@@ -50,6 +50,31 @@ static bool start_icm;
 module_param(start_icm, bool, 0444);
 MODULE_PARM_DESC(start_icm, "start ICM firmware if it is not running (default: false)");
 
+static bool force_approve_preauthorized;
+module_param(force_approve_preauthorized, bool, 0444);
+MODULE_PARM_DESC(force_approve_preauthorized,
+		 "send ICM approve even for firmware-preauthorized devices (default: false)");
+
+static bool software_pcie_tunnel_fallback;
+module_param(software_pcie_tunnel_fallback, bool, 0444);
+MODULE_PARM_DESC(software_pcie_tunnel_fallback,
+		 "create PCIe tunnel in software if ICM approve fails (default: false)");
+
+static bool software_pcie_tunnel_rescan;
+module_param(software_pcie_tunnel_rescan, bool, 0444);
+MODULE_PARM_DESC(software_pcie_tunnel_rescan,
+		 "rescan fallback PCIe downstream bus after tunnel activation (default: false)");
+
+static bool software_pcie_tunnel_skip_xhci = true;
+module_param(software_pcie_tunnel_skip_xhci, bool, 0444);
+MODULE_PARM_DESC(software_pcie_tunnel_skip_xhci,
+		 "skip xHCI connect after software PCIe fallback (default: true)");
+
+static unsigned int software_pcie_tunnel_rescan_delay = 1500;
+module_param(software_pcie_tunnel_rescan_delay, uint, 0444);
+MODULE_PARM_DESC(software_pcie_tunnel_rescan_delay,
+		 "fallback PCIe bus rescan delay in milliseconds (default: 1500)");
+
 /**
  * struct usb4_switch_nvm_auth - Holds USB4 NVM_AUTH status
  * @reply: Reply from ICM firmware is placed here
@@ -77,6 +102,9 @@ struct usb4_switch_nvm_auth {
  * @can_upgrade_nvm: Can the NVM firmware be upgrade on this controller
  * @proto_version: Firmware protocol version
  * @last_nvm_auth: Last USB4 router NVM_AUTH result (or %NULL if not set)
+ * @tunnel_list: Software-created diagnostic tunnels
+ * @pcie_rescan_work: Diagnostic delayed PCIe rescan work
+ * @pcie_rescan_bridge: Bridge whose subordinate bus should be rescanned
  * @veto: Is RTD3 veto in effect
  * @is_supported: Checks if we can support ICM on this controller
  * @cio_reset: Trigger CIO reset
@@ -102,6 +130,9 @@ struct icm {
 	bool can_upgrade_nvm;
 	u8 proto_version;
 	struct usb4_switch_nvm_auth *last_nvm_auth;
+	struct list_head tunnel_list;
+	struct delayed_work pcie_rescan_work;
+	struct pci_dev *pcie_rescan_bridge;
 	bool veto;
 	bool (*is_supported)(struct tb *tb);
 	int (*cio_reset)(struct tb *tb);
@@ -209,6 +240,10 @@ static inline u64 get_parent_route(u64 route)
 	int depth = tb_route_length(route);
 	return depth ? route & ~(0xffULL << (depth - 1) * TB_ROUTE_SHIFT) : 0;
 }
+
+static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw);
+static void icm_disconnect_pcie_tunnels(struct tb *tb);
+static void icm_cancel_pcie_rescan(struct icm *icm);
 
 static int pci2cio_wait_completion(struct icm *icm, unsigned long timeout_msec)
 {
@@ -507,15 +542,26 @@ static int icm_fr_approve_switch(struct tb *tb, struct tb_switch *sw)
 	request.connection_id = sw->connection_id;
 	request.connection_key = sw->connection_key;
 
+	tb_info(tb, "tbfix: FR approve route %llx uuid %pUb conn_id %u conn_key %u authorized %u security %u boot %u\n",
+		tb_route(sw), sw->uuid, sw->connection_id, sw->connection_key,
+		sw->authorized, sw->security_level, sw->boot);
+
 	memset(&reply, 0, sizeof(reply));
 	/* Use larger timeout as establishing tunnels can take some time */
 	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
 			  1, ICM_RETRIES, ICM_APPROVE_TIMEOUT);
-	if (ret)
+	if (ret) {
+		tb_warn(tb, "tbfix: FR approve route %llx request failed: %d\n",
+			tb_route(sw), ret);
 		return ret;
+	}
+
+	tb_info(tb, "tbfix: FR approve route %llx reply code %#x flags %#x\n",
+		tb_route(sw), reply.hdr.code, reply.hdr.flags);
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR) {
-		tb_warn(tb, "PCIe tunnel creation failed\n");
+		tb_warn(tb, "PCIe tunnel creation failed for route %llx conn_id %u\n",
+			tb_route(sw), sw->connection_id);
 		return -EIO;
 	}
 
@@ -697,6 +743,7 @@ static void update_switch(struct tb_switch *sw, u64 route, u8 connection_id,
 
 static void remove_switch(struct tb_switch *sw)
 {
+	icm_disconnect_pcie_tunnel(sw->tb, sw);
 	tb_switch_downstream_port(sw)->remote = NULL;
 	tb_switch_remove(sw);
 }
@@ -767,6 +814,12 @@ icm_fr_device_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	boot = pkg->link_info & ICM_LINK_INFO_BOOT;
 	dual_lane = pkg->hdr.flags & ICM_FLAGS_DUAL_LANE;
 	speed_gen3 = pkg->hdr.flags & ICM_FLAGS_SPEED_GEN3;
+
+	tb_info(tb, "tbfix: FR device connected uuid %pUb hdr_flags %#x link_info %#x link %u depth %u authorized %u rejected %u boot %u conn_id %u conn_key %u security %u dual_lane %u speed_gen3 %u\n",
+		&pkg->ep_uuid, pkg->hdr.flags, pkg->link_info, link, depth,
+		authorized, !!(pkg->link_info & ICM_LINK_INFO_REJECTED),
+		boot, pkg->connection_id, pkg->connection_key, security_level,
+		dual_lane, speed_gen3);
 
 	if (pkg->link_info & ICM_LINK_INFO_REJECTED) {
 		tb_info(tb, "switch at %u.%u was rejected by ICM firmware because topology limit exceeded\n",
@@ -862,6 +915,9 @@ icm_fr_device_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 		tb_switch_put(parent_sw);
 		return;
 	}
+
+	tb_info(tb, "tbfix: FR device route resolved uuid %pUb route %llx link %u depth %u\n",
+		&pkg->ep_uuid, route, link, depth);
 
 	pm_runtime_get_sync(&parent_sw->dev);
 
@@ -1063,6 +1119,376 @@ icm_tr_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	return 0;
 }
 
+static struct tb_port *icm_find_pcie_down(struct tb_switch *sw,
+					  const struct tb_port *port)
+{
+	struct tb_port *down = NULL;
+
+	if (tb_switch_is_usb4(sw)) {
+		down = usb4_switch_map_pcie_down(sw, port);
+	} else if (!tb_route(sw)) {
+		int phy_port = tb_phy_port_from_link(port->port);
+		int index;
+
+		if (tb_switch_is_cactus_ridge(sw) ||
+		    tb_switch_is_alpine_ridge(sw))
+			index = !phy_port ? 6 : 7;
+		else if (tb_switch_is_falcon_ridge(sw))
+			index = !phy_port ? 6 : 8;
+		else if (tb_switch_is_titan_ridge(sw))
+			index = !phy_port ? 8 : 9;
+		else
+			goto out;
+
+		if (WARN_ON(index > sw->config.max_port_number))
+			goto out;
+
+		down = &sw->ports[index];
+	}
+
+	if (down) {
+		if (WARN_ON(!tb_port_is_pcie_down(down)))
+			goto out;
+		if (tb_pci_port_is_enabled(down))
+			goto out;
+
+		return down;
+	}
+
+out:
+	return tb_switch_find_port(sw, TB_TYPE_PCIE_DOWN);
+}
+
+static struct pci_dev *icm_find_pcie_bridge(struct tb *tb, struct tb_port *down)
+{
+	struct pci_dev *bridge, *upstream;
+
+	upstream = pci_upstream_bridge(tb->nhi->pdev);
+	while (upstream) {
+		if (!pci_is_pcie(upstream))
+			return NULL;
+		if (pci_pcie_type(upstream) == PCI_EXP_TYPE_UPSTREAM)
+			break;
+		upstream = pci_upstream_bridge(upstream);
+	}
+
+	if (!upstream || !upstream->subordinate)
+		return NULL;
+
+	/*
+	 * Firmware ICM already selected the Thunderbolt adapter. For the PCI
+	 * side, avoid fragile Thunderbolt-port-to-PCI-slot ordinal matching and
+	 * use the same topology Linux uses elsewhere: hotplug downstream bridges
+	 * below the Thunderbolt PCIe upstream bridge are tunnel endpoints.
+	 */
+	for_each_pci_bridge(bridge, upstream->subordinate) {
+		if (!pci_is_pcie(bridge))
+			continue;
+		if (pci_pcie_type(bridge) != PCI_EXP_TYPE_DOWNSTREAM)
+			continue;
+		if (!bridge->is_pciehp)
+			continue;
+		if (!bridge->subordinate)
+			continue;
+
+		dev_info(&bridge->dev,
+			 "tbfix: selected Thunderbolt hotplug bridge for adapter %u\n",
+			 down->port);
+		return pci_dev_get(bridge);
+	}
+
+	bridge = pci_upstream_bridge(upstream);
+	while (bridge) {
+		struct pci_dev *pdev;
+
+		if (!bridge->bus)
+			break;
+
+		for_each_pci_bridge(pdev, bridge->bus) {
+			if (!pci_is_pcie(pdev))
+				continue;
+			if (pci_pcie_type(pdev) != PCI_EXP_TYPE_DOWNSTREAM)
+				continue;
+			if (!pdev->is_pciehp)
+				continue;
+			if (!pdev->subordinate)
+				continue;
+
+			dev_info(&pdev->dev,
+				 "tbfix: selected Thunderbolt hotplug sibling bridge for adapter %u\n",
+				 down->port);
+			return pci_dev_get(pdev);
+		}
+
+		bridge = pci_upstream_bridge(bridge);
+	}
+
+	return NULL;
+}
+
+static void icm_pcie_rescan_work(struct work_struct *work)
+{
+	struct icm *icm = container_of(to_delayed_work(work), struct icm,
+				      pcie_rescan_work);
+	struct pci_dev *bridge;
+	unsigned int found;
+
+	mutex_lock(&icm->request_lock);
+	bridge = pci_dev_get(icm->pcie_rescan_bridge);
+	mutex_unlock(&icm->request_lock);
+
+	if (!bridge)
+		return;
+
+	if (!bridge->subordinate) {
+		dev_warn(&bridge->dev, "tbfix: no subordinate bus for delayed Thunderbolt PCIe rescan\n");
+		goto out;
+	}
+
+	found = pci_rescan_bus(bridge->subordinate);
+	dev_info(&bridge->dev, "tbfix: delayed Thunderbolt PCIe bus rescan found %u buses/devices\n",
+		 found);
+
+out:
+	pci_dev_put(bridge);
+}
+
+static void icm_cancel_pcie_rescan(struct icm *icm)
+{
+	cancel_delayed_work_sync(&icm->pcie_rescan_work);
+	mutex_lock(&icm->request_lock);
+	pci_dev_put(icm->pcie_rescan_bridge);
+	icm->pcie_rescan_bridge = NULL;
+	mutex_unlock(&icm->request_lock);
+}
+
+static void icm_schedule_pcie_rescan(struct tb *tb, struct tb_port *down)
+{
+	struct icm *icm = tb_priv(tb);
+	struct pci_dev *bridge;
+
+	if (!software_pcie_tunnel_rescan)
+		return;
+
+	bridge = icm_find_pcie_bridge(tb, down);
+	if (!bridge) {
+		tb_port_warn(down, "tbfix: could not match PCIe bridge for delayed rescan\n");
+		return;
+	}
+
+	mutex_lock(&icm->request_lock);
+	pci_dev_put(icm->pcie_rescan_bridge);
+	icm->pcie_rescan_bridge = bridge;
+	mutex_unlock(&icm->request_lock);
+
+	dev_info(&bridge->dev, "tbfix: scheduling delayed Thunderbolt PCIe bus rescan in %u ms\n",
+		 software_pcie_tunnel_rescan_delay);
+	mod_delayed_work(system_wq, &icm->pcie_rescan_work,
+			 msecs_to_jiffies(software_pcie_tunnel_rescan_delay));
+}
+
+static bool icm_pcie_bridge_has_devices(struct pci_dev *bridge)
+{
+	bool found;
+
+	if (!bridge || !bridge->subordinate)
+		return false;
+
+	pci_lock_rescan_remove();
+	found = !list_empty(&bridge->subordinate->devices);
+	pci_unlock_rescan_remove();
+
+	return found;
+}
+
+static bool icm_pcie_bridge_link_active(struct pci_dev *bridge)
+{
+	u16 lnksta;
+
+	if (!bridge || !pci_is_pcie(bridge))
+		return false;
+
+	if (pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &lnksta))
+		return false;
+
+	return lnksta & PCI_EXP_LNKSTA_DLLLA;
+}
+
+static bool icm_pcie_subtree_present(struct tb *tb, struct tb_switch *sw)
+{
+	struct tb_port *port, *down;
+	struct pci_dev *bridge;
+	bool present;
+	int i;
+
+	port = tb_switch_downstream_port(sw);
+	if (!port)
+		return false;
+
+	down = icm_find_pcie_down(tb_switch_parent(sw), port);
+	if (!down)
+		return false;
+
+	bridge = icm_find_pcie_bridge(tb, down);
+	if (!bridge)
+		return false;
+
+	present = false;
+	for (i = 0; i < 20; i++) {
+		present = icm_pcie_bridge_has_devices(bridge);
+		if (present)
+			break;
+
+		/*
+		 * Native pciehp may already have accepted the hotplug event but
+		 * not yet populated the subordinate device list. Do not race it
+		 * by creating a software PCIe tunnel on top of the native path.
+		 */
+		if (icm_pcie_bridge_link_active(bridge)) {
+			dev_info(&bridge->dev,
+				 "tbfix: Thunderbolt PCIe hotplug link active, not forcing software tunnel\n");
+			present = true;
+			break;
+		}
+
+		msleep(100);
+	}
+
+	if (present && icm_pcie_bridge_has_devices(bridge))
+		dev_info(&bridge->dev,
+			 "tbfix: Thunderbolt PCIe subtree already present, not forcing software tunnel\n");
+	pci_dev_put(bridge);
+
+	return present;
+}
+
+static void icm_remove_pcie_devices(struct tb *tb, struct tb_port *down)
+{
+	struct pci_dev *bridge, *pdev, *tmp;
+
+	bridge = icm_find_pcie_bridge(tb, down);
+	if (!bridge)
+		return;
+
+	if (!bridge->subordinate)
+		goto out_put_bridge;
+
+	dev_info(&bridge->dev, "tbfix: removing Thunderbolt PCIe subtree before tunnel teardown\n");
+	pci_lock_rescan_remove();
+	list_for_each_entry_safe_reverse(pdev, tmp, &bridge->subordinate->devices,
+					 bus_list)
+		pci_stop_and_remove_bus_device(pdev);
+	pci_unlock_rescan_remove();
+
+out_put_bridge:
+	pci_dev_put(bridge);
+}
+
+static struct tb_tunnel *icm_find_pcie_tunnel(struct icm *icm,
+					      const struct tb_port *up)
+{
+	struct tb_tunnel *tunnel;
+
+	list_for_each_entry(tunnel, &icm->tunnel_list, list) {
+		if (tunnel->type == TB_TUNNEL_PCI && tunnel->dst_port == up)
+			return tunnel;
+	}
+
+	return NULL;
+}
+
+static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw)
+{
+	struct icm *icm = tb_priv(tb);
+	struct tb_tunnel *tunnel;
+	struct tb_port *up;
+
+	up = tb_switch_find_port(sw, TB_TYPE_PCIE_UP);
+	if (!up)
+		return 0;
+
+	tunnel = icm_find_pcie_tunnel(icm, up);
+	if (!tunnel)
+		return 0;
+
+	tb_switch_xhci_disconnect(sw);
+	icm_remove_pcie_devices(tb, tunnel->src_port);
+	tb_tunnel_deactivate(tunnel);
+	list_del(&tunnel->list);
+	tb_tunnel_put(tunnel);
+	return 0;
+}
+
+static void icm_disconnect_pcie_tunnels(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+	struct tb_tunnel *tunnel, *n;
+
+	list_for_each_entry_safe_reverse(tunnel, n, &icm->tunnel_list, list) {
+		if (tunnel->type == TB_TUNNEL_PCI) {
+			tb_tunnel_deactivate(tunnel);
+			list_del(&tunnel->list);
+			tb_tunnel_put(tunnel);
+		}
+	}
+}
+
+static int icm_tunnel_pcie_fallback(struct tb *tb, struct tb_switch *sw)
+{
+	struct icm *icm = tb_priv(tb);
+	struct tb_port *up, *down, *port;
+	struct tb_tunnel *tunnel;
+	int ret;
+
+	up = tb_switch_find_port(sw, TB_TYPE_PCIE_UP);
+	if (!up) {
+		tb_sw_warn(sw, "tbfix: no PCIe upstream port for software tunnel fallback\n");
+		return -ENODEV;
+	}
+
+	if (icm_find_pcie_tunnel(icm, up)) {
+		tb_sw_info(sw, "tbfix: software PCIe tunnel fallback already active\n");
+		return 0;
+	}
+
+	port = tb_switch_downstream_port(sw);
+	down = icm_find_pcie_down(tb_switch_parent(sw), port);
+	if (!down) {
+		tb_sw_warn(sw, "tbfix: no PCIe downstream port for software tunnel fallback\n");
+		return -ENODEV;
+	}
+
+	tb_sw_info(sw, "tbfix: software PCIe tunnel fallback using down %u:%u up %u:%u\n",
+		   down->sw->config.route_lo, down->port,
+		   up->sw->config.route_lo, up->port);
+
+	tunnel = tb_tunnel_alloc_pci(tb, up, down);
+	if (!tunnel)
+		return -ENOMEM;
+
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
+		tb_sw_warn(sw, "tbfix: software PCIe tunnel activation failed: %d\n",
+			   ret);
+		tb_tunnel_put(tunnel);
+		return ret;
+	}
+
+	if (tb_switch_pcie_l1_enable(sw))
+		tb_sw_warn(sw, "tbfix: failed to enable PCIe L1 after fallback\n");
+
+	if (software_pcie_tunnel_skip_xhci) {
+		tb_sw_info(sw, "tbfix: skipping xHCI connect after software PCIe fallback\n");
+	} else if (tb_switch_xhci_connect(sw)) {
+		tb_sw_warn(sw, "tbfix: failed to connect xHCI after fallback\n");
+	}
+
+	list_add_tail(&tunnel->list, &icm->tunnel_list);
+	icm_schedule_pcie_rescan(tb, down);
+	tb_sw_info(sw, "tbfix: software PCIe tunnel fallback active\n");
+	return 0;
+}
+
 static int icm_tr_approve_switch(struct tb *tb, struct tb_switch *sw)
 {
 	struct icm_tr_pkg_approve_device request;
@@ -1076,14 +1502,30 @@ static int icm_tr_approve_switch(struct tb *tb, struct tb_switch *sw)
 	request.route_hi = sw->config.route_hi;
 	request.connection_id = sw->connection_id;
 
+	tb_info(tb, "tbfix: TR approve route %llx uuid %pUb route_hi %#x route_lo %#x conn_id %u authorized %u security %u boot %u\n",
+		tb_route(sw), sw->uuid, sw->config.route_hi, sw->config.route_lo,
+		sw->connection_id, sw->authorized, sw->security_level, sw->boot);
+
 	memset(&reply, 0, sizeof(reply));
 	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
 			  1, ICM_RETRIES, ICM_APPROVE_TIMEOUT);
-	if (ret)
+	if (ret) {
+		tb_warn(tb, "tbfix: TR approve route %llx request failed: %d\n",
+			tb_route(sw), ret);
 		return ret;
+	}
+
+	tb_info(tb, "tbfix: TR approve route %llx reply code %#x flags %#x route_hi %#x route_lo %#x conn_id %u\n",
+		tb_route(sw), reply.hdr.code, reply.hdr.flags, reply.route_hi,
+		reply.route_lo, reply.connection_id);
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR) {
-		tb_warn(tb, "PCIe tunnel creation failed\n");
+		tb_warn(tb, "PCIe tunnel creation failed for route %llx conn_id %u\n",
+			tb_route(sw), sw->connection_id);
+		if (icm_pcie_subtree_present(tb, sw))
+			return 0;
+		if (software_pcie_tunnel_fallback)
+			return icm_tunnel_pcie_fallback(tb, sw);
 		return -EIO;
 	}
 
@@ -1255,6 +1697,12 @@ __icm_tr_device_connected(struct tb *tb, const struct icm_pkg_header *hdr,
 	dual_lane = pkg->hdr.flags & ICM_FLAGS_DUAL_LANE;
 	speed_gen3 = pkg->hdr.flags & ICM_FLAGS_SPEED_GEN3;
 
+	tb_info(tb, "tbfix: TR device connected uuid %pUb hdr_flags %#x link_info %#x route %llx route_hi %#x route_lo %#x authorized %u rejected %u boot %u conn_id %u security %u dual_lane %u speed_gen3 %u\n",
+		&pkg->ep_uuid, pkg->hdr.flags, pkg->link_info, route,
+		pkg->route_hi, pkg->route_lo, authorized,
+		!!(pkg->link_info & ICM_LINK_INFO_REJECTED), boot,
+		pkg->connection_id, security_level, dual_lane, speed_gen3);
+
 	if (pkg->link_info & ICM_LINK_INFO_REJECTED) {
 		tb_info(tb, "switch at %llx was rejected by ICM firmware because topology limit exceeded\n",
 			route);
@@ -1299,8 +1747,17 @@ __icm_tr_device_connected(struct tb *tb, const struct icm_pkg_header *hdr,
 
 	sw = alloc_switch(parent_sw, route, &pkg->ep_uuid);
 	if (!IS_ERR(sw)) {
+		int ret;
+
 		sw->connection_id = pkg->connection_id;
-		sw->authorized = authorized;
+		/*
+		 * Optional diagnostic path: if firmware reports the router as
+		 * already authorized, Linux normally never sends
+		 * ICM_APPROVE_DEVICE. When requested, force the switch into the
+		 * normal userspace-approval shape so the same request can be
+		 * tested after add_switch() has finished setting up the router.
+		 */
+		sw->authorized = authorized && !force_approve_preauthorized;
 		sw->security_level = security_level;
 		sw->boot = boot;
 		sw->link_speed = speed_gen3 ? 20 : 10;
@@ -1311,8 +1768,26 @@ __icm_tr_device_connected(struct tb *tb, const struct icm_pkg_header *hdr,
 			sw->rpm = intel_vss_is_rtd3(pkg->ep_name,
 						    sizeof(pkg->ep_name));
 
-		if (add_switch(parent_sw, sw))
+		ret = add_switch(parent_sw, sw);
+		tb_info(tb, "tbfix: TR add switch route %llx authorized %u returned %d\n",
+			tb_route(sw), sw->authorized, ret);
+		if (ret) {
 			tb_switch_put(sw);
+		} else if (authorized && force_approve_preauthorized) {
+			if (icm_pcie_subtree_present(tb, sw)) {
+				tb_info(tb, "tbfix: TR preauthorized route %llx already has PCIe subtree\n",
+					tb_route(sw));
+				sw->authorized = true;
+			} else {
+				tb_info(tb, "tbfix: TR post-add approving preauthorized route %llx conn_id %u\n",
+					tb_route(sw), sw->connection_id);
+				ret = icm_tr_approve_switch(tb, sw);
+				tb_info(tb, "tbfix: TR post-add approve route %llx returned %d\n",
+					tb_route(sw), ret);
+				if (!ret)
+					sw->authorized = true;
+			}
+		}
 	}
 
 	pm_runtime_mark_last_busy(&parent_sw->dev);
@@ -2210,6 +2685,8 @@ static void icm_stop(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 
 	cancel_delayed_work(&icm->rescan_work);
+	icm_cancel_pcie_rescan(icm);
+	icm_disconnect_pcie_tunnels(tb);
 	tb_switch_remove(tb->root_switch);
 	tb->root_switch = NULL;
 	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
@@ -2471,7 +2948,9 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	icm = tb_priv(tb);
 	INIT_DELAYED_WORK(&icm->rescan_work, icm_rescan_work);
+	INIT_DELAYED_WORK(&icm->pcie_rescan_work, icm_pcie_rescan_work);
 	mutex_init(&icm->request_lock);
+	INIT_LIST_HEAD(&icm->tunnel_list);
 
 	switch (nhi->pdev->device) {
 	case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_2C_NHI:
