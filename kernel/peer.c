@@ -205,7 +205,7 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 	rail->native_remote_ready = false;
 	tbv_native_control_init_rail(rail, peer);
 	tbv_path_default_config(peer->backend, &path_cfg);
-	if (peer->backend == TBV_BACKEND_NATIVE) {
+	if (peer->backend == TBV_BACKEND_NATIVE && peer->state->native_data_e2e) {
 		/*
 		 * Native rails only bind to Linux peers.  Even in mixed mode the
 		 * Mac-facing wire format is handled by the separate Apple

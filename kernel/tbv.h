@@ -190,6 +190,7 @@ struct tbv_path {
 	struct list_head tx_zcopy_inflight;
 	struct delayed_work tx_poll_work;
 	struct delayed_work rx_supp_poll_work;
+	unsigned long tx_last_progress_jiffies;
 	atomic_t tx_inflight;
 	atomic64_t data_tx_enqueued;
 	atomic64_t data_tx_posted;
@@ -445,6 +446,7 @@ struct tbv_state {
 	bool apple_data;
 	bool native_fragment_striping;
 	bool native_home_rail_qp;
+	bool native_data_e2e;
 	bool register_verbs;
 	bool services_registered;
 	bool verbs_registered;

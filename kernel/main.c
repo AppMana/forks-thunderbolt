@@ -112,6 +112,11 @@ module_param(native_home_rail_qp, bool, 0444);
 MODULE_PARM_DESC(native_home_rail_qp,
 		 "Keep native data QPs on the rail backing the selected ib_device");
 
+static bool native_data_e2e = true;
+module_param(native_data_e2e, bool, 0444);
+MODULE_PARM_DESC(native_data_e2e,
+		 "Enable hardware E2E flow control on native Linux data rings");
+
 static bool register_verbs;
 module_param(register_verbs, bool, 0444);
 MODULE_PARM_DESC(register_verbs,
@@ -179,6 +184,7 @@ static int __init tbv_init(void)
 	tbv_driver_state.native_data = native_data;
 	tbv_driver_state.apple_data = apple_data;
 	tbv_driver_state.native_home_rail_qp = native_home_rail_qp;
+	tbv_driver_state.native_data_e2e = native_data_e2e;
 
 	service_cfg.native_prtcstns = native_prtcstns;
 	service_cfg.apple_prtcstns = apple_prtcstns;
@@ -210,7 +216,7 @@ static int __init tbv_init(void)
 		snprintf(lanes_desc, sizeof(lanes_desc), "%u-%u",
 			 cfg.lanes_min, cfg.lanes_max);
 
-	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u native_home_rail_qp=%u\n",
+	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u native_home_rail_qp=%u native_data_e2e=%u\n",
 		tbv_compat_name(cfg.compat),
 		tbv_profile_name(cfg.profile),
 		tbv_profile_name(resolved.profile),
@@ -223,7 +229,8 @@ static int __init tbv_init(void)
 		native_data,
 		apple_data,
 		native_fragment_striping,
-		native_home_rail_qp);
+		native_home_rail_qp,
+		native_data_e2e);
 
 	return 0;
 
