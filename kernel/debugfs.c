@@ -113,6 +113,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 	seq_printf(s, "apple_data: %u\n", state->apple_data);
 	seq_printf(s, "native_fragment_striping: %u\n",
 		   state->native_fragment_striping);
+	seq_printf(s, "native_home_rail_qp: %u\n",
+		   state->native_home_rail_qp);
 	seq_printf(s, "register_verbs: %u\n", state->register_verbs);
 	seq_printf(s, "verbs_registered: %u\n", state->verbs_registered);
 	seq_printf(s, "verbs_ucontexts: %d\n",

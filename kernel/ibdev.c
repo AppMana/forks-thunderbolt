@@ -1719,7 +1719,7 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 	if (home->removing)
 		return NULL;
 
-	if (backend != TBV_BACKEND_NATIVE || gsi) {
+	if (backend != TBV_BACKEND_NATIVE || gsi || dev->state->native_home_rail_qp) {
 		refcount_inc(&home->refcnt);
 		return home;
 	}
