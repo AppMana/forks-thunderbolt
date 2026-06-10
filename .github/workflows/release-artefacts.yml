@@ -2,7 +2,7 @@ name: release-artefacts
 
 on:
   push:
-    branches: [main]
+    branches: [main, appmana/native-home-rail-test]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -11,6 +11,11 @@ on:
         description: 'When triggered manually against a v* tag, also create / update a GitHub Release.'
         required: false
         default: false
+        type: boolean
+      prerelease:
+        description: 'Mark the GitHub Release as a prerelease.'
+        required: false
+        default: true
         type: boolean
 
 concurrency:
@@ -130,10 +135,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          prerelease=0
+          case "$tag" in
+            *alpha*|*beta*|*pre*|*rc*) prerelease=1 ;;
+          esac
+          if [ "${{ inputs.prerelease || false }}" = "true" ]; then
+            prerelease=1
+          fi
+          flags=()
+          if [ "$prerelease" = 1 ]; then
+            flags+=(--prerelease)
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
+            if [ "$prerelease" = 1 ]; then
+              gh release edit "$tag" --prerelease
+            fi
           else
-            gh release create "$tag" dist/* \
-              --title "$tag" \
+            gh release create "$tag" dist/* "${flags[@]}" \
+              --title "$tag (alpha)" \
               --generate-notes
           fi

@@ -61,10 +61,14 @@ esac
 install_dkms_deps() {
 	if command -v apt-get >/dev/null 2>&1; then
 		export DEBIAN_FRONTEND=noninteractive
+		local headers_pkg=linux-headers-amd64
+		if grep -qi '^ID=ubuntu' /etc/os-release; then
+			headers_pkg=linux-headers-generic
+		fi
 		apt-get update -qq
 		apt-get install -y -qq --no-install-recommends \
 			build-essential ca-certificates dkms file kmod \
-			linux-headers-amd64 make
+			"$headers_pkg" make
 	elif command -v dnf >/dev/null 2>&1; then
 		dnf install -y -q --setopt=install_weak_deps=False \
 			ca-certificates dkms diffutils file gcc kernel-devel \

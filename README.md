@@ -2,6 +2,18 @@
 
 [![Hydra module](https://img.shields.io/endpoint?label=hydra%20module&url=https%3A%2F%2Fhydra.hellas.ai%2Fjob%2Fhellas%2Fthunderbolt-ibverbs%2Fx86_64-linux.thunderbolt-ibverbs%2Fshield&cacheSeconds=60)](https://hydra.hellas.ai/job/hellas/thunderbolt-ibverbs/x86_64-linux.thunderbolt-ibverbs)
 
+## AppMana alpha build
+
+This AppMana fork is published from:
+
+```text
+https://github.com/AppMana/forks-thunderbolt-ibverbs
+```
+
+AppMana packages are alpha/pre-release software. The Debian package version is
+`0.2.1~appmana2`, which sorts below a future stable `0.2.1` in apt. GitHub
+Releases for this fork should be marked **Pre-release**.
+
 *** WARNING ***
 
 this is a research driver. It is buggy, it is insecure, it is not for production.
@@ -95,7 +107,36 @@ Small userspace-facing test and protocol helper files that say
 
 ## Install From GitHub Releases
 
-Pre-built DKMS source packages are attached to GitHub Releases:
+Pre-built AppMana alpha DKMS/provider packages are attached to GitHub
+Pre-releases:
+
+  https://github.com/AppMana/forks-thunderbolt-ibverbs/releases
+
+For Ubuntu 24.04/noble hosts:
+
+```sh
+sudo apt install build-essential dkms git kmod "linux-headers-$(uname -r)" \
+    rdma-core ibverbs-utils perftest
+
+sudo apt install \
+    ./thunderbolt-ibverbs-dkms_0.2.1~appmana2_all.deb \
+    ./usb4-rdma-provider_0.2.1~appmana2~noble_amd64.deb
+```
+
+Once `AppMana/apt` has published the alpha packages, install through apt:
+
+```sh
+curl -fsSL https://appmana.github.io/apt/appmana-archive-keyring.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/appmana-archive-keyring.gpg
+
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/appmana-archive-keyring.gpg] https://appmana.github.io/apt noble main' \
+  | sudo tee /etc/apt/sources.list.d/appmana.list
+
+sudo apt update
+sudo apt install thunderbolt-ibverbs-dkms usb4-rdma-provider
+```
+
+Upstream Hellas DKMS source packages are attached to Hellas GitHub Releases:
 
   https://github.com/hellas-ai/thunderbolt-ibverbs/releases
 
@@ -174,6 +215,106 @@ make KVER="$(uname -r)"
 sudo make KVER="$(uname -r)" modules_install
 sudo depmod -a
 ```
+
+## Development process
+
+Install host dependencies on Ubuntu:
+
+```sh
+sudo apt update
+sudo apt install build-essential dkms gcc git ibverbs-utils kmod \
+    libibverbs-dev "linux-headers-$(uname -r)" make perftest rdma-core \
+    trace-cmd
+```
+
+Build the module and the minimal UC bench:
+
+```sh
+make KVER="$(uname -r)"
+gcc -O2 -Wall userspace/bench/uc_oneway.c \
+    -o userspace/bench/uc_oneway -pthread -l:libibverbs.so.1
+```
+
+Build release packages:
+
+```sh
+tools/ci/distro-package.sh debian
+tools/ci/distro-package-rdma.sh ubuntu
+```
+
+Container verification:
+
+```sh
+docker run --rm -v "$PWD:/work" -w /work debian:sid \
+  bash tools/ci/distro-package.sh debian
+
+docker run --rm -v "$PWD:/work" -w /work ubuntu:24.04 \
+  bash tools/ci/distro-package-rdma.sh ubuntu
+```
+
+Safe AppMana canary load options while the native TX-completion bug is being
+debugged:
+
+```sh
+sudo modprobe ib_uverbs
+sudo insmod kernel/thunderbolt_ibverbs.ko \
+  profile=linux_perf bind_services=1 allocate_rings=1 start_rings=1 \
+  negotiate_native=1 enable_tunnels=1 register_verbs=1 tbnet=allow \
+  native_home_rail_qp=1 destroy_disable_paths=0 tx_stall_warn_ms=2000 \
+  roce_netdev=<tb-chX>
+```
+
+`destroy_disable_paths=0` is for recovery-oriented testing only. It avoids
+repeatedly blocking in Thunderbolt path teardown while collecting diagnostics.
+
+Before any verbs benchmark, plain Thunderbolt networking must work:
+
+```sh
+ip -br addr | grep -E 'tb-ch|thunderbolt'
+ping -c 3 -I <tb-chX> <peer-/31-address>
+ibv_devices
+ibv_devinfo -d usb4_rdma0
+```
+
+Minimal UC smoke:
+
+```sh
+# receiver
+userspace/bench/uc_oneway --role recv --dev usb4_rdma0 \
+  --gid-index auto --port 18519 --size 4096 --count 1 --send-slots 64
+
+# sender
+userspace/bench/uc_oneway --role send --dev usb4_rdma0 \
+  --gid-index auto --port 18519 --connect <receiver-tb-ip> \
+  --size 4096 --count 1 --send-slots 64
+```
+
+Only move to perftest or NCCL after UC send/receive completes.
+
+Debugfs and logs:
+
+```sh
+sudo cat /sys/kernel/debug/thunderbolt_ibverbs/summary 2>/dev/null || true
+sudo cat /sys/kernel/debug/thunderbolt_ibverbs/peers 2>/dev/null || true
+for f in /sys/module/thunderbolt_ibverbs/parameters/*; do
+  echo "$f=$(cat "$f")"
+done
+sudo dmesg -T | grep -Ei 'thunderbolt_ibverbs|tbverbs|DMA paths|xdomain|tx stall' | tail -200
+```
+
+Tracefs capture:
+
+```sh
+sudo mount -t tracefs nodev /sys/kernel/tracing 2>/dev/null || true
+sudo trace-cmd list | grep -Ei 'thunderbolt|ib|rdma|nhi'
+sudo trace-cmd record -e thunderbolt:* -e irq:* -e napi:* -- sleep 30
+sudo trace-cmd report | less
+```
+
+When debugging TX completion, capture both hosts and compare
+`data_tx_posted`, `data_tx_completed`, `control_tx_completed`,
+`data_rx_completed`, `tx_poll calls`, and `tx_poll completed` in
+`/sys/kernel/debug/thunderbolt_ibverbs/peers`.
 
 ## Nix
 
