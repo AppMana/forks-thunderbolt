@@ -119,8 +119,8 @@ sudo apt install build-essential dkms git kmod "linux-headers-$(uname -r)" \
     rdma-core ibverbs-utils perftest
 
 sudo apt install \
-    ./thunderbolt-ibverbs-dkms_0.2.1~appmana2_all.deb \
-    ./usb4-rdma-provider_0.2.1~appmana2~noble_amd64.deb
+    ./thunderbolt-ibverbs-dkms_0.2.1.appmana2_all.deb \
+    ./usb4-rdma-provider_0.2.1.appmana2.noble_amd64.deb
 ```
 
 Once `AppMana/apt` has published the alpha packages, install through apt:
