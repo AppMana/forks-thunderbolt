@@ -112,7 +112,20 @@ module_param(native_home_rail_qp, bool, 0444);
 MODULE_PARM_DESC(native_home_rail_qp,
 		 "Keep native data QPs on the rail backing the selected ib_device");
 
-static bool native_data_e2e = true;
+/*
+ * Default E2E off: on the AppMana X670E USB4 fleet, thunderbolt_net only
+ * runs stably with e2e=0 (the tbfix stability knobs), and the 2026-06-08/09
+ * appmana-020<->appmana-009 canary showed the exact E2E starvation
+ * signature with this module: QP reaches RTS, READY exchanged both ways,
+ * sends post to the TX ring, but no completion ever fires and nothing
+ * reaches the remote RX ring. With RING_FLAG_E2E on the TX ring, a frame
+ * only transmits after the peer RX ring grants credits to the paired TX
+ * HopID; if credit grants are broken on this fabric the descriptor sits in
+ * the ring forever, which matches the observed posted>0/completed=0 stall.
+ * Opt back in per-host with native_data_e2e=1 once a pair passes
+ * ib_send_bw with it enabled.
+ */
+static bool native_data_e2e;
 module_param(native_data_e2e, bool, 0444);
 MODULE_PARM_DESC(native_data_e2e,
 		 "Enable hardware E2E flow control on native Linux data rings");
