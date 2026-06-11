@@ -90,6 +90,31 @@ module_param(tx_stall_warn_ms, uint, 0644);
 MODULE_PARM_DESC(tx_stall_warn_ms,
 		 "Warn when a native/apple TX ring has inflight frames but no completions for this many ms; 0 disables");
 
+/*
+ * Skip a rail for new native QP binding when its TX ring has frames in
+ * flight but has made no completion progress for this many ms. On the
+ * single-cable TB3/TB4 daisy chain one of the two advertised native lanes
+ * can come up "tunnel_enabled" yet never egress (ring posts, zero
+ * completions); load-balancing fresh QPs onto it strands them. 0 disables
+ * the health gate (pure round-robin).
+ */
+static uint tx_stall_skip_ms = 1500;
+module_param(tx_stall_skip_ms, uint, 0644);
+MODULE_PARM_DESC(tx_stall_skip_ms,
+		 "Exclude a rail from new native QP binding when its TX ring has inflight frames but no completion progress for this many ms; 0 disables");
+
+bool tbv_path_tx_stalled(const struct tbv_path *path)
+{
+	unsigned long progress;
+
+	if (!tx_stall_skip_ms)
+		return false;
+	if (atomic_read(&path->tx_inflight) <= 0)
+		return false;
+	progress = READ_ONCE(path->tx_last_progress_jiffies);
+	return time_after(jiffies, progress + msecs_to_jiffies(tx_stall_skip_ms));
+}
+
 struct tbv_data_frame {
 	struct ring_frame frame;
 	struct tbv_path *path;

@@ -308,6 +308,8 @@ struct tbv_peer {
 	u32 nr_rails;
 };
 
+bool tbv_path_tx_stalled(const struct tbv_path *path);
+
 static inline bool tbv_rail_data_ready(const struct tbv_rail *rail)
 {
 	if (!rail || rail->path.state != TBV_PATH_TUNNEL_ENABLED)

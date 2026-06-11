@@ -1738,6 +1738,14 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 			continue;
 		if (!READ_ONCE(rail->ibdev))
 			continue;
+		/*
+		 * Don't strand new QPs on a rail whose TX ring is enabled but
+		 * not draining (single-cable phantom lane). Fall through to a
+		 * healthy rail; if every rail is stalled the caller still gets
+		 * NULL and surfaces the failure rather than hanging silently.
+		 */
+		if (tbv_path_tx_stalled(&rail->path))
+			continue;
 
 		qps = max_t(int, atomic_read(&rail->native_qp_bind_count), 0);
 		pending = tbv_rail_pending_data_frames(rail);
