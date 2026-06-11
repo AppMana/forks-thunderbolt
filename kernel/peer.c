@@ -169,6 +169,30 @@ void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer)
 	kfree(peer);
 }
 
+/*
+ * Resolve the native hardware-E2E setting for this peer's NHI. Auto (-1)
+ * enables E2E except on AMD controllers (Strix Halo wedge); Intel
+ * Maple/Titan Ridge and others get it. 0/1 force.
+ */
+static bool tbv_native_data_e2e_for_peer(const struct tbv_peer *peer)
+{
+	const struct tb_xdomain *xd;
+	struct device *dev;
+
+	if (!peer || !peer->state)
+		return false;
+	if (peer->state->native_data_e2e >= 0)
+		return peer->state->native_data_e2e > 0;
+
+	xd = peer->xd;
+	if (!xd || !xd->tb)
+		return true;
+	dev = xd->tb->dev.parent;
+	if (!dev || !dev_is_pci(dev))
+		return true;
+	return to_pci_dev(dev)->vendor != PCI_VENDOR_ID_AMD;
+}
+
 struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 				   const struct tbv_rail_key *key,
 				   u32 native_lane)
@@ -205,7 +229,8 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 	rail->native_remote_ready = false;
 	tbv_native_control_init_rail(rail, peer);
 	tbv_path_default_config(peer->backend, &path_cfg);
-	if (peer->backend == TBV_BACKEND_NATIVE && peer->state->native_data_e2e) {
+	if (peer->backend == TBV_BACKEND_NATIVE &&
+	    tbv_native_data_e2e_for_peer(peer)) {
 		/*
 		 * Native rails only bind to Linux peers.  Even in mixed mode the
 		 * Mac-facing wire format is handled by the separate Apple

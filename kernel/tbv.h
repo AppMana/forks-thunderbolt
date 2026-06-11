@@ -448,7 +448,7 @@ struct tbv_state {
 	bool apple_data;
 	bool native_fragment_striping;
 	bool native_home_rail_qp;
-	bool native_data_e2e;
+	int native_data_e2e; /* -1 auto, 0 off, 1 on */
 	bool register_verbs;
 	bool services_registered;
 	bool verbs_registered;

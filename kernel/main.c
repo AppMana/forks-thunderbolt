@@ -125,10 +125,20 @@ MODULE_PARM_DESC(native_home_rail_qp,
  * Opt back in per-host with native_data_e2e=1 once a pair passes
  * ib_send_bw with it enabled.
  */
-static bool native_data_e2e;
-module_param(native_data_e2e, bool, 0444);
+/*
+ * -1 auto, 0 off, 1 on. The earlier blanket-off was a misdiagnosis: the
+ * observed posted>0/completed=0 stall was the phantom second native lane
+ * on a single-cable x1 link (now fixed by advertising rails per negotiated
+ * link width), not broken E2E credit grants. Hardware E2E is required for
+ * usable bidirectional throughput (the software credit window alone
+ * collapses ~10x under simultaneous load). Auto enables it everywhere
+ * except AMD NHI, where Strix Halo reproduced TX-completion wedges with
+ * multiple E2E rings active.
+ */
+static int native_data_e2e = -1;
+module_param(native_data_e2e, int, 0444);
 MODULE_PARM_DESC(native_data_e2e,
-		 "Enable hardware E2E flow control on native Linux data rings");
+		 "Native data ring hardware E2E flow control: -1 auto (on except AMD NHI), 0 off, 1 on");
 
 static bool register_verbs;
 module_param(register_verbs, bool, 0444);
