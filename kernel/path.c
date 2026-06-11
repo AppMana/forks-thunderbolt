@@ -43,7 +43,16 @@ MODULE_PARM_DESC(data_tx_max_inflight,
 #define TBV_CONTROL_QUEUE_MULTIPLIER 4
 #define TBV_DATA_CREDIT_CONTROL_RESERVE 256
 #define TBV_DATA_TX_MAX_INFLIGHT 32
-#define TBV_TX_POLL_DELAY_MS 1
+/*
+ * TX completion is interrupt-driven (NHI MSI-X -> ring_work -> frame->callback)
+ * and measured to drain ~100% of completions on its own; the supplemental
+ * poller is a straggler/stall-warning watchdog, not the completion path. A/B on
+ * 020<->009 (single x1 20G lane, RC ib_write_bw): busy 1ms re-arm vs 50ms
+ * watchdog vs poller-off were throughput-identical within run variance
+ * (~16.4 uni / ~30.5 duplex Gb/s), so the per-millisecond re-arm is wasted
+ * wakeups. Default to a watchdog cadence; 0 disables the poller entirely.
+ */
+#define TBV_TX_POLL_DELAY_MS 50
 #define TBV_RX_SUPP_POLL_DELAY_MS 1
 #define TBV_RX_SUPP_POLL_WINDOW_MS 16
 /*
@@ -65,6 +74,22 @@ static uint nhi_interrupt_throttle_ns;
 module_param(nhi_interrupt_throttle_ns, uint, 0644);
 MODULE_PARM_DESC(nhi_interrupt_throttle_ns,
 		 "NHI interrupt throttling interval for TBV data rings in ns; 0 disables ring throttling");
+
+/*
+ * Supplemental TX-completion poller cadence. The native TX ring is already
+ * interrupt-driven (tb_ring_alloc_tx with no start_poll -> NHI MSI-X ->
+ * ring_work -> frame->callback), which empirically drains ~99.5% of
+ * completions. This delayed-work poller is a backstop that drains the small
+ * tail left after inflight quiesces (no further interrupt until the next post).
+ *   >0  : re-arm interval in ms while inflight remains (1 = legacy busy-poll).
+ *    0  : disable the poller entirely -> rely purely on interrupt completion.
+ * A large value (e.g. 50) keeps a watchdog drain + the tx-stall warning while
+ * removing the per-millisecond busy re-arm.
+ */
+static uint tx_poll_delay_ms = TBV_TX_POLL_DELAY_MS;
+module_param(tx_poll_delay_ms, uint, 0644);
+MODULE_PARM_DESC(tx_poll_delay_ms,
+		 "Supplemental TX-completion poll re-arm interval in ms (0 disables; interrupt path still completes)");
 
 static tbv_ring_throttling_fn tbv_ring_throttling;
 
@@ -321,6 +346,9 @@ static void tbv_path_queue_delayed_work(struct tbv_path *path,
 static void tbv_path_queue_tx_poll(struct tbv_path *path, unsigned long delay)
 {
 	if (!path->tx_poll_enabled || !path->tx_ring)
+		return;
+	/* 0 = poller disabled: interrupt-driven ring_work still completes TX. */
+	if (!READ_ONCE(tx_poll_delay_ms))
 		return;
 
 	tbv_path_queue_delayed_work(path, &path->tx_poll_work, delay);
@@ -770,7 +798,7 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 
 	if (atomic_read(&path->tx_inflight) > 0 || completed)
 		tbv_path_queue_tx_poll(path,
-				       msecs_to_jiffies(TBV_TX_POLL_DELAY_MS));
+				       msecs_to_jiffies(READ_ONCE(tx_poll_delay_ms)));
 }
 
 static void tbv_path_rx_supp_poll_work(struct work_struct *work)
