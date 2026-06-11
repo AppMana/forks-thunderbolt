@@ -2085,6 +2085,44 @@ static int tbv_query_device(struct ib_device *ibdev,
 	return 0;
 }
 
+/*
+ * Report the IB port width/speed from what the Thunderbolt controller
+ * actually negotiated for this rail's link, instead of fixed 4X/FDR10.
+ * NCCL sizes channels and estimates bandwidth from active_width *
+ * active_speed, so a hardcoded 4X on a single-lane (1X) link overstates
+ * capacity ~4x and mistunes the transport.
+ */
+static enum ib_port_width tbv_ib_width_from_link(u32 link_width)
+{
+	switch (link_width) {
+	case TB_LINK_WIDTH_DUAL:
+	case TB_LINK_WIDTH_ASYM_TX:
+	case TB_LINK_WIDTH_ASYM_RX:
+		return IB_WIDTH_2X;
+	case TB_LINK_WIDTH_SINGLE:
+	default:
+		return IB_WIDTH_1X;
+	}
+}
+
+static enum ib_port_speed tbv_ib_speed_from_link(u32 link_speed_gbps)
+{
+	/*
+	 * Per-lane signalling, mapped to the nearest IB rate so NCCL's
+	 * bandwidth estimate tracks reality. TB3 = ~20 Gb/s/lane, USB4/TB4
+	 * gen3 = ~20, gen4 = ~40. Round to the closest standard rung.
+	 */
+	if (link_speed_gbps >= 40)
+		return IB_SPEED_HDR;   /* 50 */
+	if (link_speed_gbps >= 20)
+		return IB_SPEED_EDR;   /* 25 */
+	if (link_speed_gbps >= 14)
+		return IB_SPEED_FDR;   /* 14 */
+	if (link_speed_gbps >= 10)
+		return IB_SPEED_FDR10; /* 10.3 */
+	return IB_SPEED_QDR;           /* 10 */
+}
+
 static int tbv_query_port(struct ib_device *ibdev, u32 port_num,
 			  struct ib_port_attr *attr)
 {
@@ -2108,8 +2146,16 @@ static int tbv_query_port(struct ib_device *ibdev, u32 port_num,
 	attr->gid_tbl_len = TBV_IBDEV_GID_TBL_LEN;
 	attr->pkey_tbl_len = 1;
 	attr->max_vl_num = 1;
-	attr->active_width = IB_WIDTH_4X;
-	attr->active_speed = IB_SPEED_FDR10;
+	if (dev->rail && dev->rail->link_width) {
+		attr->active_width =
+			tbv_ib_width_from_link(dev->rail->link_width);
+		attr->active_speed =
+			tbv_ib_speed_from_link(dev->rail->link_speed);
+	} else {
+		/* No bound rail yet: report a conservative single-lane link. */
+		attr->active_width = IB_WIDTH_1X;
+		attr->active_speed = IB_SPEED_EDR;
+	}
 	return 0;
 }
 
