@@ -2868,7 +2868,15 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 	if (!complete)
 		return false;
 
-	tbv_cancel_send_ctx_packets(send);
+	/*
+	 * Only walk the TX queue / frame array when this send still has frames
+	 * outstanding (queued or inflight). A normal completion drains
+	 * tx_pending to zero first, so the scan would find nothing; skipping it
+	 * removes the dominant lock contention and per-completion O(frames)
+	 * cost under load.
+	 */
+	if (atomic_read(&send->tx_pending) > 0)
+		tbv_cancel_send_ctx_packets(send);
 	tbv_apple_sq_release_slot(send);
 
 	if (send->apple_window_acquired) {
