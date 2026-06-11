@@ -12,6 +12,27 @@
 #include "tbv.h"
 
 #define TBV_NATIVE_RING_SIZE 1024
+
+/*
+ * Bidirectional flow-control tuning. The software credit window is
+ * rx_ring_size minus the control reserve; a 20 Gb/s link with multi-ms RTT
+ * needs a bandwidth-delay-product-sized window (and matching RX buffering)
+ * or the sender start-credit-stalls under simultaneous bidirectional load
+ * (~10x throughput loss vs unidirectional). Exposed so the window depth and
+ * the TX pipeline depth can be sized to the link without a rebuild. NOTE:
+ * this is the software-credit path; the NHI also offers hardware E2E ring
+ * flow control (RING_FLAG_E2E, used by the Apple backend) which is the
+ * longer-term mechanism to adopt here.
+ */
+static uint native_ring_size = TBV_NATIVE_RING_SIZE;
+module_param(native_ring_size, uint, 0444);
+MODULE_PARM_DESC(native_ring_size,
+		 "Native TX/RX ring size = software credit window (power of two)");
+
+static uint data_tx_max_inflight = 32;
+module_param(data_tx_max_inflight, uint, 0644);
+MODULE_PARM_DESC(data_tx_max_inflight,
+		 "Max native data frames posted to the TX ring before draining completions");
 /* Apple-originated bursts can exhaust a 256-entry RX ring before credits
  * recycle. 1024 entries passed checked Mac-to-Linux UC bursts beyond one full
  * ring while keeping per-direction buffer cost modest.
@@ -596,8 +617,8 @@ void tbv_path_default_config(enum tbv_backend_type backend,
 
 	case TBV_BACKEND_NATIVE:
 	default:
-		cfg->tx_ring_size = TBV_NATIVE_RING_SIZE;
-		cfg->rx_ring_size = TBV_NATIVE_RING_SIZE;
+		cfg->tx_ring_size = native_ring_size;
+		cfg->rx_ring_size = native_ring_size;
 		cfg->tx_flags = RING_FLAG_FRAME;
 		cfg->rx_flags = RING_FLAG_FRAME;
 		cfg->sof_mask = BIT(1);
@@ -1741,7 +1762,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 
 		if (!from_control_queue &&
 		    atomic_read(&path->tx_inflight) >=
-			    TBV_DATA_TX_MAX_INFLIGHT) {
+			    READ_ONCE(data_tx_max_inflight)) {
 			path->tx_scheduling = false;
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
