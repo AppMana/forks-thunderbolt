@@ -301,12 +301,43 @@ static u32 tbv_service_native_lane(const struct tb_service_id *id)
 	return (u32)id->driver_data;
 }
 
+/*
+ * Number of usable native lanes on a specific XDomain link, read from the
+ * width the Thunderbolt controller actually negotiated. A single-cable
+ * TB3/TB4 daisy-chain link trains to TB_LINK_WIDTH_SINGLE (one 20Gb/s
+ * lane); advertising a second native rail there creates a phantom whose
+ * TX ring never egresses. Dual / asymmetric links expose two lanes.
+ */
+static u32 tbv_link_width_lane_count(enum tb_link_width width)
+{
+	switch (width) {
+	case TB_LINK_WIDTH_SINGLE:
+		return 1;
+	case TB_LINK_WIDTH_DUAL:
+	case TB_LINK_WIDTH_ASYM_TX:
+	case TB_LINK_WIDTH_ASYM_RX:
+		return 2;
+	default:
+		/* Unknown width: fall back to single lane, the safe minimum. */
+		return 1;
+	}
+}
+
 static u32 tbv_config_native_lane_count(const struct tbv_state *state)
 {
 	if (state->cfg.requested.lanes_auto)
 		return min_t(u32, 2, TBV_NATIVE_MAX_LANES);
 
 	return state->cfg.requested.lanes_max;
+}
+
+/* Lanes we will actually bind on this link: config request capped by the
+ * physical link width the controller reports. */
+static u32 tbv_link_native_lane_count(const struct tbv_state *state,
+				      const struct tb_xdomain *xd)
+{
+	return min(tbv_config_native_lane_count(state),
+		   tbv_link_width_lane_count(xd->link_width));
 }
 
 static u32 tbv_service_path_id(const struct tb_service *svc,
@@ -349,8 +380,13 @@ static int tbv_service_probe(struct tb_service *svc,
 		return -ENODEV;
 
 	if (backend == TBV_BACKEND_NATIVE &&
-	    native_lane >= tbv_config_native_lane_count(tbv_service_state))
+	    native_lane >= tbv_link_native_lane_count(tbv_service_state, xd)) {
+		dev_dbg(&xd->dev,
+			"skip native lane %u: link width 0x%x exposes %u lane(s)\n",
+			native_lane, xd->link_width,
+			tbv_link_native_lane_count(tbv_service_state, xd));
 		return -ENODEV;
+	}
 
 	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
 	if (!binding)
