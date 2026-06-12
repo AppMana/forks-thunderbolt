@@ -23,10 +23,20 @@ typedef uint64_t tbv_wire_u64;
 #endif
 
 #define TBV_NATIVE_WIRE_MAGIC		0x31564254u /* "TBV1" little-endian */
-#define TBV_NATIVE_WIRE_VERSION		1u
+/*
+ * v2: HELLO grew roce_eui64 + roce_ipv4 (the sender's RoCE GID identity) so a
+ * multi-peer node can resolve which Thunderbolt peer a destination GID refers
+ * to and rebind QPs to the right rail at RTR time (the QP is rail-bound at
+ * create_qp, before the destination is known; on a mid-chain node with two
+ * neighbours the initial bind is a coin flip). Parse rejects mismatched
+ * versions, so a v1 and a v2 node simply never negotiate; roll the fleet
+ * together (playbook_thunderbolt_ibverbs.yaml) and watch for the version
+ * mismatch warn in dmesg.
+ */
+#define TBV_NATIVE_WIRE_VERSION		2u
 #define TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE 32u
 #define TBV_NATIVE_WIRE_HDR_SIZE	16u
-#define TBV_NATIVE_WIRE_HELLO_SIZE	40u
+#define TBV_NATIVE_WIRE_HELLO_SIZE	56u
 #define TBV_NATIVE_WIRE_HELLO_MSG_SIZE \
 	(TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE + TBV_NATIVE_WIRE_HDR_SIZE + \
 	 TBV_NATIVE_WIRE_HELLO_SIZE)
@@ -72,6 +82,17 @@ struct tbv_native_wire_hello {
 	tbv_wire_u32 tx_ring_size;
 	tbv_wire_u32 rx_ring_size;
 	tbv_wire_u32 path_flags;
+	/*
+	 * v2: the sender's RoCE GID identity, used by the receiver to map a
+	 * destination GID back to this Thunderbolt peer. roce_eui64 is the
+	 * EUI-64 the kernel derives from the sender's roce_netdev MAC (the
+	 * low 8 bytes of its link-local / SLAAC GIDs, modified-EUI-64 with
+	 * the U/L bit flipped); roce_ipv4 (network byte order) matches the
+	 * IPv4-mapped ::ffff:a.b.c.d GID. Zero means "unknown" (no netdev).
+	 */
+	tbv_wire_u64 roce_eui64;
+	tbv_wire_u32 roce_ipv4;
+	tbv_wire_u32 reserved;
 };
 
 static inline void tbv_wire_put_le16(tbv_wire_u8 *p, tbv_wire_u16 value)
@@ -182,6 +203,9 @@ tbv_native_wire_build_hello(void *buf, size_t size,
 	tbv_wire_put_le32(p + 28, hello->tx_ring_size);
 	tbv_wire_put_le32(p + 32, hello->rx_ring_size);
 	tbv_wire_put_le32(p + 36, hello->path_flags);
+	tbv_wire_put_le64(p + 40, hello->roce_eui64);
+	tbv_wire_put_le32(p + 48, hello->roce_ipv4);
+	tbv_wire_put_le32(p + 52, hello->reserved);
 
 	return TBV_NATIVE_WIRE_HELLO_MSG_SIZE;
 }
@@ -260,8 +284,33 @@ tbv_native_wire_parse_hello(const void *buf, size_t size,
 	hello->tx_ring_size = tbv_wire_get_le32(p + 28);
 	hello->rx_ring_size = tbv_wire_get_le32(p + 32);
 	hello->path_flags = tbv_wire_get_le32(p + 36);
+	hello->roce_eui64 = tbv_wire_get_le64(p + 40);
+	hello->roce_ipv4 = tbv_wire_get_le32(p + 48);
+	hello->reserved = tbv_wire_get_le32(p + 52);
 
 	return 0;
+}
+
+/*
+ * Best-effort wire-version peek for diagnostics. Returns the version field if
+ * the buffer is a plausible native-wire message (magic matches), else -1.
+ * Used to emit a loud dmesg warn when a peer speaks a different wire version
+ * (mixed-version fleet during a rollout), since parse just returns -EINVAL
+ * and the rail would otherwise time out silently.
+ */
+static inline int tbv_native_wire_peek_version(const void *buf, size_t size)
+{
+	const tbv_wire_u8 *p = buf;
+
+	if (!p || size < TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE + 8u)
+		return -1;
+	if (memcmp(p + 12, tbv_native_wire_uuid,
+		   sizeof(tbv_native_wire_uuid)) != 0)
+		return -1;
+	p += TBV_NATIVE_WIRE_XDOMAIN_HDR_SIZE;
+	if (tbv_wire_get_le32(p) != TBV_NATIVE_WIRE_MAGIC)
+		return -1;
+	return tbv_wire_get_le16(p + 4);
 }
 
 #endif

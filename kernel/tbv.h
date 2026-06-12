@@ -307,6 +307,21 @@ struct tbv_peer {
 	u32 native_qp_rr_rail_id;
 	u32 nr_rails;
 	bool lane_bonded;
+	/*
+	 * The peer's RoCE GID identity, learned from its HELLO (wire v2):
+	 * remote_roce_eui64 is the modified-EUI-64 the peer's kernel derives
+	 * from its roce_netdev MAC (== bytes 8..15 of its link-local and SLAAC
+	 * GIDs, big-endian), remote_roce_ipv4 matches its IPv4-mapped GID
+	 * (network byte order). Used at modify_qp(RTR) to map a destination GID
+	 * to the Thunderbolt peer that owns it, so QPs on a multi-peer node
+	 * (mid-chain host cabled to two neighbours) bind to the rail that
+	 * actually reaches the destination instead of the create-time
+	 * round-robin guess. Written under state->lock in
+	 * tbv_native_control_apply_remote(); zero until the HELLO lands.
+	 */
+	u64 remote_roce_eui64;
+	u32 remote_roce_ipv4;
+	bool remote_identity_valid;
 };
 
 bool tbv_path_tx_stalled(const struct tbv_path *path);
@@ -746,6 +761,18 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 				   u32 native_lane);
 void tbv_peer_remove_rail(struct tbv_rail *rail);
 void tbv_rail_put(struct tbv_rail *rail);
+
+/*
+ * Pure helpers exposed for kunit (kernel/tests/). tbv_ack_route_peer decides
+ * which peer an ACK/control frame routes to (the requester via rx_path, not the
+ * QP's bound peer); tbv_psn_delta is signed 24-bit PSN distance with wraparound;
+ * tbv_gid_matches_identity decides whether a 16-byte destination GID belongs to
+ * a peer identified by (eui64, ipv4) from its wire-v2 HELLO.
+ */
+struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
+				    struct tbv_path *rx_path);
+s32 tbv_psn_delta(u32 a, u32 b);
+bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
 bool tbv_path_apple_tx_raw_mode(void);
 bool tbv_path_apple_rx_raw_mode(void);
 void tbv_path_default_config(enum tbv_backend_type backend,

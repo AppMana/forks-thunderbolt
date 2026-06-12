@@ -9,6 +9,13 @@ PWD := $(shell pwd)
 obj-m := thunderbolt_ibverbs.o
 thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
 
+# KUnit contract tests for pure driver logic (ACK routing, PSN arithmetic).
+# Only compiled in on a CONFIG_KUNIT kernel; they run at module load and report
+# via the kunit framework. The fleet's Ubuntu generic kernels lack CONFIG_KUNIT,
+# so these run in CI / a kunit.py UML kernel; the same cases are mirrored as a
+# userspace harness in tests/ack_routing_userspace.c for on-host verification.
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/ack_routing_test.o
+
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src) -I$(src)/..
 
 .PHONY: all clean modules modules_install help

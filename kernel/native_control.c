@@ -4,8 +4,11 @@
 
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/etherdevice.h>
+#include <linux/inetdevice.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
+#include <linux/netdevice.h>
 #include <linux/thunderbolt.h>
 #include <linux/workqueue.h>
 
@@ -48,6 +51,61 @@ static u32 tbv_native_control_path_flags(const struct tbv_path *path)
 	return flags;
 }
 
+/*
+ * The local RoCE GID identity advertised in our HELLO (wire v2): the
+ * modified-EUI-64 of the roce_netdev MAC (== the interface-id bytes of every
+ * MAC-derived GID ib_core builds for our ib_devices) and its first IPv4
+ * address (== the IPv4-mapped GID). The receiving peer stores these so it can
+ * resolve which Thunderbolt neighbour a destination GID belongs to at
+ * modify_qp(RTR) time. Both zero when the netdev does not exist (identity
+ * then stays invalid on the remote side).
+ */
+static void tbv_native_control_local_identity(u64 *eui64, u32 *ipv4_be)
+{
+	const char *name = tbv_ibdev_roce_netdev_name();
+	struct net_device *ndev;
+	struct in_device *in_dev;
+	const struct in_ifaddr *ifa;
+	u8 eui[8];
+
+	*eui64 = 0;
+	*ipv4_be = 0;
+
+	if (!name || !*name)
+		return;
+	ndev = dev_get_by_name(&init_net, name);
+	if (!ndev)
+		return;
+
+	if (ndev->addr_len == ETH_ALEN) {
+		/* RFC 4291 modified EUI-64: mac[0..2] ^ U/L, ff:fe, mac[3..5] */
+		eui[0] = ndev->dev_addr[0] ^ 0x02;
+		eui[1] = ndev->dev_addr[1];
+		eui[2] = ndev->dev_addr[2];
+		eui[3] = 0xff;
+		eui[4] = 0xfe;
+		eui[5] = ndev->dev_addr[3];
+		eui[6] = ndev->dev_addr[4];
+		eui[7] = ndev->dev_addr[5];
+		*eui64 = ((u64)eui[0] << 56) | ((u64)eui[1] << 48) |
+			 ((u64)eui[2] << 40) | ((u64)eui[3] << 32) |
+			 ((u64)eui[4] << 24) | ((u64)eui[5] << 16) |
+			 ((u64)eui[6] << 8) | (u64)eui[7];
+	}
+
+	rcu_read_lock();
+	in_dev = __in_dev_get_rcu(ndev);
+	if (in_dev) {
+		ifa = rcu_dereference(in_dev->ifa_list);
+		/* canonical numeric form: a.b.c.d -> a<<24|b<<16|c<<8|d */
+		if (ifa)
+			*ipv4_be = be32_to_cpu(ifa->ifa_address);
+	}
+	rcu_read_unlock();
+
+	dev_put(ndev);
+}
+
 static void tbv_native_control_fill_hello(const struct tbv_state *state,
 					  const struct tbv_peer *peer,
 					  const struct tbv_rail *rail,
@@ -66,6 +124,8 @@ static void tbv_native_control_fill_hello(const struct tbv_state *state,
 	hello->tx_ring_size = rail->path.cfg.tx_ring_size;
 	hello->rx_ring_size = rail->path.cfg.rx_ring_size;
 	hello->path_flags = tbv_native_control_path_flags(&rail->path);
+	tbv_native_control_local_identity(&hello->roce_eui64,
+					  &hello->roce_ipv4);
 }
 
 static bool tbv_native_control_peer_matches_source(
@@ -235,6 +295,16 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			rail->remote_rx_hop = remote->rx_hop;
 			tbv_path_set_remote_rx_capacity(&rail->path,
 							remote->rx_ring_size);
+			/*
+			 * Record the peer's RoCE GID identity (wire v2) so
+			 * modify_qp(RTR) can resolve destination GIDs to this
+			 * peer. Zero means the peer has no roce_netdev.
+			 */
+			if (remote->roce_eui64 || remote->roce_ipv4) {
+				peer->remote_roce_eui64 = remote->roce_eui64;
+				peer->remote_roce_ipv4 = remote->roce_ipv4;
+				peer->remote_identity_valid = true;
+			}
 			ret = 0;
 			goto out;
 		}
@@ -369,8 +439,21 @@ int tbv_native_control_handle_packet(struct tbv_state *state,
 		return 0;
 
 	ret = tbv_native_wire_parse_hello(buf, size, &remote, &info);
-	if (ret)
+	if (ret) {
+		/*
+		 * If this is a native-wire message of a DIFFERENT version,
+		 * scream: the peer's module predates/postdates ours and the
+		 * rails will just time out negotiating with no other clue.
+		 * (Seen as endless HELLO -110 retries during a mixed-version
+		 * rollout.) Anything else is some other protocol's traffic.
+		 */
+		int ver = tbv_native_wire_peek_version(buf, size);
+
+		if (ver >= 0 && ver != TBV_NATIVE_WIRE_VERSION)
+			pr_warn_ratelimited("native control: peer speaks wire v%d, this module speaks v%u -- update thunderbolt-ibverbs on the whole fleet (playbook_thunderbolt_ibverbs.yaml)\n",
+					    ver, TBV_NATIVE_WIRE_VERSION);
 		return 0;
+	}
 
 	if (info.op == TBV_NATIVE_WIRE_OP_HELLO_ACK) {
 		ret = tbv_native_control_apply_ack(state, source_xd, &info,

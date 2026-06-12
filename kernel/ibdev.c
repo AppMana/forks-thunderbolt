@@ -588,7 +588,7 @@ static u32 tbv_psn_next(u32 psn)
 	return (psn + 1) & TBV_PSN_MASK;
 }
 
-static s32 tbv_psn_delta(u32 a, u32 b)
+s32 tbv_psn_delta(u32 a, u32 b)
 {
 	u32 delta = (a - b) & TBV_PSN_MASK;
 
@@ -1699,12 +1699,19 @@ static u32 tbv_qp_rr_distance(u32 rail_id, u32 next_rail_id)
 	return U32_MAX - next_rail_id + 1 + rail_id;
 }
 
+/*
+ * Pick the least-loaded usable rail of one specific native peer (QP-count,
+ * then pending TX frames, then round-robin distance). Used both by the
+ * create-time bind (require_ibdev=true: the new QP must live on a published
+ * ib_device) and by the RTR dgid rebind (require_ibdev=false: on a multi-peer
+ * node only the first-enumerated peer's rail wins the deterministic ib_device
+ * name, but the other peer's rail is a perfectly good transport for QPs that
+ * were created on the surviving device).
+ */
 static struct tbv_rail *
-tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
-			  bool gsi, bool *counted)
+tbv_select_rail_from_peer_locked(struct tbv_peer *peer, bool require_ibdev,
+				 bool *counted)
 {
-	struct tbv_rail *home = dev->rail;
-	struct tbv_peer *peer;
 	struct tbv_rail *rail;
 	struct tbv_rail *best = NULL;
 	u32 best_qps = U32_MAX;
@@ -1714,17 +1721,6 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 	u32 next_rail_id;
 
 	*counted = false;
-	if (WARN_ON_ONCE(!home))
-		return NULL;
-	if (home->removing)
-		return NULL;
-
-	if (backend != TBV_BACKEND_NATIVE || gsi || dev->state->native_home_rail_qp) {
-		refcount_inc(&home->refcnt);
-		return home;
-	}
-
-	peer = home->peer;
 	if (!peer || peer->backend != TBV_BACKEND_NATIVE)
 		return NULL;
 
@@ -1736,7 +1732,7 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 
 		if (!tbv_rail_data_ready(rail) || rail->removing)
 			continue;
-		if (!READ_ONCE(rail->ibdev))
+		if (require_ibdev && !READ_ONCE(rail->ibdev))
 			continue;
 		/*
 		 * Don't strand new QPs on a rail whose TX ring is enabled but
@@ -1775,6 +1771,26 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 	return best;
 }
 
+static struct tbv_rail *
+tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
+			  bool gsi, bool *counted)
+{
+	struct tbv_rail *home = dev->rail;
+
+	*counted = false;
+	if (WARN_ON_ONCE(!home))
+		return NULL;
+	if (home->removing)
+		return NULL;
+
+	if (backend != TBV_BACKEND_NATIVE || gsi || dev->state->native_home_rail_qp) {
+		refcount_inc(&home->refcnt);
+		return home;
+	}
+
+	return tbv_select_rail_from_peer_locked(home->peer, true, counted);
+}
+
 static void tbv_qp_unbind_rail(struct tbv_qp *tqp)
 {
 	if (!tqp->rail)
@@ -1786,6 +1802,134 @@ static void tbv_qp_unbind_rail(struct tbv_qp *tqp)
 	}
 	tbv_rail_put(tqp->rail);
 	tqp->rail = NULL;
+}
+
+/*
+ * Does a 16-byte destination GID belong to the peer whose wire-v2 HELLO
+ * advertised (eui64, ipv4)? Every GID ib_core builds from a RoCE netdev is
+ * either IPv4-mapped (::ffff:a.b.c.d -> compare the address) or carries the
+ * netdev MAC's modified EUI-64 as its interface ID (fe80::, SLAAC global,
+ * ULA -> compare the low 8 bytes). eui64/ipv4 use canonical numeric form
+ * (big-endian byte reading); zero fields never match.
+ *
+ * Pure decision function so the contract is unit-tested: see
+ * kernel/tests/ack_routing_test.c and tests mirror.
+ */
+bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
+{
+	static const u8 v4_prefix[12] = {
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+	};
+
+	if (!memcmp(gid, v4_prefix, sizeof(v4_prefix))) {
+		u32 addr = ((u32)gid[12] << 24) | ((u32)gid[13] << 16) |
+			   ((u32)gid[14] << 8) | (u32)gid[15];
+
+		return ipv4 && addr == ipv4;
+	}
+
+	if (eui64) {
+		u64 iid = ((u64)gid[8] << 56) | ((u64)gid[9] << 48) |
+			  ((u64)gid[10] << 40) | ((u64)gid[11] << 32) |
+			  ((u64)gid[12] << 24) | ((u64)gid[13] << 16) |
+			  ((u64)gid[14] << 8) | (u64)gid[15];
+
+		return iid == eui64;
+	}
+
+	return false;
+}
+
+/*
+ * Rebind a native RC/UC QP to the rail of the peer that actually owns the
+ * destination GID, now that RTR told us who the destination is.
+ *
+ * The QP is rail-bound at create_qp, BEFORE the destination is known; on a
+ * mid-chain node cabled to two neighbours that bind is effectively a coin
+ * flip (the ib_device's home peer = first-enumerated neighbour). A QP bound
+ * toward the wrong neighbour sends every data frame out the wrong rail: the
+ * destination never sees them (or, pre-fix, saw its ACKs misrouted) and the
+ * sender dies with IBV_WC_RETRY_EXC_ERR. The destination GID in the RTR
+ * ah_attr identifies the true peer via the identity it advertised in its
+ * wire-v2 HELLO, so move the QP's binding there.
+ *
+ * Returns -ENETUNREACH (failing the modify_qp) when every native peer
+ * advertised an identity and none matches: the destination is not a
+ * Thunderbolt neighbour of this node (e.g. the chain wrap link), and failing
+ * RTR fast with a clear dmesg line beats a silent retry storm.
+ */
+static int tbv_qp_rebind_rail_for_dgid(struct tbv_qp *tqp)
+{
+	struct tbv_state *state = tqp->owner;
+	const struct ib_global_route *grh;
+	struct tbv_peer *peer;
+	struct tbv_peer *match = NULL;
+	struct tbv_rail *new_rail;
+	bool counted = false;
+	bool all_valid = true;
+	int nnative = 0;
+
+	if (tqp->backend != TBV_BACKEND_NATIVE || tqp->type == IB_QPT_GSI)
+		return 0;
+	if (state->native_home_rail_qp)
+		return 0;
+	if (!(rdma_ah_get_ah_flags(&tqp->attr.ah_attr) & IB_AH_GRH))
+		return 0;
+	grh = rdma_ah_read_grh(&tqp->attr.ah_attr);
+
+	mutex_lock(&state->lock);
+	list_for_each_entry(peer, &state->peers, node) {
+		if (peer->backend != TBV_BACKEND_NATIVE)
+			continue;
+		nnative++;
+		if (!peer->remote_identity_valid) {
+			all_valid = false;
+			continue;
+		}
+		if (tbv_gid_matches_identity(grh->dgid.raw,
+					     peer->remote_roce_eui64,
+					     peer->remote_roce_ipv4)) {
+			match = peer;
+			break;
+		}
+	}
+
+	if (!match) {
+		mutex_unlock(&state->lock);
+		if (nnative > 0 && all_valid) {
+			pr_warn_ratelimited("QP %u RTR dgid %pI6 matches no thunderbolt peer (%d native peers) -- destination is not a TB neighbour of this node\n",
+					    tqp->base.qp_num, grh->dgid.raw,
+					    nnative);
+			return -ENETUNREACH;
+		}
+		/* Identity unknown (peer mid-negotiation): keep legacy bind. */
+		return 0;
+	}
+
+	if (tqp->rail && tqp->rail->peer == match) {
+		mutex_unlock(&state->lock);
+		return 0;
+	}
+
+	new_rail = tbv_select_rail_from_peer_locked(match, false, &counted);
+	if (!new_rail) {
+		mutex_unlock(&state->lock);
+		pr_warn_ratelimited("QP %u RTR dgid %pI6 resolves to peer %u but it has no usable rail\n",
+				    tqp->base.qp_num, grh->dgid.raw,
+				    match->peer_id);
+		return -ENETUNREACH;
+	}
+
+	pr_info("QP %u rebound from peer %u to peer %u rail 0x%x (RTR dgid %pI6)\n",
+		tqp->base.qp_num,
+		tqp->rail && tqp->rail->peer ? tqp->rail->peer->peer_id : 0,
+		match->peer_id, new_rail->rail_id, grh->dgid.raw);
+
+	tbv_qp_unbind_rail(tqp);
+	tqp->rail = new_rail;
+	tqp->rail_binding_counted = counted;
+	mutex_unlock(&state->lock);
+	return 0;
 }
 
 static u32 tbv_collect_native_data_paths_for_qp_locked(struct tbv_qp *tqp,
@@ -1853,17 +1997,43 @@ static void tbv_native_control_path_score(struct tbv_path *path,
 			 U32_MAX : (u32)control_pending;
 }
 
+/*
+ * Which peer should an ACK / control frame route to?
+ *
+ * It is a RESPONSE to a request that arrived on rx_path, so it must go back to
+ * the peer that sent it. The QP's bound peer (tqp->rail->peer) is the peer this
+ * QP *initiates* data to, which on a multi-peer node (a mid-chain host cabled
+ * to two neighbours) need NOT be the requester: the responder QP is rail-bound
+ * by round-robin at creation, before any request arrives, while inbound
+ * requests are demuxed to it by QPN regardless of binding. Routing the ACK by
+ * tqp->rail->peer then sends it out the wrong neighbour's rail and the
+ * requester never sees it -> IBV_WC_RETRY_EXC_ERR even though the write itself
+ * was delivered (writes forward fine, ACKs return on the wrong rail: the exact
+ * asymmetry observed on appmana-020<->009). Prefer rx_path's peer; fall back to
+ * the QP's bound peer only for rx_path-less callers (timer-driven re-ACK).
+ *
+ * Pure decision function so the contract is unit-tested: see
+ * kernel/tests/ack_routing_test.c (tbv_ack_route_peer_test).
+ */
+struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
+				    struct tbv_path *rx_path)
+{
+	if (rx_path && rx_path->rail && rx_path->rail->peer)
+		return rx_path->rail->peer;
+	return qp_rail ? qp_rail->peer : NULL;
+}
+
 static struct tbv_path *
 tbv_select_native_control_path_for_qp_locked(struct tbv_qp *tqp,
 					     struct tbv_path *rx_path)
 {
-	struct tbv_peer *peer = tqp->rail->peer;
+	struct tbv_peer *peer = tbv_ack_route_peer(tqp->rail, rx_path);
 	struct tbv_rail *rail;
 	struct tbv_rail *best = NULL;
 	u32 best_data_score = U32_MAX;
 	u32 best_control_score = U32_MAX;
 
-	if (peer->backend != TBV_BACKEND_NATIVE)
+	if (!peer || peer->backend != TBV_BACKEND_NATIVE)
 		return NULL;
 
 	list_for_each_entry(rail, &peer->rails, node) {
@@ -2722,6 +2892,17 @@ out_unlock:
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	if (ret)
 		return ret;
+	/*
+	 * RTR carries the destination GID (IB_QP_AV): move the QP to the rail
+	 * of the peer that owns it. Must run before recv-credit advertisement
+	 * below so the credits go out the correct rail. Sleeping context; the
+	 * spinlock above is released.
+	 */
+	if (attr_mask & IB_QP_AV) {
+		ret = tbv_qp_rebind_rail_for_dgid(tqp);
+		if (ret)
+			return ret;
+	}
 	if (flush_error)
 		tbv_qp_flush_error(tqp);
 	if (attr_mask & (IB_QP_STATE | IB_QP_DEST_QPN))
@@ -3239,8 +3420,26 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			list_add_tail(&send->retry_node, retry_sends);
 			continue;
 		}
-		if (send->retryable && send->retries >= max_retries)
+		if (send->retryable && send->retries >= max_retries) {
+			/*
+			 * This is what the application sees as
+			 * IBV_WC_RETRY_EXC_ERR. Most common cause on this
+			 * transport: the responder received our frames but its
+			 * ACKs never came back (misrouted to another peer --
+			 * see tbv_ack_route_peer / the unknown-QPN RX warn on
+			 * the third node). Scream with enough context to
+			 * correlate across nodes; the silent counter alone hid
+			 * this for a full debugging day.
+			 */
+			pr_warn_ratelimited("native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x%x dest_qp=0x%x psn=%u opcode=%u retries=%u rail=0x%x route=0x%llx (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)\n",
+					    tqp->base.qp_num,
+					    tqp->attr.dest_qp_num,
+					    send->psn & TBV_PSN_MASK,
+					    send->opcode, send->retries,
+					    tqp->rail ? tqp->rail->rail_id : 0xffffffffu,
+					    tqp->rail ? tqp->rail->key.route : 0ULL);
 			atomic64_inc(&tqp->owner->data_wr_retry_exhausted);
+		}
 		if (!send->ready) {
 			send->ready = true;
 			send->completion_status = -ETIMEDOUT;
@@ -5589,11 +5788,18 @@ static int tbv_send_ack_on_path(struct tbv_qp *tqp,
 
 	/*
 	 * OK SEND ACKs are idempotent, and a lost ACK forces the peer to
-	 * retransmit the whole SEND. On native multi-rail peers, put OK ACKs
-	 * on every live rail; non-OK ACKs stay single-path to preserve their
-	 * existing retry/error timing.
+	 * retransmit the whole SEND. On native multi-rail peers, putting OK
+	 * ACKs on every live rail adds redundancy -- but ONLY when we have no
+	 * rx_path to anchor the response. With an rx_path present (the normal
+	 * case: we are acking a request that just arrived), route the ACK back
+	 * the way it came via the rx_path-aware selector; the all-native-paths
+	 * spray collects rails from the QP's bound peer, which on a multi-peer
+	 * node may not be the requester, so it could send every ACK out the
+	 * wrong neighbour's rail (-> requester never sees it -> RETRY_EXC).
+	 * Reserve the multi-rail spray for rx_path-less re-ACKs. See kunit
+	 * tbv_ack_routing_test.
 	 */
-	if (status == TBV_NATIVE_SEND_ACK_OK)
+	if (status == TBV_NATIVE_SEND_ACK_OK && !rx_path)
 		ret = tbv_send_control_frame_on_all_native_paths(tqp, rx_path,
 								frame, len);
 	else
@@ -8542,6 +8748,20 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 
 	tqp = tbv_qp_get_by_num(state, hdr->dest_qp);
 	if (!tqp) {
+		/*
+		 * A frame for a QPN that does not exist here usually means a
+		 * PEER MISROUTED it: e.g. a multi-peer responder routing ACKs
+		 * by its QP's bound peer instead of the requester's rx_path
+		 * (appmana-020<->009 regression: 79k ACKs landed on the third
+		 * node 025 as data_rx_no_qp while the requester retried into
+		 * IBV_WC_RETRY_EXC_ERR -- with no dmesg anywhere). Scream so
+		 * the receiving node identifies the misroute immediately.
+		 */
+		pr_warn_ratelimited("native RX frame for unknown QPN: opcode=%u dest_qp=0x%x src_qp=0x%x psn=%u rx_route=0x%llx (likely misrouted by peer; check sender's ACK/control routing)\n",
+				    hdr->opcode, hdr->dest_qp, hdr->src_qp,
+				    hdr->psn & TBV_PSN_MASK,
+				    rx_path && rx_path->rail
+					    ? rx_path->rail->key.route : 0ULL);
 		atomic64_inc(&state->data_rx_no_qp);
 		return;
 	}
