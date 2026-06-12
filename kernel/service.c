@@ -379,6 +379,15 @@ static int tbv_service_probe(struct tb_service *svc,
 	    !tbv_service_apple_xdomain_allowed(tbv_service_state, xd))
 		return -ENODEV;
 
+	/*
+	 * Bond the link to dual lane BEFORE the lane-count gate so a 40 Gb/s
+	 * link exposes its second native rail (one rail caps ~16 Gb/s; the win
+	 * is striping across two rails). No-op unless native_lane_bonding is
+	 * set. Both ends probe concurrently and converge.
+	 */
+	if (backend == TBV_BACKEND_NATIVE)
+		tbv_xdomain_bond_sync(xd);
+
 	if (backend == TBV_BACKEND_NATIVE &&
 	    native_lane >= tbv_link_native_lane_count(tbv_service_state, xd)) {
 		dev_dbg(&xd->dev,
