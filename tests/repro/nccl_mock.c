@@ -212,8 +212,14 @@ int main(int argc, char **argv) {
 	// plain WRITE), so the proof of success is client completions + no error.
 	int rc = 0;
 	if (g_server) {
-		// for SEND/WRITE_IMM, post recvs so completions land
+		// For SEND/WRITE_IMM the receiver consumes one recv per message:
+		// post the initial window AND REPOST on every completion, exactly
+		// like a real application (NCCL reposts continuously). Without the
+		// repost the test starves the responder after the first window and
+		// measures the harness, not the driver.
 		if (op_code() != IBV_WR_RDMA_WRITE) {
+			long need = (long)g_iters * g_qps;
+			long handed = 0;
 			for (int i = 0; i < g_qps; i++)
 				for (int k = 0; k < g_outst; k++) {
 					struct ibv_sge sge = { (uintptr_t)c.buf + (size_t)g_size*k,
@@ -222,6 +228,28 @@ int main(int argc, char **argv) {
 						.num_sge = 1 }, *bad;
 					ibv_post_recv(c.qp[i], &rw, &bad);
 				}
+			while (handed < need) {
+				int progress = 0;
+				for (int i = 0; i < g_qps; i++) {
+					struct ibv_wc wc[8];
+					int ne = ibv_poll_cq(c.cq[i], 8, wc);
+					for (int j = 0; j < ne; j++) {
+						if (wc[j].status != IBV_WC_SUCCESS) {
+							fprintf(stderr, "*** recv-side qp%d status=%s\n",
+								i, ibv_wc_status_str(wc[j].status));
+							handed = need; break;
+						}
+						handed++; progress++;
+						struct ibv_sge sge = { (uintptr_t)c.buf, g_size,
+							c.mr->lkey };
+						struct ibv_recv_wr rw = { .wr_id = 0, .sg_list = &sge,
+							.num_sge = 1 }, *bad;
+						ibv_post_recv(c.qp[i], &rw, &bad);
+					}
+				}
+				if (!progress) usleep(1000);
+			}
+			fprintf(stderr, "[receiver] handled %ld message completions\n", handed);
 		}
 	} else {
 		enum ibv_wr_opcode opc = op_code();
