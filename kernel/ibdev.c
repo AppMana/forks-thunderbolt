@@ -1049,6 +1049,9 @@ tbv_qp_accept_recv_credit(struct tbv_qp *tqp,
 		} else if (!check_add_overflow(tqp->remote_recv_credits,
 					       hdr->imm_data, &new_credits)) {
 			tqp->remote_recv_credits = new_credits;
+			pr_info_ratelimited("CREDDBG tx-credit-accept qpn=0x%x +%u -> %u\n",
+					    tqp->base.qp_num, hdr->imm_data,
+					    new_credits);
 		}
 	} else if (tqp->early_remote_recv_credit_src_known &&
 		   tqp->early_remote_recv_credit_src_qp != hdr->src_qp) {
@@ -1455,6 +1458,13 @@ static bool tbv_qp_note_rnr_ack(struct tbv_qp *tqp, u32 psn,
 			*matched_out = send;
 		if (tbv_send_rnr_retry_exhausted(send) || tqp->closing ||
 		    tqp->state == IB_QPS_ERR) {
+			pr_info_ratelimited("CREDDBG tx-RNR-FATAL qpn=0x%x psn=%u exhausted=%d closing=%d qperr=%d rnr=%u/%u\n",
+					    tqp->base.qp_num, psn & TBV_PSN_MASK,
+					    tbv_send_rnr_retry_exhausted(send),
+					    tqp->closing,
+					    tqp->state == IB_QPS_ERR,
+					    send->rnr_retries,
+					    send->max_rnr_retries);
 			if (!send->ready) {
 				send->ready = true;
 				send->completion_status = -EAGAIN;
@@ -1468,6 +1478,10 @@ static bool tbv_qp_note_rnr_ack(struct tbv_qp *tqp, u32 psn,
 		send->rnr_waiting = true;
 		send->retrying = false;
 		tbv_send_mark_queued(send, jiffies);
+		pr_info_ratelimited("CREDDBG tx-RNR-NAK qpn=0x%x psn=%u rnr_retries=%u/%u credits=%u delay_j=%lu\n",
+				    tqp->base.qp_num, psn & TBV_PSN_MASK,
+				    send->rnr_retries, send->max_rnr_retries,
+				    tqp->remote_recv_credits, delay);
 		if (tbv_send_rnr_waits_for_recv_credit(send)) {
 			if (tqp->remote_recv_credits)
 				tbv_qp_schedule_timeout_now_locked(tqp);
@@ -5963,6 +5977,8 @@ static void tbv_qp_advertise_recv_credits(struct tbv_qp *tqp)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 
 	ret = tbv_send_recv_credit(tqp, dest_qp, tqp->base.qp_num, credits);
+	pr_info_ratelimited("CREDDBG rx-credit-advertise qpn=0x%x dest=0x%x credits=%u ret=%d\n",
+			    tqp->base.qp_num, dest_qp, credits, ret);
 	if (!ret)
 		return;
 
@@ -7093,6 +7109,9 @@ static bool tbv_rx_deliver_reorder_msg_locked(struct tbv_state *state,
 
 	if (!tbv_qp_pop_recv(tqp, &wqe)) {
 		atomic64_inc(&state->data_rx_rnr);
+		pr_info_ratelimited("CREDDBG rx-RNR(site7094) qpn=0x%x recv_count=%u advertised=%u\n",
+				    tqp->base.qp_num, tqp->recv_count,
+				    tqp->recv_credits_advertised);
 		tbv_send_ack_on_path(tqp, rx_path, msg->src_qp,
 				     tqp->base.qp_num, msg->psn,
 				     TBV_NATIVE_SEND_ACK_RNR);
@@ -7159,6 +7178,10 @@ static bool tbv_rx_deliver_reorder_write_locked(struct tbv_state *state,
 
 	if (msg->with_imm && !tbv_qp_pop_recv(tqp, &tqp->rx_write.imm_wqe)) {
 		atomic64_inc(&state->data_rx_rnr);
+		pr_info_ratelimited("CREDDBG rx-RNR(reorder) qpn=0x%x psn=%u recv_count=%u advertised=%u\n",
+				    tqp->base.qp_num, msg->psn,
+				    tqp->recv_count,
+				    tqp->recv_credits_advertised);
 		tbv_send_ack_on_path(tqp, rx_path, msg->src_qp,
 				     tqp->base.qp_num, msg->psn,
 				     TBV_NATIVE_SEND_ACK_RNR);
@@ -7751,6 +7774,9 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		} else {
 			if (!tbv_qp_pop_recv(tqp, &msg->wqe)) {
 				atomic64_inc(&state->data_rx_rnr);
+				pr_info_ratelimited("CREDDBG rx-RNR(site7756) qpn=0x%x recv_count=%u advertised=%u\n",
+						    tqp->base.qp_num, tqp->recv_count,
+						    tqp->recv_credits_advertised);
 				tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
 						       hdr->remote_addr,
 						       hdr->frag_offset);
@@ -7872,6 +7898,9 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		}
 		if (!tbv_qp_pop_recv(tqp, &msg->wqe)) {
 			atomic64_inc(&state->data_rx_rnr);
+			pr_info_ratelimited("CREDDBG rx-RNR(site7877) qpn=0x%x recv_count=%u advertised=%u\n",
+					    tqp->base.qp_num, tqp->recv_count,
+					    tqp->recv_credits_advertised);
 			tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
 					       hdr->remote_addr,
 					       hdr->frag_offset);
@@ -8120,6 +8149,9 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		}
 		if (with_imm && !tbv_qp_pop_recv(tqp, &wrx->imm_wqe)) {
 			atomic64_inc(&state->data_rx_rnr);
+			pr_info_ratelimited("CREDDBG rx-RNR(site8125) qpn=0x%x recv_count=%u advertised=%u\n",
+					    tqp->base.qp_num, tqp->recv_count,
+					    tqp->recv_credits_advertised);
 			tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
 					       hdr->remote_addr,
 					       hdr->frag_offset);
@@ -8857,8 +8889,11 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 			tbv_send_complete(send, send->completion_status);
 			tbv_send_ctx_put(send);
 		}
-		if (completed_error && completed_ack)
+		if (completed_error && completed_ack) {
+			pr_info_ratelimited("CREDDBG qp-mark-error qpn=0x%x (send completed with error after ACK)\n",
+					    tqp->base.qp_num);
 			tbv_qp_mark_error(tqp);
+		}
 		tbv_qp_put(tqp);
 		return;
 	}
