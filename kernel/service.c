@@ -674,6 +674,8 @@ int tbv_services_start(struct tbv_state *state, bool bind_services,
 	if (ret)
 		goto err_stop_minimal;
 
+	state->native_prtcstns = service_cfg->native_prtcstns;
+	state->native_reannounce_jiffies = 0;
 	ret = tbv_register_native_dirs(state, service_cfg->native_prtcstns);
 	if (ret)
 		goto err_stop_minimal;
@@ -708,6 +710,43 @@ err_clear:
 	tbv_native_control_stop(state);
 	tbv_service_state = NULL;
 	return ret;
+}
+
+/* Min spacing between property re-announces; each one makes every neighbour
+ * re-read our whole property block, so don't thrash the control channel. */
+#define TBV_REANNOUNCE_MIN_INTERVAL_MS 10000u
+
+bool tbv_services_reannounce_native(struct tbv_state *state)
+{
+	unsigned long last;
+	int ret;
+
+	if (!state || !state->services_registered || !state->native_dir_count)
+		return false;
+
+	last = READ_ONCE(state->native_reannounce_jiffies);
+	if (last && time_before(jiffies,
+				last + msecs_to_jiffies(TBV_REANNOUNCE_MIN_INTERVAL_MS)))
+		return false;
+	WRITE_ONCE(state->native_reannounce_jiffies, jiffies);
+
+	/*
+	 * tb_unregister_property_dir + tb_register_property_dir both push an
+	 * XDomain properties-changed notification to every connected peer. A
+	 * peer whose earlier property read raced our module load (and gave up,
+	 * leaving us service-less on its side, our HELLOs unanswered with
+	 * -ETIMEDOUT) restarts its read cycle on the fresh notification and
+	 * recreates the tbverbs service. Healthy peers re-read and find the
+	 * same content -- idempotent.
+	 */
+	tbv_unregister_native_dirs(state);
+	ret = tbv_register_native_dirs(state, state->native_prtcstns);
+	if (ret) {
+		pr_warn("native property re-announce failed: %d\n", ret);
+		return false;
+	}
+	pr_info("re-announced native services (HELLO retries exhausted; prodding stale peers)\n");
+	return true;
 }
 
 void tbv_services_stop(struct tbv_state *state)

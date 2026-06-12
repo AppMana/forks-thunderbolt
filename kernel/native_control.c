@@ -764,9 +764,24 @@ static void tbv_native_control_work(struct work_struct *work)
 			if (attempt < TBV_NATIVE_HELLO_RETRIES) {
 				retry = true;
 			} else {
-				pr_warn("native HELLO route=0x%llx rail=0x%x failed after %u attempts: %d\n",
-					rail->key.route, rail->rail_id,
-					attempt, ret);
+				/*
+				 * Unanswered HELLOs usually mean the peer's
+				 * one-shot XDomain property read raced our
+				 * module load and gave up, so it never
+				 * recreated our tbverbs service and has no
+				 * rail to answer from. Push a fresh
+				 * properties-changed (rate-limited) to restart
+				 * its read cycle and KEEP retrying instead of
+				 * dying: convergence beats the reload roulette
+				 * (1-in-10 link survival, 2026-06-12 roll).
+				 */
+				pr_warn_ratelimited("native HELLO route=0x%llx rail=0x%x still unanswered after %u attempts (%d); re-announcing services and retrying\n",
+						    rail->key.route,
+						    rail->rail_id, attempt,
+						    ret);
+				tbv_services_reannounce_native(state);
+				rail->native_attempts = 0;
+				retry = true;
 			}
 			goto out;
 		}

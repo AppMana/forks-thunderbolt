@@ -454,6 +454,17 @@ struct tbv_state {
 	struct tbv_tbnet_identity tbnet_identity;
 	struct tb_property_dir *native_dirs[TBV_NATIVE_MAX_LANES];
 	u32 native_dir_count;
+	/*
+	 * Saved prtcstns + rate limit for tbv_services_reannounce_native(): when
+	 * a rail exhausts its HELLO retries (the peer has not recreated our
+	 * service after a module reload -- its one-shot XDomain property read
+	 * raced our initialization and gave up), re-registering the property
+	 * dirs sends a fresh properties-changed notification that restarts the
+	 * peer's read cycle. Without this, module reloads converge ~1 in 10
+	 * (2026-06-12 fleet roll) and the only reliable recovery is a reboot.
+	 */
+	u32 native_prtcstns;
+	unsigned long native_reannounce_jiffies;
 	struct tb_property_dir *apple_dir;
 	struct dentry *debugfs_dir;
 	bool allocate_rings;
@@ -723,6 +734,12 @@ struct tb_property_dir *tbv_service_create_apple_dir(u32 prtcstns);
 int tbv_services_start(struct tbv_state *state, bool bind_services,
 		       const struct tbv_service_config *service_cfg);
 void tbv_services_stop(struct tbv_state *state);
+/*
+ * Re-register the native property dirs to push a fresh XDomain
+ * properties-changed notification to every neighbour (rate-limited; returns
+ * false when skipped). Used by native control when HELLO retries exhaust.
+ */
+bool tbv_services_reannounce_native(struct tbv_state *state);
 int tbv_native_control_start(struct tbv_state *state);
 void tbv_native_control_stop(struct tbv_state *state);
 const char *tbv_native_control_mode_name(const struct tbv_state *state);
