@@ -306,6 +306,14 @@ struct tbv_peer {
 	struct mutex control_lock;
 	u32 native_qp_rr_rail_id;
 	u32 nr_rails;
+	bool lane_bonded;
+	/*
+	 * XDomain lane bonding needs both hosts to enable their second lane
+	 * adapter in the same window; a lone attempt returns -ENOTCONN. Retry
+	 * on a timer so independently-loaded peers eventually overlap.
+	 */
+	struct delayed_work lane_bond_work;
+	int lane_bond_attempts;
 };
 
 bool tbv_path_tx_stalled(const struct tbv_path *path);

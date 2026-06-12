@@ -3,10 +3,82 @@
 #define pr_fmt(fmt) "thunderbolt_ibverbs: " fmt
 
 #include <linux/errno.h>
+#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/thunderbolt.h>
+#include <linux/workqueue.h>
 
 #include "tbv.h"
+
+/*
+ * Experiment: host-to-host (XDomain) Thunderbolt links power on at single
+ * lane (x1, 20 Gb/s) because XDomain lane bonding is normally only driven by
+ * thunderbolt-net after a ThunderboltIP login, which our chain does not run.
+ * The kernel exports tb_xdomain_lane_bonding_enable(); the cable already
+ * trains Gen3 (20 Gb/s/lane), so bonding should yield a DUAL-width 40 Gb/s
+ * logical link. Keep lanes=1 so the native lane-count stays 1 (one rail over
+ * the now-wider link) instead of resurrecting a second rail. Off by default;
+ * the host uplink is PCIe 3.0 x4 (~31.5 Gb/s/dir) so the upside is ~1.5x.
+ */
+static bool native_lane_bonding;
+module_param(native_lane_bonding, bool, 0644);
+MODULE_PARM_DESC(native_lane_bonding,
+		 "Attempt XDomain lane bonding (x1->x2, 40 Gb/s) on native peers");
+
+#define TBV_LANE_BOND_MAX_ATTEMPTS 15
+#define TBV_LANE_BOND_RETRY_MS 2000
+
+/*
+ * Try to bring the peer's link up at dual lane. -ENOTCONN means our side
+ * enabled its second lane adapter but the remote had not enabled its own
+ * within the wait window; tb_port_enable leaves the adapter enabled, so a
+ * later retry (once the remote has also enabled) converges. Returns 0 on
+ * success, the negative errno otherwise.
+ */
+static int tbv_peer_try_lane_bond(struct tbv_peer *peer)
+{
+	struct tb_xdomain *xd = peer->xd;
+	enum tb_link_width before;
+	int ret;
+
+	if (!xd)
+		return -ENODEV;
+	if (peer->lane_bonded || xd->link_width != TB_LINK_WIDTH_SINGLE)
+		return 0;
+
+	before = xd->link_width;
+	ret = tb_xdomain_lane_bonding_enable(xd);
+	if (!ret) {
+		peer->lane_bonded = true;
+		pr_info("peer %u lane bonding enabled width %u->%u speed=%uGb/s after %d attempt(s)\n",
+			peer->peer_id, before, xd->link_width, xd->link_speed,
+			peer->lane_bond_attempts + 1);
+	}
+	return ret;
+}
+
+static void tbv_peer_lane_bond_work(struct work_struct *work)
+{
+	struct tbv_peer *peer = container_of(to_delayed_work(work),
+					     struct tbv_peer, lane_bond_work);
+	int ret;
+
+	if (!READ_ONCE(native_lane_bonding) || peer->lane_bonded)
+		return;
+
+	peer->lane_bond_attempts++;
+	ret = tbv_peer_try_lane_bond(peer);
+	if (ret == -ENOTCONN &&
+	    peer->lane_bond_attempts < TBV_LANE_BOND_MAX_ATTEMPTS) {
+		schedule_delayed_work(&peer->lane_bond_work,
+				      msecs_to_jiffies(TBV_LANE_BOND_RETRY_MS));
+		return;
+	}
+	if (ret)
+		pr_warn("peer %u lane bonding gave up ret=%d after %d attempt(s) width=%u (staying x1)\n",
+			peer->peer_id, ret, peer->lane_bond_attempts,
+			peer->xd ? peer->xd->link_width : 0);
+}
 
 static bool tbv_peer_matches(const struct tbv_peer *peer,
 			     enum tbv_backend_type backend,
@@ -139,6 +211,10 @@ struct tbv_peer *tbv_peer_get_or_create(struct tbv_state *state,
 
 	pr_info("peer %u created backend=%s\n", peer->peer_id,
 		tbv_backend_name(backend));
+
+	INIT_DELAYED_WORK(&peer->lane_bond_work, tbv_peer_lane_bond_work);
+	if (native_lane_bonding && backend == TBV_BACKEND_NATIVE && xd)
+		schedule_delayed_work(&peer->lane_bond_work, 0);
 	return peer;
 }
 
@@ -161,6 +237,13 @@ void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer)
 	if (peer->nr_rails)
 		pr_warn("peer %u destroyed with %u live rails\n",
 			peer->peer_id, peer->nr_rails);
+
+	cancel_delayed_work_sync(&peer->lane_bond_work);
+	if (peer->lane_bonded && peer->xd) {
+		tb_xdomain_lane_bonding_disable(peer->xd);
+		pr_info("peer %u lane bonding disabled (width=%u)\n",
+			peer->peer_id, peer->xd->link_width);
+	}
 
 	pr_info("peer %u destroyed backend=%s\n", peer->peer_id,
 		tbv_backend_name(peer->backend));
