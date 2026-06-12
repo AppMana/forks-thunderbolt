@@ -280,7 +280,20 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 	if (!rail)
 		return ERR_PTR(-ENOMEM);
 
-	rail_id = ida_alloc(&peer->rail_ids, GFP_KERNEL);
+	/*
+	 * rail_id is the cross-host identity used to match native-control
+	 * HELLO/READY between the two peers. It MUST be symmetric: a plain
+	 * ida counter is assigned in service-probe order, which can differ
+	 * between the two hosts, so on a 2-rail (bonded) link host A's lane 1
+	 * could get rail_id 1 while host B's lane 1 gets rail_id 0 -> the
+	 * second rail's READY finds "no matching peer rail" and the peer is
+	 * torn down (link oscillates back to x1). native_lane is symmetric by
+	 * construction (derived from the service id both ends advertise), so
+	 * pin rail_id = native_lane. Reserving the exact id also rejects a
+	 * duplicate lane within one peer.
+	 */
+	rail_id = ida_alloc_range(&peer->rail_ids, native_lane, native_lane,
+				  GFP_KERNEL);
 	if (rail_id < 0) {
 		kfree(rail);
 		return ERR_PTR(rail_id);
