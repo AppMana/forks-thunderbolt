@@ -465,6 +465,26 @@ struct tbv_state {
 	 */
 	u32 native_prtcstns;
 	unsigned long native_reannounce_jiffies;
+	/*
+	 * Boot-time identity race (2026-06-13 DSV4 outage): the module loads
+	 * and HELLOs within seconds of POST, before DHCP has assigned the
+	 * roce_netdev's IPv4. The HELLO then advertises eui64 with ipv4=0,
+	 * peers store it as a valid identity, and every later v4-mapped dgid
+	 * hard-fails modify_qp(RTR) with -ENETUNREACH. Three defenses:
+	 *  1. identity_grace_until: defer the first HELLO while the local
+	 *     identity is incomplete, up to this deadline.
+	 *  2. hello_sent_incomplete: set when a HELLO went out with ipv4=0
+	 *     after the grace expired.
+	 *  3. identity_refresh_work: scheduled by the inetaddr notifier when
+	 *     the roce_netdev gains an address; re-HELLOs negotiated rails so
+	 *     peers replace the incomplete identity.
+	 * The receive-side defense is tbv_gid_identity_verdict(): an identity
+	 * that cannot adjudicate a dgid family is INCONCLUSIVE and never
+	 * contributes to a hard -ENETUNREACH reject.
+	 */
+	unsigned long identity_grace_until;
+	bool hello_sent_incomplete;
+	struct work_struct identity_refresh_work;
 	struct tb_property_dir *apple_dir;
 	struct dentry *debugfs_dir;
 	bool allocate_rings;
@@ -790,6 +810,34 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
 s32 tbv_psn_delta(u32 a, u32 b);
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
+/*
+ * tbv_gid_identity_verdict classifies a dgid against a stored peer identity.
+ * INCONCLUSIVE means the identity cannot adjudicate this dgid's address
+ * family (e.g. a v4-mapped dgid against an identity whose ipv4 was 0 because
+ * the peer HELLOed before DHCP) and MUST NOT count toward the all-peers-
+ * valid -ENETUNREACH rejection in tbv_qp_rebind_rail_for_dgid().
+ */
+/*
+ * How long the first HELLO may wait for the roce_netdev to get an IPv4
+ * address (DHCP at boot). A HELLO sent earlier advertises identity ipv4=0,
+ * which peers can never resolve a v4-mapped dgid against. Past the grace we
+ * send anyway (a v6-only or address-less deployment must still negotiate)
+ * and rely on the inetaddr notifier to re-HELLO when an address appears.
+ */
+#define TBV_IDENTITY_GRACE_MS 30000
+
+enum tbv_identity_verdict {
+	TBV_IDENTITY_NO_MATCH = 0,
+	TBV_IDENTITY_MATCH,
+	TBV_IDENTITY_INCONCLUSIVE,
+};
+enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
+						   bool identity_valid,
+						   u64 eui64, u32 ipv4_be);
+bool tbv_native_control_local_identity_incomplete(void);
+void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
+int tbv_native_control_identity_notifier_register(struct tbv_state *state);
+void tbv_native_control_identity_notifier_unregister(void);
 bool tbv_path_apple_tx_raw_mode(void);
 bool tbv_path_apple_rx_raw_mode(void);
 void tbv_path_default_config(enum tbv_backend_type backend,

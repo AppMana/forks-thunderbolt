@@ -48,17 +48,31 @@ static s32 tbv_psn_delta(u32 a, u32 b)
 #include <string.h>
 typedef uint64_t u64;
 typedef uint8_t u8;
-static int tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
+enum tbv_identity_verdict {
+	TBV_IDENTITY_NO_MATCH = 0,
+	TBV_IDENTITY_MATCH,
+	TBV_IDENTITY_INCONCLUSIVE,
+};
+
+static enum tbv_identity_verdict
+tbv_gid_identity_verdict(const u8 gid[16], int identity_valid,
+			 u64 eui64, u32 ipv4)
 {
 	static const u8 v4_prefix[12] = {
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
 	};
 
+	if (!identity_valid)
+		return TBV_IDENTITY_INCONCLUSIVE;
+
 	if (!memcmp(gid, v4_prefix, sizeof(v4_prefix))) {
 		u32 addr = ((u32)gid[12] << 24) | ((u32)gid[13] << 16) |
 			   ((u32)gid[14] << 8) | (u32)gid[15];
 
-		return ipv4 && addr == ipv4;
+		if (!ipv4)
+			return TBV_IDENTITY_INCONCLUSIVE;
+		return addr == ipv4 ? TBV_IDENTITY_MATCH :
+				      TBV_IDENTITY_NO_MATCH;
 	}
 
 	if (eui64) {
@@ -67,10 +81,17 @@ static int tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
 			  ((u64)gid[12] << 24) | ((u64)gid[13] << 16) |
 			  ((u64)gid[14] << 8) | (u64)gid[15];
 
-		return iid == eui64;
+		return iid == eui64 ? TBV_IDENTITY_MATCH :
+				      TBV_IDENTITY_NO_MATCH;
 	}
 
-	return 0;
+	return TBV_IDENTITY_INCONCLUSIVE;
+}
+
+static int tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
+{
+	return tbv_gid_identity_verdict(gid, 1, eui64, ipv4) ==
+	       TBV_IDENTITY_MATCH;
 }
 
 static int failures;
@@ -151,6 +172,27 @@ int main(void)
 		EXPECT(!tbv_gid_matches_identity(v4_eui_collision,
 						 0x0000fffffeb776faULL, v4),
 		       "gid match: v4-mapped compared as address, not EUI");
+
+		/* Verdict classifier: the 2026-06-13 DSV4 boot bug. An
+		 * identity stored from a pre-DHCP HELLO (eui64, ipv4=0) must
+		 * ABSTAIN on a v4-mapped dgid, never vote "not me" -- that
+		 * vote is what turned modify_qp(RTR) into -ENETUNREACH
+		 * against the node's own cabled neighbour. */
+		EXPECT(tbv_gid_identity_verdict(v4m, 1, eui, 0) ==
+		       TBV_IDENTITY_INCONCLUSIVE,
+		       "verdict: v4 dgid vs ipv4=0 identity abstains (DSV4 boot bug)");
+		EXPECT(tbv_gid_identity_verdict(v4m, 1, eui, v4) ==
+		       TBV_IDENTITY_MATCH,
+		       "verdict: v4 dgid conclusive match");
+		EXPECT(tbv_gid_identity_verdict(v4m, 1, eui, 0x0a020039u) ==
+		       TBV_IDENTITY_NO_MATCH,
+		       "verdict: v4 dgid conclusive mismatch");
+		EXPECT(tbv_gid_identity_verdict(ll, 1, 0, v4) ==
+		       TBV_IDENTITY_INCONCLUSIVE,
+		       "verdict: EUI dgid vs eui64=0 identity abstains");
+		EXPECT(tbv_gid_identity_verdict(v4m, 0, eui, v4) ==
+		       TBV_IDENTITY_INCONCLUSIVE,
+		       "verdict: invalid identity abstains");
 	}
 
 	printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

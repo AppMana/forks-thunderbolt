@@ -1831,15 +1831,37 @@ static void tbv_qp_unbind_rail(struct tbv_qp *tqp)
  */
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
 {
+	return tbv_gid_identity_verdict(gid, true, eui64, ipv4) ==
+	       TBV_IDENTITY_MATCH;
+}
+
+/*
+ * Classify a dgid against a stored identity. The third state matters: an
+ * identity with the relevant field zeroed CANNOT adjudicate the dgid, it can
+ * only abstain. A peer that HELLOed before DHCP assigned its address
+ * advertises (eui64, ipv4=0); treating that as a plain non-match made every
+ * peer "validly not matching" and modify_qp(RTR) hard-failed -ENETUNREACH
+ * against the node's own cabled neighbour (2026-06-13 DSV4 boot outage).
+ */
+enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
+						   bool identity_valid,
+						   u64 eui64, u32 ipv4)
+{
 	static const u8 v4_prefix[12] = {
 		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
 	};
+
+	if (!identity_valid)
+		return TBV_IDENTITY_INCONCLUSIVE;
 
 	if (!memcmp(gid, v4_prefix, sizeof(v4_prefix))) {
 		u32 addr = ((u32)gid[12] << 24) | ((u32)gid[13] << 16) |
 			   ((u32)gid[14] << 8) | (u32)gid[15];
 
-		return ipv4 && addr == ipv4;
+		if (!ipv4)
+			return TBV_IDENTITY_INCONCLUSIVE;
+		return addr == ipv4 ? TBV_IDENTITY_MATCH :
+				      TBV_IDENTITY_NO_MATCH;
 	}
 
 	if (eui64) {
@@ -1848,10 +1870,11 @@ bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4)
 			  ((u64)gid[12] << 24) | ((u64)gid[13] << 16) |
 			  ((u64)gid[14] << 8) | (u64)gid[15];
 
-		return iid == eui64;
+		return iid == eui64 ? TBV_IDENTITY_MATCH :
+				      TBV_IDENTITY_NO_MATCH;
 	}
 
-	return false;
+	return TBV_IDENTITY_INCONCLUSIVE;
 }
 
 /*
@@ -1896,16 +1919,27 @@ static int tbv_qp_rebind_rail_for_dgid(struct tbv_qp *tqp)
 		if (peer->backend != TBV_BACKEND_NATIVE)
 			continue;
 		nnative++;
-		if (!peer->remote_identity_valid) {
-			all_valid = false;
-			continue;
-		}
-		if (tbv_gid_matches_identity(grh->dgid.raw,
-					     peer->remote_roce_eui64,
-					     peer->remote_roce_ipv4)) {
+		switch (tbv_gid_identity_verdict(grh->dgid.raw,
+						 peer->remote_identity_valid,
+						 peer->remote_roce_eui64,
+						 peer->remote_roce_ipv4)) {
+		case TBV_IDENTITY_MATCH:
 			match = peer;
 			break;
+		case TBV_IDENTITY_INCONCLUSIVE:
+			/*
+			 * This identity cannot adjudicate the dgid (peer mid-
+			 * negotiation, or it HELLOed pre-DHCP with ipv4=0).
+			 * It must abstain rather than vote "not me", else a
+			 * cabled neighbour gets -ENETUNREACH below.
+			 */
+			all_valid = false;
+			break;
+		case TBV_IDENTITY_NO_MATCH:
+			break;
 		}
+		if (match)
+			break;
 	}
 
 	if (!match) {

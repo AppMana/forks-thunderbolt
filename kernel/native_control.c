@@ -106,6 +106,25 @@ static void tbv_native_control_local_identity(u64 *eui64, u32 *ipv4_be)
 	dev_put(ndev);
 }
 
+/*
+ * True while the roce_netdev exists but has no IPv4 yet (the boot-time DHCP
+ * window). A HELLO sent now would advertise ipv4=0, which a peer can never
+ * resolve a v4-mapped dgid against.
+ */
+bool tbv_native_control_local_identity_incomplete(void)
+{
+	const char *name = tbv_ibdev_roce_netdev_name();
+	u64 eui64;
+	u32 ipv4;
+
+	if (!name || !*name)
+		return false;
+	tbv_native_control_local_identity(&eui64, &ipv4);
+	if (!eui64 && !ipv4)
+		return false; /* netdev absent: identity legitimately empty */
+	return !ipv4;
+}
+
 static void tbv_native_control_fill_hello(const struct tbv_state *state,
 					  const struct tbv_peer *peer,
 					  const struct tbv_rail *rail,
@@ -756,10 +775,24 @@ static void tbv_native_control_work(struct work_struct *work)
 		return;
 
 	if (state->negotiate_native && !rail->native_negotiated) {
+		/*
+		 * Defer the first HELLO while the local identity is missing
+		 * its IPv4 (boot vs DHCP race) so peers never store an
+		 * identity they cannot resolve v4-mapped dgids against.
+		 * Bounded by identity_grace_until; past it we proceed and the
+		 * inetaddr notifier re-HELLOs when the address arrives.
+		 */
+		if (tbv_native_control_local_identity_incomplete() &&
+		    time_before(jiffies, state->identity_grace_until)) {
+			retry = true;
+			goto out;
+		}
 		attempt = ++rail->native_attempts;
 		ret = tbv_native_control_exchange_once(state, peer, rail,
 						       attempt);
 		rail->native_last_error = ret;
+		if (!ret && tbv_native_control_local_identity_incomplete())
+			WRITE_ONCE(state->hello_sent_incomplete, true);
 		if (ret) {
 			if (attempt < TBV_NATIVE_HELLO_RETRIES) {
 				retry = true;
@@ -924,4 +957,81 @@ const char *tbv_native_control_mode_name(const struct tbv_state *state)
 		return "off";
 
 	return state->native_control_source_aware ? "source_aware" : "legacy";
+}
+
+/*
+ * Identity refresh: when the roce_netdev gains its first IPv4 after HELLOs
+ * already went out with ipv4=0 (boot vs DHCP race past the grace window),
+ * re-run the HELLO exchange on every negotiated rail. Peers overwrite the
+ * stored identity from the fresh HELLO (apply path), so v4-mapped dgids
+ * resolve again without a module reload. 2026-06-13: stale boot identities
+ * required a fleet-wide manual reload pass to bring DSV4 up.
+ */
+void tbv_native_control_identity_refresh_workfn(struct work_struct *work)
+{
+	struct tbv_state *state =
+		container_of(work, struct tbv_state, identity_refresh_work);
+	struct tbv_peer *peer;
+	int refreshed = 0;
+
+	if (tbv_native_control_local_identity_incomplete())
+		return;
+	if (!READ_ONCE(state->hello_sent_incomplete))
+		return;
+	WRITE_ONCE(state->hello_sent_incomplete, false);
+
+	mutex_lock(&state->lock);
+	list_for_each_entry(peer, &state->peers, node) {
+		struct tbv_rail *rail;
+
+		if (peer->backend != TBV_BACKEND_NATIVE)
+			continue;
+		list_for_each_entry(rail, &peer->rails, node) {
+			if (!rail->native_negotiated)
+				continue;
+			if (!tbv_native_control_exchange_once(state, peer,
+							      rail, 1))
+				refreshed++;
+		}
+	}
+	mutex_unlock(&state->lock);
+
+	pr_info("identity refresh: re-HELLOed %d negotiated rail(s) after roce_netdev address arrival\n",
+		refreshed);
+}
+
+static struct tbv_state *tbv_identity_notifier_state;
+
+static int tbv_native_control_inetaddr_event(struct notifier_block *nb,
+					     unsigned long event, void *ptr)
+{
+	struct in_ifaddr *ifa = ptr;
+	struct tbv_state *state = READ_ONCE(tbv_identity_notifier_state);
+	const char *name = tbv_ibdev_roce_netdev_name();
+
+	if (!state || event != NETDEV_UP || !ifa || !ifa->ifa_dev ||
+	    !ifa->ifa_dev->dev)
+		return NOTIFY_DONE;
+	if (!name || !*name ||
+	    strcmp(ifa->ifa_dev->dev->name, name))
+		return NOTIFY_DONE;
+	if (READ_ONCE(state->hello_sent_incomplete))
+		schedule_work(&state->identity_refresh_work);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block tbv_native_control_inetaddr_nb = {
+	.notifier_call = tbv_native_control_inetaddr_event,
+};
+
+int tbv_native_control_identity_notifier_register(struct tbv_state *state)
+{
+	WRITE_ONCE(tbv_identity_notifier_state, state);
+	return register_inetaddr_notifier(&tbv_native_control_inetaddr_nb);
+}
+
+void tbv_native_control_identity_notifier_unregister(void)
+{
+	unregister_inetaddr_notifier(&tbv_native_control_inetaddr_nb);
+	WRITE_ONCE(tbv_identity_notifier_state, NULL);
 }

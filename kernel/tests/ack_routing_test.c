@@ -163,6 +163,72 @@ static void tbv_gid_match_v4_does_not_eui_match(struct kunit *test)
 						    TEST_IPV4));
 }
 
+/*
+ * tbv_gid_identity_verdict: the three-state classifier behind the rebind
+ * decision. The INCONCLUSIVE state exists because of the 2026-06-13 DSV4
+ * boot outage: nodes HELLOed before DHCP assigned their LAN address, so
+ * peers stored (eui64, ipv4=0) as a VALID identity. Treating that as a
+ * plain non-match made "every peer validly not matching" true and
+ * modify_qp(RTR) hard-failed -ENETUNREACH against the node's own cabled
+ * neighbour. An identity that cannot adjudicate the dgid's address family
+ * must abstain, never vote.
+ */
+static void tbv_verdict_v4_dgid_zero_ipv4_is_inconclusive(struct kunit *test)
+{
+	/* ::ffff:10.2.0.4 against identity (eui64, ipv4=0): the DSV4 bug. */
+	const u8 gid[16] = { 0, 0, 0, 0, 0, 0, 0, 0,
+			     0, 0, 0xff, 0xff, 10, 2, 0, 4 };
+
+	KUNIT_EXPECT_EQ(test, TBV_IDENTITY_INCONCLUSIVE,
+			tbv_gid_identity_verdict(gid, true, TEST_EUI64, 0));
+}
+
+static void tbv_verdict_v4_dgid_match_and_mismatch(struct kunit *test)
+{
+	const u8 gid[16] = { 0, 0, 0, 0, 0, 0, 0, 0,
+			     0, 0, 0xff, 0xff, 10, 2, 0, 15 };
+
+	KUNIT_EXPECT_EQ(test, TBV_IDENTITY_MATCH,
+			tbv_gid_identity_verdict(gid, true, TEST_EUI64,
+						 TEST_IPV4));
+	KUNIT_EXPECT_EQ(test, TBV_IDENTITY_NO_MATCH,
+			tbv_gid_identity_verdict(gid, true, TEST_EUI64,
+						 0x0a020039u /* 10.2.0.57 */));
+}
+
+static void tbv_verdict_eui_dgid_zero_eui_is_inconclusive(struct kunit *test)
+{
+	/* fe80:: dgid against identity (eui64=0, ipv4 set): can't compare. */
+	const u8 gid[16] = { 0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+			     0x5a, 0x11, 0x22, 0xff, 0xfe, 0xb7, 0x76, 0xfa };
+
+	KUNIT_EXPECT_EQ(test, TBV_IDENTITY_INCONCLUSIVE,
+			tbv_gid_identity_verdict(gid, true, 0, TEST_IPV4));
+}
+
+static void tbv_verdict_invalid_identity_is_inconclusive(struct kunit *test)
+{
+	const u8 gid[16] = { 0, 0, 0, 0, 0, 0, 0, 0,
+			     0, 0, 0xff, 0xff, 10, 2, 0, 15 };
+
+	KUNIT_EXPECT_EQ(test, TBV_IDENTITY_INCONCLUSIVE,
+			tbv_gid_identity_verdict(gid, false, TEST_EUI64,
+						 TEST_IPV4));
+}
+
+static void tbv_verdict_match_wrapper_contract_unchanged(struct kunit *test)
+{
+	/* tbv_gid_matches_identity keeps its boolean contract: only a
+	 * conclusive MATCH returns true; INCONCLUSIVE stays false. */
+	const u8 gid[16] = { 0, 0, 0, 0, 0, 0, 0, 0,
+			     0, 0, 0xff, 0xff, 10, 2, 0, 15 };
+
+	KUNIT_EXPECT_TRUE(test,
+			  tbv_gid_matches_identity(gid, TEST_EUI64, TEST_IPV4));
+	KUNIT_EXPECT_FALSE(test,
+			   tbv_gid_matches_identity(gid, TEST_EUI64, 0));
+}
+
 static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),
 	KUNIT_CASE(tbv_ack_route_peer_falls_back_to_qp),
@@ -176,6 +242,11 @@ static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_gid_match_wrong_peer),
 	KUNIT_CASE(tbv_gid_match_zero_identity_never_matches),
 	KUNIT_CASE(tbv_gid_match_v4_does_not_eui_match),
+	KUNIT_CASE(tbv_verdict_v4_dgid_zero_ipv4_is_inconclusive),
+	KUNIT_CASE(tbv_verdict_v4_dgid_match_and_mismatch),
+	KUNIT_CASE(tbv_verdict_eui_dgid_zero_eui_is_inconclusive),
+	KUNIT_CASE(tbv_verdict_invalid_identity_is_inconclusive),
+	KUNIT_CASE(tbv_verdict_match_wrapper_contract_unchanged),
 	{}
 };
 

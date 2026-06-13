@@ -208,6 +208,16 @@ static int __init tbv_init(void)
 	tbv_driver_state.apple_data = apple_data;
 	tbv_driver_state.native_home_rail_qp = native_home_rail_qp;
 	tbv_driver_state.native_data_e2e = native_data_e2e;
+	tbv_driver_state.identity_grace_until =
+		jiffies + msecs_to_jiffies(TBV_IDENTITY_GRACE_MS);
+	tbv_driver_state.hello_sent_incomplete = false;
+	INIT_WORK(&tbv_driver_state.identity_refresh_work,
+		  tbv_native_control_identity_refresh_workfn);
+	ret = tbv_native_control_identity_notifier_register(&tbv_driver_state);
+	if (ret) {
+		tbv_core_exit(&tbv_driver_state);
+		goto err_path_symbols;
+	}
 
 	service_cfg.native_prtcstns = native_prtcstns;
 	service_cfg.apple_prtcstns = apple_prtcstns;
@@ -219,6 +229,8 @@ static int __init tbv_init(void)
 	ret = tbv_services_start(&tbv_driver_state, bind_services,
 				 &service_cfg);
 	if (ret) {
+		tbv_native_control_identity_notifier_unregister();
+		cancel_work_sync(&tbv_driver_state.identity_refresh_work);
 		tbv_core_exit(&tbv_driver_state);
 		goto err_path_symbols;
 	}
@@ -226,6 +238,8 @@ static int __init tbv_init(void)
 	ret = tbv_ibdev_start(&tbv_driver_state, register_verbs);
 	if (ret) {
 		tbv_services_stop(&tbv_driver_state);
+		tbv_native_control_identity_notifier_unregister();
+		cancel_work_sync(&tbv_driver_state.identity_refresh_work);
 		tbv_core_exit(&tbv_driver_state);
 		goto err_path_symbols;
 	}
@@ -264,6 +278,8 @@ err_path_symbols:
 
 static void __exit tbv_exit(void)
 {
+	tbv_native_control_identity_notifier_unregister();
+	cancel_work_sync(&tbv_driver_state.identity_refresh_work);
 	tbv_ibdev_stop(&tbv_driver_state);
 	tbv_services_stop(&tbv_driver_state);
 	tbv_core_exit(&tbv_driver_state);
