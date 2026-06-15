@@ -102,4 +102,25 @@ static inline bool tb_xdomain_handshake_complete(const struct tb_xdomain_handsha
 	return h->request_sent && h->peer_seen;
 }
 
+/**
+ * tb_xdomain_handshake_supersede() - a peer reconnect invalidates a stale
+ * established handshake.
+ *
+ * A fresh inbound LOGIN/HELLO arriving while our handshake is already complete
+ * means the peer restarted its side WITHOUT a physical link edge (so the ICM
+ * emits no remove event): our "established" state now points at the peer's old,
+ * freed rings, and our one-shot work will short-circuit instead of re-confirming
+ * -- the peer is stranded. Drop the handshake so both sides re-confirm before
+ * data flows again. This is the protocol-level equivalent of thunderbolt_net's
+ * LOGOUT-reset teardown (its login_work sends a LOGOUT on reconnect and the peer
+ * tears its session down). Returns true if a complete handshake was superseded.
+ */
+static inline bool tb_xdomain_handshake_supersede(struct tb_xdomain_handshake *h)
+{
+	if (!tb_xdomain_handshake_complete(h))
+		return false;
+	tb_xdomain_handshake_reset(h);
+	return true;
+}
+
 #endif /* _LINUX_THUNDERBOLT_NEGOTIATION_H */
