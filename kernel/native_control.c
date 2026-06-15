@@ -182,8 +182,24 @@ static int tbv_native_control_kick_matching_rail(
 			    rail->rail_id != rail_id)
 				continue;
 
-			if (tbv_native_control_can_kick_rail(state, rail))
+			if (tbv_native_control_can_kick_rail(state, rail)) {
+				/*
+				 * An inbound HELLO/READY means the peer is
+				 * actively (re-)negotiating this rail. Re-arm its
+				 * finite retry budgets before re-running the work,
+				 * mirroring thunderbolt_net's TBIP_LOGIN handler
+				 * (which resets login_retries=0 on an inbound
+				 * request). Without this a budget-exhausted rail
+				 * ignored a peer that was still trying -- so
+				 * convergence depended on our own exhaustion +
+				 * re-announce instead of responding to peer
+				 * activity. Modelled by tb_test_xdomain_kick_rearm.
+				 */
+				rail->native_attempts = 0;
+				rail->native_tunnel_attempts = 0;
+				rail->native_hs.attempts = 0;
 				schedule_delayed_work(&rail->native_work, 0);
+			}
 			ret = 0;
 			goto out;
 		}

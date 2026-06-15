@@ -93,6 +93,19 @@ static void tbv_test_native_handshake_multirail(struct kunit *test)
 					  tbv_model_mcoord(nrails, true, settle, 3, 200));
 }
 
+/*
+ * flaw #1: tbv_native_control_kick_matching_rail must re-arm a budget-exhausted
+ * rail on an inbound peer request (HELLO/READY), mirroring net's TBIP_LOGIN
+ * handler resetting login_retries. The flawed kick re-scheduled work without
+ * resetting the attempt counters.
+ */
+static void tbv_test_native_kick_rearm(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, false),
+			(unsigned int)HS_RETRY_BUDGET);	/* the bug */
+	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, true), 0u);	/* the fix */
+}
+
 /* rx_path's peer (the requester) wins over the QP's bound peer. */
 static void tbv_ack_route_peer_prefers_rx_path(struct kunit *test)
 {
@@ -301,6 +314,7 @@ static void tbv_verdict_match_wrapper_contract_unchanged(struct kunit *test)
 static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_test_native_handshake_hang),
 	KUNIT_CASE(tbv_test_native_handshake_multirail),
+	KUNIT_CASE(tbv_test_native_kick_rearm),
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),
 	KUNIT_CASE(tbv_ack_route_peer_falls_back_to_qp),
 	KUNIT_CASE(tbv_ack_route_peer_rx_path_without_rail),
