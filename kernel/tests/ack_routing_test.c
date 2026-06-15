@@ -311,8 +311,43 @@ static void tbv_verdict_match_wrapper_contract_unchanged(struct kunit *test)
 			   tbv_gid_matches_identity(gid, TEST_EUI64, 0));
 }
 
+/*
+ * Re-HELLO supersede (the XDomain re-negotiation hang): an inbound HELLO on an
+ * already-established native rail means the peer soft-reloaded (no link edge, no
+ * remove event), so its old rings are gone. tbv_native_control_apply_remote()
+ * must supersede the latched handshake (the shared cross-driver contract,
+ * mirroring thunderbolt_net's LOGOUT reset) so the rail stops reporting
+ * data-ready into a dead tunnel and re-confirms. Exercises the REAL
+ * tbv_rail_data_ready() and tb_xdomain_handshake_supersede(); the model step
+ * matches apply_remote's inbound-HELLO path. Mirror: reconnect_userspace.c.
+ */
+static void tbv_test_native_rehello_supersede(struct kunit *test)
+{
+	struct tbv_peer peer = { .backend = TBV_BACKEND_NATIVE };
+	struct tbv_rail rail;
+
+	memset(&rail, 0, sizeof(rail));
+	rail.peer = &peer;
+	rail.path.state = TBV_PATH_TUNNEL_ENABLED;
+	rail.native_hs.request_sent = true;
+	rail.native_hs.peer_seen = true;
+	rail.native_hs.established = true;
+	rail.native_negotiated = true;
+	rail.remote_transmit_path = 5;
+	KUNIT_EXPECT_TRUE(test, tbv_rail_data_ready(&rail));
+
+	/* peer restarts and re-HELLOs with new hops (apply_remote inbound path) */
+	rail.native_negotiated = true;
+	rail.remote_transmit_path = 9;
+	tb_xdomain_handshake_supersede(&rail.native_hs);
+
+	/* must no longer be data-ready until it re-handshakes */
+	KUNIT_EXPECT_FALSE(test, tbv_rail_data_ready(&rail));
+}
+
 static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_test_native_handshake_hang),
+	KUNIT_CASE(tbv_test_native_rehello_supersede),
 	KUNIT_CASE(tbv_test_native_handshake_multirail),
 	KUNIT_CASE(tbv_test_native_kick_rearm),
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),

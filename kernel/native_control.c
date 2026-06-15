@@ -300,7 +300,8 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 					   const struct tb_xdomain *source_xd,
 					   const struct tbv_native_wire_info *info,
 					   const struct tbv_native_wire_hello *remote,
-					   bool require_matching_rail)
+					   bool require_matching_rail,
+					   bool supersede)
 {
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
@@ -338,6 +339,21 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 				peer->remote_roce_ipv4 = remote->roce_ipv4;
 				peer->remote_identity_valid = true;
 			}
+			/*
+			 * An inbound HELLO arriving while this rail is already
+			 * established means the peer restarted its side without a
+			 * link edge (no remove event), so our latched handshake
+			 * points at the peer's old rings and our work would
+			 * short-circuit instead of re-confirming -- the
+			 * re-negotiation hang. Supersede it (shared cross-driver
+			 * contract, mirroring thunderbolt_net's LOGOUT reset) so
+			 * the kick below re-sends our READY. Only the inbound-HELLO
+			 * caller passes supersede; the HELLO_ACK/initiator path
+			 * must not self-reset. Reproduced by reconnect_userspace.c
+			 * / tbv_test_native_rehello_supersede.
+			 */
+			if (supersede)
+				tb_xdomain_handshake_supersede(&rail->native_hs);
 			ret = 0;
 			goto out;
 		}
@@ -354,7 +370,7 @@ static int tbv_native_control_apply_ack(struct tbv_state *state,
 					const struct tbv_native_wire_hello *remote)
 {
 	return tbv_native_control_apply_remote(state, source_xd, info, remote,
-					       true);
+					       true, false);
 }
 
 static int tbv_native_control_mark_remote_ready(struct tbv_state *state,
@@ -577,7 +593,7 @@ int tbv_native_control_handle_packet(struct tbv_state *state,
 	}
 
 	ret = tbv_native_control_apply_remote(state, source_xd, &info,
-					      &remote, true);
+					      &remote, true, true);
 	if (!ret)
 		pr_info("native HELLO received route=0x%llx rail=0x%x remote_out=%u remote_tx=%u remote_rx=%u\n",
 			info.route, remote.rail_id, remote.transmit_path,
