@@ -177,6 +177,19 @@ static inline bool model_established(const struct model_link *L)
 	return L->a.hs.established && L->b.hs.established;
 }
 
+/*
+ * Flaw #1 contract (learned from thunderbolt_net TBIP): a peer's request frame
+ * must re-arm a budget-exhausted handshake. net resets login_retries=0 in its
+ * TBIP_LOGIN handler; the ibverbs kick path (tbv_native_control_kick_matching_rail)
+ * historically re-scheduled the rail's work WITHOUT resetting its attempt
+ * counters, so an exhausted rail ignored a peer that was actively re-requesting.
+ * Returns the attempt count after an inbound "kick".
+ */
+static inline unsigned int model_kick(unsigned int attempts, bool reset_on_kick)
+{
+	return reset_on_kick ? 0 : attempts;
+}
+
 /* ---- operations ---- */
 static inline void model_host_boot(struct model_host *h, bool fix,
 				   int settle_steps, int retry_budget)

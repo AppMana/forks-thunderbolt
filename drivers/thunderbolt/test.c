@@ -2962,10 +2962,21 @@ static void tb_test_xdomain_negotiation_multirail(struct kunit *test)
 					  tb_model_mcoord(nrails, true, settle, 3, 200));
 }
 
+/* flaw #1: an inbound peer request must re-arm a budget-exhausted handshake */
+static void tb_test_xdomain_kick_rearm(struct kunit *test)
+{
+	/* the bug: the kick is ignored, the handshake stays exhausted */
+	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, false),
+			(unsigned int)HS_RETRY_BUDGET);
+	/* net's contract: the inbound request resets the retry budget */
+	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, true), 0u);
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_negotiation_hang),
 	KUNIT_CASE(tb_test_xdomain_negotiation_multirail),
+	KUNIT_CASE(tb_test_xdomain_kick_rearm),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

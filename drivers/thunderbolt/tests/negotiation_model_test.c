@@ -101,6 +101,12 @@ int main(void)
 		CHECK(ok, "fix recovers ALL rails for 1..4 rails x settle 0..30");
 	}
 
+	/* flaw #1: inbound peer request must re-arm a budget-exhausted handshake */
+	CHECK(model_kick(HS_RETRY_BUDGET, false) == HS_RETRY_BUDGET,
+	      "kick WITHOUT reset leaves handshake exhausted (the bug)");
+	CHECK(model_kick(HS_RETRY_BUDGET, true) == 0,
+	      "kick WITH reset re-arms the budget (net's TBIP contract)");
+
 	printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 	return failures ? 1 : 0;
 }
