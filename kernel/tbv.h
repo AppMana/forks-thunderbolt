@@ -18,6 +18,8 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
+
+#include "thunderbolt_negotiation.h"
 #include <linux/xarray.h>
 
 #include "proto/config.h"
@@ -259,7 +261,6 @@ struct tbv_rail {
 	int remote_rx_hop;
 	u32 native_attempts;
 	u32 native_tunnel_attempts;
-	u32 native_ready_attempts;
 	int native_last_error;
 	/*
 	 * Physical lane index for native rails (0..TBV_NATIVE_MAX_LANES-1).
@@ -288,8 +289,14 @@ struct tbv_rail {
 	 */
 	bool ibdev_register_deferred;
 	bool native_negotiated;
-	bool native_ready_sent;
-	bool native_remote_ready;
+	/*
+	 * READY/confirmation handshake, using the shared cross-driver contract
+	 * (thunderbolt_negotiation.h): request_sent == our READY sent,
+	 * peer_seen == the peer's READY received, established == both. Re-armed
+	 * with tb_xdomain_handshake_reset() on every reconnect so a coordinated
+	 * reload cannot strand the rail (see tb_test_xdomain_negotiation_hang).
+	 */
+	struct tb_xdomain_handshake native_hs;
 	bool native_work_stop;
 };
 
@@ -332,7 +339,7 @@ static inline bool tbv_rail_data_ready(const struct tbv_rail *rail)
 		return false;
 	if (!rail->peer || rail->peer->backend != TBV_BACKEND_NATIVE)
 		return true;
-	return rail->native_ready_sent && rail->native_remote_ready;
+	return tb_xdomain_handshake_complete(&rail->native_hs);
 }
 
 static inline bool tbv_rail_apple_data_ready(const struct tbv_rail *rail)

@@ -23,6 +23,75 @@
  */
 #include <kunit/test.h>
 #include "../tbv.h"
+#include "negotiation_model.h"
+
+/*
+ * Coordinated reload of a two-host link using the shared negotiation model
+ * (mocked ICM firmware + gen gate + login/HELLO handshake). Returns whether the
+ * link is established after `steps`. Same model as forks-thunderbolt's
+ * tb_test_xdomain_negotiation_hang -- the ibverbs native READY handshake now
+ * uses the same struct tb_xdomain_handshake + re-arm contract.
+ */
+static bool tbv_model_coord_reload(bool fix, int settle, int budget, int steps)
+{
+	struct model_link L;
+
+	memset(&L, 0, sizeof(L));
+	model_host_boot(&L.a, fix, settle, budget);
+	model_host_boot(&L.b, fix, settle, budget);
+	model_run(&L, 20);
+	if (!model_established(&L))
+		return false;
+	model_host_reload(&L.a);
+	model_host_reload(&L.b);
+	model_run(&L, steps);
+	return model_established(&L);
+}
+
+/* Adversarial: the hang is conditional on budget<settle and permanent; the
+ * handshake re-arm fix recovers across a wide settle sweep. */
+static void tbv_test_native_handshake_hang(struct kunit *test)
+{
+	int settle;
+
+	KUNIT_EXPECT_FALSE(test, tbv_model_coord_reload(false, 5, 3, 200));
+	KUNIT_EXPECT_FALSE(test, tbv_model_coord_reload(false, 4, 3, 200));
+	KUNIT_EXPECT_TRUE(test, tbv_model_coord_reload(false, 3, 3, 200));
+	KUNIT_EXPECT_TRUE(test, tbv_model_coord_reload(false, 2, 3, 200));
+	KUNIT_EXPECT_FALSE(test, tbv_model_coord_reload(false, 5, 3, 5000));
+	for (settle = 0; settle <= 40; settle++)
+		KUNIT_EXPECT_TRUE(test, tbv_model_coord_reload(true, settle, 3, 200));
+}
+
+/* multi-rail: an ibverbs peer's rails (lanes) share one property generation */
+static bool tbv_model_mcoord(int nrails, bool fix, int settle, int budget, int steps)
+{
+	struct model_mlink M;
+
+	memset(&M, 0, sizeof(M));
+	model_mhost_boot(&M.a, nrails, fix, settle, budget);
+	model_mhost_boot(&M.b, nrails, fix, settle, budget);
+	model_mrun(&M, 20);
+	if (!model_mestablished(&M))
+		return false;
+	model_mhost_reload(&M.a);
+	model_mhost_reload(&M.b);
+	model_mrun(&M, steps);
+	return model_mestablished(&M);
+}
+
+static void tbv_test_native_handshake_multirail(struct kunit *test)
+{
+	int nrails, settle;
+
+	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
+		KUNIT_EXPECT_FALSE(test, tbv_model_mcoord(nrails, false, 5, 3, 200));
+
+	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
+		for (settle = 0; settle <= 30; settle++)
+			KUNIT_EXPECT_TRUE(test,
+					  tbv_model_mcoord(nrails, true, settle, 3, 200));
+}
 
 /* rx_path's peer (the requester) wins over the QP's bound peer. */
 static void tbv_ack_route_peer_prefers_rx_path(struct kunit *test)
@@ -230,6 +299,8 @@ static void tbv_verdict_match_wrapper_contract_unchanged(struct kunit *test)
 }
 
 static struct kunit_case tbv_ack_routing_test_cases[] = {
+	KUNIT_CASE(tbv_test_native_handshake_hang),
+	KUNIT_CASE(tbv_test_native_handshake_multirail),
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),
 	KUNIT_CASE(tbv_ack_route_peer_falls_back_to_qp),
 	KUNIT_CASE(tbv_ack_route_peer_rx_path_without_rail),

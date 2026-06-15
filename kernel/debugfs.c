@@ -387,10 +387,10 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   atomic_read(&rail->native_qp_bind_count),
 				   tbv_path_state_name(rail->path.state),
 				   rail->native_negotiated,
-				   rail->native_ready_sent,
-				   rail->native_remote_ready,
+				   rail->native_hs.request_sent,
+				   rail->native_hs.peer_seen,
 				   rail->native_attempts +
-				   rail->native_ready_attempts,
+				   rail->native_hs.attempts,
 				   rail->native_last_error,
 				   rail->path.local_transmit_path,
 				   rail->path.local_tx_hop,

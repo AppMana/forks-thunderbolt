@@ -216,10 +216,8 @@ void tbv_native_control_queue_rail(struct tbv_state *state,
 	WRITE_ONCE(rail->native_work_stop, false);
 	rail->native_attempts = 0;
 	rail->native_tunnel_attempts = 0;
-	rail->native_ready_attempts = 0;
 	rail->native_last_error = 0;
-	rail->native_ready_sent = false;
-	rail->native_remote_ready = false;
+	tb_xdomain_handshake_reset(&rail->native_hs);
 	schedule_delayed_work(&rail->native_work,
 			      msecs_to_jiffies(TBV_NATIVE_HELLO_INITIAL_DELAY_MS));
 }
@@ -366,7 +364,7 @@ static int tbv_native_control_mark_remote_ready(struct tbv_state *state,
 			    rail->rail_id != remote->rail_id)
 				continue;
 
-			rail->native_remote_ready = true;
+			rail->native_hs.peer_seen = true;
 			ret = 0;
 			/*
 			 * Take a refcount so we can call tbv_ibdev_rail_event
@@ -412,7 +410,7 @@ static int tbv_native_control_mark_local_ready_sent(
 			    rail->rail_id != rail_id)
 				continue;
 
-			rail->native_ready_sent = true;
+			rail->native_hs.request_sent = true;
 			rail->native_last_error = 0;
 			ret = 0;
 			if (tbv_rail_data_ready(rail) && !rail->removing) {
@@ -869,8 +867,8 @@ static void tbv_native_control_work(struct work_struct *work)
 
 	if (state->enable_tunnels &&
 	    rail->path.state == TBV_PATH_TUNNEL_ENABLED &&
-	    !rail->native_ready_sent) {
-		attempt = ++rail->native_ready_attempts;
+	    !rail->native_hs.request_sent) {
+		attempt = ++rail->native_hs.attempts;
 		ret = tbv_native_control_ready_once(state, peer, rail);
 		if (ret && tbv_native_control_rail_data_ready(state, rail))
 			ret = 0;
@@ -879,13 +877,30 @@ static void tbv_native_control_work(struct work_struct *work)
 			if (attempt < TBV_NATIVE_READY_RETRIES) {
 				retry = true;
 			} else {
-				pr_warn("native READY route=0x%llx rail=0x%x failed after %u attempts: %d\n",
-					rail->key.route, rail->rail_id,
-					attempt, ret);
+				/*
+				 * The READY exchange is the mutual-confirmation
+				 * half of the handshake; like the HELLO phase it
+				 * must NOT give up after a finite budget. A
+				 * coordinated fleet reload exhausts these attempts
+				 * while the peer is still settling, and giving up
+				 * here strands the rail with the tbverbs service
+				 * present but no negotiated peer -- the observed
+				 * hang. Re-arm (the tb_xdomain_handshake_reset
+				 * contract) and re-announce our services to restart
+				 * the peer's property read, then keep retrying until
+				 * the handshake completes mutually. Modelled by
+				 * tb_test_xdomain_negotiation_hang (forks-thunderbolt).
+				 */
+				pr_warn_ratelimited("native READY route=0x%llx rail=0x%x unanswered after %u attempts (%d); re-announcing services and retrying\n",
+						    rail->key.route,
+						    rail->rail_id, attempt, ret);
+				tbv_services_reannounce_native(state);
+				tb_xdomain_handshake_reset(&rail->native_hs);
+				retry = true;
 			}
 			goto out;
 		}
-		rail->native_ready_sent = true;
+		rail->native_hs.request_sent = true;
 
 		/*
 		 * We initiated the READY exchange: ready_once already marked the

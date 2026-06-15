@@ -16,7 +16,7 @@ thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o 
 # userspace harness in tests/ack_routing_userspace.c for on-host verification.
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/ack_routing_test.o
 
-ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src) -I$(src)/..
+ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
 .PHONY: all clean modules modules_install help
 
