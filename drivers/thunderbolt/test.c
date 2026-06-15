@@ -11,6 +11,7 @@
 
 #include "tb.h"
 #include "tunnel.h"
+#include "tests/negotiation_model.h"
 
 static int __ida_init(struct kunit_resource *res, void *context)
 {
@@ -2883,8 +2884,55 @@ static void tb_test_xdomain_properties_stale(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 1, 0));
 }
 
+/* coordinated reload of a two-host link; established after `steps`? */
+static bool tb_model_coord_reload(bool fix, int settle, int budget, int steps)
+{
+	struct model_link L;
+
+	memset(&L, 0, sizeof(L));
+	model_host_boot(&L.a, fix, settle, budget);
+	model_host_boot(&L.b, fix, settle, budget);
+	model_run(&L, 20);
+	if (!model_established(&L))
+		return false;
+	model_host_reload(&L.a);
+	model_host_reload(&L.b);
+	model_run(&L, steps);
+	return model_established(&L);
+}
+
+/*
+ * Models the soft-reconnect HANG with a mocked ICM firmware (link-edge-only
+ * XDOMAIN_CONNECTED, no property-generation re-notify -- per the Titan/Maple
+ * Ridge disassembly) plus the gen gate and the one-shot login/HELLO handshake.
+ * Adversarial so it cannot be cheated: the hang must be conditional on the
+ * budget-vs-settle fragility and permanent, and the fix must be robust.
+ */
+static void tb_test_xdomain_negotiation_hang(struct kunit *test)
+{
+	int settle;
+
+	/* Conditional on the finite HELLO budget being spent before the peer
+	 * settles -- NOT hardcoded: it recovers on its own when the budget is
+	 * enough (settle <= budget). */
+	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 5, 3, 200));
+	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 4, 3, 200));
+	KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(false, 3, 3, 200));
+	KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(false, 2, 3, 200));
+
+	/* Permanent, not slow. */
+	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 5, 3, 5000));
+
+	/* The fix (re-arm the handshake on the peer's generation change + retry
+	 * until mutual confirmation) recovers across a wide settle sweep with a
+	 * fixed small budget -- it removes the fragility, it is not tuned. */
+	for (settle = 0; settle <= 40; settle++)
+		KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(true, settle, 3, 200));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
+	KUNIT_CASE(tb_test_xdomain_negotiation_hang),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
