@@ -1421,7 +1421,7 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 	mutex_lock(&xd->lock);
 
 	/* Only accept newer generation properties (cached_gen==0 forces accept) */
-	if (tb_xdomain_properties_stale(xd->remote_properties, gen,
+	if (tb_xdomain_generation_stale(xd->remote_properties, gen,
 					xd->remote_property_block_gen)) {
 		ret = 0;
 		goto err_free_block;
