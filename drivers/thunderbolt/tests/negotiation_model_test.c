@@ -64,6 +64,43 @@ int main(void)
 	/* and the fix never makes a working case worse */
 	CHECK(coord_reload(true, 2, 3, 200) == true, "fix: easy case still works");
 
+
+	/* ---- multi-rail: a peer with several rails on one link (shared gen) ---- */
+	{
+		struct model_mlink M;
+		int nrails, settle;
+		bool ok;
+
+		/* coordinated reload, NO fix: every rail hangs */
+		for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++) {
+			memset(&M, 0, sizeof(M));
+			model_mhost_boot(&M.a, nrails, false, 5, 3);
+			model_mhost_boot(&M.b, nrails, false, 5, 3);
+			model_mrun(&M, 20);
+			model_mhost_reload(&M.a);
+			model_mhost_reload(&M.b);
+			model_mrun(&M, 200);
+			char msg[64]; snprintf(msg, sizeof msg, "%d-rail coordinated reload HANGS w/o fix", nrails);
+			CHECK(!model_mestablished(&M), msg);
+		}
+
+		/* coordinated reload, WITH fix: ALL rails recover, across rail counts
+		 * and settle times */
+		ok = true;
+		for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
+			for (settle = 0; settle <= 30; settle++) {
+				memset(&M, 0, sizeof(M));
+				model_mhost_boot(&M.a, nrails, true, settle, 3);
+				model_mhost_boot(&M.b, nrails, true, settle, 3);
+				model_mrun(&M, 20);
+				model_mhost_reload(&M.a);
+				model_mhost_reload(&M.b);
+				model_mrun(&M, 200);
+				if (!model_mestablished(&M)) ok = false;
+			}
+		CHECK(ok, "fix recovers ALL rails for 1..4 rails x settle 0..30");
+	}
+
 	printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 	return failures ? 1 : 0;
 }

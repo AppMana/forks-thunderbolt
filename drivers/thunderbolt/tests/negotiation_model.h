@@ -206,4 +206,140 @@ static inline void model_host_reload(struct model_host *h)
 	tb_xdomain_handshake_reset(&h->hs);
 }
 
+/*
+ * Multi-rail extension: an ibverbs peer has several rails (lanes) on one link,
+ * each with its own login/HELLO handshake but SHARING the host's single
+ * property generation (a re-announce bumps it once for all rails). Each
+ * rail-pair must negotiate independently; the fix must recover ALL rails after
+ * a coordinated reload, not just one.
+ */
+#define MODEL_MAX_RAILS 4
+
+struct model_rail {
+	int settle;
+	bool have_remote;
+	unsigned int cached_remote_gen;
+	bool remote_service_present;
+	struct tb_xdomain_handshake hs;
+	unsigned int hs_gen;
+};
+
+struct model_mhost {
+	unsigned int local_gen;		/* shared by all this host's rails */
+	bool service_registered;
+	bool driver_up;
+	bool fix_rearm;
+	int settle_steps;
+	int retry_budget;
+	int nrails;
+	struct model_rail rail[MODEL_MAX_RAILS];
+};
+
+struct model_mlink {
+	struct model_mhost a, b;
+};
+
+static inline void model_mrail_reread(struct model_rail *r,
+				      const struct model_mhost *peer, bool force)
+{
+	unsigned int cached = force ? 0 : r->cached_remote_gen;
+
+	if (tb_xdomain_generation_stale(r->have_remote, peer->local_gen, cached))
+		return;
+	r->have_remote = true;
+	r->cached_remote_gen = peer->local_gen;
+	r->remote_service_present = peer->service_registered;
+}
+
+static inline void model_mrail_send(struct model_mhost *self, int i,
+				    struct model_mhost *peer)
+{
+	struct model_rail *sr = &self->rail[i];
+	struct model_rail *pr = &peer->rail[i];
+
+	if (self->fix_rearm && sr->have_remote &&
+	    sr->cached_remote_gen != sr->hs_gen) {
+		tb_xdomain_handshake_reset(&sr->hs);
+		sr->hs_gen = sr->cached_remote_gen;
+	}
+	if (!self->driver_up || !sr->remote_service_present ||
+	    (sr->hs.peer_seen && pr->hs.peer_seen))
+		return;
+	if (!self->fix_rearm && (int)sr->hs.attempts >= self->retry_budget)
+		return;
+	sr->hs.attempts++;
+	sr->hs.request_sent = true;
+	if (peer->driver_up && pr->settle == 0 && pr->remote_service_present)
+		pr->hs.peer_seen = true;
+}
+
+static inline void model_mstep(struct model_mlink *L)
+{
+	int i;
+
+	for (i = 0; i < L->a.nrails; i++) {
+		if (L->a.rail[i].settle > 0)
+			L->a.rail[i].settle--;
+		if (L->b.rail[i].settle > 0)
+			L->b.rail[i].settle--;
+		model_mrail_reread(&L->a.rail[i], &L->b, L->a.fix_rearm);
+		model_mrail_reread(&L->b.rail[i], &L->a, L->b.fix_rearm);
+	}
+	for (i = 0; i < L->a.nrails; i++) {
+		model_mrail_send(&L->a, i, &L->b);
+		model_mrail_send(&L->b, i, &L->a);
+	}
+}
+
+static inline void model_mrun(struct model_mlink *L, int steps)
+{
+	while (steps-- > 0)
+		model_mstep(L);
+}
+
+static inline bool model_mestablished(const struct model_mlink *L)
+{
+	int i;
+
+	for (i = 0; i < L->a.nrails; i++)
+		if (!(L->a.rail[i].hs.peer_seen && L->b.rail[i].hs.peer_seen))
+			return false;
+	return L->a.nrails > 0;
+}
+
+static inline void model_mhost_boot(struct model_mhost *h, int nrails, bool fix,
+				    int settle, int budget)
+{
+	int i;
+
+	h->driver_up = true;
+	h->service_registered = true;
+	h->local_gen++;
+	h->fix_rearm = fix;
+	h->settle_steps = settle;
+	h->retry_budget = budget;
+	h->nrails = nrails;
+	for (i = 0; i < nrails; i++) {
+		h->rail[i].settle = 0;
+		tb_xdomain_handshake_reset(&h->rail[i].hs);
+	}
+}
+
+static inline void model_mhost_reload(struct model_mhost *h)
+{
+	int i;
+
+	h->driver_up = false;
+	h->service_registered = false;
+	h->local_gen++;			/* unregister bumps the shared gen */
+
+	h->driver_up = true;
+	h->service_registered = true;
+	h->local_gen++;			/* re-register bumps it again */
+	for (i = 0; i < h->nrails; i++) {
+		h->rail[i].settle = h->settle_steps;
+		tb_xdomain_handshake_reset(&h->rail[i].hs);
+	}
+}
+
 #endif /* _TB_NEGOTIATION_MODEL_H */

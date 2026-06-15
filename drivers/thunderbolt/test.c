@@ -2930,9 +2930,42 @@ static void tb_test_xdomain_negotiation_hang(struct kunit *test)
 		KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(true, settle, 3, 200));
 }
 
+/* multi-rail: several rails on one link share a property generation */
+static bool tb_model_mcoord(int nrails, bool fix, int settle, int budget, int steps)
+{
+	struct model_mlink M;
+
+	memset(&M, 0, sizeof(M));
+	model_mhost_boot(&M.a, nrails, fix, settle, budget);
+	model_mhost_boot(&M.b, nrails, fix, settle, budget);
+	model_mrun(&M, 20);
+	if (!model_mestablished(&M))
+		return false;
+	model_mhost_reload(&M.a);
+	model_mhost_reload(&M.b);
+	model_mrun(&M, steps);
+	return model_mestablished(&M);
+}
+
+static void tb_test_xdomain_negotiation_multirail(struct kunit *test)
+{
+	int nrails, settle;
+
+	/* every rail hangs after a coordinated reload without the fix */
+	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
+		KUNIT_EXPECT_FALSE(test, tb_model_mcoord(nrails, false, 5, 3, 200));
+
+	/* the fix recovers ALL rails, across rail counts and settle times */
+	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
+		for (settle = 0; settle <= 30; settle++)
+			KUNIT_EXPECT_TRUE(test,
+					  tb_model_mcoord(nrails, true, settle, 3, 200));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_negotiation_hang),
+	KUNIT_CASE(tb_test_xdomain_negotiation_multirail),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
