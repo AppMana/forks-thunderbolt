@@ -1244,6 +1244,25 @@ static inline u64 tb_downstream_route(struct tb_port *port)
 }
 
 bool tb_is_xdomain_enabled(void);
+
+/**
+ * tb_xdomain_properties_stale() - should a freshly-read remote property block be dropped?
+ * @have_remote: whether we already hold this peer's properties
+ * @gen: generation reported with the just-read block
+ * @cached_gen: generation of the block we currently hold
+ *
+ * The peer's property generation counter is monotonic, so normally only a
+ * strictly-newer block is accepted. The reload-recovery paths reset
+ * @cached_gen to 0 so any real block (gen >= 1) is accepted again; a first
+ * read (!have_remote) is always accepted. Pure predicate so it can be
+ * exercised by KUnit (tb_test_xdomain_properties_*) and the userspace mirror.
+ */
+static inline bool tb_xdomain_properties_stale(bool have_remote, u32 gen,
+					       u32 cached_gen)
+{
+	return have_remote && gen <= cached_gen;
+}
+
 bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 			       const void *buf, size_t size);
 struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,

@@ -2852,7 +2852,39 @@ static void tb_test_property_copy(struct kunit *test)
 	tb_property_free_dir(src);
 }
 
+static void tb_test_xdomain_properties_stale(struct kunit *test)
+{
+	/*
+	 * Models the generation gate in tb_xdomain_get_properties() and the
+	 * reload-recovery fix. The peer's generation is monotonic.
+	 */
+
+	/* First read (no cached properties) is always accepted. */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_properties_stale(false, 1, 0));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_properties_stale(false, 7, 0));
+
+	/* Strictly newer generation is accepted. */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_properties_stale(true, 8, 5));
+
+	/*
+	 * THE BUG: an equal or non-advanced generation is dropped. This is what
+	 * strands a reloaded peer once a raced/lost properties-changed
+	 * notification latches a stale generation.
+	 */
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_properties_stale(true, 5, 5));
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_properties_stale(true, 5, 7));
+
+	/*
+	 * THE FIX: resetting the cached generation to 0 (done on
+	 * PROPERTIES_CHANGED_REQUEST and by the rescan sysfs trigger) forces any
+	 * real block (gen >= 1) to be accepted again, so services re-probe.
+	 */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_properties_stale(true, 5, 0));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_properties_stale(true, 1, 0));
+}
+
 static struct kunit_case tb_test_cases[] = {
+	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
