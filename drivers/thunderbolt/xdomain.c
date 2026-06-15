@@ -776,10 +776,22 @@ static void tb_xdp_handle_request(struct work_struct *work)
 		 * Since the properties have been changed, let's update
 		 * the xdomain related to this connection as well in
 		 * case there is a change in services it offers.
+		 *
+		 * The peer's property generation counter is monotonic and
+		 * this notification is best-effort: after a simultaneous
+		 * fleet driver reload it can be lost/raced and the cached
+		 * generation latched, after which tb_xdomain_get_properties()
+		 * silently drops every re-read (gen <= cached) and services
+		 * never re-probe. Clear the cached generation so this
+		 * notification always forces a fresh accept.
 		 */
-		if (xd && device_is_registered(&xd->dev))
+		if (xd && device_is_registered(&xd->dev)) {
+			mutex_lock(&xd->lock);
+			xd->remote_property_block_gen = 0;
+			mutex_unlock(&xd->lock);
 			queue_delayed_work(tb->wq, &xd->state_work,
 					   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+		}
 		break;
 
 	case UUID_REQUEST_OLD:
@@ -1835,10 +1847,48 @@ static ssize_t tx_lanes_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR(tx_lanes, 0444, tx_lanes_show, NULL);
 
+static int unregister_service(struct device *dev, void *data);
+
+/*
+ * Force a full re-read of the remote peer's XDomain property directory and
+ * re-probe its services, bypassing the monotonic-generation gate in
+ * tb_xdomain_get_properties(). Needed because the ICM firmware (Titan Ridge /
+ * Maple Ridge) only re-announces an XDomain on a physical link edge and the
+ * XDP properties-changed notification is best-effort, so after a simultaneous
+ * fleet driver reload a peer can re-register its services while our cached
+ * generation stays latched and the re-read is silently dropped. Writing 1 here
+ * recovers such a stuck link without a cable replug.
+ */
+static ssize_t rescan_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct tb_xdomain *xd = container_of(dev, struct tb_xdomain, dev);
+	bool val;
+	int ret;
+
+	ret = kstrtobool(buf, &val);
+	if (ret)
+		return ret;
+	if (!val)
+		return count;
+
+	mutex_lock(&xd->lock);
+	xd->remote_property_block_gen = 0;
+	mutex_unlock(&xd->lock);
+
+	/* Drop stale services so re-enumeration re-creates and re-probes them. */
+	device_for_each_child_reverse(&xd->dev, xd, unregister_service);
+
+	queue_delayed_work(xd->tb->wq, &xd->state_work, 0);
+	return count;
+}
+static DEVICE_ATTR_WO(rescan);
+
 static struct attribute *xdomain_attrs[] = {
 	&dev_attr_device.attr,
 	&dev_attr_device_name.attr,
 	&dev_attr_maxhopid.attr,
+	&dev_attr_rescan.attr,
 	&dev_attr_rx_lanes.attr,
 	&dev_attr_rx_speed.attr,
 	&dev_attr_tx_lanes.attr,
