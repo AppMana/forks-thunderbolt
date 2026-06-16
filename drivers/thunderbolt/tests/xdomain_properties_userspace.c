@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Userspace mirror of tb_xdomain_generation_stale() (tb.h) and the KUnit case
- * tb_test_xdomain_properties_stale() (test.c). Fleet kernels lack CONFIG_KUNIT,
- * so this asserts the same truth table for the generation gate + reload fix.
- * Keep in lockstep with the kernel helper.
+ * Userspace harness for tb_xdomain_generation_stale() and the matching KUnit
+ * cases in test.c. Fleet kernels lack CONFIG_KUNIT, so this runs the same truth
+ * table with plain `cc`. It is NOT a hand-copied "mirror": it #includes the ONE
+ * real shared header so the predicate cannot drift -- single source of truth for
+ * the core, thunderbolt_net and thunderbolt_ibverbs.
+ *
+ *   cc -o /tmp/xdprop xdomain_properties_userspace.c && /tmp/xdprop
  */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-/* MIRROR of tb.h: tb_xdomain_generation_stale() */
-static inline bool tb_xdomain_generation_stale(bool have_remote, uint32_t gen,
-					       uint32_t cached_gen)
-{
-	return have_remote && gen <= cached_gen;
-}
+typedef uint32_t u32; /* the header's kernel type, for the userspace build */
+#include "../thunderbolt_negotiation.h"
 
 #define CHECK(expr, want) do {                                               \
 	bool got = (expr);                                                   \
