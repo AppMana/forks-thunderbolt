@@ -1,1 +1,0 @@
-savedcmd_thunderbolt.mod := printf '%s\n'   nhi.o nhi_ops.o ctl.o tb.o switch.o cap.o path.o tunnel.o eeprom.o domain.o dma_port.o icm.o property.o xdomain.o lc.o tmu.o usb4.o usb4_port.o nvm.o retimer.o quirks.o clx.o acpi.o debugfs.o | awk '!x[$$0]++ { print("./"$$0) }' > thunderbolt.mod

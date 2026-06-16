@@ -1,1 +1,10 @@
 dist/
+
+# kernel build artifacts (OOT in-place builds)
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+modules.order
+Module.symvers
