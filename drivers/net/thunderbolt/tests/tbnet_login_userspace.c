@@ -32,41 +32,49 @@ static int failures;
 } while (0)
 
 /*
- * Does net still report "connected" after a restarted peer re-LOGINs?
- * @adopted: model the shared-handshake net (true) or the current ad-hoc net.
- * The contract: it must NOT (the stale session is dropped, re-confirm first).
+ * Model net's ThunderboltIP login flow as it now is in main.c after adopting
+ * struct tb_xdomain_handshake: login sent -> request_sent, remote login ->
+ * peer_seen, connected == complete, and an inbound LOGIN that arrives while
+ * already complete supersedes the stale session (main.c then queues
+ * disconnect_work; the peer's retries re-establish).
  */
-static bool net_connected_after_peer_relogin(bool adopted)
+struct net_login { struct tb_xdomain_handshake hs; };
+
+static bool net_connected(const struct net_login *n)
 {
-	if (adopted) {
-		struct tb_xdomain_handshake hs = { 0 };
-
-		/* we are logged in and connected */
-		hs.request_sent = true;
-		hs.peer_seen = true;
-		hs.established = true;
-		/* restarted peer re-LOGINs: supersede our stale session */
-		tb_xdomain_handshake_supersede(&hs);
-		return tb_xdomain_handshake_complete(&hs);
-	} else {
-		/* current net: connected == login_sent && login_received */
-		bool login_sent = true, login_received = true;
-
-		/* inbound re-LOGIN: net just re-sets login_received, no teardown */
-		login_received = true;
-		return login_sent && login_received;	/* stays connected -> stale */
-	}
+	return tb_xdomain_handshake_complete(&n->hs);
 }
+static void net_send_login(struct net_login *n)   { n->hs.request_sent = true; }
+static void net_recv_login(struct net_login *n)   { n->hs.peer_seen = true; }
+/* returns true if this inbound LOGIN superseded a live session (-> tear down) */
+static bool net_peer_login(struct net_login *n)   { return tb_xdomain_handshake_supersede(&n->hs); }
+static void net_reset(struct net_login *n)        { tb_xdomain_handshake_reset(&n->hs); }
 
 int main(void)
 {
+	struct net_login n = { 0 };
+
 	printf("thunderbolt_net login-handshake adoption:\n");
-	/* current ad-hoc net keeps a stale session up -> this FAILS until adoption */
-	CHECK(net_connected_after_peer_relogin(false) == false,
-	      "net drops a stale session on a peer re-login");
-	/* the adopted (shared handshake) net supersedes it correctly */
-	CHECK(net_connected_after_peer_relogin(true) == false,
-	      "adopted net supersedes the stale session (reference)");
+
+	/* cold connect: both sides log in -> connected */
+	net_send_login(&n);
+	net_recv_login(&n);
+	CHECK(net_connected(&n), "connected once both logins exchanged");
+
+	/* peer restarts and re-LOGINs while we still think we're connected:
+	 * main.c supersedes + tears down rather than carrying a stale session.
+	 * (capture once -- net_peer_login() has the supersede side effect) */
+	bool superseded = net_peer_login(&n);
+
+	CHECK(superseded, "inbound re-login supersedes the live session");
+	CHECK(!net_connected(&n), "no longer connected until re-confirmed");
+
+	/* the tear-down resets, then a fresh handshake reconnects cleanly */
+	net_reset(&n);
+	net_send_login(&n);
+	net_recv_login(&n);
+	CHECK(net_connected(&n), "reconnects after a clean re-handshake");
+
 	printf("%s\n", failures ? "FAILED" : "PASSED");
 	return failures ? 1 : 0;
 }

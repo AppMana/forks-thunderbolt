@@ -20,6 +20,8 @@
 #include <linux/rtnetlink.h>
 #include <linux/sizes.h>
 #include <linux/thunderbolt.h>
+
+#include "../../thunderbolt/thunderbolt_negotiation.h"
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
@@ -163,13 +165,13 @@ struct tbnet_ring {
  * @stats: Network statistics
  * @skb: Network packet that is currently processed on Rx path
  * @command_id: ID used for next configuration protocol packet
- * @login_sent: ThunderboltIP login message successfully sent
- * @login_received: ThunderboltIP login message received from the remote
- *		    host
+ * @login_hs: ThunderboltIP login handshake state (shared tb_xdomain_handshake:
+ *	      request_sent == our login sent, peer_seen == remote login received,
+ *	      complete == both, so a soft reconnect can re-arm/supersede it the
+ *	      same way the core and thunderbolt_ibverbs do)
  * @local_transmit_path: HopID we are using to send out packets
  * @remote_transmit_path: HopID the other end is using to send packets to us
- * @connection_lock: Lock serializing access to @login_sent,
- *		     @login_received and @transmit_path.
+ * @connection_lock: Lock serializing access to @login_hs and @transmit_path.
  * @login_retries: Number of login retries currently done
  * @login_work: Worker to send ThunderboltIP login packets
  * @connected_work: Worker that finalizes the ThunderboltIP connection
@@ -197,8 +199,7 @@ struct tbnet {
 	struct tbnet_stats stats;
 	struct sk_buff *skb;
 	atomic_t command_id;
-	bool login_sent;
-	bool login_received;
+	struct tb_xdomain_handshake login_hs;
 	int local_transmit_path;
 	int remote_transmit_path;
 	struct mutex connection_lock;
@@ -324,8 +325,7 @@ static void start_login(struct tbnet *net)
 	netdev_dbg(net->dev, "login started\n");
 
 	mutex_lock(&net->connection_lock);
-	net->login_sent = false;
-	net->login_received = false;
+	tb_xdomain_handshake_reset(&net->login_hs);
 	mutex_unlock(&net->connection_lock);
 
 	queue_delayed_work(system_long_wq, &net->login_work,
@@ -392,7 +392,7 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	mutex_lock(&net->connection_lock);
 
-	if (net->login_sent && net->login_received) {
+	if (tb_xdomain_handshake_complete(&net->login_hs)) {
 		int ret, retries = TBNET_LOGOUT_RETRIES;
 
 		while (send_logout && retries-- > 0) {
@@ -421,8 +421,7 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 	}
 
 	net->login_retries = 0;
-	net->login_sent = false;
-	net->login_received = false;
+	tb_xdomain_handshake_reset(&net->login_hs);
 
 	netdev_dbg(net->dev, "network traffic stopped\n");
 
@@ -467,7 +466,22 @@ static int tbnet_handle_packet(const void *buf, size_t size, void *data)
 			netdev_dbg(net->dev, "remote login response sent\n");
 
 			mutex_lock(&net->connection_lock);
-			net->login_received = true;
+			/* A fresh LOGIN arriving while our handshake is already
+			 * complete means the peer restarted its side WITHOUT a
+			 * physical link edge, so our session points at its freed
+			 * rings. Supersede the stale handshake and tear the
+			 * tunnel down; the peer's ongoing login retries then
+			 * re-establish a fresh session. (Shared contract with the
+			 * core and thunderbolt_ibverbs; see thunderbolt_negotiation.h.)
+			 */
+			if (tb_xdomain_handshake_supersede(&net->login_hs)) {
+				mutex_unlock(&net->connection_lock);
+				netdev_dbg(net->dev,
+					   "peer re-login: tearing down stale session\n");
+				queue_work(system_long_wq, &net->disconnect_work);
+				break;
+			}
+			net->login_hs.peer_seen = true;
 			net->remote_transmit_path = pkg->transmit_path;
 
 			/* If we reached the number of max retries or
@@ -475,7 +489,7 @@ static int tbnet_handle_packet(const void *buf, size_t size, void *data)
 			 * login retries
 			 */
 			if (net->login_retries >= TBNET_LOGIN_RETRIES ||
-			    !net->login_sent) {
+			    !net->login_hs.request_sent) {
 				net->login_retries = 0;
 				queue_delayed_work(system_long_wq,
 						   &net->login_work, 0);
@@ -643,7 +657,7 @@ static void tbnet_connected_work(struct work_struct *work)
 		return;
 
 	mutex_lock(&net->connection_lock);
-	connected = net->login_sent && net->login_received;
+	connected = tb_xdomain_handshake_complete(&net->login_hs);
 	mutex_unlock(&net->connection_lock);
 
 	if (!connected)
@@ -728,7 +742,7 @@ static void tbnet_login_work(struct work_struct *work)
 		net->login_retries = 0;
 
 		mutex_lock(&net->connection_lock);
-		net->login_sent = true;
+		net->login_hs.request_sent = true;
 		mutex_unlock(&net->connection_lock);
 
 		queue_work(system_long_wq, &net->connected_work);
