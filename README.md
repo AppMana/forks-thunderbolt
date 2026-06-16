@@ -1,9 +1,18 @@
 # forks-thunderbolt
 
-AppMana fork of the Linux kernel Thunderbolt drivers. The fleet branch
-contains two independent workstreams: Thunderbolt networking fixes for
-the 3-node NCCL chain and ICM/PCIe hotplug diagnostics for HP FlexIO
-Thunderbolt storage.
+AppMana fork of the Linux kernel Thunderbolt drivers and our out-of-tree
+`thunderbolt_ibverbs` (usb4_rdma RDMA) transport, in **one repo** so the three
+host-to-host Thunderbolt stacks share a single negotiation header instead of
+hand-synced copies:
+
+- **`thunderbolt`** — the core XDomain/USB4 driver.
+- **`thunderbolt_net`** — IP-over-Thunderbolt (`tbnet`).
+- **`thunderbolt_ibverbs`** — the usb4_rdma RDMA transport + userspace provider.
+
+All three negotiate the same XDomain connection and shared the same soft-reconnect
+bug; the fix lives once in `drivers/thunderbolt/thunderbolt_negotiation.h`
+(generation gate + handshake re-arm + the `TB_XNEG_*` installable macros), with
+KUnit + plain-`cc` userspace coverage (fleet kernels lack `CONFIG_KUNIT`).
 
 ```
 upstream  = git://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git
@@ -15,9 +24,12 @@ base      = v6.17 + 3 backports already in linux-hwe-6.17
 ## What's here
 
 ```
-drivers/thunderbolt/        full subsystem source (patched)
-drivers/net/thunderbolt/    tbnet driver source (patched)
-dkms/                       DKMS scaffolding (dkms.conf, Makefile)
+drivers/thunderbolt/            full subsystem source (patched) + the shared
+                                thunderbolt_negotiation.h (single source of truth)
+drivers/net/thunderbolt/        tbnet driver source (patched)
+drivers/thunderbolt_ibverbs/    usb4_rdma RDMA driver, userspace provider, dkms,
+                                tests (merged from the old thunderbolt-ibverbs repo)
+dkms/                           DKMS scaffolding (dkms.conf, Makefile)
 packaging/debian/           Debian package metadata for thunderbolt-tbfix-dkms
 scripts/
   oot-build.sh              fast iteration: stage at ~/src/tb-oot, build, hot-swap
