@@ -1,0 +1,937 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef TBV_H
+#define TBV_H
+
+#include <linux/atomic.h>
+#include <linux/bitops.h>
+#include <linux/completion.h>
+#include <linux/device.h>
+#include <linux/idr.h>
+#include <linux/if.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/netdevice.h>
+#include <linux/notifier.h>
+#include <linux/refcount.h>
+#include <linux/sizes.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
+#include <linux/uuid.h>
+#include <linux/workqueue.h>
+
+#include "thunderbolt_negotiation.h"
+#include <linux/xarray.h>
+
+#include "proto/config.h"
+
+#define TBV_DRV_NAME "thunderbolt_ibverbs"
+#define TBV_ETH_ALEN 6
+#define TBV_NATIVE_PROTOCOL_KEY "tbverbs"
+#define TBV_NATIVE_MAX_LANES 4
+#define TBV_DATA_PDF_FRAME_START 1
+#define TBV_DATA_PDF_FRAME_END 3
+#define TBV_NATIVE_PRTCID 1
+#define TBV_NATIVE_PRTCVERS 1
+#define TBV_NATIVE_PRTCREVS 0
+#define TBV_APPLE_PRTCID 0xfa57
+#define TBV_APPLE_PRTCVERS 1
+#define TBV_APPLE_PRTCREVS 0
+#define TBV_APPLE_QPN_SHIFT 8
+#define TBV_APPLE_FRAME_SIZE SZ_4K
+#define TBV_APPLE_MAX_MSG_SIZE SZ_16M
+
+static inline bool tbv_dma_device_ready(const struct device *dev)
+{
+	if (!dev)
+		return false;
+
+	/*
+	 * A Thunderbolt core reprobe can briefly expose ring DMA devices whose
+	 * IOMMU group is attached before dev->iommu is populated. Calling
+	 * dma_map_* in that window reaches iommu_get_dma_domain() and oopses.
+	 * Treat it as probe deferral; direct-DMA systems have no iommu_group and
+	 * still pass this check.
+	 */
+	return !dev->iommu_group || dev->iommu;
+}
+
+#define TBV_TBNET_ID_STATE_CARRIER		BIT(0)
+#define TBV_TBNET_ID_STATE_NEIGHBOR_READY	BIT(1)
+#define TBV_TBNET_ID_STATE_PACKET_PATH_ACTIVE	BIT(2)
+#define TBV_TBNET_ID_STATE_FULL_IP_ACTIVE	BIT(3)
+
+struct tb_property_dir;
+struct tbv_tbnet_minimal_session;
+struct seq_file;
+
+enum tbv_compat_mode {
+	TBV_COMPAT_AUTO,
+	TBV_COMPAT_FORCE,
+	TBV_COMPAT_OFF,
+};
+
+enum tbv_profile {
+	TBV_PROFILE_AUTO,
+	TBV_PROFILE_MAC_COMPAT,
+	TBV_PROFILE_LINUX_PERF,
+	TBV_PROFILE_MIXED,
+};
+
+enum tbv_tbnet_policy {
+	TBV_TBNET_AUTO,
+	TBV_TBNET_ALLOW,
+	TBV_TBNET_PREFER_RDMA,
+	TBV_TBNET_BLOCK,
+};
+
+enum tbv_tbnet_identity_mode {
+	TBV_TBNET_ID_AUTO,
+	TBV_TBNET_ID_STOCK,
+	TBV_TBNET_ID_STOCK_PROXY,
+	TBV_TBNET_ID_MINIMAL_PACKET,
+	TBV_TBNET_ID_OFF,
+};
+
+enum tbv_backend_type {
+	TBV_BACKEND_NATIVE,
+	TBV_BACKEND_APPLE,
+};
+
+enum tbv_path_state {
+	TBV_PATH_NEW,
+	TBV_PATH_RING_ALLOCATED,
+	TBV_PATH_RING_STARTED,
+	TBV_PATH_TUNNEL_ENABLED,
+	TBV_PATH_STOPPED,
+};
+
+struct tbv_config {
+	enum tbv_compat_mode compat;
+	enum tbv_profile profile;
+	enum tbv_tbnet_policy tbnet;
+	enum tbv_tbnet_identity_mode tbnet_identity;
+	u32 lanes_min;
+	u32 lanes_max;
+	bool lanes_auto;
+};
+
+struct tbv_resolved_config {
+	struct tbv_config requested;
+	enum tbv_profile profile;
+	enum tbv_tbnet_identity_mode tbnet_identity;
+	bool native_enabled;
+	bool apple_enabled;
+	bool rc_supported;
+	bool uc_supported;
+};
+
+struct tbv_backend_ops {
+	enum tbv_backend_type type;
+	const char *name;
+	bool supports_rc;
+	bool supports_uc;
+	bool needs_tbnet_identity;
+};
+
+struct tbv_rail_key {
+	u64 route;
+	u32 local_adapter;
+	u32 remote_adapter;
+	u32 path_id;
+};
+
+struct tbv_path_config {
+	u32 tx_ring_size;
+	u32 rx_ring_size;
+	u32 tx_flags;
+	u32 rx_flags;
+	int tx_hop;
+	int rx_hop;
+	int transmit_path;
+	int receive_path;
+	u16 sof_mask;
+	u16 eof_mask;
+	bool e2e;
+};
+
+struct tbv_path_owned_frame {
+	struct list_head node;
+	void *data;
+	u32 len;
+	u8 sof;
+	u8 eof;
+};
+
+struct tbv_path {
+	enum tbv_path_state state;
+	struct tbv_path_config cfg;
+	struct tbv_rail *rail;
+	struct tb_ring *tx_ring;
+	struct tb_ring *rx_ring;
+	struct tbv_data_frame *tx_frames;
+	struct tbv_data_frame *rx_frames;
+	struct tbv_tx_packet *tx_control_packets;
+	struct tbv_tx_packet *tx_data_packets;
+	u32 tx_frame_count;
+	u32 rx_frame_count;
+	u32 tx_control_packet_count;
+	u32 tx_data_packet_count;
+	u32 tx_control_queued;
+	u32 tx_data_queued;
+	u32 tx_data_reserved;
+	u32 tx_data_queue_limit;
+	u32 tx_remote_data_credits;
+	u32 tx_remote_data_credit_max;
+	u32 rx_data_credit_pending;
+	spinlock_t tx_lock;
+	struct list_head tx_free;
+	struct list_head tx_control_free;
+	struct list_head tx_data_free;
+	struct list_head tx_control_queue;
+	struct list_head tx_data_queue;
+	struct list_head tx_zcopy_inflight;
+	struct delayed_work tx_poll_work;
+	struct delayed_work rx_supp_poll_work;
+	unsigned long tx_last_progress_jiffies;
+	atomic_t tx_inflight;
+	atomic64_t data_tx_enqueued;
+	atomic64_t data_tx_posted;
+	atomic64_t data_tx_completed;
+	atomic64_t control_tx_enqueued;
+	atomic64_t control_tx_posted;
+	atomic64_t control_tx_completed;
+	atomic64_t control_tx_queue_max_ms;
+	atomic64_t data_tx_credit_stalls;
+	atomic64_t data_tx_credit_received;
+	atomic64_t data_rx_completed;
+	atomic64_t data_rx_credit_sent;
+	atomic64_t data_rx_credit_send_error;
+	atomic64_t data_rx_repost_failed;
+	atomic64_t tx_poll_calls;
+	atomic64_t tx_poll_completed;
+	atomic64_t rx_supp_poll_calls;
+	atomic64_t rx_supp_poll_completed;
+	unsigned long rx_supp_poll_until;
+	u8 rx_raw_opcode;
+	u8 rx_raw_flags;
+	u32 rx_raw_dest_qp;
+	u32 rx_raw_src_qp;
+	u32 rx_raw_psn;
+	u32 rx_raw_imm_data;
+	u32 rx_raw_rkey;
+	u32 rx_raw_done;
+	u32 rx_raw_remaining;
+	u64 rx_raw_base;
+	bool rx_raw_pending;
+	bool tx_poll_enabled;
+	bool rx_supp_poll_enabled;
+	bool tx_scheduling;
+	bool tx_raw_stream_active;
+	bool tx_raw_stream_end_seen;
+	u32 tx_raw_stream_inflight;
+	void *tx_raw_stream_owner;
+	int local_transmit_path;
+	int local_tx_hop;
+	int local_rx_hop;
+	int remote_transmit_path;
+};
+
+struct tbv_rail {
+	struct list_head node;
+	struct tbv_peer *peer;
+	struct tbv_state *native_work_state;
+	struct tbv_rail_key key;
+	struct tbv_path path;
+	struct delayed_work native_work;
+	refcount_t refcnt;
+	struct completion refs_zero;
+	/*
+	 * Per-rail IB device. Lifecycle managed by tbv_ibdev_rail_event()
+	 * (see ibdev.c) under state->rail_register_lock. NULL means this rail
+	 * has not yet reached the data-ready edge (or has been torn down).
+	 */
+	struct tbv_ibdev *ibdev;
+	atomic_t native_qp_bind_count;
+	u32 rail_id;
+	u32 link_speed;
+	u32 link_width;
+	u32 remote_rail_id;
+	int remote_transmit_path;
+	int remote_tx_hop;
+	int remote_rx_hop;
+	u32 native_attempts;
+	u32 native_tunnel_attempts;
+	int native_last_error;
+	/*
+	 * Physical lane index for native rails (0..TBV_NATIVE_MAX_LANES-1).
+	 * Set in tbv_peer_add_rail() from the matched service id and consumed
+	 * by tbv_ibdev_rail_name_index(). Don't derive this from rail->key.path_id;
+	 * the encoded path_id uses TBV_NATIVE_PRTCID as its low byte for lane 0,
+	 * which collides with the (prtcid << 8) | lane scheme used for the
+	 * other lanes (both lane 0 and lane 1 would round-trip to "lane 1").
+	 * Undefined for non-native backends.
+	 */
+	u32 native_lane;
+	bool active;
+	bool removing;
+	/*
+	 * Registration unwinding marker. Set under state->rail_register_lock
+	 * when ib_register_device() returns nonzero for this rail. While true
+	 * tbv_ibdev_start()'s catchup loop and tbv_ibdev_rail_event() will
+	 * skip the rail, breaking the spin loop the failed lane would
+	 * otherwise cause.
+	 */
+	bool ibdev_register_failed;
+	/*
+	 * Retryable registration blocker. A ready rail can reach verbs
+	 * registration before the configured RoCE netdev exists; keep it out of
+	 * the catchup loop until a matching netdev notifier event retries it.
+	 */
+	bool ibdev_register_deferred;
+	bool native_negotiated;
+	/*
+	 * READY/confirmation handshake, using the shared cross-driver contract
+	 * (thunderbolt_negotiation.h): request_sent == our READY sent,
+	 * peer_seen == the peer's READY received, established == both. Re-armed
+	 * with tb_xdomain_handshake_reset() on every reconnect so a coordinated
+	 * reload cannot strand the rail (see tb_test_xdomain_negotiation_hang).
+	 */
+	struct tb_xdomain_handshake native_hs;
+	/*
+	 * Set when an inbound re-HELLO carried a transmit_path different from the
+	 * one the live tunnel was enabled with (the peer reloaded with new rings).
+	 * tbv_native_control_work() then disables the stale tunnel back to
+	 * RING_STARTED so the tunnel phase re-enables it with the new hop, instead
+	 * of leaving a data-ready rail pointed at a dead hop. Reproduced by
+	 * reconnect_userspace.c scenario 2 / tbv_test_native_rehello_changed_hops.
+	 */
+	bool native_tunnel_rehop;
+	bool native_work_stop;
+};
+
+struct tbv_peer {
+	struct list_head node;
+	refcount_t refcnt;
+	struct tbv_state *state;
+	u32 peer_id;
+	enum tbv_backend_type backend;
+	struct tb_xdomain *xd;
+	struct list_head rails;
+	struct ida rail_ids;
+	/* Serializes XDomain control and tunnel setup transactions per link. */
+	struct mutex control_lock;
+	u32 native_qp_rr_rail_id;
+	u32 nr_rails;
+	bool lane_bonded;
+	/*
+	 * The peer's RoCE GID identity, learned from its HELLO (wire v2):
+	 * remote_roce_eui64 is the modified-EUI-64 the peer's kernel derives
+	 * from its roce_netdev MAC (== bytes 8..15 of its link-local and SLAAC
+	 * GIDs, big-endian), remote_roce_ipv4 matches its IPv4-mapped GID
+	 * (network byte order). Used at modify_qp(RTR) to map a destination GID
+	 * to the Thunderbolt peer that owns it, so QPs on a multi-peer node
+	 * (mid-chain host cabled to two neighbours) bind to the rail that
+	 * actually reaches the destination instead of the create-time
+	 * round-robin guess. Written under state->lock in
+	 * tbv_native_control_apply_remote(); zero until the HELLO lands.
+	 */
+	u64 remote_roce_eui64;
+	u32 remote_roce_ipv4;
+	bool remote_identity_valid;
+};
+
+bool tbv_path_tx_stalled(const struct tbv_path *path);
+
+static inline bool tbv_rail_data_ready(const struct tbv_rail *rail)
+{
+	if (!rail || rail->path.state != TBV_PATH_TUNNEL_ENABLED)
+		return false;
+	if (!rail->peer || rail->peer->backend != TBV_BACKEND_NATIVE)
+		return true;
+	return tb_xdomain_handshake_complete(&rail->native_hs);
+}
+
+static inline bool tbv_rail_apple_data_ready(const struct tbv_rail *rail)
+{
+	return rail && rail->path.state == TBV_PATH_TUNNEL_ENABLED;
+}
+
+struct tbv_tbnet_identity {
+	enum tbv_tbnet_identity_mode mode;
+	unsigned long state;
+	struct mutex lock;
+	struct list_head minimal_sessions;
+	struct tb_property_dir *minimal_dir;
+	char tbnet_netdev_name[IFNAMSIZ];
+	char gid_netdev_name[IFNAMSIZ];
+	struct net_device *tbnet_dev;
+	struct net_device *gid_dev;
+	struct notifier_block netdev_nb;
+	struct notifier_block inetaddr_nb;
+	__be32 proxy_ipv4;
+	bool minimal_e2e;
+	bool minimal_apple_only;
+	bool minimal_neighbor_seen;
+	bool minimal_dir_registered;
+	bool minimal_driver_registered;
+	bool minimal_started;
+	bool netdev_nb_registered;
+	bool inetaddr_nb_registered;
+	bool rx_handler_registered;
+	atomic64_t minimal_login_rx;
+	atomic64_t minimal_login_tx;
+	atomic64_t minimal_logout_rx;
+	atomic64_t minimal_logout_tx;
+	atomic64_t minimal_status_rx;
+	atomic64_t minimal_status_tx;
+	atomic64_t minimal_packet_rx;
+	atomic64_t minimal_packet_tx_posted;
+	atomic64_t minimal_packet_tx;
+	atomic64_t minimal_packet_tx_errors;
+	atomic64_t minimal_path_errors;
+	atomic64_t arp_requests;
+	atomic64_t arp_replies;
+	atomic64_t arp_ignored;
+	atomic64_t arp_errors;
+};
+
+enum tbv_tbip_type {
+	TBV_TBIP_LOGIN,
+	TBV_TBIP_LOGIN_RESPONSE,
+	TBV_TBIP_LOGOUT,
+	TBV_TBIP_STATUS,
+};
+
+struct tbv_tbip_control {
+	u64 route;
+	u8 sequence;
+	uuid_t initiator_uuid;
+	uuid_t target_uuid;
+	u32 command_id;
+};
+
+struct tbv_tbip_login_params {
+	struct tbv_tbip_control ctrl;
+	u32 transmit_path;
+};
+
+struct tbv_tbip_login_response_params {
+	struct tbv_tbip_control ctrl;
+	u32 status;
+	u8 receiver_mac[TBV_ETH_ALEN];
+};
+
+struct tbv_tbip_status_params {
+	struct tbv_tbip_control ctrl;
+	u32 status;
+};
+
+struct tbv_tbip_status_result {
+	struct tbv_tbip_control ctrl;
+	u32 status;
+};
+
+struct tbv_tbip_login_response_result {
+	struct tbv_tbip_control ctrl;
+	u32 status;
+	u8 receiver_mac[TBV_ETH_ALEN];
+	u32 receiver_mac_len;
+};
+
+struct tbv_tbnet_arp_proxy {
+	__be32 ipv4;
+	u8 mac[TBV_ETH_ALEN];
+};
+
+struct tbv_tbnet_identity_config {
+	const char *tbnet_netdev;
+	const char *gid_netdev;
+	bool minimal_e2e;
+	bool minimal_apple_only;
+};
+
+#define TBV_CONFIGURED_LINK_NAME_LEN (TBV_CFG_LINK_NAME_MAX + 1u)
+
+struct tbv_configured_link {
+	struct list_head node;
+	u32 link_id;
+	enum tbv_backend_type backend;
+	struct tbv_id_selection app_selection;
+	char name[TBV_CONFIGURED_LINK_NAME_LEN];
+};
+
+struct tbv_state {
+	struct tbv_resolved_config cfg;
+	struct mutex lock;
+	struct list_head peers;
+	struct list_head configured_links;
+	u32 next_peer_id;
+	u32 configured_link_count;
+	struct tbv_tbnet_identity tbnet_identity;
+	struct tb_property_dir *native_dirs[TBV_NATIVE_MAX_LANES];
+	u32 native_dir_count;
+	/*
+	 * Saved prtcstns + rate limit for tbv_services_reannounce_native(): when
+	 * a rail exhausts its HELLO retries (the peer has not recreated our
+	 * service after a module reload -- its one-shot XDomain property read
+	 * raced our initialization and gave up), re-registering the property
+	 * dirs sends a fresh properties-changed notification that restarts the
+	 * peer's read cycle. Without this, module reloads converge ~1 in 10
+	 * (2026-06-12 fleet roll) and the only reliable recovery is a reboot.
+	 */
+	u32 native_prtcstns;
+	unsigned long native_reannounce_jiffies;
+	/*
+	 * Boot-time identity race (2026-06-13 DSV4 outage): the module loads
+	 * and HELLOs within seconds of POST, before DHCP has assigned the
+	 * roce_netdev's IPv4. The HELLO then advertises eui64 with ipv4=0,
+	 * peers store it as a valid identity, and every later v4-mapped dgid
+	 * hard-fails modify_qp(RTR) with -ENETUNREACH. Three defenses:
+	 *  1. identity_grace_until: defer the first HELLO while the local
+	 *     identity is incomplete, up to this deadline.
+	 *  2. hello_sent_incomplete: set when a HELLO went out with ipv4=0
+	 *     after the grace expired.
+	 *  3. identity_refresh_work: scheduled by the inetaddr notifier when
+	 *     the roce_netdev gains an address; re-HELLOs negotiated rails so
+	 *     peers replace the incomplete identity.
+	 * The receive-side defense is tbv_gid_identity_verdict(): an identity
+	 * that cannot adjudicate a dgid family is INCONCLUSIVE and never
+	 * contributes to a hard -ENETUNREACH reject.
+	 */
+	unsigned long identity_grace_until;
+	bool hello_sent_incomplete;
+	struct work_struct identity_refresh_work;
+	struct tb_property_dir *apple_dir;
+	struct dentry *debugfs_dir;
+	bool allocate_rings;
+	bool start_rings;
+	bool negotiate_native;
+	bool enable_tunnels;
+	bool native_data;
+	bool apple_data;
+	bool native_fragment_striping;
+	bool native_home_rail_qp;
+	int native_data_e2e; /* -1 auto, 0 off, 1 on */
+	bool register_verbs;
+	bool services_registered;
+	bool verbs_registered;
+	bool native_control_registered;
+	bool native_control_source_aware;
+	bool native_legacy_multicable_warned;
+	bool apple_tunnels_wait_tbnet;
+	bool apple_tunnels_pending;
+	struct work_struct apple_tunnel_work;
+	struct workqueue_struct *workqueue;
+	struct notifier_block ibdev_netdev_nb;
+	atomic_t verbs_ucontexts;
+	atomic_t verbs_pds;
+	atomic_t verbs_cqs;
+	atomic_t verbs_qps;
+	atomic_t verbs_mrs;
+	atomic_t verbs_recv_wqes;
+	atomic64_t data_wr_send;
+	atomic64_t data_wr_op_send;
+	atomic64_t data_wr_op_send_imm;
+	atomic64_t data_wr_op_write;
+	atomic64_t data_wr_op_write_imm;
+	atomic64_t data_wr_op_unsupported;
+	atomic64_t data_wr_live;
+	atomic64_t data_wr_no_path;
+	atomic64_t data_wr_no_recv_credit;
+	atomic64_t data_wr_copied;
+	atomic64_t data_wr_zcopy;
+	atomic64_t data_wr_zcopy_fallback;
+	atomic64_t data_wr_zcopy_fallback_striping;
+	atomic64_t data_wr_zcopy_fallback_unsafe_sge;
+	atomic64_t data_wr_copy_error;
+	atomic64_t data_wr_path_send;
+	atomic64_t data_wr_path_send_error;
+	atomic64_t data_wr_retransmit;
+	atomic64_t data_wr_rnr_retransmit;
+	atomic64_t data_wr_retry_enqueue_error;
+	atomic64_t data_wr_retry_exhausted;
+	atomic64_t data_wr_rnr_retry_exhausted;
+	atomic64_t data_wr_timeout;
+	atomic64_t apple_sq_queued;
+	atomic64_t apple_sq_dequeued;
+	atomic64_t apple_sq_full;
+	atomic64_t apple_sq_flushed;
+	atomic64_t data_tx_accepted;
+	atomic64_t data_tx_posted;
+	atomic64_t data_tx_completed;
+	atomic64_t data_tx_canceled;
+	atomic64_t data_tx_errors;
+	atomic64_t data_tx_credit_stalls;
+	atomic64_t data_tx_credit_received;
+	atomic64_t data_rx_completed;
+	atomic64_t data_rx_credit_sent;
+	atomic64_t data_rx_credit_send_error;
+	atomic64_t data_rx_repost_failed;
+	atomic64_t data_rx_bad_frame;
+	atomic64_t data_rx_bad_header;
+	atomic64_t data_rx_send;
+	atomic64_t data_rx_op_send;
+	atomic64_t data_rx_op_send_imm;
+	atomic64_t data_rx_op_write;
+	atomic64_t data_rx_op_write_imm;
+	atomic64_t data_rx_ack;
+	atomic64_t data_rx_ack_matched;
+	atomic64_t data_rx_ack_match_retried;
+	atomic64_t data_rx_ack_match_max_ms;
+	atomic64_t data_rx_ack_match_current_max_ms;
+	atomic64_t data_rx_ack_match_over_10ms;
+	atomic64_t data_rx_ack_match_over_64ms;
+	atomic64_t data_rx_ack_miss;
+	atomic64_t data_rx_late_ack;
+	atomic64_t data_rx_ack_cumulative;
+	atomic64_t data_tx_ack_ok;
+	atomic64_t data_tx_ack_rnr;
+	atomic64_t data_tx_ack_error;
+	atomic64_t data_tx_ack_send_error;
+	atomic64_t data_rx_ack_rnr;
+	atomic64_t data_rx_duplicate_ack;
+	atomic64_t data_rx_ack_history_miss;
+	atomic64_t data_tx_read_ack_ok;
+	atomic64_t data_tx_read_ack_retry;
+	atomic64_t data_tx_read_ack_error;
+	atomic64_t data_rx_read_ack_ok;
+	atomic64_t data_rx_read_ack_retry;
+	atomic64_t data_rx_read_ack_error;
+	atomic64_t data_read_resp_retransmit;
+	atomic64_t data_read_resp_drop;
+	atomic64_t data_rx_read_resp_duplicate;
+	atomic64_t data_rx_read_resp_gap;
+	atomic64_t data_rx_read_resp_remote_error;
+	atomic64_t data_rx_read_resp_bad_header;
+	atomic64_t data_rx_read_resp_copy_error;
+	atomic64_t data_rx_read_resp_short;
+	atomic64_t data_rx_read_req_no_access;
+	atomic64_t data_rx_read_req_no_mr;
+	atomic64_t data_rx_read_req_mr_access;
+	atomic64_t data_rx_read_req_too_large;
+	atomic64_t data_rx_read_req_bad_iova;
+	atomic64_t data_rx_read_req_alloc_error;
+	atomic64_t data_rx_read_req_resp_busy;
+	atomic64_t data_rx_read_req_resp_error;
+	atomic64_t data_rx_no_qp;
+	atomic64_t data_rx_bad_peer;
+	atomic64_t data_rx_unconnected_qp;
+	atomic64_t data_rx_qp_error;
+	atomic64_t data_rx_no_recv;
+	atomic64_t data_rx_rnr;
+	atomic64_t data_rx_rnr_suppressed;
+	atomic64_t data_rx_copy_error;
+	atomic64_t data_rx_send_len_error;
+	atomic64_t data_rx_send_prot_error;
+	atomic64_t data_rx_send_cq_error;
+	atomic64_t data_rx_send_bad_fragment;
+	atomic64_t data_rx_send_sequence_error;
+	atomic64_t data_rx_active_timeout;
+	atomic64_t data_rx_reorder_buffered;
+	atomic64_t data_rx_reorder_delivered;
+	atomic64_t data_rx_reorder_dropped;
+	atomic64_t data_rx_reorder_timeout;
+	atomic64_t data_rx_reorder_window;
+	atomic64_t data_rx_pending_discarded;
+	atomic64_t apple_rx_sof;
+	atomic64_t apple_rx_eof3;
+	atomic64_t apple_rx_eof_other;
+	atomic64_t apple_rx_sof_while_active;
+	atomic64_t apple_rx_no_sof_when_idle;
+	atomic64_t apple_rx_eof_without_active;
+	atomic64_t apple_rx_len_overrun;
+	atomic64_t data_cq_overflow;
+	atomic64_t native_legacy_ambiguous_limited;
+	struct xarray verbs_mrs_xa;
+	struct xarray verbs_qps_xa;
+	/*
+	 * Serializes per-rail ib_device registration against teardown.
+	 * tbv_ibdev_rail_event() publishes one ib_device per active rail as
+	 * its data path comes up; tbv_peer_remove_rail() and module-exit
+	 * tear them down. Kept separate from state->lock so the sleeping
+	 * ib_(un)register_device path doesn't invert against verbs ops that
+	 * take state->lock.
+	 */
+	struct mutex rail_register_lock;
+	struct work_struct ibdev_netdev_retry_work;
+	/*
+	 * Up-event gate, owned by rail_register_lock. Set to true by
+	 * tbv_ibdev_start() before any rising-edge events may publish; cleared
+	 * by tbv_ibdev_stop() before draining so no late ready-edge event
+	 * sneaks a fresh ib_device past module exit. Down events ignore this
+	 * flag so existing devices can always be torn down.
+	 */
+	bool register_enabled;
+	bool ibdev_netdev_nb_registered;
+};
+
+struct dentry;
+struct tbv_service_config {
+	u32 native_prtcstns;
+	u32 apple_prtcstns;
+	bool allocate_rings;
+	bool start_rings;
+	bool negotiate_native;
+	bool enable_tunnels;
+};
+
+struct tb_property_dir;
+struct tbv_data_frame;
+struct tbv_native_data_header;
+struct tbv_tx_packet;
+struct device;
+struct page;
+struct tb_ring;
+struct tb_xdomain;
+typedef void (*tbv_path_tx_done_fn)(void *ctx, int status);
+typedef int (*tbv_path_tx_fill_fn)(void *ctx, void *dst, u32 len);
+typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
+				     u32 *page_off, u32 *length,
+				     tbv_path_tx_done_fn *done,
+				     void **done_ctx);
+#define TBV_PATH_SEND_CONTROL	BIT(0)
+#define TBV_PATH_SEND_DEFER	BIT(1)
+extern const uuid_t tbv_native_service_uuid;
+
+int tbv_config_parse(struct tbv_config *cfg, const char *compat,
+		     const char *profile, const char *tbnet,
+		     const char *tbnet_identity, const char *lanes);
+int tbv_config_resolve(struct tbv_resolved_config *resolved,
+		       const struct tbv_config *cfg);
+
+const char *tbv_compat_name(enum tbv_compat_mode mode);
+const char *tbv_profile_name(enum tbv_profile profile);
+const char *tbv_tbnet_policy_name(enum tbv_tbnet_policy policy);
+const char *tbv_tbnet_identity_name(enum tbv_tbnet_identity_mode mode);
+const char *tbv_backend_name(enum tbv_backend_type type);
+
+int tbv_ibdev_start(struct tbv_state *state, bool register_verbs);
+void tbv_ibdev_stop(struct tbv_state *state);
+const char *tbv_ibdev_roce_netdev_name(void);
+/*
+ * Notify the verbs layer that rail's data path has come up (joined=true) or
+ * is about to be torn down (joined=false). Safe to call repeatedly; only the
+ * rising/falling edge of "ibdev published" causes registration changes.
+ *
+ * Up events are gated on state->register_enabled (flipped off by
+ * tbv_ibdev_stop()). Down events are unconditional so module-exit and rail
+ * remove can always undo a published device. Returns 0 on success/no-op, or a
+ * negative errno if an up event failed to publish (the rail is then
+ * permanently marked failed and will be skipped on retry).
+ */
+int tbv_ibdev_rail_event(struct tbv_state *state, struct tbv_rail *rail,
+			 bool joined);
+void tbv_ibdev_rx_frame(struct tbv_state *state, struct tbv_path *rx_path,
+			const void *data, u32 len);
+void tbv_ibdev_rx_native_frame(struct tbv_state *state,
+			       struct tbv_path *rx_path,
+			       const struct tbv_native_data_header *hdr,
+			       const void *payload);
+void tbv_ibdev_rx_apple_frame(struct tbv_state *state,
+			      const struct tbv_path *path,
+			      const void *payload, u32 len, u8 sof, u8 eof);
+
+int tbv_tbnet_identity_check_config(const struct tbv_resolved_config *cfg);
+int tbv_tbnet_identity_prepare(struct tbv_tbnet_identity *identity,
+			       const struct tbv_resolved_config *cfg,
+			       const struct tbv_tbnet_identity_config *identity_cfg);
+void tbv_tbnet_identity_stop(struct tbv_tbnet_identity *identity);
+int tbv_tbip_build_login(void *buf, size_t size,
+			 const struct tbv_tbip_login_params *params);
+int tbv_tbip_build_login_response(void *buf, size_t size,
+				  const struct tbv_tbip_login_response_params *params);
+int tbv_tbip_build_logout(void *buf, size_t size,
+			  const struct tbv_tbip_control *ctrl);
+int tbv_tbip_build_status(void *buf, size_t size,
+			  const struct tbv_tbip_status_params *params);
+int tbv_tbip_parse_type(const void *buf, size_t size,
+			enum tbv_tbip_type *type,
+			struct tbv_tbip_control *ctrl);
+int tbv_tbip_parse_login(const void *buf, size_t size,
+			 struct tbv_tbip_login_params *params);
+int tbv_tbip_parse_login_response(const void *buf, size_t size,
+				  struct tbv_tbip_login_response_result *result);
+int tbv_tbip_parse_status(const void *buf, size_t size,
+			  struct tbv_tbip_status_result *result);
+int tbv_tbnet_arp_reply_for_request(void *reply, size_t reply_size,
+				    const void *request, size_t request_size,
+				    const struct tbv_tbnet_arp_proxy *proxy);
+int tbv_tbnet_minimal_start(struct tbv_tbnet_identity *identity);
+void tbv_tbnet_minimal_stop(struct tbv_tbnet_identity *identity);
+void tbv_tbnet_minimal_recompute_state_locked(struct tbv_tbnet_identity *identity);
+bool tbv_tbnet_minimal_neighbor_ready(struct tbv_tbnet_identity *identity,
+				      const uuid_t *remote_uuid);
+void tbv_tbnet_minimal_clear_neighbors_locked(struct tbv_tbnet_identity *identity);
+void tbv_tbnet_minimal_debugfs_show(struct seq_file *s,
+				    struct tbv_tbnet_identity *identity);
+void tbv_services_tbnet_identity_ready(struct tbv_tbnet_identity *identity);
+struct tb_property_dir *tbv_service_create_native_dir(void);
+struct tb_property_dir *tbv_service_create_apple_dir(u32 prtcstns);
+int tbv_services_start(struct tbv_state *state, bool bind_services,
+		       const struct tbv_service_config *service_cfg);
+void tbv_services_stop(struct tbv_state *state);
+/*
+ * Re-register the native property dirs to push a fresh XDomain
+ * properties-changed notification to every neighbour (rate-limited; returns
+ * false when skipped). Used by native control when HELLO retries exhaust.
+ */
+bool tbv_services_reannounce_native(struct tbv_state *state);
+int tbv_native_control_start(struct tbv_state *state);
+void tbv_native_control_stop(struct tbv_state *state);
+const char *tbv_native_control_mode_name(const struct tbv_state *state);
+int tbv_native_control_xdomain_start(struct tbv_state *state);
+void tbv_native_control_xdomain_stop(void);
+int tbv_native_control_legacy_start(struct tbv_state *state);
+void tbv_native_control_legacy_stop(void);
+int tbv_native_control_handle_packet(struct tbv_state *state,
+				     struct tb_xdomain *source_xd,
+				     const void *buf, size_t size);
+void tbv_native_control_init_rail(struct tbv_rail *rail,
+				  struct tbv_peer *peer);
+void tbv_native_control_queue_rail(struct tbv_state *state,
+				   struct tbv_rail *rail);
+void tbv_native_control_cancel_rail(struct tbv_rail *rail);
+int tbv_native_control_exchange(struct tbv_state *state, struct tbv_peer *peer,
+				struct tbv_rail *rail);
+void tbv_rail_key_init(struct tbv_rail_key *key, u64 route,
+		       u32 local_adapter, u32 remote_adapter, u32 path_id);
+int tbv_rail_key_cmp(const struct tbv_rail_key *a,
+		     const struct tbv_rail_key *b);
+u32 tbv_rail_key_hash(const struct tbv_rail_key *key);
+struct tbv_peer *tbv_peer_get_or_create(struct tbv_state *state,
+					enum tbv_backend_type backend,
+					struct tb_xdomain *xd);
+void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer);
+/*
+ * Synchronously bring an XDomain link up at dual lane (40 Gb/s) before rails
+ * are built, so tbv_service_probe's lane-count gate exposes the second rail.
+ * No-op when native_lane_bonding is off or the link is already DUAL. Returns
+ * the resulting xd->link_width is DUAL (true) or stayed SINGLE (false).
+ */
+bool tbv_xdomain_bond_sync(struct tb_xdomain *xd);
+struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
+				   const struct tbv_rail_key *key,
+				   u32 native_lane);
+void tbv_peer_remove_rail(struct tbv_rail *rail);
+void tbv_rail_put(struct tbv_rail *rail);
+
+/*
+ * Pure helpers exposed for kunit (kernel/tests/). tbv_ack_route_peer decides
+ * which peer an ACK/control frame routes to (the requester via rx_path, not the
+ * QP's bound peer); tbv_psn_delta is signed 24-bit PSN distance with wraparound;
+ * tbv_gid_matches_identity decides whether a 16-byte destination GID belongs to
+ * a peer identified by (eui64, ipv4) from its wire-v2 HELLO.
+ */
+struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
+				    struct tbv_path *rx_path);
+s32 tbv_psn_delta(u32 a, u32 b);
+bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
+/*
+ * tbv_gid_identity_verdict classifies a dgid against a stored peer identity.
+ * INCONCLUSIVE means the identity cannot adjudicate this dgid's address
+ * family (e.g. a v4-mapped dgid against an identity whose ipv4 was 0 because
+ * the peer HELLOed before DHCP) and MUST NOT count toward the all-peers-
+ * valid -ENETUNREACH rejection in tbv_qp_rebind_rail_for_dgid().
+ */
+/*
+ * How long the first HELLO may wait for the roce_netdev to get an IPv4
+ * address (DHCP at boot). A HELLO sent earlier advertises identity ipv4=0,
+ * which peers can never resolve a v4-mapped dgid against. Past the grace we
+ * send anyway (a v6-only or address-less deployment must still negotiate)
+ * and rely on the inetaddr notifier to re-HELLO when an address appears.
+ */
+#define TBV_IDENTITY_GRACE_MS 30000
+
+enum tbv_identity_verdict {
+	TBV_IDENTITY_NO_MATCH = 0,
+	TBV_IDENTITY_MATCH,
+	TBV_IDENTITY_INCONCLUSIVE,
+};
+enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
+						   bool identity_valid,
+						   u64 eui64, u32 ipv4_be);
+bool tbv_native_control_local_identity_incomplete(void);
+void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
+int tbv_native_control_identity_notifier_register(struct tbv_state *state);
+void tbv_native_control_identity_notifier_unregister(void);
+bool tbv_path_apple_tx_raw_mode(void);
+bool tbv_path_apple_rx_raw_mode(void);
+void tbv_path_default_config(enum tbv_backend_type backend,
+			     struct tbv_path_config *cfg);
+void tbv_path_init_optional_symbols(void);
+void tbv_path_exit_optional_symbols(void);
+void tbv_path_init(struct tbv_path *path,
+		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
+void tbv_path_reset(struct tbv_path *path);
+const char *tbv_path_state_name(enum tbv_path_state state);
+int tbv_path_alloc_rings(struct tbv_path *path, struct tb_xdomain *xd,
+			 int requested_transmit_path);
+int tbv_path_start_rings(struct tbv_path *path);
+int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
+			   int remote_transmit_path);
+int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd);
+void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size);
+void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits);
+int tbv_path_reserve_data(struct tbv_path *path, u32 frames);
+void tbv_path_release_data_reservation(struct tbv_path *path, u32 frames);
+int tbv_path_send(struct tbv_path *path, const void *data, u32 len,
+		  unsigned int flags,
+		  tbv_path_tx_done_fn done, void *done_ctx);
+int tbv_path_send_owned(struct tbv_path *path, void *data, u32 len,
+			unsigned int flags,
+			tbv_path_tx_done_fn done, void *done_ctx);
+int tbv_path_send_marked_owned(struct tbv_path *path, void *data, u32 len,
+			       u8 sof, u8 eof, unsigned int flags,
+			       tbv_path_tx_done_fn done, void *done_ctx);
+int tbv_path_send_owned_list_reserved(struct tbv_path *path,
+				      struct list_head *frames,
+				      unsigned int flags,
+				      tbv_path_tx_done_fn done,
+				      void *done_ctx);
+int tbv_path_prepare_owned_list(struct tbv_path *path,
+				struct list_head *frames,
+				struct list_head *packets,
+				u32 *packet_count,
+				unsigned int flags,
+				tbv_path_tx_done_fn done,
+				void *done_ctx);
+int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
+				       struct list_head *packets,
+				       u32 packet_count,
+				       unsigned int flags);
+void tbv_path_release_prepared_list_silent(struct list_head *packets,
+					   int status);
+int tbv_path_send_marked_fill(struct tbv_path *path, u32 len,
+			      u8 sof, u8 eof, unsigned int flags,
+			      tbv_path_tx_fill_fn fill, void *fill_ctx,
+			      tbv_path_tx_done_fn done, void *done_ctx);
+int tbv_path_send_page_stream(struct tbv_path *path,
+			      const struct tbv_native_data_header *hdr,
+			      u32 total_length, unsigned int flags,
+			      tbv_path_tx_done_fn meta_done,
+			      void *meta_done_ctx,
+			      tbv_path_next_page_fn next, void *next_ctx);
+void tbv_path_kick_tx(struct tbv_path *path);
+void tbv_path_cancel_data_done_ctx(struct tbv_path *path,
+				   tbv_path_tx_done_fn done, void *done_ctx);
+void tbv_path_cancel_data_owner_ctx(struct tbv_path *path, void *owner_ctx);
+void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd);
+
+const struct tbv_backend_ops *tbv_backend_get(enum tbv_backend_type type);
+int tbv_link_activate_config(struct tbv_state *state, const char *name,
+			     enum tbv_backend_type backend,
+			     const struct tbv_cfg_link *cfg);
+void tbv_link_deactivate_config(struct tbv_state *state, u32 link_id);
+u32 tbv_link_count(struct tbv_state *state);
+void tbv_link_debugfs_show(struct seq_file *s, struct tbv_state *state);
+int tbv_debugfs_init(struct tbv_state *state);
+void tbv_debugfs_exit(struct tbv_state *state);
+int tbv_configfs_start(struct tbv_state *state);
+void tbv_configfs_stop(struct tbv_state *state);
+
+int tbv_core_init(struct tbv_state *state,
+		  const struct tbv_resolved_config *cfg,
+		  const struct tbv_tbnet_identity_config *identity_cfg);
+void tbv_core_exit(struct tbv_state *state);
+
+#endif

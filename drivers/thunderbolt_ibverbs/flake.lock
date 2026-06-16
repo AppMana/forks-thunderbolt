@@ -1,0 +1,46 @@
+{
+  "nodes": {
+    "linux-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779802034,
+        "narHash": "sha256-AtgoTQnF7yPt7dyYJjQIy8zt1JGdebkHSmVcoUxu7Xo=",
+        "ref": "refs/heads/next",
+        "rev": "d73a08958e66849ea713d2f458b2fcf7b183f987",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      },
+      "original": {
+        "ref": "refs/heads/next",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1780243769,
+        "narHash": "sha256-x5UQuRsH3MqI0U9afaXSNqzTPSeZlRLvFAav2Ux1pNw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "331800de5053fcebacf6813adb5db9c9dca22a0c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "linux-src": "linux-src",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
