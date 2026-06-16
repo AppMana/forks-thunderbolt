@@ -2856,8 +2856,10 @@ static void tb_test_property_copy(struct kunit *test)
 static void tb_test_xdomain_properties_stale(struct kunit *test)
 {
 	/*
-	 * Models the generation gate in tb_xdomain_get_properties() and the
-	 * reload-recovery fix. The peer's generation is monotonic.
+	 * Models the generation gate in tb_xdomain_get_properties(). The peer's
+	 * generation is monotonic WITHIN A SESSION (the remote always answers with
+	 * its current/highest gen) and reseeds randomly on REBOOT, so the gate
+	 * drops only an exact-duplicate re-read.
 	 */
 
 	/* First read (no cached properties) is always accepted. */
@@ -2867,18 +2869,26 @@ static void tb_test_xdomain_properties_stale(struct kunit *test)
 	/* Strictly newer generation is accepted. */
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 8, 5));
 
-	/*
-	 * THE BUG: an equal or non-advanced generation is dropped. This is what
-	 * strands a reloaded peer once a raced/lost properties-changed
-	 * notification latches a stale generation.
-	 */
+	/* An exact duplicate (same gen we already hold) is dropped (skip re-parse). */
 	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 5, 5));
-	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 5, 7));
 
 	/*
-	 * THE FIX: resetting the cached generation to 0 (done on
-	 * PROPERTIES_CHANGED_REQUEST and by the rescan sysfs trigger) forces any
-	 * real block (gen >= 1) to be accepted again, so services re-probe.
+	 * A LOWER generation can only mean the peer REBOOTED: the local block
+	 * generation is seeded with get_random_u32() and only incremented, so a
+	 * fresh boot reseeds to a value frequently below what a non-rebooted peer
+	 * still caches. The directory genuinely changed (new boot, re-registered
+	 * services), so it MUST be accepted -- the old `gen <= cached` gate stranded
+	 * the peer forever when the best-effort PROPERTIES_CHANGED reset was lost
+	 * (the appmana-002<->018 stranding: 002 rebooted, 018 dropped every re-read
+	 * of 002's new ThunderboltIP service).
+	 */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 5, 7));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 0x2a, 0xc0ffee99));
+
+	/*
+	 * Reconnect-recovery still works: resetting the cached generation to 0
+	 * (done on PROPERTIES_CHANGED_REQUEST and by the rescan sysfs trigger)
+	 * forces any real block to be accepted again, so services re-probe.
 	 */
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 5, 0));
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 1, 0));

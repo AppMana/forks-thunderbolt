@@ -51,15 +51,32 @@
  * @remote_gen:  generation reported with the just-read block
  * @cached_gen:  generation of the block we currently hold
  *
- * Normally only a strictly-newer generation is accepted. Reconnect-recovery
- * paths reset @cached_gen to 0 so any real block (generation >= 1) is accepted
- * again; a first read (!@have_remote) is always accepted. Pure predicate so it
- * can be exercised by KUnit and a userspace mirror.
+ * Drop ONLY an exact-duplicate re-read (same generation we already hold);
+ * accept everything else.
+ *
+ * A peer's property generation is monotonic *within a session* -- the remote
+ * always answers a properties request with its CURRENT (highest) generation, so
+ * a re-read can never carry a generation LOWER than one we already cached while
+ * the peer stays up. The generation is therefore strictly-newer in normal
+ * operation and `remote_gen == cached_gen` is the only in-session "nothing
+ * changed, skip the re-parse" case.
+ *
+ * A generation that went BACKWARDS can only mean the peer REBOOTED: the local
+ * block generation is seeded with get_random_u32() at init (xdomain.c) and only
+ * incremented, so a fresh boot reseeds to a new random value that is frequently
+ * lower than what a non-rebooted peer still caches. The peer's directory has
+ * genuinely changed (new boot, re-registered services), so this MUST be
+ * accepted -- the old `remote_gen <= cached_gen` gate silently stranded the peer
+ * forever once the best-effort PROPERTIES_CHANGED reset-to-0 was lost (observed
+ * on the appmana-002<->018 link: 002 rebooted, 018 dropped every re-read of
+ * 002's new ThunderboltIP service). Reconnect-recovery paths still reset
+ * @cached_gen to 0 (any non-zero gen then accepted); a first read (!@have_remote)
+ * is always accepted. Pure predicate, exercised by KUnit + a userspace harness.
  */
 static inline bool tb_xdomain_generation_stale(bool have_remote, u32 remote_gen,
 					       u32 cached_gen)
 {
-	return have_remote && remote_gen <= cached_gen;
+	return have_remote && remote_gen == cached_gen;
 }
 
 /**
