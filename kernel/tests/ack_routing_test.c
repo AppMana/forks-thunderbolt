@@ -390,7 +390,98 @@ static void tbv_test_native_rehello_changed_hops(struct kunit *test)
 			rail.remote_transmit_path);
 }
 
+/*
+ * ============================================================================
+ * Cohesive negotiation macros (TB_XNEG_*) -- the installable negotiation both
+ * thunderbolt_ibverbs and thunderbolt_net embed. These cover EVERYTHING the
+ * macros fix, so the same KUnit guards both drivers' install:
+ *   - tb_xdomain_generation_stale (the gate)
+ *   - tb_xdomain_services_added/removed/changed (the service-set predicates)
+ *   - TB_XNEG_ENUMERATE/RECONNECT (the forced-rescan that binds a newly-
+ *     advertised service after a soft reload whose notification was lost)
+ * Userspace mirror: kernel/tests/tbnet_bind_userspace.c. Keep in lockstep.
+ * ============================================================================
+ */
+struct xneg_link_peer { TB_XNEG_STATE; };
+
+/* a driver poll: re-read iff notified OR a reconnect forced a rescan */
+static void xneg_poll(struct xneg_link_peer *self,
+		      const struct xneg_link_peer *peer, bool notified)
+{
+	if (!(notified || self->xneg_force_rescan))
+		return;
+	TB_XNEG_ENUMERATE(self, peer->xneg_local_gen, peer->xneg_local_svcs,
+			  /*_bind*/ (void)svc, /*_unbind*/ (void)svc);
+}
+
+/* soft reload flipping tbnet_identity=stock; fix forces the rescan, notify lost */
+static void xneg_reload_add_tbnet(struct xneg_link_peer *self, bool fix)
+{
+	if (fix)
+		TB_XNEG_RECONNECT(self);
+	else
+		tb_xdomain_handshake_reset(&self->xneg_hs);
+	TB_XNEG_ADVERTISE(self, TB_XSVC_NATIVE | TB_XSVC_TBNET);
+}
+
+/* coordinated reload adding tbnet; returns whether BOTH peers bound tbnet */
+static bool xneg_tbnet_binds_after_reload(bool fix)
+{
+	struct xneg_link_peer a, b;
+
+	TB_XNEG_INIT(&a, TB_XSVC_NATIVE);
+	TB_XNEG_INIT(&b, TB_XSVC_NATIVE);
+	xneg_poll(&a, &b, true);
+	xneg_poll(&b, &a, true);
+	xneg_reload_add_tbnet(&a, fix);
+	xneg_reload_add_tbnet(&b, fix);
+	for (int i = 0; i < 10; i++) {		/* notifications never arrive */
+		xneg_poll(&a, &b, false);
+		xneg_poll(&b, &a, false);
+	}
+	return TB_XNEG_BOUND(&a, TB_XSVC_TBNET) && TB_XNEG_BOUND(&b, TB_XSVC_TBNET);
+}
+
+/* the gate: only a strictly-newer gen accepts; a 0 cache forces accept */
+static void tbv_test_xneg_generation_gate(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(false, 1, 7)); /* first read */
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 5, 5));   /* equal: stale */
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 4, 5));   /* older: stale */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 6, 5));  /* newer: ok */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 1, 0));  /* forced re-read */
+}
+
+/* the service-set predicates that drive bind/unbind */
+static void tbv_test_xneg_service_set_predicates(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, tb_xdomain_services_added(TB_XSVC_NATIVE,
+			TB_XSVC_NATIVE | TB_XSVC_TBNET), (u32)TB_XSVC_TBNET);
+	KUNIT_EXPECT_EQ(test, tb_xdomain_services_removed(
+			TB_XSVC_NATIVE | TB_XSVC_TBNET, TB_XSVC_NATIVE),
+			(u32)TB_XSVC_TBNET);
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_service_set_changed(TB_XSVC_NATIVE,
+			TB_XSVC_NATIVE | TB_XSVC_TBNET));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_service_set_changed(TB_XSVC_NATIVE,
+			TB_XSVC_NATIVE));
+}
+
+/*
+ * THE renegotiation gap: after a coordinated soft reload that advertises tbnet,
+ * the peer binds thunderbolt_net ONLY if the reconnect forces a directory
+ * rescan. Trusting the (lost) best-effort notification strands it -- the
+ * "thunderbolt_net loads then unloads, no tbX iface" symptom.
+ */
+static void tbv_test_xneg_tbnet_bind_renegotiation(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, xneg_tbnet_binds_after_reload(false)); /* the bug */
+	KUNIT_EXPECT_TRUE(test, xneg_tbnet_binds_after_reload(true));   /* the fix */
+}
+
 static struct kunit_case tbv_ack_routing_test_cases[] = {
+	KUNIT_CASE(tbv_test_xneg_generation_gate),
+	KUNIT_CASE(tbv_test_xneg_service_set_predicates),
+	KUNIT_CASE(tbv_test_xneg_tbnet_bind_renegotiation),
 	KUNIT_CASE(tbv_test_native_handshake_hang),
 	KUNIT_CASE(tbv_test_native_rehello_supersede),
 	KUNIT_CASE(tbv_test_native_rehello_changed_hops),
