@@ -1414,6 +1414,37 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 	return 0;
 }
 
+/*
+ * Disable an enabled tunnel but KEEP the rings started, returning the path to
+ * TBV_PATH_RING_STARTED so tbv_path_enable_tunnel() can re-run with a different
+ * peer out-hop. Used when a peer soft-reloads and re-HELLOs with a changed
+ * transmit_path (native_control.c re-HELLO supersede): the live tunnel points at
+ * a hop the peer no longer owns, and enable_tunnel() would otherwise reject the
+ * new hop with -EBUSY (this releases the in-hopid so the realloc succeeds). The
+ * disable mirrors tbv_path_destroy()'s tunnel-teardown branch.
+ */
+int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd)
+{
+	if (path->state != TBV_PATH_TUNNEL_ENABLED)
+		return -EINVAL;
+
+	if (destroy_disable_paths)
+		tb_xdomain_disable_paths(xd, path->local_transmit_path,
+					 path->local_tx_hop,
+					 path->remote_transmit_path,
+					 path->local_rx_hop);
+	if (path->remote_transmit_path >= 0) {
+		tb_xdomain_release_in_hopid(xd, path->remote_transmit_path);
+		path->remote_transmit_path = -1;
+	}
+	path->state = TBV_PATH_RING_STARTED;
+	pr_info("disabled tunnel for rehop route=0x%llx rail=0x%x out_hop=%d tx_hop=%d rx_hop=%d\n",
+		path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
+		path->rail ? path->rail->rail_id : 0xffffffff,
+		path->local_transmit_path, path->local_tx_hop, path->local_rx_hop);
+	return 0;
+}
+
 static struct tbv_tx_packet *
 tbv_path_alloc_data_packet_owned(struct tbv_path *path, u8 *buf, u32 len,
 				 tbv_path_tx_done_fn done, void *done_ctx)

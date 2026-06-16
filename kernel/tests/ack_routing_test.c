@@ -345,9 +345,55 @@ static void tbv_test_native_rehello_supersede(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tbv_rail_data_ready(&rail));
 }
 
+/*
+ * Changed-hops rehop: when the re-HELLO carries a different out-hop than the
+ * live tunnel was enabled with, supersede alone is not enough -- the tunnel must
+ * be disabled (-> RING_STARTED) and re-enabled with the new hop, else the rail
+ * re-confirms data-ready into a dead hop (enable_tunnel rejects the change with
+ * -EBUSY, path.c:1380). Models the work's rehop path + tbv_path_*_tunnel state
+ * transitions. Mirror: reconnect_userspace.c scenario 2.
+ */
+static void tbv_test_native_rehello_changed_hops(struct kunit *test)
+{
+	struct tbv_peer peer = { .backend = TBV_BACKEND_NATIVE };
+	struct tbv_rail rail;
+	bool rehop;
+
+	memset(&rail, 0, sizeof(rail));
+	rail.peer = &peer;
+	rail.path.state = TBV_PATH_TUNNEL_ENABLED;
+	rail.path.remote_transmit_path = 5;	/* tunnel enabled with peer hop 5 */
+	rail.remote_transmit_path = 5;
+	rail.native_negotiated = true;
+	rail.native_hs.request_sent = true;
+	rail.native_hs.peer_seen = true;
+
+	/* inbound HELLO with a new hop (9): supersede + flag rehop */
+	rail.remote_transmit_path = 9;
+	rehop = rail.path.state == TBV_PATH_TUNNEL_ENABLED &&
+		rail.path.remote_transmit_path != rail.remote_transmit_path;
+	tb_xdomain_handshake_supersede(&rail.native_hs);
+	KUNIT_EXPECT_TRUE(test, rehop);
+
+	/* work: disable stale tunnel, re-enable with new hop, re-handshake */
+	if (rehop) {
+		rail.path.remote_transmit_path = -1;
+		rail.path.state = TBV_PATH_RING_STARTED;
+	}
+	rail.path.remote_transmit_path = rail.remote_transmit_path;
+	rail.path.state = TBV_PATH_TUNNEL_ENABLED;
+	rail.native_hs.request_sent = true;
+	rail.native_hs.peer_seen = true;
+
+	KUNIT_EXPECT_TRUE(test, tbv_rail_data_ready(&rail));
+	KUNIT_EXPECT_EQ(test, rail.path.remote_transmit_path,
+			rail.remote_transmit_path);
+}
+
 static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_test_native_handshake_hang),
 	KUNIT_CASE(tbv_test_native_rehello_supersede),
+	KUNIT_CASE(tbv_test_native_rehello_changed_hops),
 	KUNIT_CASE(tbv_test_native_handshake_multirail),
 	KUNIT_CASE(tbv_test_native_kick_rearm),
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),

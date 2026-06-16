@@ -297,6 +297,15 @@ struct tbv_rail {
 	 * reload cannot strand the rail (see tb_test_xdomain_negotiation_hang).
 	 */
 	struct tb_xdomain_handshake native_hs;
+	/*
+	 * Set when an inbound re-HELLO carried a transmit_path different from the
+	 * one the live tunnel was enabled with (the peer reloaded with new rings).
+	 * tbv_native_control_work() then disables the stale tunnel back to
+	 * RING_STARTED so the tunnel phase re-enables it with the new hop, instead
+	 * of leaving a data-ready rail pointed at a dead hop. Reproduced by
+	 * reconnect_userspace.c scenario 2 / tbv_test_native_rehello_changed_hops.
+	 */
+	bool native_tunnel_rehop;
 	bool native_work_stop;
 };
 
@@ -860,6 +869,7 @@ int tbv_path_alloc_rings(struct tbv_path *path, struct tb_xdomain *xd,
 int tbv_path_start_rings(struct tbv_path *path);
 int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 			   int remote_transmit_path);
+int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd);
 void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size);
 void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits);
 int tbv_path_reserve_data(struct tbv_path *path, u32 frames);

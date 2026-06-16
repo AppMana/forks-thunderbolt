@@ -352,8 +352,23 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			 * must not self-reset. Reproduced by reconnect_userspace.c
 			 * / tbv_test_native_rehello_supersede.
 			 */
-			if (supersede)
+			if (supersede) {
+				/*
+				 * If the live tunnel was enabled with a different
+				 * out-hop than this HELLO carries, the peer reloaded
+				 * with fresh rings: flag a rehop so the work disables
+				 * and re-enables the tunnel with the new hop. Without
+				 * this the rail re-confirms data-ready into a dead hop
+				 * (enable_tunnel() rejects the change with -EBUSY,
+				 * path.c:1380). Reproduced by reconnect_userspace.c
+				 * scenario 2 / tbv_test_native_rehello_changed_hops.
+				 */
+				if (rail->path.state == TBV_PATH_TUNNEL_ENABLED &&
+				    rail->path.remote_transmit_path !=
+					    (int)remote->transmit_path)
+					rail->native_tunnel_rehop = true;
 				tb_xdomain_handshake_supersede(&rail->native_hs);
+			}
 			ret = 0;
 			goto out;
 		}
@@ -846,6 +861,26 @@ static void tbv_native_control_work(struct work_struct *work)
 				rail->native_attempts = 0;
 				retry = true;
 			}
+			goto out;
+		}
+	}
+
+	/*
+	 * Peer reloaded with a different out-hop (flagged by the inbound-HELLO
+	 * supersede in tbv_native_control_apply_remote): disable the stale tunnel
+	 * back to RING_STARTED so the tunnel phase below re-enables it with the new
+	 * remote_transmit_path. Without this the rail re-confirms data-ready into a
+	 * dead hop. Reproduced by reconnect_userspace.c scenario 2.
+	 */
+	if (rail->native_tunnel_rehop &&
+	    rail->path.state == TBV_PATH_TUNNEL_ENABLED) {
+		mutex_lock(&peer->control_lock);
+		ret = tbv_path_disable_tunnel(&rail->path, peer->xd);
+		mutex_unlock(&peer->control_lock);
+		rail->native_tunnel_rehop = false;
+		if (ret) {
+			rail->native_last_error = ret;
+			retry = true;
 			goto out;
 		}
 	}
