@@ -123,4 +123,141 @@ static inline bool tb_xdomain_handshake_supersede(struct tb_xdomain_handshake *h
 	return true;
 }
 
+/*
+ * Service-set negotiation. One XDomain link advertises a SET of protocol
+ * services in its property directory; the peer's core enumerates the set and
+ * binds a matching service driver to each entry (thunderbolt_net to the stock
+ * ThunderboltIP UUID, thunderbolt_ibverbs to the native UUID). The set is
+ * dynamic: thunderbolt_ibverbs adds the ThunderboltIP entry only when
+ * tbnet_identity != off, so flipping that param (or a reload that flips it)
+ * is a property-directory change the peer MUST re-read to (un)bind tbnet.
+ *
+ * Same failure mode as the property generation above: the change rides the
+ * best-effort properties-changed notification with no link edge, so a lost
+ * notification leaves the peer's enumerated set stale and the newly-added
+ * service never binds (thunderbolt_net loads then unloads -- no tbX appears).
+ * Shared by the advertiser (ibverbs, which must bump generation on a set change)
+ * and the binder (tbnet, which must (re)bind on a newly-present entry).
+ */
+enum {
+	TB_XSVC_NATIVE = 1u << 0,	/* thunderbolt_ibverbs native data */
+	TB_XSVC_TBNET  = 1u << 1,	/* stock ThunderboltIP / thunderbolt_net */
+};
+
+/**
+ * tb_xdomain_services_added() - services present now but not before.
+ * @prev: the service mask the peer had previously enumerated
+ * @now:  the service mask in the freshly-read property block
+ *
+ * The core must bind a service driver for each bit returned here. Pure helper
+ * so the enumerate path and the KUnit/userspace mirrors share one rule.
+ */
+static inline u32 tb_xdomain_services_added(u32 prev, u32 now)
+{
+	return now & ~prev;
+}
+
+/**
+ * tb_xdomain_services_removed() - services gone now that were present before.
+ * The core must unbind a service driver for each bit returned here.
+ */
+static inline u32 tb_xdomain_services_removed(u32 prev, u32 now)
+{
+	return prev & ~now;
+}
+
+/**
+ * tb_xdomain_service_set_changed() - did the LOCAL advertised set change?
+ *
+ * The advertiser calls this when its service set is (re)computed (e.g. on a
+ * tbnet_identity change). Contract: a true result MUST bump the local property
+ * generation, so the peer's tb_xdomain_generation_stale() gate accepts the
+ * re-read and re-enumerates -- otherwise an unchanged generation strands the
+ * new/removed service exactly like a stale handshake strands a peer.
+ */
+static inline bool tb_xdomain_service_set_changed(u32 prev_local, u32 now_local)
+{
+	return prev_local != now_local;
+}
+
+/*
+ * ============================================================================
+ * Installable cohesive negotiation
+ * ============================================================================
+ * The predicates above are the building blocks; these macros compose them into
+ * drop-in state + operations so thunderbolt_ibverbs and thunderbolt_net "install"
+ * the SAME negotiation into their own per-link objects. Because both sides run
+ * byte-identical logic, a service-set change advertised by one driver is honoured
+ * by the peer's other driver -- that is the cohesion: tbnet binds iff ibverbs
+ * advertised it, through the same gate and the same forced-rescan-on-reconnect.
+ *
+ * A driver:
+ *   1. embeds TB_XNEG_STATE; in its per-peer struct,
+ *   2. TB_XNEG_INIT() on connect, TB_XNEG_RECONNECT() on every soft reconnect
+ *      (service reload / properties-changed / rescan trigger),
+ *   3. TB_XNEG_ADVERTISE() whenever it recomputes its local service set
+ *      (e.g. a tbnet_identity flip adds/removes TB_XSVC_TBNET),
+ *   4. TB_XNEG_ENUMERATE() on each notification/poll, passing _bind/_unbind
+ *      statements that (un)attach the per-service driver (tbnet netdev, ibverbs
+ *      rail) for the bits in `svc`.
+ * The forced-rescan latch makes step 4 re-read even when the best-effort
+ * properties-changed notification was lost -- the bug this prevents is the peer
+ * never re-enumerating after a soft reconnect, stranding the new service.
+ */
+#define TB_XNEG_STATE						\
+	struct tb_xdomain_handshake xneg_hs;			\
+	bool xneg_have_remote;					\
+	u32  xneg_cached_gen;					\
+	u32  xneg_remote_svcs;					\
+	u32  xneg_bound_svcs;					\
+	u32  xneg_local_svcs;					\
+	u32  xneg_local_gen;					\
+	bool xneg_force_rescan
+
+#define TB_XNEG_INIT(o, local_services) do {			\
+	tb_xdomain_handshake_reset(&(o)->xneg_hs);		\
+	(o)->xneg_have_remote = false;				\
+	(o)->xneg_cached_gen = 0;				\
+	(o)->xneg_remote_svcs = 0;				\
+	(o)->xneg_bound_svcs = 0;				\
+	(o)->xneg_local_svcs = (local_services);		\
+	(o)->xneg_local_gen = 1;				\
+	(o)->xneg_force_rescan = true;				\
+} while (0)
+
+/* a soft reconnect: re-arm the handshake AND force the next directory re-read */
+#define TB_XNEG_RECONNECT(o) do {				\
+	tb_xdomain_handshake_reset(&(o)->xneg_hs);		\
+	(o)->xneg_force_rescan = true;				\
+} while (0)
+
+/* local service set (re)computed; bump the generation on a real change so the
+ * peer's tb_xdomain_generation_stale() gate accepts the re-read */
+#define TB_XNEG_ADVERTISE(o, services) do {			\
+	if (tb_xdomain_service_set_changed((o)->xneg_local_svcs, (services))) { \
+		(o)->xneg_local_svcs = (services);		\
+		(o)->xneg_local_gen++;				\
+	}							\
+} while (0)
+
+/* re-read the peer directory through the gate (forced after a reconnect) and
+ * run _bind/_unbind with `u32 svc` = the changed-service mask */
+#define TB_XNEG_ENUMERATE(o, peer_gen, peer_svcs, _bind, _unbind) do {	\
+	u32 __cached = (o)->xneg_force_rescan ? 0u : (o)->xneg_cached_gen; \
+	if (!tb_xdomain_generation_stale((o)->xneg_have_remote, (peer_gen), __cached)) { \
+		u32 svc;						\
+		u32 __add = tb_xdomain_services_added((o)->xneg_remote_svcs, (peer_svcs)); \
+		u32 __del = tb_xdomain_services_removed((o)->xneg_remote_svcs, (peer_svcs)); \
+		(o)->xneg_have_remote = true;			\
+		(o)->xneg_cached_gen = (peer_gen);		\
+		(o)->xneg_remote_svcs = (peer_svcs);		\
+		(o)->xneg_force_rescan = false;			\
+		if (__add) { svc = __add; (o)->xneg_bound_svcs |= __add; { _bind; } } \
+		if (__del) { svc = __del; (o)->xneg_bound_svcs &= ~__del; { _unbind; } } \
+		(void)svc;					\
+	}							\
+} while (0)
+
+#define TB_XNEG_BOUND(o, service)  (((o)->xneg_bound_svcs & (service)) == (service))
+
 #endif /* _LINUX_THUNDERBOLT_NEGOTIATION_H */
