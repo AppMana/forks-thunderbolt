@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 typedef uint32_t u32;
-#include "../thunderbolt_negotiation.h"
+#include "../../../thunderbolt/thunderbolt_negotiation.h"
 
 static int failures;
 #define CHECK(c, m) do { \

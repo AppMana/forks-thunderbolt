@@ -19,7 +19,7 @@
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
-#include "thunderbolt_negotiation.h"
+#include "../../thunderbolt/thunderbolt_negotiation.h"
 #include <linux/xarray.h>
 
 #include "proto/config.h"

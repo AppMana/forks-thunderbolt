@@ -30,7 +30,7 @@
 #ifndef _TB_NEGOTIATION_MODEL_H
 #define _TB_NEGOTIATION_MODEL_H
 
-#include "../thunderbolt_negotiation.h"
+#include "../../../thunderbolt/thunderbolt_negotiation.h"
 
 /*
  * Defaults; the real values are per-host (set at boot) so tests can sweep them
