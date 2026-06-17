@@ -35,11 +35,22 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 headers_pkg=linux-headers-amd64
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-	headers_pkg=linux-headers-generic
+	# The fleet runs noble's HWE 6.17 kernel and this is a v6.17-based fork, so
+	# build against matching 6.17 headers (stock linux-headers-generic is 6.8 and
+	# would fail to compile). The HWE metapackage tracks the same kernel the
+	# nodes use.
+	headers_pkg="${TBFIX_HEADERS_PKG:-linux-headers-generic-hwe-24.04}"
 fi
 apt-get install -y -qq --no-install-recommends \
 	build-essential ca-certificates dkms file kmod "$headers_pkg" make
-apt-get install -y -qq "$artefact"
+# Stage the package's /usr/src tree WITHOUT running its postinst dkms
+# autoinstall. In CI the runner's kernel ($(uname -r), e.g. *-azure) headers are
+# not present in the build container, so an autoinstall against it fails. We
+# verify package structure here (and optionally compile below via
+# TBFIX_VERIFY_DKMS_BUILD=1 against matching headers); the real per-node compile
+# happens at deploy time. `dpkg --unpack` runs preinst + extracts the payload
+# but skips configure/postinst (deps were installed just above).
+dpkg --unpack "$artefact"
 
 modname=thunderbolt-tbfix
 src_dir="$(find /usr/src -maxdepth 1 -type d -name "${modname}-*" -print -quit)"
@@ -48,7 +59,7 @@ version="$(awk -F'"' '/^PACKAGE_VERSION=/ { print $2; exit }' "$src_dir/dkms.con
 printf '==> Source dir: %s\n' "$src_dir"
 printf '==> Version:    %s\n' "$version"
 
-for required in dkms.conf Makefile thunderbolt thunderbolt_net; do
+for required in dkms.conf Makefile drivers/thunderbolt drivers/net/thunderbolt; do
 	[[ -e "$src_dir/$required" ]] ||
 		{ printf 'error: missing %s in %s\n' "$required" "$src_dir" >&2; exit 1; }
 done
@@ -59,10 +70,14 @@ if [[ "${TBFIX_VERIFY_DKMS_BUILD:-0}" != "1" ]]; then
 	exit 0
 fi
 
-kver="$(find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
+# Pick the installed kernel that actually has build headers (the HWE 6.17 we
+# installed above), not $(uname -r) which in CI is the headerless runner kernel.
+kver="$(for d in /lib/modules/*/build; do [[ -e "$d" ]] && basename "$(dirname "$d")"; done | sort -V | tail -n 1)"
 [[ -n "$kver" && -d "/lib/modules/$kver/build" ]] || { printf 'error: no kernel headers found\n' >&2; exit 1; }
 printf '==> Kernel:     %s\n' "$kver"
 
+# dpkg --unpack staged the source but did not run the postinst dkms add.
+dkms add -m "$modname" -v "$version" || true
 if ! dkms build -m "$modname" -v "$version" -k "$kver" --force; then
 	cat "/var/lib/dkms/$modname/$version/build/make.log" >&2 || true
 	exit 1

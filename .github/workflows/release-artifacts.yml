@@ -35,11 +35,12 @@ jobs:
             bash tools/ci/distro-package.sh ubuntu
           ls -la dist/
 
-      - name: Verify tbfix DKMS deb install
+      - name: Verify tbfix DKMS deb builds (noble HWE 6.17 headers)
         run: |
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
+            -e TBFIX_VERIFY_DKMS_BUILD=1 \
             ubuntu:24.04 \
             bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
 
