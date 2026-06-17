@@ -9247,36 +9247,53 @@ static int tbv_ibdev_register_one(struct tbv_state *state,
 /*
  * Compute the deterministic ib_device name suffix for a per-lane rail.
  *
- * The historical commit (module/ ca70710) called out that probe-order
- * naming gives different ib_device numbers on different nodes for the
- * same physical lane, which breaks any tooling that pins to "usb4_rdma2".
- * Use (tb_domain_index * TBV_NATIVE_MAX_LANES + lane) so the same lane on
- * the same domain always gets the same name. Apple peers don't carry a
- * lane subdivision, so they take the per-domain "Apple slot" which lives
- * just above the native lane range.
+ * The historical commit (module/ ca70710) called out that probe-order naming
+ * gives different ib_device numbers on different nodes for the same physical
+ * lane, which breaks any tooling that pins to "usb4_rdma2". The first fix used
+ * (tb_domain_index * lanes + lane) so the same lane on the same domain always
+ * got the same name -- but it ignored that ONE domain (one controller) reaches
+ * MULTIPLE neighbours over different downstream adapters. A mid-chain host
+ * cabled to two neighbours has two native rails, both on domain 0 lane 0, so
+ * both resolved to "usb4_rdma0" and the second ib_register_device() returned
+ * -ENFILE; the second neighbour's rail never came up (observed on appmana-018,
+ * cabled to 002 and 027). Fold rail->key.local_adapter in so distinct
+ * (domain, adapter, lane) tuples never collide, while a bonded link's lanes
+ * still disambiguate by lane and a given physical rail keeps a stable index.
+ * Pure arithmetic lives in tbv_ibdev_name_index() (KUnit + userspace mirror).
  */
-static int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
+int tbv_ibdev_name_index(int domain_idx, u32 local_adapter, u32 native_lane,
+			 int apple, unsigned int max_lanes)
 {
-	int domain_idx;
 	unsigned int slot;
 
+	if (domain_idx < 0)
+		return -ENODEV;
+	if (local_adapter >= TBV_NAME_MAX_ADAPTERS)
+		return -ERANGE;
+	if (apple) {
+		/* Apple rails carry no lane subdivision: the per-(domain,adapter)
+		 * slot just above the native lane range. */
+		slot = max_lanes;
+	} else {
+		if (native_lane >= max_lanes)
+			return -ERANGE;
+		slot = native_lane;
+	}
+
+	return ((unsigned int)domain_idx * TBV_NAME_MAX_ADAPTERS + local_adapter)
+		* (max_lanes + 1) + slot;
+}
+
+static int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
+{
 	if (!rail || !rail->peer || !rail->peer->xd || !rail->peer->xd->tb)
 		return -ENODEV;
 
-	domain_idx = rail->peer->xd->tb->index;
-	if (domain_idx < 0)
-		return -ENODEV;
-
-	if (rail->peer->backend == TBV_BACKEND_NATIVE) {
-		if (rail->native_lane >= TBV_NATIVE_MAX_LANES)
-			return -ERANGE;
-		slot = rail->native_lane;
-	} else {
-		/* One slot per (domain, backend) for Apple. */
-		slot = TBV_NATIVE_MAX_LANES;
-	}
-
-	return domain_idx * (TBV_NATIVE_MAX_LANES + 1) + slot;
+	return tbv_ibdev_name_index(rail->peer->xd->tb->index,
+				    rail->key.local_adapter,
+				    rail->native_lane,
+				    rail->peer->backend != TBV_BACKEND_NATIVE,
+				    TBV_NATIVE_MAX_LANES);
 }
 
 int tbv_ibdev_rail_event(struct tbv_state *state, struct tbv_rail *rail,
