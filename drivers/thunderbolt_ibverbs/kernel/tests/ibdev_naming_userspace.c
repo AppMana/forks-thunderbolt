@@ -2,21 +2,20 @@
 /*
  * Userspace mirror of kernel/tests/ibdev_naming_test.c (KUnit).
  *
- * Models the REAL per-rail naming inputs seen on a mid-chain node, captured
- * live on appmana-022 (cabled to neighbours 021 and 023). Both native rails
- * report the SAME (domain 0, native_lane 0, local_adapter 0); the ONLY field
- * that differs between them is the XDomain ROUTE (downstream port): 0x3 vs 0x1.
- * Observed dmesg:
- *   registered native ib_device usb4_rdma0 ... route=0x3
- *   failed to register per-rail ib_device usb4_rdma0: -23 ... route=0x1
+ * Drives tbv_ibdev_rail_name_index() -- the CALLER that reads fields off a
+ * struct tbv_rail -- because the defect was there: it chose which rail-key
+ * field to key the ib_device name on. Two mock rails model appmana-022's
+ * neighbours (021 and 023): identical domain / native_lane / local_adapter,
+ * differing ONLY in key.route (downstream port 0x3 vs 0x1). The contract is
+ * "two neighbours -> two names"; this test is red while the caller keys on
+ * local_adapter (both 0 -> collide -> the 2nd ib_register_device() is -ENFILE)
+ * and green once it keys on the route. The test body never changes between the
+ * two -- only the code under test does.
  *
- * tbv_ibdev_name_index() keys the name on (domain, route downstream-port, lane).
- * The two rails share domain/lane/local_adapter and differ only in route, so
- * keying on the route's low byte (the downstream port) gives them distinct
- * names. This mirror feeds the function the REAL inputs and asserts the
- * contract (two rails -> two names).
+ * Keep in lockstep with the KUnit. The fleet kernels lack CONFIG_KUNIT.
  *
  * build+run: cc -O2 -Wall -o /tmp/naming_test ibdev_naming_userspace.c && /tmp/naming_test
+ * (define BUGGY_CALLER to compile the pre-fix local_adapter caller and watch it fail)
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -32,6 +31,14 @@ typedef uint64_t u64;
 #ifndef ERANGE
 #define ERANGE 34
 #endif
+
+/* --- minimal struct shapes (only the fields the caller touches) --- */
+enum tbv_backend_type { TBV_BACKEND_APPLE, TBV_BACKEND_NATIVE };
+struct tb { int index; };
+struct tb_xdomain { struct tb *tb; };
+struct tbv_rail_key { u64 route; u32 local_adapter; };
+struct tbv_peer { enum tbv_backend_type backend; struct tb_xdomain *xd; };
+struct tbv_rail { struct tbv_peer *peer; struct tbv_rail_key key; u32 native_lane; };
 
 /* --- MIRROR of tbv_ibdev_name_index() in kernel/ibdev.c (verbatim) --- */
 static int tbv_ibdev_name_index(int domain_idx, u32 route_port,
@@ -55,19 +62,21 @@ static int tbv_ibdev_name_index(int domain_idx, u32 route_port,
 		* (max_lanes + 1) + slot;
 }
 
-/*
- * A per-rail naming input exactly as tbv_ibdev_rail_name_index() reads it off a
- * struct tbv_rail: the tb domain index, the rail key's route (whose low byte is
- * the downstream port), and the native lane. The two rails below are the
- * literal values from appmana-022.
- */
-struct rail_id { int domain; u32 local_adapter; u64 route; u32 native_lane; int apple; };
-
-/* what the driver computes: the route's low byte is the downstream port */
-static int name_index_of(const struct rail_id *r)
+/* --- MIRROR of tbv_ibdev_rail_name_index() in kernel/ibdev.c --- */
+static int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
 {
-	return tbv_ibdev_name_index(r->domain, (u32)(r->route & 0xff),
-				    r->native_lane, r->apple,
+	u32 disc;
+
+	if (!rail || !rail->peer || !rail->peer->xd || !rail->peer->xd->tb)
+		return -ENODEV;
+#ifdef BUGGY_CALLER
+	disc = rail->key.local_adapter;            /* the bug: constant 0 */
+#else
+	disc = (u32)(rail->key.route & 0xff);      /* the fix: downstream port */
+#endif
+	return tbv_ibdev_name_index(rail->peer->xd->tb->index, disc,
+				    rail->native_lane,
+				    rail->peer->backend != TBV_BACKEND_NATIVE,
 				    TBV_NATIVE_MAX_LANES);
 }
 
@@ -79,21 +88,20 @@ static int failures;
 
 int main(void)
 {
-	/* appmana-022's two native rails: differ ONLY in route */
-	struct rail_id to_021 = { .domain = 0, .local_adapter = 0, .route = 0x3, .native_lane = 0 };
-	struct rail_id to_023 = { .domain = 0, .local_adapter = 0, .route = 0x1, .native_lane = 0 };
-	int a, b;
+	struct tb dom = { .index = 0 };
+	struct tb_xdomain xd = { .tb = &dom };
+	struct tbv_peer p021 = { .backend = TBV_BACKEND_NATIVE, .xd = &xd };
+	struct tbv_peer p023 = { .backend = TBV_BACKEND_NATIVE, .xd = &xd };
+	/* identical domain/lane/local_adapter; only route differs */
+	struct tbv_rail to_021 = { .peer = &p021, .key = { .route = 0x3, .local_adapter = 0 }, .native_lane = 0 };
+	struct tbv_rail to_023 = { .peer = &p023, .key = { .route = 0x1, .local_adapter = 0 }, .native_lane = 0 };
+	int a = tbv_ibdev_rail_name_index(&to_021);
+	int b = tbv_ibdev_rail_name_index(&to_023);
 
-	printf("tbv_ibdev_name_index multi-rail naming (real appmana-022 rails):\n");
-
-	a = name_index_of(&to_021);
-	b = name_index_of(&to_023);
+	printf("tbv_ibdev_rail_name_index on the real appmana-022 rails:\n");
 	printf("  rail->021 (route 0x3) -> usb4_rdma%d\n", a);
 	printf("  rail->023 (route 0x1) -> usb4_rdma%d\n", b);
-
 	CHECK(a >= 0 && b >= 0, "both rails name successfully");
-	/* THE BUG: same (domain, local_adapter, lane), different route -> the
-	 * names MUST differ, or the second ib_register_device() is -ENFILE. */
 	CHECK(a != b, "two neighbours on one node get DIFFERENT usb4_rdma names");
 
 	printf("%s\n", failures ? "FAILED" : "PASSED");

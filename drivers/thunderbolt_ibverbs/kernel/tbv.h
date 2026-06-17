@@ -850,6 +850,13 @@ s32 tbv_psn_delta(u32 a, u32 b);
  */
 int tbv_ibdev_name_index(int domain_idx, u32 route_port, u32 native_lane,
 			 int apple, unsigned int max_lanes);
+/*
+ * tbv_ibdev_rail_name_index reads the naming inputs off a struct tbv_rail and
+ * calls tbv_ibdev_name_index. Exposed for kunit: this is where the field choice
+ * lives (it must key on the rail key's route, NOT local_adapter, which is 0 for
+ * every native rail on a node).
+ */
+int tbv_ibdev_rail_name_index(const struct tbv_rail *rail);
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
 /*
  * tbv_gid_identity_verdict classifies a dgid against a stored peer identity.

@@ -1,52 +1,79 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KUnit tests for thunderbolt_ibverbs per-rail ib_device naming
- * (tbv_ibdev_name_index in kernel/ibdev.c).
+ * KUnit tests for thunderbolt_ibverbs per-rail ib_device naming.
  *
- * Models the REAL inputs seen on a mid-chain node, captured live on
- * appmana-022 (cabled to 021 and 023). Both native rails report the SAME
- * (domain 0, native_lane 0, local_adapter 0); only the XDomain ROUTE differs
- * (downstream port 0x3 vs 0x1). The current index keys on
- * (domain, local_adapter, lane) and never looks at the route, so both rails
- * map to usb4_rdma0 and the second ib_register_device() returns -ENFILE (-23):
- *   registered native ib_device usb4_rdma0 ... route=0x3
- *   failed to register per-rail ib_device usb4_rdma0: -23 ... route=0x1
+ * Drives tbv_ibdev_rail_name_index() -- the CALLER that reads fields off a
+ * struct tbv_rail -- because that is where the defect lived: which rail-key
+ * field the name is keyed on. Two mock rails model appmana-022's neighbours
+ * (021 and 023): identical tb domain, native_lane and local_adapter, differing
+ * ONLY in key.route (downstream port 0x3 vs 0x1). The contract is "two
+ * neighbours -> two names"; the test is red while the caller keys on
+ * local_adapter (both 0 -> usb4_rdma0 -> the 2nd ib_register_device() is
+ * -ENFILE/-23) and green once it keys on the route. The test body does not
+ * change between the two -- only the code under test does.
  *
- * This suite FAILS against the current logic (the bug is real, on hardware) and
- * passes once the index keys on the route. Keep in lockstep with the userspace
- * mirror tests/ibdev_naming_userspace.c (the fleet kernels lack CONFIG_KUNIT).
+ * Built into the module on a CONFIG_KUNIT kernel (see kernel/Makefile); the
+ * fleet's Ubuntu generic kernels lack CONFIG_KUNIT, so the same cases run
+ * on-host via tests/ibdev_naming_userspace.c (which can compile the pre-fix
+ * caller with -DBUGGY_CALLER to show the red).
  */
 #include <kunit/test.h>
+#include <linux/thunderbolt.h>
 #include "../tbv.h"
 
 #define L TBV_NATIVE_MAX_LANES
 
-/*
- * appmana-022's two native rails as tbv_ibdev_rail_name_index() reads them off
- * each struct tbv_rail: identical domain/local_adapter/native_lane, differing
- * only in rail->key.route, whose low byte is the downstream port (0x3 vs 0x1).
- * Keying the index on that port gives them distinct names.
- */
+/* Build a native rail to a peer reached over @route on tb domain 0. */
+static void mock_rail(struct tbv_rail *rail, struct tbv_peer *peer,
+		      struct tb_xdomain *xd, struct tb *dom, u64 route)
+{
+	dom->index = 0;
+	xd->tb = dom;
+	peer->backend = TBV_BACKEND_NATIVE;
+	peer->xd = xd;
+	rail->peer = peer;
+	rail->key.route = route;
+	rail->key.local_adapter = 0;	/* 0 for every native rail -- the trap */
+	rail->native_lane = 0;
+}
+
 static void tbv_naming_two_neighbours_must_differ(struct kunit *test)
 {
-	/* rail to 021, route 0x3 -> port 3 */
-	int a = tbv_ibdev_name_index(0, /*route_port=*/0x3, /*lane=*/0, /*apple=*/0, L);
-	/* rail to 023, route 0x1 -> port 1 */
-	int b = tbv_ibdev_name_index(0, /*route_port=*/0x1, /*lane=*/0, /*apple=*/0, L);
+	struct tb dom_a = {0}, dom_b = {0};
+	struct tb_xdomain xd_a = {0}, xd_b = {0};
+	struct tbv_peer p021 = {0}, p023 = {0};
+	struct tbv_rail to_021 = {0}, to_023 = {0};
+	int a, b;
+
+	mock_rail(&to_021, &p021, &xd_a, &dom_a, 0x3);	/* neighbour 021 */
+	mock_rail(&to_023, &p023, &xd_b, &dom_b, 0x1);	/* neighbour 023 */
+
+	a = tbv_ibdev_rail_name_index(&to_021);
+	b = tbv_ibdev_rail_name_index(&to_023);
 
 	KUNIT_EXPECT_GE(test, a, 0);
 	KUNIT_EXPECT_GE(test, b, 0);
-	/* MUST differ or the 2nd ib_register_device() is -ENFILE */
+	/* MUST differ or the 2nd ib_register_device() returns -ENFILE */
 	KUNIT_EXPECT_NE(test, a, b);
 }
 
+/* a bonded link's two lanes to ONE peer (same route) stay distinct by lane */
 static void tbv_naming_lanes_disambiguate(struct kunit *test)
 {
-	/* a bonded link's two lanes to one peer must still get distinct names */
-	KUNIT_EXPECT_NE(test, tbv_ibdev_name_index(0, 0, 0, 0, L),
-			tbv_ibdev_name_index(0, 0, 1, 0, L));
+	struct tb dom = {0};
+	struct tb_xdomain xd = {0};
+	struct tbv_peer peer = {0};
+	struct tbv_rail lane0 = {0}, lane1 = {0};
+
+	mock_rail(&lane0, &peer, &xd, &dom, 0x3);
+	mock_rail(&lane1, &peer, &xd, &dom, 0x3);
+	lane1.native_lane = 1;
+
+	KUNIT_EXPECT_NE(test, tbv_ibdev_rail_name_index(&lane0),
+			tbv_ibdev_rail_name_index(&lane1));
 }
 
+/* pure arithmetic guard: out-of-range lane is rejected */
 static void tbv_naming_errors(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, tbv_ibdev_name_index(-1, 0, 0, 0, L), -ENODEV);

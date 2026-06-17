@@ -9285,7 +9285,7 @@ int tbv_ibdev_name_index(int domain_idx, u32 route_port, u32 native_lane,
 		* (max_lanes + 1) + slot;
 }
 
-static int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
+int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
 {
 	u32 route_port;
 
