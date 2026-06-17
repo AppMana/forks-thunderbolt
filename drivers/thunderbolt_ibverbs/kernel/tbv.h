@@ -19,7 +19,15 @@
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
-#include "../../thunderbolt/thunderbolt_negotiation.h"
+/*
+ * The shared XDomain negotiation header. thunderbolt_ibverbs keeps a
+ * byte-identical copy under proto/ (kept in sync with the canonical
+ * drivers/thunderbolt/thunderbolt_negotiation.h) so this include resolves the
+ * same way in-tree, in the standalone DKMS package and in the split package --
+ * proto/ is always kernel/'s sibling, whereas the canonical drivers/thunderbolt
+ * is not present in the standalone package.
+ */
+#include "../proto/thunderbolt_negotiation.h"
 #include <linux/xarray.h>
 
 #include "proto/config.h"
