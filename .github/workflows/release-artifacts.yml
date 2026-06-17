@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build DKMS deb
+      - name: Build tbfix DKMS deb
         run: |
           mkdir -p dist
           docker run --rm \
@@ -35,7 +35,7 @@ jobs:
             bash tools/ci/distro-package.sh ubuntu
           ls -la dist/
 
-      - name: Verify DKMS deb install
+      - name: Verify tbfix DKMS deb install
         run: |
           docker run --rm \
             -v "$PWD:/work" \
@@ -43,10 +43,40 @@ jobs:
             ubuntu:24.04 \
             bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
 
+      - name: Build ibverbs DKMS deb
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e OUT_DIR=/work/dist \
+            ubuntu:24.04 \
+            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package.sh debian
+          ls -la dist/
+
+      - name: Build usb4-rdma-provider deb (noble)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e OUT_DIR=/work/dist \
+            ubuntu:24.04 \
+            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package-rdma.sh ubuntu
+          ls -la dist/
+
+      - name: Build usb4-rdma-provider deb (jammy)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e OUT_DIR=/work/dist \
+            ubuntu:22.04 \
+            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package-rdma.sh ubuntu
+          ls -la dist/
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: thunderbolt-tbfix-deb
+          name: thunderbolt-debs
           path: dist/*
           if-no-files-found: error
 
