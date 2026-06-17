@@ -9245,33 +9245,34 @@ static int tbv_ibdev_register_one(struct tbv_state *state,
 }
 
 /*
- * Compute the deterministic ib_device name suffix for a per-lane rail.
+ * Compute the deterministic ib_device name suffix for a per-PEER rail.
  *
  * The historical commit (module/ ca70710) called out that probe-order naming
  * gives different ib_device numbers on different nodes for the same physical
- * lane, which breaks any tooling that pins to "usb4_rdma2". The first fix used
- * (tb_domain_index * lanes + lane) so the same lane on the same domain always
- * got the same name -- but it ignored that ONE domain (one controller) reaches
- * MULTIPLE neighbours over different downstream adapters. A mid-chain host
- * cabled to two neighbours has two native rails, both on domain 0 lane 0, so
- * both resolved to "usb4_rdma0" and the second ib_register_device() returned
- * -ENFILE; the second neighbour's rail never came up (observed on appmana-018,
- * cabled to 002 and 027). Fold rail->key.local_adapter in so distinct
- * (domain, adapter, lane) tuples never collide, while a bonded link's lanes
- * still disambiguate by lane and a given physical rail keeps a stable index.
- * Pure arithmetic lives in tbv_ibdev_name_index() (KUnit + userspace mirror).
+ * link, which breaks any tooling that pins to "usb4_rdma2". The first fix used
+ * (tb_domain_index * lanes + lane); a second tried local_adapter -- both wrong,
+ * because ONE domain (one controller) reaches MULTIPLE neighbours and they
+ * share (domain, native_lane 0) AND local_adapter 0. The ONLY field that
+ * differs between a mid-chain node's two rails is the XDomain ROUTE: its low
+ * byte is the downstream port the neighbour is cabled to. Observed live on
+ * appmana-022 (route 0x3 -> 021, route 0x1 -> 023): both resolved to
+ * "usb4_rdma0" so the second ib_register_device() returned -ENFILE/-23 and that
+ * neighbour's rail never came up. Key the name on (domain, route_port, lane):
+ * route_port distinguishes the two neighbours (the live multi-peer case), and
+ * native_lane is retained for the lane-bonded striping case (two rails to ONE
+ * peer, same route, lanes 0 and 1). Pure arithmetic; KUnit + userspace mirror.
  */
-int tbv_ibdev_name_index(int domain_idx, u32 local_adapter, u32 native_lane,
+int tbv_ibdev_name_index(int domain_idx, u32 route_port, u32 native_lane,
 			 int apple, unsigned int max_lanes)
 {
 	unsigned int slot;
 
 	if (domain_idx < 0)
 		return -ENODEV;
-	if (local_adapter >= TBV_NAME_MAX_ADAPTERS)
+	if (route_port >= TBV_NAME_MAX_PORTS)
 		return -ERANGE;
 	if (apple) {
-		/* Apple rails carry no lane subdivision: the per-(domain,adapter)
+		/* Apple rails carry no lane subdivision: the per-(domain,port)
 		 * slot just above the native lane range. */
 		slot = max_lanes;
 	} else {
@@ -9280,17 +9281,27 @@ int tbv_ibdev_name_index(int domain_idx, u32 local_adapter, u32 native_lane,
 		slot = native_lane;
 	}
 
-	return ((unsigned int)domain_idx * TBV_NAME_MAX_ADAPTERS + local_adapter)
+	return ((unsigned int)domain_idx * TBV_NAME_MAX_PORTS + route_port)
 		* (max_lanes + 1) + slot;
 }
 
 static int tbv_ibdev_rail_name_index(const struct tbv_rail *rail)
 {
+	u32 route_port;
+
 	if (!rail || !rail->peer || !rail->peer->xd || !rail->peer->xd->tb)
 		return -ENODEV;
 
+	/*
+	 * The low byte of the XDomain route is the downstream port the peer is
+	 * cabled to on this controller. Chain peers are directly cabled (a
+	 * single-hop route), so this is unique per neighbour and stable across
+	 * reboots/probe order.
+	 */
+	route_port = (u32)(rail->key.route & 0xff);
+
 	return tbv_ibdev_name_index(rail->peer->xd->tb->index,
-				    rail->key.local_adapter,
+				    route_port,
 				    rail->native_lane,
 				    rail->peer->backend != TBV_BACKEND_NATIVE,
 				    TBV_NATIVE_MAX_LANES);

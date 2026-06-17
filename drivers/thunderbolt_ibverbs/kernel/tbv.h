@@ -37,12 +37,12 @@
 #define TBV_NATIVE_PROTOCOL_KEY "tbverbs"
 #define TBV_NATIVE_MAX_LANES 4
 /*
- * Upper bound on a TB downstream-adapter number, used to fold the per-rail
- * local adapter into the deterministic ib_device name index so two neighbours
- * on one domain do not collide (see tbv_ibdev_name_index()). TB adapter numbers
- * fit comfortably below this.
+ * Upper bound on a TB downstream-port number (the low byte of an XDomain
+ * route), used to key the deterministic ib_device name index on the peer's
+ * port so two neighbours on one domain do not collide (see
+ * tbv_ibdev_name_index()). TB port numbers fit comfortably below this.
  */
-#define TBV_NAME_MAX_ADAPTERS 64
+#define TBV_NAME_MAX_PORTS 64
 #define TBV_DATA_PDF_FRAME_START 1
 #define TBV_DATA_PDF_FRAME_END 3
 #define TBV_NATIVE_PRTCID 1
@@ -841,13 +841,14 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
 s32 tbv_psn_delta(u32 a, u32 b);
 /*
- * tbv_ibdev_name_index maps (tb domain, local downstream adapter, native lane)
- * to a deterministic, locally-unique "usb4_rdma%d" suffix. Folding the local
- * adapter in is what keeps a mid-chain host's two neighbour rails (same domain,
- * same lane 0) from colliding on one name and failing ib_register_device with
- * -ENFILE. @apple is non-zero for an Apple-backend rail (no lane subdivision).
+ * tbv_ibdev_name_index maps (tb domain, route downstream-port, native lane) to
+ * a deterministic, locally-unique "usb4_rdma%d" suffix. Keying on the route's
+ * downstream port is what keeps a mid-chain host's two neighbour rails (which
+ * share domain, lane 0 and local_adapter 0, differing only in route) from
+ * colliding on one name and failing ib_register_device with -ENFILE. @apple is
+ * non-zero for an Apple-backend rail (no lane subdivision).
  */
-int tbv_ibdev_name_index(int domain_idx, u32 local_adapter, u32 native_lane,
+int tbv_ibdev_name_index(int domain_idx, u32 route_port, u32 native_lane,
 			 int apple, unsigned int max_lanes);
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
 /*
