@@ -11,7 +11,6 @@
 
 #include "tb.h"
 #include "tunnel.h"
-#include "icm_reset.h"
 #include "tests/negotiation_model.h"
 
 static int __ida_init(struct kunit_resource *res, void *context)
@@ -2943,153 +2942,85 @@ static void tb_test_xdomain_reboot_stranding(struct kunit *test)
 }
 
 /*
- * Model of the on-controller ICM firmware lifecycle (kept in lockstep with the
- * userspace mirror tests/icm_reset_userspace.c). Captures both failure modes:
- * the -110 wedge (running but unresponsive after DRV_UNLOADS) AND the "firmware
- * not authenticated" failure -- the CIO reset clears the wedge but
- * de-authenticates the NVM (REG_FW_STS_NVM_AUTH_DONE), and re-auth takes a
- * cold-boot-length time, so icm_stop() must wait for the firmware to come back
- * running AND authenticated before completing the unload.
+ * Firmware-proven model of the ICM warm/cold reset behaviour (kept in lockstep
+ * with the userspace mirror tests/icm_reset_userspace.c). Reverse-engineering of
+ * the Titan Ridge ICM firmware (AppMana/intel-thunderbolt-firmwares,
+ * out/ICM_8051_FINDINGS.md) established that the NVM authentication asserting
+ * REG_FW_STS_NVM_AUTH_DONE is performed ONLY by the on-die mask ROM at a true
+ * chip reset -- it is absent from the flashed 8051/ARC application image. The
+ * kernel's icm_firmware_reset() (ICM_EN_CPU) is a warm CPU restart that
+ * re-enters the application image, which reads READ-ONLY reset-cause registers
+ * (CA41/CB5E), sees "warm", and skips re-init -- so on Alpine/Titan Ridge it
+ * NEVER re-authenticates. Maple Ridge has a real reset vector and re-auths on a
+ * warm restart. This is why a live rmmod+modprobe on AR/TR is terminal until a
+ * board power cycle, and why icm_stop() does NOT attempt a runtime reset.
+ *
+ * ar_tr below is the genuine controller property (Alpine/Titan Ridge vs USB4/
+ * Maple Ridge), not a toggle: the outcome follows from the modelled firmware.
  */
-#define ICM_FW_AUTH_TICKS	8	/* re-auth time after a reset */
-#define ICM_FW_RELOAD_AUTH	3	/* reload get_mode auth wait (short) */
-#define ICM_FW_UNLOAD_AUTH	12	/* icm_stop reauth wait (the fix) */
-
 struct icm_fw_model {
-	bool icm_en;		/* REG_FW_STS_ICM_EN: firmware running */
-	bool wedged;		/* running but no longer answers ICM_DRIVER_READY */
-	bool authed;		/* REG_FW_STS_NVM_AUTH_DONE */
-	int auth_remaining;	/* ticks until re-auth completes */
+	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
+	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
 };
 
-static void icm_fw_tick(struct icm_fw_model *fw, int ticks)
-{
-	if (fw->auth_remaining > 0) {
-		fw->auth_remaining -= ticks;
-		if (fw->auth_remaining <= 0) {
-			fw->auth_remaining = 0;
-			fw->authed = true;
-		}
-	}
-}
-
+/* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
 static void icm_fw_cold_boot(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
-	fw->wedged = false;
 	fw->authed = true;
-	fw->auth_remaining = 0;
 }
 
-static void icm_fw_drv_unloads(struct icm_fw_model *fw, bool ar_tr_family)
-{
-	if (fw->icm_en && ar_tr_family)
-		fw->wedged = true;
-}
-
-static void icm_fw_firmware_reset(struct icm_fw_model *fw)
+/*
+ * Warm CPU restart (the driver's icm_firmware_reset / ICM_EN_CPU). The mask ROM
+ * is NOT re-entered. AR/TR: the application image's read-only reset-cause gate
+ * makes it skip re-init -> stays de-authenticated, forever, until a cold boot.
+ * Maple Ridge: a real reset vector re-runs init -> re-authenticates.
+ */
+static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
 {
 	fw->icm_en = true;
-	fw->wedged = false;
-	fw->authed = false;
-	fw->auth_remaining = ICM_FW_AUTH_TICKS;
+	fw->authed = !ar_tr;
 }
 
-static void icm_fw_firmware_start(struct icm_fw_model *fw)
-{
-	if (!fw->icm_en) {
-		icm_fw_firmware_reset(fw);
-		icm_fw_tick(fw, ICM_FW_RELOAD_AUTH);
-	}
-}
-
-static bool icm_fw_get_mode_ok(struct icm_fw_model *fw)
-{
-	int b = ICM_FW_RELOAD_AUTH;
-
-	while (b-- > 0 && !fw->authed)
-		icm_fw_tick(fw, 1);
-	return fw->authed;
-}
-
+/* ICM_DRIVER_READY succeeds only if the firmware is running AND authenticated. */
 static bool icm_fw_driver_ready(struct icm_fw_model *fw)
 {
-	icm_fw_firmware_start(fw);
-	if (!icm_fw_get_mode_ok(fw))
-		return false;			/* "ICM firmware not authenticated" */
-	return fw->icm_en && !fw->wedged;	/* ICM_DRIVER_READY, no -110 */
+	return fw->icm_en && fw->authed;
 }
 
-static void icm_fw_stop(struct icm_fw_model *fw, bool ar_tr, bool have_upstream,
-			bool going_away)
-{
-	icm_fw_drv_unloads(fw, ar_tr);
-	if (icm_stop_should_reset_firmware(ar_tr, have_upstream, going_away)) {
-		int budget = ICM_FW_UNLOAD_AUTH;
-
-		icm_fw_firmware_reset(fw);
-		/* The fix: leave the firmware running AND re-authenticated. */
-		while (budget-- > 0 &&
-		       !icm_firmware_reauth_complete(fw->icm_en, fw->authed))
-			icm_fw_tick(fw, 1);
-	}
-}
-
-static void tb_test_icm_unload_wedge(struct kunit *test)
+static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 {
 	struct icm_fw_model fw;
 
-	/* Cold boot then load: driver_ready works. */
+	/* Cold boot: mask ROM authenticated -> driver_ready succeeds. */
 	icm_fw_cold_boot(&fw);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
-	/* -110 wedge prevention: the reset on unload clears the wedge. */
-	icm_fw_cold_boot(&fw);
-	icm_fw_stop(&fw, true, true, false);
-	KUNIT_EXPECT_FALSE(test, fw.wedged);
-
 	/*
-	 * The observed 002 failure: after the reset-on-unload the reload must
-	 * still come up authenticated. icm_stop waits for
-	 * icm_firmware_reauth_complete(); dropping the auth check from that
-	 * predicate makes this wedge into "firmware not authenticated".
+	 * Alpine/Titan Ridge live rmmod+modprobe (a warm restart): the mask-ROM
+	 * auth is skipped, so the firmware comes back NOT authenticated and
+	 * driver_ready fails. No driver action on the unload path can recover it
+	 * (the reason the reset-on-unload approach was reverted) -- it is terminal
+	 * until a board power cycle.
 	 */
 	icm_fw_cold_boot(&fw);
-	icm_fw_stop(&fw, true, true, false);
-	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
-
-	/*
-	 * The -110 wedge from a real production condition (not a toggle): if the
-	 * vendor-cap upstream port was never cached the predicate returns false,
-	 * no reset fires, and the firmware stays running-but-wedged (probe -110).
-	 */
-	icm_fw_cold_boot(&fw);
-	icm_fw_stop(&fw, true, false, false);
+	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
 
-	/* USB4/Maple Ridge never resets and never wedges. */
+	/* Only a cold boot (reboot / power cycle) re-authenticates AR/TR. */
 	icm_fw_cold_boot(&fw);
-	icm_fw_stop(&fw, false, true, false);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
-}
 
-static void tb_test_icm_stop_reset_policy(struct kunit *test)
-{
-	/* AR/TR + reset port cached + real unload -> reset to a clean state. */
-	KUNIT_EXPECT_TRUE(test, icm_stop_should_reset_firmware(true, true, false));
-	/* Controller physically gone -> skip (writes would fault). */
-	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(true, true, true));
-	/* No cached vendor-cap upstream port -> cannot reset safely. */
-	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(true, false, false));
-	/* USB4/Maple Ridge (no cio_reset) -> no reset needed. */
-	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(false, true, false));
+	/* Maple Ridge has a real reset vector -> re-auths on a warm restart. */
+	icm_fw_cold_boot(&fw);
+	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
+	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 }
 
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
-	KUNIT_CASE(tb_test_icm_unload_wedge),
-	KUNIT_CASE(tb_test_icm_stop_reset_policy),
+	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

@@ -20,7 +20,6 @@
 #include <linux/workqueue.h>
 
 #include "ctl.h"
-#include "icm_reset.h"
 #include "nhi_regs.h"
 #include "tb.h"
 #include "tunnel.h"
@@ -2202,28 +2201,6 @@ static bool icm_ar_is_supported(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 
 	/*
-	 * Cache the upstream PCIe port and its vendor-specific capability up
-	 * front, even when the firmware is already running. icm_stop() needs
-	 * them to issue a CIO reset on the unload path so the ICM is left in a
-	 * clean state (see icm_stop_should_reset_firmware()); without this the
-	 * common "firmware already running at probe" boot path leaves
-	 * upstream_port NULL and the unload reset would be a no-op.
-	 */
-	if (!icm->upstream_port) {
-		upstream_port = get_upstream_port(tb->nhi->pdev);
-		if (upstream_port) {
-			int cap;
-
-			cap = pci_find_ext_capability(upstream_port,
-						      PCI_EXT_CAP_ID_VNDR);
-			if (cap > 0) {
-				icm->upstream_port = upstream_port;
-				icm->vnd_cap = cap;
-			}
-		}
-	}
-
-	/*
 	 * Starting from Alpine Ridge we can use ICM on Apple machines
 	 * as well. We just need to reset and re-enable it first.
 	 * However, only start it if explicitly asked by the user.
@@ -2233,8 +2210,25 @@ static bool icm_ar_is_supported(struct tb *tb)
 	if (!start_icm)
 		return false;
 
-	/* Reset through the vendor-specific registers requires the port above. */
-	return icm->upstream_port != NULL;
+	/*
+	 * Find the upstream PCIe port in case we need to do reset
+	 * through its vendor specific registers.
+	 */
+	upstream_port = get_upstream_port(tb->nhi->pdev);
+	if (upstream_port) {
+		int cap;
+
+		cap = pci_find_ext_capability(upstream_port,
+					      PCI_EXT_CAP_ID_VNDR);
+		if (cap > 0) {
+			icm->upstream_port = upstream_port;
+			icm->vnd_cap = cap;
+
+			return true;
+		}
+	}
+
+	return false;
 }
 
 static int icm_ar_cio_reset(struct tb *tb)
@@ -2965,48 +2959,23 @@ static void icm_stop(struct tb *tb)
 	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
 
 	/*
-	 * On Alpine/Titan Ridge the firmware survives an rmmod: DRV_UNLOADS
-	 * alone leaves it "running" but unresponsive, so the next driver load's
-	 * ICM_DRIVER_READY times out ("failed to send driver ready to ICM",
-	 * probe -110) and only a host cold boot recovers it. Reset the firmware
-	 * here so an rmmod+modprobe cycle comes back as clean as a cold boot.
-	 * Skipped when the controller is gone (going_away) or the reset port was
-	 * never cached -- see icm_stop_should_reset_firmware().
+	 * Do NOT try to reset the ICM firmware here to "clean up" for the next
+	 * driver load. On Alpine/Titan Ridge a live rmmod+modprobe wedges the
+	 * controller and CANNOT be recovered by any runtime reset: the NVM
+	 * authentication that asserts REG_FW_STS_NVM_AUTH_DONE is performed only
+	 * by the on-die mask ROM at a true chip reset. icm_firmware_reset()
+	 * (ICM_EN_CPU) is a warm CPU restart that re-enters the flashed
+	 * application image; that image reads read-only reset-cause registers
+	 * (CA41/CB5E), sees "warm", and skips re-init -- so it never
+	 * re-authenticates. A CIO reset here only swaps the "-110 driver-not-
+	 * ready" wedge for an equally terminal "firmware not authenticated"
+	 * (and costs a multi-second shutdown stall). These boards have no
+	 * D3cold, so only a board power cycle re-enters the ROM. AR/TR core
+	 * changes must therefore be deployed via reboot, not a live reload.
+	 * Proven by firmware reverse-engineering: AppMana/intel-thunderbolt-
+	 * firmwares (out/ICM_8051_FINDINGS.md). Maple Ridge has a real reset
+	 * vector and re-authenticates on a warm restart, so it is unaffected.
 	 */
-	if (icm_stop_should_reset_firmware(icm->cio_reset, icm->upstream_port,
-					   tb->nhi->going_away)) {
-		int ret = icm_firmware_reset(tb, tb->nhi);
-
-		if (ret) {
-			tb_warn(tb, "failed to reset ICM firmware on unload: %d\n",
-				ret);
-		} else {
-			unsigned int retries = 50;
-			u32 sts;
-
-			/*
-			 * The CIO reset clears the wedge but de-authenticates the
-			 * firmware. Wait until it is running AND re-authenticated
-			 * before completing the unload, otherwise the next driver
-			 * load comes up "ICM firmware not authenticated" (its
-			 * get_mode wait is short and firmware_start does not wait
-			 * for an already-running firmware). Cold-boot-length budget.
-			 */
-			do {
-				sts = ioread32(tb->nhi->iobase + REG_FW_STS);
-				if (icm_firmware_reauth_complete(
-					    sts & REG_FW_STS_ICM_EN,
-					    sts & REG_FW_STS_NVM_AUTH_DONE))
-					break;
-				msleep(100);
-			} while (--retries);
-
-			if (!retries)
-				tb_warn(tb, "ICM firmware did not re-authenticate after unload reset\n");
-			else
-				tb_dbg(tb, "reset ICM firmware to clean state on unload\n");
-		}
-	}
 
 	kfree(icm->last_nvm_auth);
 	icm->last_nvm_auth = NULL;
