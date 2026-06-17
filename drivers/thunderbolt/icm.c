@@ -2977,11 +2977,35 @@ static void icm_stop(struct tb *tb)
 					   tb->nhi->going_away)) {
 		int ret = icm_firmware_reset(tb, tb->nhi);
 
-		if (ret)
+		if (ret) {
 			tb_warn(tb, "failed to reset ICM firmware on unload: %d\n",
 				ret);
-		else
-			tb_dbg(tb, "reset ICM firmware to clean state on unload\n");
+		} else {
+			unsigned int retries = 50;
+			u32 sts;
+
+			/*
+			 * The CIO reset clears the wedge but de-authenticates the
+			 * firmware. Wait until it is running AND re-authenticated
+			 * before completing the unload, otherwise the next driver
+			 * load comes up "ICM firmware not authenticated" (its
+			 * get_mode wait is short and firmware_start does not wait
+			 * for an already-running firmware). Cold-boot-length budget.
+			 */
+			do {
+				sts = ioread32(tb->nhi->iobase + REG_FW_STS);
+				if (icm_firmware_reauth_complete(
+					    sts & REG_FW_STS_ICM_EN,
+					    sts & REG_FW_STS_NVM_AUTH_DONE))
+					break;
+				msleep(100);
+			} while (--retries);
+
+			if (!retries)
+				tb_warn(tb, "ICM firmware did not re-authenticate after unload reset\n");
+			else
+				tb_dbg(tb, "reset ICM firmware to clean state on unload\n");
+		}
 	}
 
 	kfree(icm->last_nvm_auth);

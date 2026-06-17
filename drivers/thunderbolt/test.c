@@ -2944,21 +2944,41 @@ static void tb_test_xdomain_reboot_stranding(struct kunit *test)
 
 /*
  * Model of the on-controller ICM firmware lifecycle (kept in lockstep with the
- * userspace mirror tests/icm_reset_userspace.c). On Alpine/Titan Ridge the
- * firmware survives a driver rmmod "running" (REG_FW_STS_ICM_EN) but stops
- * answering ICM_DRIVER_READY, and icm_firmware_start() only resets it when it
- * is NOT running -- so without the unload-path reset the next driver_ready
- * times out and only a host cold boot recovers it.
+ * userspace mirror tests/icm_reset_userspace.c). Captures both failure modes:
+ * the -110 wedge (running but unresponsive after DRV_UNLOADS) AND the "firmware
+ * not authenticated" failure -- the CIO reset clears the wedge but
+ * de-authenticates the NVM (REG_FW_STS_NVM_AUTH_DONE), and re-auth takes a
+ * cold-boot-length time, so icm_stop() must wait for the firmware to come back
+ * running AND authenticated before completing the unload.
  */
+#define ICM_FW_AUTH_TICKS	8	/* re-auth time after a reset */
+#define ICM_FW_RELOAD_AUTH	3	/* reload get_mode auth wait (short) */
+#define ICM_FW_UNLOAD_AUTH	12	/* icm_stop reauth wait (the fix) */
+
 struct icm_fw_model {
-	bool icm_en;	/* firmware running */
-	bool wedged;	/* running but no longer answers ICM_DRIVER_READY */
+	bool icm_en;		/* REG_FW_STS_ICM_EN: firmware running */
+	bool wedged;		/* running but no longer answers ICM_DRIVER_READY */
+	bool authed;		/* REG_FW_STS_NVM_AUTH_DONE */
+	int auth_remaining;	/* ticks until re-auth completes */
 };
+
+static void icm_fw_tick(struct icm_fw_model *fw, int ticks)
+{
+	if (fw->auth_remaining > 0) {
+		fw->auth_remaining -= ticks;
+		if (fw->auth_remaining <= 0) {
+			fw->auth_remaining = 0;
+			fw->authed = true;
+		}
+	}
+}
 
 static void icm_fw_cold_boot(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
 	fw->wedged = false;
+	fw->authed = true;
+	fw->auth_remaining = 0;
 }
 
 static void icm_fw_drv_unloads(struct icm_fw_model *fw, bool ar_tr_family)
@@ -2971,27 +2991,48 @@ static void icm_fw_firmware_reset(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
 	fw->wedged = false;
+	fw->authed = false;
+	fw->auth_remaining = ICM_FW_AUTH_TICKS;
 }
 
 static void icm_fw_firmware_start(struct icm_fw_model *fw)
 {
-	if (!fw->icm_en)
+	if (!fw->icm_en) {
 		icm_fw_firmware_reset(fw);
+		icm_fw_tick(fw, ICM_FW_RELOAD_AUTH);
+	}
+}
+
+static bool icm_fw_get_mode_ok(struct icm_fw_model *fw)
+{
+	int b = ICM_FW_RELOAD_AUTH;
+
+	while (b-- > 0 && !fw->authed)
+		icm_fw_tick(fw, 1);
+	return fw->authed;
 }
 
 static bool icm_fw_driver_ready(struct icm_fw_model *fw)
 {
 	icm_fw_firmware_start(fw);
-	return fw->icm_en && !fw->wedged;
+	if (!icm_fw_get_mode_ok(fw))
+		return false;			/* "ICM firmware not authenticated" */
+	return fw->icm_en && !fw->wedged;	/* ICM_DRIVER_READY, no -110 */
 }
 
 static void icm_fw_stop(struct icm_fw_model *fw, bool ar_tr, bool have_upstream,
 			bool going_away)
 {
 	icm_fw_drv_unloads(fw, ar_tr);
-	/* Unconditionally drive the real production predicate, as icm_stop does. */
-	if (icm_stop_should_reset_firmware(ar_tr, have_upstream, going_away))
+	if (icm_stop_should_reset_firmware(ar_tr, have_upstream, going_away)) {
+		int budget = ICM_FW_UNLOAD_AUTH;
+
 		icm_fw_firmware_reset(fw);
+		/* The fix: leave the firmware running AND re-authenticated. */
+		while (budget-- > 0 &&
+		       !icm_firmware_reauth_complete(fw->icm_en, fw->authed))
+			icm_fw_tick(fw, 1);
+	}
 }
 
 static void tb_test_icm_unload_wedge(struct kunit *test)
@@ -3002,27 +3043,31 @@ static void tb_test_icm_unload_wedge(struct kunit *test)
 	icm_fw_cold_boot(&fw);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
+	/* -110 wedge prevention: the reset on unload clears the wedge. */
+	icm_fw_cold_boot(&fw);
+	icm_fw_stop(&fw, true, true, false);
+	KUNIT_EXPECT_FALSE(test, fw.wedged);
+
 	/*
-	 * The fix: a Titan Ridge rmmod with the reset port cached resets on
-	 * unload, so the reload's driver_ready is clean without a host cold boot
-	 * -- the appmana-002 case. Removing the predicate makes this wedge.
+	 * The observed 002 failure: after the reset-on-unload the reload must
+	 * still come up authenticated. icm_stop waits for
+	 * icm_firmware_reauth_complete(); dropping the auth check from that
+	 * predicate makes this wedge into "firmware not authenticated".
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_stop(&fw, true, true, false);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
 	/*
-	 * The wedge, from a real production condition (not a toggle): if the
+	 * The -110 wedge from a real production condition (not a toggle): if the
 	 * vendor-cap upstream port was never cached the predicate returns false,
-	 * no reset fires, and the Titan Ridge firmware stays running-but-wedged
-	 * ("failed to send driver ready to ICM", probe -110). This is what Part 1
-	 * (always caching upstream_port) exists to prevent.
+	 * no reset fires, and the firmware stays running-but-wedged (probe -110).
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_stop(&fw, true, false, false);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
 
-	/* USB4/Maple Ridge never wedges across rmmod (no cio_reset). */
+	/* USB4/Maple Ridge never resets and never wedges. */
 	icm_fw_cold_boot(&fw);
 	icm_fw_stop(&fw, false, true, false);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));

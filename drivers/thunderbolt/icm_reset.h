@@ -36,4 +36,22 @@ static inline bool icm_stop_should_reset_firmware(bool have_cio_reset,
 	return have_cio_reset && have_upstream_port && !going_away;
 }
 
+/*
+ * After icm_stop() resets the firmware (icm_firmware_reset: CIO reset + ARC
+ * restart), the firmware is briefly running but NOT yet re-authenticated
+ * (REG_FW_STS_NVM_AUTH_DONE clears and re-auth takes a cold-boot-length time).
+ * icm_stop() must wait for the firmware to come back BOTH running AND
+ * authenticated before completing the unload; otherwise the next driver load --
+ * whose get_mode auth wait is short and whose firmware_start does not wait at
+ * all when the firmware is already "running" -- comes up "ICM firmware not
+ * authenticated" with no usb4_rdma (observed on 002, 2026-06-17).
+ *
+ *   running       - REG_FW_STS_ICM_EN
+ *   authenticated - REG_FW_STS_NVM_AUTH_DONE
+ */
+static inline bool icm_firmware_reauth_complete(bool running, bool authenticated)
+{
+	return running && authenticated;
+}
+
 #endif /* ICM_RESET_H */
