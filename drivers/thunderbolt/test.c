@@ -11,6 +11,7 @@
 
 #include "tb.h"
 #include "tunnel.h"
+#include "icm_reset.h"
 #include "tests/negotiation_model.h"
 
 static int __ida_init(struct kunit_resource *res, void *context)
@@ -2894,99 +2895,156 @@ static void tb_test_xdomain_properties_stale(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 1, 0));
 }
 
-/* coordinated reload of a two-host link; established after `steps`? */
-static bool tb_model_coord_reload(bool fix, int settle, int budget, int steps)
+/*
+ * Reproduces the real appmana-002<->018 stranding on a faithful two-host +
+ * firmware model (link-edge-only XDOMAIN_CONNECTED, no re-notify on a
+ * property-only change -- per the Titan/Maple Ridge disassembly). There is NO
+ * "fix" toggle: the only lever is the real production predicate
+ * tb_xdomain_generation_stale(). Reverting it (gen <= cached) strands the
+ * rebooted-lower-gen peer below, exactly as reverting xdomain.c would.
+ */
+static void tb_test_xdomain_reboot_stranding(struct kunit *test)
 {
 	struct model_link L;
 
+	/* Cold boot: link edge -> firmware event -> both hosts enumerate. */
 	memset(&L, 0, sizeof(L));
-	model_host_boot(&L.a, fix, settle, budget);
-	model_host_boot(&L.b, fix, settle, budget);
-	model_run(&L, 20);
-	if (!model_established(&L))
-		return false;
-	model_host_reload(&L.a);
-	model_host_reload(&L.b);
-	model_run(&L, steps);
-	return model_established(&L);
+	model_cold_boot(&L, 0xC0FFEE99u, 0x11111111u);
+	KUNIT_EXPECT_TRUE(test, model_established(&L));
+
+	/*
+	 * Host A reboots to a LOWER generation and B gets no fresh firmware edge,
+	 * so B's only recovery is the gated software re-read. The real gate
+	 * accepts the lower generation and B re-enumerates; reverting the gate
+	 * strands B here forever (the bug).
+	 */
+	memset(&L, 0, sizeof(L));
+	model_cold_boot(&L, 0xC0FFEE99u, 0x11111111u);
+	model_peer_reboot(&L.a, 0x0000002Au);
+	model_run(&L, 50);
+	KUNIT_EXPECT_TRUE(test, model_established(&L));
+
+	/*
+	 * Not rigged to always recover: a reboot to a HIGHER generation is
+	 * accepted by both the old and new gate, so it must establish regardless
+	 * -- proving the recovery above is specifically the lower-gen fix.
+	 */
+	memset(&L, 0, sizeof(L));
+	model_cold_boot(&L, 0x00000005u, 0x11111111u);
+	model_peer_reboot(&L.a, 0x00000009u);
+	model_run(&L, 50);
+	KUNIT_EXPECT_TRUE(test, model_established(&L));
+
+	/* The recovery came from the gate (no firmware fallback exists). */
+	KUNIT_EXPECT_FALSE(test,
+			   tb_xdomain_generation_stale(true, 0x2Au, 0xC0FFEE99u));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_xdomain_generation_stale(true, 0x2Au, 0x2Au));
 }
 
 /*
- * Models the soft-reconnect HANG with a mocked ICM firmware (link-edge-only
- * XDOMAIN_CONNECTED, no property-generation re-notify -- per the Titan/Maple
- * Ridge disassembly) plus the gen gate and the one-shot login/HELLO handshake.
- * Adversarial so it cannot be cheated: the hang must be conditional on the
- * budget-vs-settle fragility and permanent, and the fix must be robust.
+ * Model of the on-controller ICM firmware lifecycle (kept in lockstep with the
+ * userspace mirror tests/icm_reset_userspace.c). On Alpine/Titan Ridge the
+ * firmware survives a driver rmmod "running" (REG_FW_STS_ICM_EN) but stops
+ * answering ICM_DRIVER_READY, and icm_firmware_start() only resets it when it
+ * is NOT running -- so without the unload-path reset the next driver_ready
+ * times out and only a host cold boot recovers it.
  */
-static void tb_test_xdomain_negotiation_hang(struct kunit *test)
+struct icm_fw_model {
+	bool icm_en;	/* firmware running */
+	bool wedged;	/* running but no longer answers ICM_DRIVER_READY */
+};
+
+static void icm_fw_cold_boot(struct icm_fw_model *fw)
 {
-	int settle;
-
-	/* Conditional on the finite HELLO budget being spent before the peer
-	 * settles -- NOT hardcoded: it recovers on its own when the budget is
-	 * enough (settle <= budget). */
-	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 5, 3, 200));
-	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 4, 3, 200));
-	KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(false, 3, 3, 200));
-	KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(false, 2, 3, 200));
-
-	/* Permanent, not slow. */
-	KUNIT_EXPECT_FALSE(test, tb_model_coord_reload(false, 5, 3, 5000));
-
-	/* The fix (re-arm the handshake on the peer's generation change + retry
-	 * until mutual confirmation) recovers across a wide settle sweep with a
-	 * fixed small budget -- it removes the fragility, it is not tuned. */
-	for (settle = 0; settle <= 40; settle++)
-		KUNIT_EXPECT_TRUE(test, tb_model_coord_reload(true, settle, 3, 200));
+	fw->icm_en = true;
+	fw->wedged = false;
 }
 
-/* multi-rail: several rails on one link share a property generation */
-static bool tb_model_mcoord(int nrails, bool fix, int settle, int budget, int steps)
+static void icm_fw_drv_unloads(struct icm_fw_model *fw, bool ar_tr_family)
 {
-	struct model_mlink M;
-
-	memset(&M, 0, sizeof(M));
-	model_mhost_boot(&M.a, nrails, fix, settle, budget);
-	model_mhost_boot(&M.b, nrails, fix, settle, budget);
-	model_mrun(&M, 20);
-	if (!model_mestablished(&M))
-		return false;
-	model_mhost_reload(&M.a);
-	model_mhost_reload(&M.b);
-	model_mrun(&M, steps);
-	return model_mestablished(&M);
+	if (fw->icm_en && ar_tr_family)
+		fw->wedged = true;
 }
 
-static void tb_test_xdomain_negotiation_multirail(struct kunit *test)
+static void icm_fw_firmware_reset(struct icm_fw_model *fw)
 {
-	int nrails, settle;
-
-	/* every rail hangs after a coordinated reload without the fix */
-	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
-		KUNIT_EXPECT_FALSE(test, tb_model_mcoord(nrails, false, 5, 3, 200));
-
-	/* the fix recovers ALL rails, across rail counts and settle times */
-	for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
-		for (settle = 0; settle <= 30; settle++)
-			KUNIT_EXPECT_TRUE(test,
-					  tb_model_mcoord(nrails, true, settle, 3, 200));
+	fw->icm_en = true;
+	fw->wedged = false;
 }
 
-/* flaw #1: an inbound peer request must re-arm a budget-exhausted handshake */
-static void tb_test_xdomain_kick_rearm(struct kunit *test)
+static void icm_fw_firmware_start(struct icm_fw_model *fw)
 {
-	/* the bug: the kick is ignored, the handshake stays exhausted */
-	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, false),
-			(unsigned int)HS_RETRY_BUDGET);
-	/* net's contract: the inbound request resets the retry budget */
-	KUNIT_EXPECT_EQ(test, model_kick(HS_RETRY_BUDGET, true), 0u);
+	if (!fw->icm_en)
+		icm_fw_firmware_reset(fw);
+}
+
+static bool icm_fw_driver_ready(struct icm_fw_model *fw)
+{
+	icm_fw_firmware_start(fw);
+	return fw->icm_en && !fw->wedged;
+}
+
+static void icm_fw_stop(struct icm_fw_model *fw, bool ar_tr, bool have_upstream,
+			bool going_away)
+{
+	icm_fw_drv_unloads(fw, ar_tr);
+	/* Unconditionally drive the real production predicate, as icm_stop does. */
+	if (icm_stop_should_reset_firmware(ar_tr, have_upstream, going_away))
+		icm_fw_firmware_reset(fw);
+}
+
+static void tb_test_icm_unload_wedge(struct kunit *test)
+{
+	struct icm_fw_model fw;
+
+	/* Cold boot then load: driver_ready works. */
+	icm_fw_cold_boot(&fw);
+	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
+
+	/*
+	 * The fix: a Titan Ridge rmmod with the reset port cached resets on
+	 * unload, so the reload's driver_ready is clean without a host cold boot
+	 * -- the appmana-002 case. Removing the predicate makes this wedge.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_stop(&fw, true, true, false);
+	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
+
+	/*
+	 * The wedge, from a real production condition (not a toggle): if the
+	 * vendor-cap upstream port was never cached the predicate returns false,
+	 * no reset fires, and the Titan Ridge firmware stays running-but-wedged
+	 * ("failed to send driver ready to ICM", probe -110). This is what Part 1
+	 * (always caching upstream_port) exists to prevent.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_stop(&fw, true, false, false);
+	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
+
+	/* USB4/Maple Ridge never wedges across rmmod (no cio_reset). */
+	icm_fw_cold_boot(&fw);
+	icm_fw_stop(&fw, false, true, false);
+	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
+}
+
+static void tb_test_icm_stop_reset_policy(struct kunit *test)
+{
+	/* AR/TR + reset port cached + real unload -> reset to a clean state. */
+	KUNIT_EXPECT_TRUE(test, icm_stop_should_reset_firmware(true, true, false));
+	/* Controller physically gone -> skip (writes would fault). */
+	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(true, true, true));
+	/* No cached vendor-cap upstream port -> cannot reset safely. */
+	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(true, false, false));
+	/* USB4/Maple Ridge (no cio_reset) -> no reset needed. */
+	KUNIT_EXPECT_FALSE(test, icm_stop_should_reset_firmware(false, true, false));
 }
 
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
-	KUNIT_CASE(tb_test_xdomain_negotiation_hang),
-	KUNIT_CASE(tb_test_xdomain_negotiation_multirail),
-	KUNIT_CASE(tb_test_xdomain_kick_rearm),
+	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
+	KUNIT_CASE(tb_test_icm_unload_wedge),
+	KUNIT_CASE(tb_test_icm_stop_reset_policy),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

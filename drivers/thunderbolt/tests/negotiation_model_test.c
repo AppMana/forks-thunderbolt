@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Userspace mirror of the KUnit negotiation-hang model. Adversarial: proves the
- * hang emerges from the budget-vs-settle fragility (not a hardcoded failure),
- * is permanent, and that the handshake re-arm fix is robust across timings. */
+/*
+ * Userspace mirror of the KUnit XDomain re-negotiation model. Reproduces the
+ * real appmana-002<->018 stranding on a faithful two-host + firmware model and
+ * proves the fix. There is NO "apply the fix" toggle: the only lever is the real
+ * production predicate tb_xdomain_generation_stale(); comment its fix out (in
+ * thunderbolt_negotiation.h) and the stranding case below goes red, exactly as
+ * reverting the driver would. Keep in lockstep with the KUnit in test.c.
+ */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,97 +20,63 @@ static int failures;
 	if (!(cond)) failures++; \
 } while (0)
 
-/* coordinated reload; returns whether the link is established after `steps` */
-static bool coord_reload(bool fix, int settle, int budget, int steps)
-{
-	struct model_link L;
-	memset(&L, 0, sizeof(L));
-	model_host_boot(&L.a, fix, settle, budget);
-	model_host_boot(&L.b, fix, settle, budget);
-	model_run(&L, 20);
-	if (!model_established(&L))
-		return false;		/* didn't even cold-boot */
-	model_host_reload(&L.a);
-	model_host_reload(&L.b);
-	model_run(&L, steps);
-	return model_established(&L);
-}
-
 int main(void)
 {
-	/* sanity: cold boot works */
-	CHECK(coord_reload(false, 5, 3, 0) == false /* established checked pre-reload */ || true,
-	      "(cold boot covered by the pre-reload guard)");
+	printf("XDomain re-negotiation (faithful firmware + real gen gate):\n");
 
-	/* THE HANG is conditional on the real fragility: budget < settle hangs,
-	 * budget >= settle recovers even WITHOUT the fix. If the hang were
-	 * hardcoded it would fail regardless of timing. */
-	CHECK(coord_reload(false, /*settle*/5, /*budget*/3, 200) == false,
-	      "no-fix: settle(5) > budget(3) -> HANGS");
-	CHECK(coord_reload(false, /*settle*/2, /*budget*/3, 200) == true,
-	      "no-fix: settle(2) <= budget(3) -> recovers (hang is NOT hardcoded)");
-	CHECK(coord_reload(false, /*settle*/3, /*budget*/3, 200) == true,
-	      "no-fix: settle(3) == budget(3) -> recovers (boundary)");
-	CHECK(coord_reload(false, /*settle*/4, /*budget*/3, 200) == false,
-	      "no-fix: settle(4) > budget(3) -> HANGS");
-
-	/* the hang is PERMANENT, not slow: still stuck after 5000 steps */
-	CHECK(coord_reload(false, 5, 3, 5000) == false,
-	      "no-fix hang is permanent (5000 steps)");
-
-	/* the FIX is robust: recovers across a wide sweep of settle times with a
-	 * small fixed budget -- it is not tuned to one number */
-	bool fix_robust = true;
-	for (int settle = 0; settle <= 40; settle++)
-		if (!coord_reload(true, settle, 3, 200))
-			fix_robust = false;
-	CHECK(fix_robust, "fix recovers for every settle in 0..40 (budget 3)");
-
-	/* and the fix never makes a working case worse */
-	CHECK(coord_reload(true, 2, 3, 200) == true, "fix: easy case still works");
-
-
-	/* ---- multi-rail: a peer with several rails on one link (shared gen) ---- */
+	/* Cold boot: link edge -> firmware event -> both enumerate -> established. */
 	{
-		struct model_mlink M;
-		int nrails, settle;
-		bool ok;
-
-		/* coordinated reload, NO fix: every rail hangs */
-		for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++) {
-			memset(&M, 0, sizeof(M));
-			model_mhost_boot(&M.a, nrails, false, 5, 3);
-			model_mhost_boot(&M.b, nrails, false, 5, 3);
-			model_mrun(&M, 20);
-			model_mhost_reload(&M.a);
-			model_mhost_reload(&M.b);
-			model_mrun(&M, 200);
-			char msg[64]; snprintf(msg, sizeof msg, "%d-rail coordinated reload HANGS w/o fix", nrails);
-			CHECK(!model_mestablished(&M), msg);
-		}
-
-		/* coordinated reload, WITH fix: ALL rails recover, across rail counts
-		 * and settle times */
-		ok = true;
-		for (nrails = 1; nrails <= MODEL_MAX_RAILS; nrails++)
-			for (settle = 0; settle <= 30; settle++) {
-				memset(&M, 0, sizeof(M));
-				model_mhost_boot(&M.a, nrails, true, settle, 3);
-				model_mhost_boot(&M.b, nrails, true, settle, 3);
-				model_mrun(&M, 20);
-				model_mhost_reload(&M.a);
-				model_mhost_reload(&M.b);
-				model_mrun(&M, 200);
-				if (!model_mestablished(&M)) ok = false;
-			}
-		CHECK(ok, "fix recovers ALL rails for 1..4 rails x settle 0..30");
+		struct model_link L;
+		memset(&L, 0, sizeof(L));
+		model_cold_boot(&L, /*gen_a=*/0xC0FFEE99u, /*gen_b=*/0x11111111u);
+		CHECK(model_established(&L), "cold boot -> both hosts enumerate the peer");
 	}
 
-	/* flaw #1: inbound peer request must re-arm a budget-exhausted handshake */
-	CHECK(model_kick(HS_RETRY_BUDGET, false) == HS_RETRY_BUDGET,
-	      "kick WITHOUT reset leaves handshake exhausted (the bug)");
-	CHECK(model_kick(HS_RETRY_BUDGET, true) == 0,
-	      "kick WITH reset re-arms the budget (net's TBIP contract)");
+	/*
+	 * THE BUG: host A reboots and reseeds to a LOWER generation, and B gets
+	 * no fresh firmware edge (absorbed/raced one-shot). B's only recovery is
+	 * the gated software re-read. With the FIXED gate B accepts the lower
+	 * generation and re-enumerates A's new services; revert the gate (in the
+	 * header) and B drops every re-read forever -> stranded (this line fails).
+	 */
+	{
+		struct model_link L;
+		memset(&L, 0, sizeof(L));
+		model_cold_boot(&L, 0xC0FFEE99u, 0x11111111u);
+		model_peer_reboot(&L.a, /*new_gen=*/0x0000002Au);  /* lower than cached */
+		model_run(&L, 50);
+		CHECK(model_established(&L),
+		      "peer reboot to LOWER gen -> non-rebooted host re-enumerates (the fix)");
+	}
+
+	/*
+	 * Faithfulness check #1: the model is not rigged to always recover. A
+	 * reboot to a HIGHER generation is accepted by BOTH the old and new gate
+	 * (it is not the stranding condition), so it must establish regardless --
+	 * proving the recovery above is specifically the lower-gen fix, not a
+	 * model that ignores the gate.
+	 */
+	{
+		struct model_link L;
+		memset(&L, 0, sizeof(L));
+		model_cold_boot(&L, 0x00000005u, 0x11111111u);
+		model_peer_reboot(&L.a, /*new_gen=*/0x00000009u);  /* higher than cached */
+		model_run(&L, 50);
+		CHECK(model_established(&L),
+		      "peer reboot to HIGHER gen -> re-enumerates (not the stranding case)");
+	}
+
+	/*
+	 * Faithfulness check #2: the firmware genuinely offers no fallback. If the
+	 * gate drops the re-read, nothing else re-enumerates the peer -- so a
+	 * model in which the gate said "stale" would stay stranded no matter how
+	 * many poll rounds run. We assert the real gate does NOT call the lower-gen
+	 * block stale (i.e. the recovery came from the gate, not from the model).
+	 */
+	CHECK(!tb_xdomain_generation_stale(true, 0x2Au, 0xC0FFEE99u),
+	      "real gate accepts the rebooted peer's lower generation");
+	CHECK(tb_xdomain_generation_stale(true, 0x2Au, 0x2Au),
+	      "real gate still drops an exact-duplicate re-read");
 
 	printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 	return failures ? 1 : 0;

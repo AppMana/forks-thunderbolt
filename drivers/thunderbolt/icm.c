@@ -20,6 +20,7 @@
 #include <linux/workqueue.h>
 
 #include "ctl.h"
+#include "icm_reset.h"
 #include "nhi_regs.h"
 #include "tb.h"
 #include "tunnel.h"
@@ -2201,6 +2202,28 @@ static bool icm_ar_is_supported(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 
 	/*
+	 * Cache the upstream PCIe port and its vendor-specific capability up
+	 * front, even when the firmware is already running. icm_stop() needs
+	 * them to issue a CIO reset on the unload path so the ICM is left in a
+	 * clean state (see icm_stop_should_reset_firmware()); without this the
+	 * common "firmware already running at probe" boot path leaves
+	 * upstream_port NULL and the unload reset would be a no-op.
+	 */
+	if (!icm->upstream_port) {
+		upstream_port = get_upstream_port(tb->nhi->pdev);
+		if (upstream_port) {
+			int cap;
+
+			cap = pci_find_ext_capability(upstream_port,
+						      PCI_EXT_CAP_ID_VNDR);
+			if (cap > 0) {
+				icm->upstream_port = upstream_port;
+				icm->vnd_cap = cap;
+			}
+		}
+	}
+
+	/*
 	 * Starting from Alpine Ridge we can use ICM on Apple machines
 	 * as well. We just need to reset and re-enable it first.
 	 * However, only start it if explicitly asked by the user.
@@ -2210,25 +2233,8 @@ static bool icm_ar_is_supported(struct tb *tb)
 	if (!start_icm)
 		return false;
 
-	/*
-	 * Find the upstream PCIe port in case we need to do reset
-	 * through its vendor specific registers.
-	 */
-	upstream_port = get_upstream_port(tb->nhi->pdev);
-	if (upstream_port) {
-		int cap;
-
-		cap = pci_find_ext_capability(upstream_port,
-					      PCI_EXT_CAP_ID_VNDR);
-		if (cap > 0) {
-			icm->upstream_port = upstream_port;
-			icm->vnd_cap = cap;
-
-			return true;
-		}
-	}
-
-	return false;
+	/* Reset through the vendor-specific registers requires the port above. */
+	return icm->upstream_port != NULL;
 }
 
 static int icm_ar_cio_reset(struct tb *tb)
@@ -2957,6 +2963,27 @@ static void icm_stop(struct tb *tb)
 	tb_switch_remove(tb->root_switch);
 	tb->root_switch = NULL;
 	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
+
+	/*
+	 * On Alpine/Titan Ridge the firmware survives an rmmod: DRV_UNLOADS
+	 * alone leaves it "running" but unresponsive, so the next driver load's
+	 * ICM_DRIVER_READY times out ("failed to send driver ready to ICM",
+	 * probe -110) and only a host cold boot recovers it. Reset the firmware
+	 * here so an rmmod+modprobe cycle comes back as clean as a cold boot.
+	 * Skipped when the controller is gone (going_away) or the reset port was
+	 * never cached -- see icm_stop_should_reset_firmware().
+	 */
+	if (icm_stop_should_reset_firmware(icm->cio_reset, icm->upstream_port,
+					   tb->nhi->going_away)) {
+		int ret = icm_firmware_reset(tb, tb->nhi);
+
+		if (ret)
+			tb_warn(tb, "failed to reset ICM firmware on unload: %d\n",
+				ret);
+		else
+			tb_dbg(tb, "reset ICM firmware to clean state on unload\n");
+	}
+
 	kfree(icm->last_nvm_auth);
 	icm->last_nvm_auth = NULL;
 }
