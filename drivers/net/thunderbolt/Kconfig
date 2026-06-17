@@ -10,3 +10,12 @@ config USB4_NET
 
 	  To compile this driver a module, choose M here. The module will be
 	  called thunderbolt_net.
+
+config USB4_NET_KUNIT_TEST
+	bool "KUnit tests for USB4 networking" if !KUNIT_ALL_TESTS
+	depends on USB4_NET && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Builds the thunderbolt_net login-handshake KUnit tests into the module
+	  (they run at module load on a CONFIG_KUNIT kernel). Mirrored on-host by
+	  tests/tbnet_login_userspace.c for kernels without CONFIG_KUNIT.
