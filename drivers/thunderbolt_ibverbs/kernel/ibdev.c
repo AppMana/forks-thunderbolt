@@ -2375,8 +2375,14 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	tbv_rail_netdev_mac(be64_to_cpu(dev->base.node_guid), mac);
 	eth_hw_addr_set(ndev, mac);
 
-	if (dev->base.dev.parent)
-		SET_NETDEV_DEV(ndev, dev->base.dev.parent);
+	/*
+	 * Parent to the per-link XDomain device (NOT the shared NHI ring device
+	 * that ib_device uses): it is unique per cabled neighbour and carries the
+	 * peer hostname in its `device_name` attribute, so udev can resolve the
+	 * peer and rename the netdev per link (mirrors thunderbolt_net).
+	 */
+	if (dev->rail && dev->rail->peer && dev->rail->peer->xd)
+		SET_NETDEV_DEV(ndev, &dev->rail->peer->xd->dev);
 
 	ret = register_netdev(ndev);
 	if (ret) {

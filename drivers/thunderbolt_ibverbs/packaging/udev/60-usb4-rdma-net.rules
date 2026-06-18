@@ -1,0 +1,6 @@
+# Stable per-link name for the usb4_rdma GID-only netdev that thunderbolt_ibverbs
+# creates per rail (kernel name u4r<N>, which is enumeration-order and unstable).
+# The helper derives a name from the parent XDomain device the kernel already
+# populates (peer hostname / UUID), so this needs NO site configuration and works
+# on any host. A site that wants its own scheme can ship a higher-priority rule.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", PROGRAM="/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname %k", NAME="%c"

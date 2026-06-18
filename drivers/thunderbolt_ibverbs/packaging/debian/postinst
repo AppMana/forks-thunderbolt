@@ -12,6 +12,11 @@ case "$1" in
             fi
             dkms autoinstall -m "$NAME"/"$VERSION" || true
         fi
+        # Pick up the usb4_rdma netdev naming rule (no-op if udev not running).
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules 2>/dev/null || true
+            udevadm trigger --subsystem-match=net --action=add 2>/dev/null || true
+        fi
         ;;
 esac
 

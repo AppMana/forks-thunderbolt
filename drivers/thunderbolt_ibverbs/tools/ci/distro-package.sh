@@ -102,6 +102,13 @@ build_deb() {
 	substitute "$repo_root/packaging/debian/prerm" "$stage/DEBIAN/prerm"
 	chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"
 
+	# udev: stable per-link name for the usb4_rdma GID netdev. Self-contained
+	# (helper derives the name from XDomain sysfs), so it works on any host.
+	install -D -m 0644 "$repo_root/packaging/udev/60-usb4-rdma-net.rules" \
+		"$stage/usr/lib/udev/rules.d/60-usb4-rdma-net.rules"
+	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-ifname" \
+		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname"
+
 	local deb="$out_dir/${pkgname}_${version}_all.deb"
 	dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null
 	printf '==> Built %s\n' "$deb"
