@@ -2966,6 +2966,32 @@ static void tb_test_xdomain_coreset_strand(struct kunit *test)
 }
 
 /*
+ * Late host-to-host link: a chain node has two ports. One neighbour is up at
+ * boot (enumerated by the initial scan); the other boots later, so its link
+ * trains during this node's init window -- after its port's initial scan,
+ * before hotplug is armed. tb_handle_hotplug drops events while
+ * !tcm->hotplug_active, so that late link is enumerated by neither path and the
+ * node never sees the second neighbour. Both ports MUST end up enumerated; red
+ * until tb.c re-scans ports when hotplug is armed (appmana-009<->020).
+ */
+static void tb_test_xdomain_late_second_link(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.port[0].link_up = true;	/* neighbour 0 (025) up at boot */
+	/* neighbour 1 (020) still booting: its link is down during the scan */
+
+	cm_scan_port(&h, 0);		/* enumerates port 0 */
+	cm_scan_port(&h, 1);		/* port 1 link down -> nothing */
+	cm_link_up(&h, 1);		/* 020 boots: link trains, hotplug not armed -> dropped */
+	cm_arm_hotplug(&h);		/* armed, but nothing re-scans port 1 */
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);	/* red: late link missed */
+}
+
+/*
  * Firmware-proven model of the ICM warm/cold reset behaviour (kept in lockstep
  * with the userspace mirror tests/icm_reset_userspace.c). Reverse-engineering of
  * the Titan Ridge ICM firmware (AppMana/intel-thunderbolt-firmwares,
@@ -3051,6 +3077,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),
+	KUNIT_CASE(tb_test_xdomain_late_second_link),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),

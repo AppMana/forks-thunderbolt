@@ -3053,6 +3053,19 @@ static int tb_start(struct tb *tb, bool reset)
 
 	/* Allow tb_handle_hotplug to progress events */
 	tcm->hotplug_active = true;
+
+	/*
+	 * A host-to-host link can train during the init window above -- after
+	 * its port's initial scan, before hotplug was armed -- so its plug event
+	 * was dropped (tb_handle_hotplug ignores events while !hotplug_active) and
+	 * it is enumerated by neither path. Re-scan the root ports now that
+	 * hotplug is armed to catch such a late link. Idempotent: a port that
+	 * already has a remote switch or XDomain is skipped (port->remote /
+	 * tb_xdomain_find_by_route), and a still-down port bails in
+	 * tb_wait_for_port(). Without this a node permanently loses a neighbour
+	 * whose peer booted slowly (appmana-009 never saw appmana-020).
+	 */
+	tb_scan_switch(tb->root_switch);
 	return 0;
 }
 

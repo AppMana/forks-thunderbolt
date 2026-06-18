@@ -215,4 +215,64 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
 	return L->a.enumerated && L->b.enumerated;
 }
 
+/*
+ * ---- Software CM: late host-to-host link enumeration (tb.c) ----
+ *
+ * Grounded in tb.c: tb_scan_port() enumerates a port's XDomain only if the link
+ * is already up (tb_wait_for_port <= 0 -> bail); a link that comes up LATER is
+ * re-scanned via tb_handle_hotplug() -> tb_scan_port(). BUT tb_handle_hotplug
+ * drops every event while !tcm->hotplug_active (init/suspend/shutdown, the
+ * `goto out` near its top). So a host link that trains during the INIT WINDOW --
+ * after its initial scan found nothing, before hotplug is armed -- is enumerated
+ * by neither path and is lost until something else re-scans.
+ *
+ * Live: appmana-009 enumerated appmana-025 (port up at boot) but never
+ * appmana-020 (its port trained while 009 was still booting), so 009 had no
+ * XDomain to answer 020's property requests. Modelled as a per-port state +
+ * the arm-ordering; the fix re-scans ports when hotplug is armed.
+ */
+struct cm_port {
+	bool link_up;	/* peer's link has trained */
+	bool xdomain;	/* this port's XDomain was enumerated */
+};
+
+struct cm_host {
+	struct cm_port port[2];
+	bool hotplug_armed;
+};
+
+/* Initial scan of one port: enumerate it only if the link is already up. */
+static inline void cm_scan_port(struct cm_host *h, int p)
+{
+	if (h->port[p].link_up)
+		h->port[p].xdomain = true;
+}
+
+/*
+ * A peer finishes booting and its link to port @p trains. Models the resulting
+ * plug event: handled (re-scan) only if hotplug is armed, else dropped.
+ */
+static inline void cm_link_up(struct cm_host *h, int p)
+{
+	h->port[p].link_up = true;
+	if (h->hotplug_armed)
+		h->port[p].xdomain = true;	/* tb_handle_hotplug -> tb_scan_port */
+	/* else: !tcm->hotplug_active -> event dropped */
+}
+
+/*
+ * Arm hotplug, then re-scan every port (tb_start() calls tb_scan_switch() right
+ * after setting hotplug_active) so a link that trained during the init window is
+ * caught. Kept in lockstep with tb.c; reverting the re-scan strands the late
+ * link again.
+ */
+static inline void cm_arm_hotplug(struct cm_host *h)
+{
+	int i;
+
+	h->hotplug_armed = true;
+	for (i = 0; i < 2; i++)
+		cm_scan_port(h, i);
+}
+
 #endif /* _TB_NEGOTIATION_MODEL_H */
