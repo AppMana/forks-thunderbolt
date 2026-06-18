@@ -105,5 +105,9 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$tag" dist/* --title "$tag" --generate-notes
+            gh release create "$tag" dist/* --title "$tag" --generate-notes --latest
           fi
+          # Ensure the release is published, not a draft -- a draft is 404 to
+          # downstream consumers (the AppMana/apt publish workflow, the DSV4
+          # image build), so always force it public.
+          gh release edit "$tag" --draft=false --latest
