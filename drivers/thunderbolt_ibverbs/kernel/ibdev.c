@@ -2821,6 +2821,51 @@ static int tbv_destroy_qp(struct ib_qp *qp, struct ib_udata *udata)
 	return 0;
 }
 
+#define TBV_REACH_PREFIX_BITS 64
+
+/* GID with no per-link subnet yet: link-local fe80::/10 or v4-mapped
+ * ::ffff:0:0/96. Until udev assigns the routable per-link address the rail's
+ * GID is one of these, so reachability cannot be judged -- stay permissive. */
+static bool tbv_gid_no_per_link_subnet(const u8 g[16])
+{
+	static const u8 v4map[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+	return (g[0] == 0xfe && (g[1] & 0xc0) == 0x80) ||
+	       !memcmp(g, v4map, sizeof(v4map));
+}
+
+/*
+ * Honest-HCA reachability backstop. A native rail reaches only the peer on its
+ * one cabled link, so at RTR the destination GID must share the rail's local
+ * per-link GID subnet; otherwise fail cleanly with -ENETUNREACH rather than
+ * misroute onto the rail's single neighbour. Inert (returns 0) while the GIDs
+ * are still link-local/v4-mapped, i.e. before per-link addresses are deployed.
+ */
+static int tbv_qp_check_dgid_on_rail(struct tbv_qp *tqp)
+{
+	const struct ib_global_route *grh;
+	union ib_gid sgid;
+
+	if (tqp->backend != TBV_BACKEND_NATIVE || tqp->type == IB_QPT_GSI)
+		return 0;
+	if (!(rdma_ah_get_ah_flags(&tqp->attr.ah_attr) & IB_AH_GRH))
+		return 0;
+	grh = rdma_ah_read_grh(&tqp->attr.ah_attr);
+
+	if (rdma_query_gid(tqp->base.device, 1, grh->sgid_index, &sgid))
+		return 0;
+	if (tbv_gid_no_per_link_subnet(sgid.raw) ||
+	    tbv_gid_no_per_link_subnet(grh->dgid.raw))
+		return 0;
+	if (!tbv_gid_subnet_match(sgid.raw, grh->dgid.raw,
+				  TBV_REACH_PREFIX_BITS)) {
+		pr_warn_ratelimited("QP %u RTR dgid %pI6 not in rail subnet (sgid %pI6) -- off-link destination\n",
+				    tqp->base.qp_num, grh->dgid.raw, sgid.raw);
+		return -ENETUNREACH;
+	}
+	return 0;
+}
+
 static int tbv_modify_qp(struct ib_qp *qp, struct ib_qp_attr *attr,
 			 int attr_mask, struct ib_udata *udata)
 {
@@ -2909,6 +2954,12 @@ out_unlock:
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	if (ret)
 		return ret;
+	/* RTR carries the destination GID (sleeping context here). */
+	if (attr_mask & IB_QP_AV) {
+		ret = tbv_qp_check_dgid_on_rail(tqp);
+		if (ret)
+			return ret;
+	}
 	if (flush_error)
 		tbv_qp_flush_error(tqp);
 	if (attr_mask & (IB_QP_STATE | IB_QP_DEST_QPN))

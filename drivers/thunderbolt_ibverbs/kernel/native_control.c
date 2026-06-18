@@ -113,8 +113,7 @@ static void tbv_native_control_local_identity(u64 *eui64, u32 *ipv4_be)
  * link-local/EUI RoCE GID. Locally administered + unicast (0x02). udev assigns
  * the per-link routable address on top.
  *
- * Unit-tested: kernel/tests/rail_mac_test.c (KUnit) + the verbatim userspace
- * mirror kernel/tests/rail_mac_userspace.c. Change all three together.
+ * Unit-tested: kernel/tests/rail_mac_test.c (run via tools/run-kunit.sh).
  */
 void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6])
 {
@@ -124,6 +123,32 @@ void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6])
 	mac[3] = (u8)(node_guid >> 16);
 	mac[4] = (u8)(node_guid >> 8);
 	mac[5] = (u8)node_guid;
+}
+
+/*
+ * Reachability predicate for the honest per-link HCA: true iff GIDs @a and @b
+ * share the first @prefix_bits bits, i.e. sit in the same RoCE subnet. A rail
+ * reaches a peer iff the peer's GID matches the rail's local GID subnet (the
+ * per-link address udev assigns); anything else must fail cleanly rather than
+ * be misrouted. Unit-tested: kernel/tests/ack_routing_test.c (run-kunit.sh).
+ */
+bool tbv_gid_subnet_match(const u8 a[16], const u8 b[16], unsigned int prefix_bits)
+{
+	unsigned int full, rem;
+
+	if (prefix_bits > 128)
+		return false;
+	full = prefix_bits / 8;
+	rem = prefix_bits % 8;
+	if (full && memcmp(a, b, full))
+		return false;
+	if (rem) {
+		u8 mask = (u8)(0xff << (8 - rem));
+
+		if ((a[full] & mask) != (b[full] & mask))
+			return false;
+	}
+	return true;
 }
 
 /*
