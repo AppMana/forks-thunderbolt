@@ -107,6 +107,62 @@ static void tbv_native_control_local_identity(u64 *eui64, u32 *ipv4_be)
 }
 
 /*
+ * FNV-1a 64-bit: tiny, portable, deterministic hash. Used so the per-link GID
+ * /64 is computed byte-identically here and in the userspace test mirror
+ * (kernel/tests/link_gid_userspace.c); jhash would force duplicating its
+ * internals into the mirror.
+ */
+static u64 tbv_link_gid_fnv1a(const u8 *data, size_t len)
+{
+	u64 h = 0xcbf29ce484222325ULL;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		h ^= data[i];
+		h *= 0x00000100000001b3ULL;
+	}
+	return h;
+}
+
+/*
+ * The honest-HCA per-link GID /64 subnet prefix for the link between two hosts
+ * identified by their Thunderbolt unique_id UUIDs. Symmetric in (a,b) so both
+ * ends derive the SAME /64 (they land on one subnet -> reachable by GID match);
+ * distinct per link (a node's two cabled links get different /64s, so a dest GID
+ * resolves to exactly one rail); ULA (fd00::/8) so it never collides with the
+ * LAN/global prefixes. The interface-id (low 8 bytes) is the per-rail node_guid,
+ * set in tbv_ibdev_register(); this helper owns only the /64.
+ *
+ * Contract is unit-tested: kernel/tests/link_gid_test.c (KUnit) and the
+ * verbatim userspace mirror kernel/tests/link_gid_userspace.c. Change all three
+ * together.
+ */
+void tbv_link_gid_prefix(const u8 a[16], const u8 b[16], u8 prefix[8])
+{
+	const u8 *lo = a, *hi = b;
+	u8 buf[32];
+	u64 h;
+
+	if (memcmp(a, b, 16) > 0) {
+		lo = b;
+		hi = a;
+	}
+	memcpy(buf, lo, 16);
+	memcpy(buf + 16, hi, 16);
+	h = tbv_link_gid_fnv1a(buf, sizeof(buf));
+
+	/* RFC 4193 ULA /64: 0xfd | 40-bit global-id (per-link hash) | 16-bit subnet=0 */
+	memset(prefix, 0, 8);
+	prefix[0] = 0xfd;
+	prefix[1] = (u8)(h >> 32);
+	prefix[2] = (u8)(h >> 24);
+	prefix[3] = (u8)(h >> 16);
+	prefix[4] = (u8)(h >> 8);
+	prefix[5] = (u8)h;
+	/* prefix[6..7] = subnet id 0 */
+}
+
+/*
  * True while the roce_netdev exists but has no IPv4 yet (the boot-time DHCP
  * window). A HELLO sent now would advertise ipv4=0, which a peer can never
  * resolve a v4-mapped dgid against.
