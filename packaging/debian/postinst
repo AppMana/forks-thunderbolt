@@ -12,6 +12,13 @@ case "$1" in
             fi
             dkms autoinstall -m "$NAME"/"$VERSION" || true
         fi
+        # `thunderbolt` is loaded from the initramfs (early boot), so a DKMS
+        # rebuild alone is NOT enough: without regenerating the initramfs the
+        # stale in-initramfs module loads at the next boot and the freshly built
+        # one never runs. Refresh it for all installed kernels.
+        if command -v update-initramfs >/dev/null 2>&1; then
+            update-initramfs -u -k all || true
+        fi
         ;;
 esac
 
