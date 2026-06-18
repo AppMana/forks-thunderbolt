@@ -2391,11 +2391,15 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 		return ret;
 	}
 
-	rtnl_lock();
-	dev_open(ndev, NULL);
-	rtnl_unlock();
+	/*
+	 * Leave the netdev admin-DOWN: udev brings it up when it assigns the
+	 * per-link address (matched on the TB parent device). This keeps the
+	 * rail-registration path free of an rtnl_lock()/dev_open() -- a load-path
+	 * lock acquisition that can wedge the node. Maple Ridge firmware recovers
+	 * from a warm reload (see drivers/thunderbolt/test.c icm_fw model), so a
+	 * load-time hang on these nodes is a driver-software fault, not the ICM.
+	 */
 	netif_carrier_on(ndev);
-
 	dev->netdev = ndev;
 	return 0;
 }

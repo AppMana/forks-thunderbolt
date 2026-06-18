@@ -3011,7 +3011,13 @@ static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 	icm_fw_cold_boot(&fw);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
-	/* Maple Ridge has a real reset vector -> re-auths on a warm restart. */
+	/*
+	 * Maple Ridge (e.g. appmana-019/020) has a real reset vector -> re-auths
+	 * on a warm restart. A module reload therefore does NOT wedge the ICM on
+	 * these nodes; a hang seen while (un)loading the module on a Maple Ridge
+	 * host is a driver-software fault (e.g. a lock taken in the load path),
+	 * not a firmware-terminal state.
+	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
