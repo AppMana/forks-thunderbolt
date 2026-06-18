@@ -101,9 +101,9 @@ in lockstep.
 
 ## Validation
 
-- Pure predicate `tb_xdomain_generation_stale()` is covered by the KUnit case
-  `tb_test_xdomain_generation_stale` (`test.c`) and a userspace mirror
-  (`tests/xdomain_properties_userspace.c`) — fleet kernels lack `CONFIG_KUNIT`.
+- Pure predicate `tb_xdomain_generation_stale()` is covered by the KUnit cases in
+  `drivers/thunderbolt/test.c` (core) and the ibverbs ack-routing suite. Run via
+  `drivers/thunderbolt_ibverbs/tools/run-kunit.sh` (`kunit.py`, x86_64 qemu).
 - Hardware: with the patched core on both ends of a link, a soft
   `thunderbolt_ibverbs` reload re-negotiates without a reboot (the patched side
   re-reads where an unpatched neighbour's gen-gate blocks it).

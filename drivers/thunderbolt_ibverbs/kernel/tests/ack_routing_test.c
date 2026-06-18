@@ -17,9 +17,8 @@
  *  - tbv_psn_delta: signed 24-bit PSN distance with wraparound, used to decide
  *    in-window vs duplicate ACKs.
  *
- * Build: included in the module only when CONFIG_KUNIT is set
- * (see kernel/Makefile). Run on a CONFIG_KUNIT kernel, e.g. via kunit.py, or
- * mirror the same cases in userspace (kernel/tests/ack_routing_userspace.c).
+ * Build: included in the module only when CONFIG_KUNIT is set. Run via
+ * drivers/thunderbolt_ibverbs/tools/run-kunit.sh (kunit.py on an overlaid tree).
  */
 #include <kunit/test.h>
 #include "../tbv.h"
@@ -319,7 +318,7 @@ static void tbv_verdict_match_wrapper_contract_unchanged(struct kunit *test)
  * mirroring thunderbolt_net's LOGOUT reset) so the rail stops reporting
  * data-ready into a dead tunnel and re-confirms. Exercises the REAL
  * tbv_rail_data_ready() and tb_xdomain_handshake_supersede(); the model step
- * matches apply_remote's inbound-HELLO path. Mirror: reconnect_userspace.c.
+ * matches apply_remote's inbound-HELLO path.
  */
 static void tbv_test_native_rehello_supersede(struct kunit *test)
 {
@@ -351,7 +350,7 @@ static void tbv_test_native_rehello_supersede(struct kunit *test)
  * be disabled (-> RING_STARTED) and re-enabled with the new hop, else the rail
  * re-confirms data-ready into a dead hop (enable_tunnel rejects the change with
  * -EBUSY, path.c:1380). Models the work's rehop path + tbv_path_*_tunnel state
- * transitions. Mirror: reconnect_userspace.c scenario 2.
+ * transitions.
  */
 static void tbv_test_native_rehello_changed_hops(struct kunit *test)
 {
@@ -399,7 +398,6 @@ static void tbv_test_native_rehello_changed_hops(struct kunit *test)
  *   - tb_xdomain_services_added/removed/changed (the service-set predicates)
  *   - TB_XNEG_ENUMERATE/RECONNECT (the forced-rescan that binds a newly-
  *     advertised service after a soft reload whose notification was lost)
- * Userspace mirror: kernel/tests/tbnet_bind_userspace.c. Keep in lockstep.
  * ============================================================================
  */
 struct xneg_link_peer { TB_XNEG_STATE; };
@@ -442,13 +440,14 @@ static bool xneg_tbnet_binds_after_reload(bool fix)
 	return TB_XNEG_BOUND(&a, TB_XSVC_TBNET) && TB_XNEG_BOUND(&b, TB_XSVC_TBNET);
 }
 
-/* the gate: only a strictly-newer gen accepts; a 0 cache forces accept */
+/* the gate: drop ONLY an exact-duplicate re-read; a lower gen means the peer
+ * rebooted (random reseed) and MUST be accepted; a 0 cache forces accept */
 static void tbv_test_xneg_generation_gate(struct kunit *test)
 {
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(false, 1, 7)); /* first read */
-	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 5, 5));   /* equal: stale */
-	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 4, 5));   /* older: stale */
-	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 6, 5));  /* newer: ok */
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_generation_stale(true, 5, 5));   /* equal: duplicate, stale */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 4, 5));  /* lower: peer rebooted, accept */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 6, 5));  /* newer: accept */
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_generation_stale(true, 1, 0));  /* forced re-read */
 }
 

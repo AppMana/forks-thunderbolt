@@ -5,8 +5,8 @@
  * (mac[0] == 0x02), deterministic, and distinct per rail (distinct node_guid
  * low bits -> distinct MAC -> distinct per-rail RoCE GID).
  *
- * Mirrored in kernel/tests/rail_mac_userspace.c for on-host runs (fleet kernels
- * lack CONFIG_KUNIT). Compiled only when CONFIG_KUNIT is set (see kernel/Makefile).
+ * Run via drivers/thunderbolt_ibverbs/tools/run-kunit.sh (kunit.py against an
+ * overlaid v6.17 tree); built into the module on a CONFIG_KUNIT kernel.
  */
 #include <kunit/test.h>
 #include <linux/string.h>

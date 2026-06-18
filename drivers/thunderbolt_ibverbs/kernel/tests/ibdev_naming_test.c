@@ -12,10 +12,8 @@
  * -ENFILE/-23) and green once it keys on the route. The test body does not
  * change between the two -- only the code under test does.
  *
- * Built into the module on a CONFIG_KUNIT kernel (see kernel/Makefile); the
- * fleet's Ubuntu generic kernels lack CONFIG_KUNIT, so the same cases run
- * on-host via tests/ibdev_naming_userspace.c (which can compile the pre-fix
- * caller with -DBUGGY_CALLER to show the red).
+ * Built into the module on a CONFIG_KUNIT kernel; run via
+ * drivers/thunderbolt_ibverbs/tools/run-kunit.sh (kunit.py on an overlaid tree).
  */
 #include <kunit/test.h>
 #include <linux/thunderbolt.h>

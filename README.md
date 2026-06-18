@@ -12,7 +12,8 @@ hand-synced copies:
 All three negotiate the same XDomain connection and shared the same soft-reconnect
 bug; the fix lives once in `drivers/thunderbolt/thunderbolt_negotiation.h`
 (generation gate + handshake re-arm + the `TB_XNEG_*` installable macros), with
-KUnit + plain-`cc` userspace coverage (fleet kernels lack `CONFIG_KUNIT`).
+KUnit, run via `drivers/thunderbolt_ibverbs/tools/run-kunit.sh` (`kunit.py` on an
+overlaid v6.17 tree, x86_64 qemu; the fleet/host kernels lack `CONFIG_KUNIT`).
 
 ```
 upstream  = git://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git
