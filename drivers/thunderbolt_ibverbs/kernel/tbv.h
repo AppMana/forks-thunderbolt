@@ -889,12 +889,6 @@ bool tbv_native_control_local_identity_incomplete(void);
  * tests/rail_mac_test.c.
  */
 void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6]);
-/*
- * tbv_gid_subnet_match: true iff GIDs a and b share the first prefix_bits bits
- * (same RoCE subnet) -- the per-link reachability test. See native_control.c +
- * tests/ack_routing_test.c.
- */
-bool tbv_gid_subnet_match(const u8 a[16], const u8 b[16], unsigned int prefix_bits);
 void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
 int tbv_native_control_identity_notifier_register(struct tbv_state *state);
 void tbv_native_control_identity_notifier_unregister(void);

@@ -126,32 +126,6 @@ void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6])
 }
 
 /*
- * Reachability predicate for the honest per-link HCA: true iff GIDs @a and @b
- * share the first @prefix_bits bits, i.e. sit in the same RoCE subnet. A rail
- * reaches a peer iff the peer's GID matches the rail's local GID subnet (the
- * per-link address udev assigns); anything else must fail cleanly rather than
- * be misrouted. Unit-tested: kernel/tests/ack_routing_test.c (run-kunit.sh).
- */
-bool tbv_gid_subnet_match(const u8 a[16], const u8 b[16], unsigned int prefix_bits)
-{
-	unsigned int full, rem;
-
-	if (prefix_bits > 128)
-		return false;
-	full = prefix_bits / 8;
-	rem = prefix_bits % 8;
-	if (full && memcmp(a, b, full))
-		return false;
-	if (rem) {
-		u8 mask = (u8)(0xff << (8 - rem));
-
-		if ((a[full] & mask) != (b[full] & mask))
-			return false;
-	}
-	return true;
-}
-
-/*
  * True while the roce_netdev exists but has no IPv4 yet (the boot-time DHCP
  * window). A HELLO sent now would advertise ipv4=0, which a peer can never
  * resolve a v4-mapped dgid against.

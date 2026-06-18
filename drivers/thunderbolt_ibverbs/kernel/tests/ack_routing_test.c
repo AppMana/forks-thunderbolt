@@ -245,51 +245,6 @@ static void tbv_gid_match_v4_does_not_eui_match(struct kunit *test)
 }
 
 /*
- * tbv_gid_subnet_match: the per-link reachability test for the honest HCA. A
- * rail reaches a peer iff the peer's GID is in the rail's local-GID subnet (the
- * per-link address udev assigns). Two ends of one link share the subnet;
- * different links do not; an off-link dgid must NOT match (it fails cleanly
- * rather than misrouting onto the rail's one real neighbour).
- */
-static void tbv_subnet_match_same_64(struct kunit *test)
-{
-	/* fd00:99:2:7::/64 -- both ends of a link share the /64. */
-	const u8 a[16] = { 0xfd,0,0x99,0,0,2,0,7, 0x5a,0x11,0x22,0xff,0xfe,0xb7,0x75,0xb1 };
-	const u8 b[16] = { 0xfd,0,0x99,0,0,2,0,7, 0x12,0x21,0x1b,0x64,0xde,0x7a,0,1 };
-
-	KUNIT_EXPECT_TRUE(test, tbv_gid_subnet_match(a, b, 64));
-}
-
-static void tbv_subnet_match_different_64(struct kunit *test)
-{
-	/* link 7 vs link 9 -- different /64s, not reachable. */
-	const u8 a[16] = { 0xfd,0,0x99,0,0,2,0,7, 0,0,0,0,0,0,0,1 };
-	const u8 c[16] = { 0xfd,0,0x99,0,0,2,0,9, 0,0,0,0,0,0,0,1 };
-
-	KUNIT_EXPECT_FALSE(test, tbv_gid_subnet_match(a, c, 64));
-}
-
-static void tbv_subnet_match_127_link_pair(struct kunit *test)
-{
-	/* a /127 link: ::8 and ::9 differ only in the last bit -> same /127,
-	 * but a full /128 compare must distinguish them. */
-	const u8 lo[16] = { 0xfd,0,0x99,1,0,0,0,0, 0,0,0,0,0,0,0,0x08 };
-	const u8 hi[16] = { 0xfd,0,0x99,1,0,0,0,0, 0,0,0,0,0,0,0,0x09 };
-
-	KUNIT_EXPECT_TRUE(test, tbv_gid_subnet_match(lo, hi, 127));
-	KUNIT_EXPECT_FALSE(test, tbv_gid_subnet_match(lo, hi, 128));
-}
-
-static void tbv_subnet_match_127_off_link(struct kunit *test)
-{
-	/* ::8 and ::a are in different /127s (::8-::9 vs ::a-::b). */
-	const u8 a[16] = { 0xfd,0,0x99,1,0,0,0,0, 0,0,0,0,0,0,0,0x08 };
-	const u8 c[16] = { 0xfd,0,0x99,1,0,0,0,0, 0,0,0,0,0,0,0,0x0a };
-
-	KUNIT_EXPECT_FALSE(test, tbv_gid_subnet_match(a, c, 127));
-}
-
-/*
  * tbv_gid_identity_verdict: the three-state classifier behind the rebind
  * decision. The INCONCLUSIVE state exists because of the 2026-06-13 DSV4
  * boot outage: nodes HELLOed before DHCP assigned their LAN address, so
@@ -543,10 +498,6 @@ static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_gid_match_wrong_peer),
 	KUNIT_CASE(tbv_gid_match_zero_identity_never_matches),
 	KUNIT_CASE(tbv_gid_match_v4_does_not_eui_match),
-	KUNIT_CASE(tbv_subnet_match_same_64),
-	KUNIT_CASE(tbv_subnet_match_different_64),
-	KUNIT_CASE(tbv_subnet_match_127_link_pair),
-	KUNIT_CASE(tbv_subnet_match_127_off_link),
 	KUNIT_CASE(tbv_verdict_v4_dgid_zero_ipv4_is_inconclusive),
 	KUNIT_CASE(tbv_verdict_v4_dgid_match_and_mismatch),
 	KUNIT_CASE(tbv_verdict_eui_dgid_zero_eui_is_inconclusive),

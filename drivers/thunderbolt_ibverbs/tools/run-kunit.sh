@@ -48,7 +48,7 @@ thunderbolt_ibverbs-y := \
 	proto/config.o proto/identity.o proto/reliability.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += \
 	kernel/tests/ack_routing_test.o kernel/tests/ibdev_naming_test.o \
-	kernel/tests/rail_mac_test.o
+	kernel/tests/rail_mac_test.o kernel/tests/nccl_device_test.o
 ccflags-y := -I$(src)/kernel -I$(src) -DDEBUG -Wno-unused-parameter
 MK
 
