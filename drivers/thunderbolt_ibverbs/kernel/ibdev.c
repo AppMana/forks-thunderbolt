@@ -8,6 +8,7 @@
 #include <linux/crc32c.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/etherdevice.h>
 #include <linux/highmem.h>
 #include <linux/idr.h>
 #include <linux/in6.h>
@@ -1895,32 +1896,6 @@ enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
  * Thunderbolt neighbour of this node (e.g. the chain wrap link), and failing
  * RTR fast with a clear dmesg line beats a silent retry storm.
  */
-static int tbv_qp_check_dgid_on_rail(struct tbv_qp *tqp)
-{
-	const struct ib_global_route *grh;
-	struct tb_xdomain *xd;
-	u8 prefix[8];
-
-	if (tqp->backend != TBV_BACKEND_NATIVE || tqp->type == IB_QPT_GSI)
-		return 0;
-	if (!(rdma_ah_get_ah_flags(&tqp->attr.ah_attr) & IB_AH_GRH))
-		return 0;
-	if (!tqp->rail || !tqp->rail->peer)
-		return 0;
-	xd = tqp->rail->peer->xd;
-	if (!xd || !xd->local_uuid || !xd->remote_uuid)
-		return 0;
-
-	grh = rdma_ah_read_grh(&tqp->attr.ah_attr);
-	tbv_link_gid_prefix(xd->local_uuid->b, xd->remote_uuid->b, prefix);
-	if (memcmp(grh->dgid.raw, prefix, sizeof(prefix))) {
-		pr_warn_ratelimited("QP %u RTR dgid %pI6 not on this rail's link\n",
-				    tqp->base.qp_num, grh->dgid.raw);
-		return -ENETUNREACH;
-	}
-	return 0;
-}
-
 static u32 tbv_collect_native_data_paths_for_qp_locked(struct tbv_qp *tqp,
 						       struct tbv_path **paths,
 						       u32 max_paths)
@@ -2361,66 +2336,96 @@ static const char *tbv_ibdev_netdev_name(const struct tbv_ibdev *dev)
 	return tbv_ibdev_netdev_name_for(dev->state, dev->backend);
 }
 
+static netdev_tx_t tbv_netdev_xmit(struct sk_buff *skb, struct net_device *ndev)
+{
+	/* GID-only netdev: the rail's data path is native Thunderbolt. */
+	kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops tbv_netdev_ops = {
+	.ndo_start_xmit = tbv_netdev_xmit,
+};
+
+static void tbv_netdev_setup(struct net_device *ndev)
+{
+	ether_setup(ndev);
+	ndev->netdev_ops = &tbv_netdev_ops;
+	ndev->flags |= IFF_NOARP;
+	ndev->priv_flags |= IFF_NO_QUEUE;
+}
+
+/*
+ * Each rail owns a private virtual netdev so ib_core's RoCE GID management
+ * gives the rail a distinct GID table: the per-rail MAC yields a per-rail
+ * link-local/EUI GID, and udev assigns the per-link routable address (parented
+ * to the rail's Thunderbolt device for matching) so both ends of a link share a
+ * subnet. The netdev carries no traffic; the rail's data path is native TB.
+ */
 static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 {
-	const char *name = tbv_ibdev_netdev_name(dev);
 	struct net_device *ndev;
-	int ret = 0;
+	u8 mac[ETH_ALEN];
+	int ret;
 
-	if (!name)
-		return 0;
-
-	ndev = dev_get_by_name(&init_net, name);
+	ndev = alloc_netdev(0, "u4r%d", NET_NAME_ENUM, tbv_netdev_setup);
 	if (!ndev)
-		return -EPROBE_DEFER;
+		return -ENOMEM;
 
-	if (ndev->reg_state != NETREG_REGISTERED) {
-		dev_put(ndev);
-		return -EPROBE_DEFER;
+	tbv_rail_netdev_mac(be64_to_cpu(dev->base.node_guid), mac);
+	eth_hw_addr_set(ndev, mac);
+
+	if (dev->base.dev.parent)
+		SET_NETDEV_DEV(ndev, dev->base.dev.parent);
+
+	ret = register_netdev(ndev);
+	if (ret) {
+		free_netdev(ndev);
+		return ret;
 	}
 
 	ret = ib_device_set_netdev(&dev->base, ndev, 1);
 	if (ret) {
-		dev_put(ndev);
+		unregister_netdev(ndev);
+		free_netdev(ndev);
 		return ret;
 	}
 
+	rtnl_lock();
+	dev_open(ndev, NULL);
+	rtnl_unlock();
+	netif_carrier_on(ndev);
+
 	dev->netdev = ndev;
-	dev_put(ndev);
 	return 0;
 }
 
 static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
 {
-	if (!dev->netdev)
+	struct net_device *ndev = dev->netdev;
+
+	if (!ndev)
 		return;
 
-	ib_device_set_netdev(&dev->base, NULL, 1);
 	dev->netdev = NULL;
+	ib_device_set_netdev(&dev->base, NULL, 1);
+	unregister_netdev(ndev);
+	free_netdev(ndev);
 }
 
 static int tbv_query_gid(struct ib_device *ibdev, u32 port_num, int index,
 			 union ib_gid *gid)
 {
-	struct tbv_ibdev *dev = container_of(ibdev, struct tbv_ibdev, base);
-	struct tb_xdomain *xd;
-	u8 prefix[8];
-
+	/*
+	 * RoCE GIDs come from the rail's bound netdev (ib_core roce_gid_mgmt),
+	 * not from here; this static entry is only a fallback for the cache.
+	 */
 	if (port_num != 1 || index < 0 || index >= TBV_IBDEV_GID_TBL_LEN)
 		return -EINVAL;
 
 	memset(gid, 0, sizeof(*gid));
-	gid->global.interface_id = ibdev->node_guid;
-
-	/* index 0: per-link /64 from both endpoints' TB unique_ids + node_guid iid */
-	xd = (dev->rail && dev->rail->peer) ? dev->rail->peer->xd : NULL;
-	if (index == 0 && xd && xd->local_uuid && xd->remote_uuid) {
-		tbv_link_gid_prefix(xd->local_uuid->b, xd->remote_uuid->b, prefix);
-		memcpy(&gid->raw[0], prefix, sizeof(prefix));
-		return 0;
-	}
-
 	gid->global.subnet_prefix = cpu_to_be64(0xfe80000000000000ULL);
+	gid->global.interface_id = ibdev->node_guid;
 	return 0;
 }
 
@@ -2894,13 +2899,6 @@ out_unlock:
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	if (ret)
 		return ret;
-	/* RTR carries the destination GID (IB_QP_AV): the dgid must be on this
-	 * rail's link, else the destination is off-rail. Sleeping context. */
-	if (attr_mask & IB_QP_AV) {
-		ret = tbv_qp_check_dgid_on_rail(tqp);
-		if (ret)
-			return ret;
-	}
 	if (flush_error)
 		tbv_qp_flush_error(tqp);
 	if (attr_mask & (IB_QP_STATE | IB_QP_DEST_QPN))

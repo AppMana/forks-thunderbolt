@@ -884,11 +884,11 @@ enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
 						   u64 eui64, u32 ipv4_be);
 bool tbv_native_control_local_identity_incomplete(void);
 /*
- * tbv_link_gid_prefix derives the per-link RoCE GID /64 (honest-HCA: distinct
- * per cabled link, symmetric across the two endpoints) from the two hosts' TB
- * unique_id UUIDs. See kernel/native_control.c + tests/link_gid_{test,userspace}.c.
+ * tbv_rail_netdev_mac derives a rail's private netdev MAC from its node_guid so
+ * each rail gets a distinct RoCE GID. See kernel/native_control.c +
+ * tests/rail_mac_{test,userspace}.c.
  */
-void tbv_link_gid_prefix(const u8 a[16], const u8 b[16], u8 prefix[8]);
+void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6]);
 void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
 int tbv_native_control_identity_notifier_register(struct tbv_state *state);
 void tbv_native_control_identity_notifier_unregister(void);

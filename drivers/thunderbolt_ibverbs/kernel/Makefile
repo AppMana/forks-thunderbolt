@@ -16,7 +16,7 @@ thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o 
 # userspace harness in tests/ack_routing_userspace.c for on-host verification.
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/ack_routing_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/ibdev_naming_test.o
-thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/link_gid_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rail_mac_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
