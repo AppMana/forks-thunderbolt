@@ -8,12 +8,12 @@
  * with `cc`. If you change tbv_link_gid_prefix() in kernel/native_control.c,
  * update BOTH this mirror and the kunit suite.
  *
- * CONTRACT (the honest-HCA per-link GID): given the Thunderbolt unique_id UUIDs
- * of the two hosts on a link, derive the RoCE GID /64 subnet prefix such that:
+ * Given the Thunderbolt unique_id UUIDs of the two hosts on a link, derive the
+ * GID /64 subnet prefix such that:
  *   - symmetric: both ends (which see (local,remote) in opposite order) derive
- *     the SAME /64, so they land on one subnet -> "reachable" by GID match;
+ *     the SAME /64, so they land on one subnet -> match by GID subnet;
  *   - distinct per link: a node's two cabled links get two different /64s, so a
- *     dest GID resolves to exactly one rail (no flat-GID ambiguity);
+ *     dest GID resolves to exactly one rail;
  *   - ULA: fd00::/8 (RFC 4193), so it never collides with global/LAN prefixes.
  * The interface-id (low 8 bytes of the GID) is the per-rail node_guid, set
  * elsewhere; this helper only owns the /64.

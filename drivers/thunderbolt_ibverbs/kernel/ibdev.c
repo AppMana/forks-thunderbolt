@@ -1895,88 +1895,29 @@ enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
  * Thunderbolt neighbour of this node (e.g. the chain wrap link), and failing
  * RTR fast with a clear dmesg line beats a silent retry storm.
  */
-static int tbv_qp_rebind_rail_for_dgid(struct tbv_qp *tqp)
+static int tbv_qp_check_dgid_on_rail(struct tbv_qp *tqp)
 {
-	struct tbv_state *state = tqp->owner;
 	const struct ib_global_route *grh;
-	struct tbv_peer *peer;
-	struct tbv_peer *match = NULL;
-	struct tbv_rail *new_rail;
-	bool counted = false;
-	bool all_valid = true;
-	int nnative = 0;
+	struct tb_xdomain *xd;
+	u8 prefix[8];
 
 	if (tqp->backend != TBV_BACKEND_NATIVE || tqp->type == IB_QPT_GSI)
 		return 0;
-	if (state->native_home_rail_qp)
-		return 0;
 	if (!(rdma_ah_get_ah_flags(&tqp->attr.ah_attr) & IB_AH_GRH))
 		return 0;
+	if (!tqp->rail || !tqp->rail->peer)
+		return 0;
+	xd = tqp->rail->peer->xd;
+	if (!xd || !xd->local_uuid || !xd->remote_uuid)
+		return 0;
+
 	grh = rdma_ah_read_grh(&tqp->attr.ah_attr);
-
-	mutex_lock(&state->lock);
-	list_for_each_entry(peer, &state->peers, node) {
-		if (peer->backend != TBV_BACKEND_NATIVE)
-			continue;
-		nnative++;
-		switch (tbv_gid_identity_verdict(grh->dgid.raw,
-						 peer->remote_identity_valid,
-						 peer->remote_roce_eui64,
-						 peer->remote_roce_ipv4)) {
-		case TBV_IDENTITY_MATCH:
-			match = peer;
-			break;
-		case TBV_IDENTITY_INCONCLUSIVE:
-			/*
-			 * This identity cannot adjudicate the dgid (peer mid-
-			 * negotiation, or it HELLOed pre-DHCP with ipv4=0).
-			 * It must abstain rather than vote "not me", else a
-			 * cabled neighbour gets -ENETUNREACH below.
-			 */
-			all_valid = false;
-			break;
-		case TBV_IDENTITY_NO_MATCH:
-			break;
-		}
-		if (match)
-			break;
-	}
-
-	if (!match) {
-		mutex_unlock(&state->lock);
-		if (nnative > 0 && all_valid) {
-			pr_warn_ratelimited("QP %u RTR dgid %pI6 matches no thunderbolt peer (%d native peers) -- destination is not a TB neighbour of this node\n",
-					    tqp->base.qp_num, grh->dgid.raw,
-					    nnative);
-			return -ENETUNREACH;
-		}
-		/* Identity unknown (peer mid-negotiation): keep legacy bind. */
-		return 0;
-	}
-
-	if (tqp->rail && tqp->rail->peer == match) {
-		mutex_unlock(&state->lock);
-		return 0;
-	}
-
-	new_rail = tbv_select_rail_from_peer_locked(match, false, &counted);
-	if (!new_rail) {
-		mutex_unlock(&state->lock);
-		pr_warn_ratelimited("QP %u RTR dgid %pI6 resolves to peer %u but it has no usable rail\n",
-				    tqp->base.qp_num, grh->dgid.raw,
-				    match->peer_id);
+	tbv_link_gid_prefix(xd->local_uuid->b, xd->remote_uuid->b, prefix);
+	if (memcmp(grh->dgid.raw, prefix, sizeof(prefix))) {
+		pr_warn_ratelimited("QP %u RTR dgid %pI6 not on this rail's link\n",
+				    tqp->base.qp_num, grh->dgid.raw);
 		return -ENETUNREACH;
 	}
-
-	pr_info("QP %u rebound from peer %u to peer %u rail 0x%x (RTR dgid %pI6)\n",
-		tqp->base.qp_num,
-		tqp->rail && tqp->rail->peer ? tqp->rail->peer->peer_id : 0,
-		match->peer_id, new_rail->rail_id, grh->dgid.raw);
-
-	tbv_qp_unbind_rail(tqp);
-	tqp->rail = new_rail;
-	tqp->rail_binding_counted = counted;
-	mutex_unlock(&state->lock);
 	return 0;
 }
 
@@ -2461,12 +2402,25 @@ static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
 static int tbv_query_gid(struct ib_device *ibdev, u32 port_num, int index,
 			 union ib_gid *gid)
 {
+	struct tbv_ibdev *dev = container_of(ibdev, struct tbv_ibdev, base);
+	struct tb_xdomain *xd;
+	u8 prefix[8];
+
 	if (port_num != 1 || index < 0 || index >= TBV_IBDEV_GID_TBL_LEN)
 		return -EINVAL;
 
 	memset(gid, 0, sizeof(*gid));
-	gid->global.subnet_prefix = cpu_to_be64(0xfe80000000000000ULL);
 	gid->global.interface_id = ibdev->node_guid;
+
+	/* index 0: per-link /64 from both endpoints' TB unique_ids + node_guid iid */
+	xd = (dev->rail && dev->rail->peer) ? dev->rail->peer->xd : NULL;
+	if (index == 0 && xd && xd->local_uuid && xd->remote_uuid) {
+		tbv_link_gid_prefix(xd->local_uuid->b, xd->remote_uuid->b, prefix);
+		memcpy(&gid->raw[0], prefix, sizeof(prefix));
+		return 0;
+	}
+
+	gid->global.subnet_prefix = cpu_to_be64(0xfe80000000000000ULL);
 	return 0;
 }
 
@@ -2940,14 +2894,10 @@ out_unlock:
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	if (ret)
 		return ret;
-	/*
-	 * RTR carries the destination GID (IB_QP_AV): move the QP to the rail
-	 * of the peer that owns it. Must run before recv-credit advertisement
-	 * below so the credits go out the correct rail. Sleeping context; the
-	 * spinlock above is released.
-	 */
+	/* RTR carries the destination GID (IB_QP_AV): the dgid must be on this
+	 * rail's link, else the destination is off-rail. Sleeping context. */
 	if (attr_mask & IB_QP_AV) {
-		ret = tbv_qp_rebind_rail_for_dgid(tqp);
+		ret = tbv_qp_check_dgid_on_rail(tqp);
 		if (ret)
 			return ret;
 	}

@@ -1,17 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KUnit tests for the honest-HCA per-link GID /64 derivation
- * (tbv_link_gid_prefix in kernel/native_control.c).
+ * KUnit tests for tbv_link_gid_prefix (kernel/native_control.c): the per-link
+ * GID /64 derived from the two hosts' Thunderbolt unique_id UUIDs. Properties:
+ * (a) symmetric -- both ends derive the same /64; (b) distinct per link; (c) ULA.
  *
- * Contract: given the two hosts' Thunderbolt unique_id UUIDs on a link, derive
- * the RoCE GID /64 subnet prefix so that it is (a) symmetric -- both ends derive
- * the same /64, so they share a subnet and a dest GID matches by subnet; (b)
- * distinct per link -- a node's two cabled links get different /64s; (c) ULA.
- *
- * Mirrored verbatim in kernel/tests/link_gid_userspace.c for on-host runs
- * (fleet kernels lack CONFIG_KUNIT). Change all three together.
- *
- * Build: included only when CONFIG_KUNIT is set (see kernel/Makefile).
+ * Mirrored in kernel/tests/link_gid_userspace.c for on-host runs (fleet kernels
+ * lack CONFIG_KUNIT). Compiled only when CONFIG_KUNIT is set (see kernel/Makefile).
  */
 #include <kunit/test.h>
 #include <linux/string.h>
