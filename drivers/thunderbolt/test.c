@@ -2942,6 +2942,30 @@ static void tb_test_xdomain_reboot_stranding(struct kunit *test)
 }
 
 /*
+ * Co-reset strand: both peers reboot at once. The kernel reads the peer's
+ * properties with a bounded budget (XDOMAIN_RETRIES) and, on exhaustion, today
+ * goes to XDOMAIN_STATE_ERROR -> __stop_handshake() (terminal). On a simultaneous
+ * reboot both peers are still booting, so each exhausts its budget before the
+ * other answers, both stop, and a stopped host sends no XDP request so the Maple
+ * ICM never re-arms -> permanent strand (the live appmana-020<->009 failure).
+ * Reproduced here; the fix re-reads instead of stopping.
+ */
+static void tb_test_xdomain_coreset_strand(struct kunit *test)
+{
+	struct coreset_link L;
+
+	/*
+	 * Simultaneous reboot: both peers answer only at round 15, but the read
+	 * budget is 10, so each exhausts before the other has booted. The link
+	 * MUST still establish once both finish booting. With today's terminal
+	 * give-up (__stop_handshake) it never re-reads and strands -- this is red
+	 * until xdomain.c reschedules the read instead of failing.
+	 */
+	coreset_boot(&L, 15, 15);
+	KUNIT_EXPECT_TRUE(test, coreset_run(&L, 100));
+}
+
+/*
  * Firmware-proven model of the ICM warm/cold reset behaviour (kept in lockstep
  * with the userspace mirror tests/icm_reset_userspace.c). Reverse-engineering of
  * the Titan Ridge ICM firmware (AppMana/intel-thunderbolt-firmwares,
@@ -3026,6 +3050,7 @@ static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
+	KUNIT_CASE(tb_test_xdomain_coreset_strand),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),

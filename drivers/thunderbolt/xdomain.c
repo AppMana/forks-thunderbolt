@@ -1667,7 +1667,19 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
-			tb_xdomain_failed(xd);
+			/*
+			 * A non-EAGAIN failure here usually means the peer is
+			 * still BOOTING and has not registered its property
+			 * block yet. The old tb_xdomain_failed() ->
+			 * XDOMAIN_STATE_ERROR -> __stop_handshake() was terminal
+			 * and stranded a SIMULTANEOUS reboot forever: both peers
+			 * exhaust the read budget before either answers, both
+			 * stop, and a stopped host sends no XDP request so
+			 * neither Maple ICM re-arms its announce
+			 * (appmana-020<->009). Re-arm the budget and keep
+			 * re-reading instead, recovering once the peer boots.
+			 */
+			tb_xdomain_queue_properties(xd);
 		} else {
 			xd->state = XDOMAIN_STATE_ENUMERATED;
 		}

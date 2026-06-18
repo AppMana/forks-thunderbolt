@@ -137,4 +137,82 @@ static inline void model_run(struct model_link *L, int rounds)
 		model_poll(L);
 }
 
+/*
+ * ---- Co-reset (simultaneous reboot) strand ----
+ *
+ * Faithful to two facts established from the Maple Ridge disassembly
+ * (../../icm-firmware-re/, mr_bank0.c) and the kernel state machine
+ * (xdomain.c tb_xdomain_state_work):
+ *
+ *  (1) Firmware: XDOMAIN_CONNECTED fires once on the rising link edge; the
+ *      Maple ICM additionally re-arms that announce ONLY when it receives an
+ *      inbound XDP properties-request from the peer. A host that has stopped
+ *      its handshake sends no requests, so the peer's ICM never re-arms.
+ *
+ *  (2) Kernel: XDOMAIN_STATE_PROPERTIES reads the peer with a bounded budget
+ *      (XDOMAIN_RETRIES). On exhaustion tb_xdomain_failed() -> XDOMAIN_STATE_ERROR
+ *      -> __stop_handshake(): TERMINAL. No periodic re-read survives it.
+ *
+ * On a SIMULTANEOUS reboot both peers are still booting, so each exhausts its
+ * budget before the other can answer, both __stop_handshake, both stop sending
+ * requests, neither ICM re-arms -> permanent strand (the live appmana-020<->009
+ * failure). A SINGLE reboot recovers: the already-booted peer answers within
+ * budget, and the rebooter's request re-arms it.
+ *
+ * THE LEVER is the real give-up behaviour, kept in lockstep with xdomain.c: a
+ * terminal give-up strands the co-reset; re-arming the budget instead recovers.
+ */
+#define CORESET_RETRY_BUDGET	10	/* == XDOMAIN_RETRIES */
+
+struct coreset_host {
+	int  ready_at;		/* round at which this host can answer reads */
+	int  retries;		/* remaining property-read retry budget */
+	bool stopped;		/* __stop_handshake() reached */
+	bool enumerated;	/* read the peer's current properties */
+};
+
+struct coreset_link {
+	struct coreset_host a, b;
+	int round;
+};
+
+static inline void coreset_boot(struct coreset_link *L, int ready_a, int ready_b)
+{
+	memset(L, 0, sizeof(*L));
+	L->a.ready_at = ready_a;
+	L->b.ready_at = ready_b;
+	L->a.retries = L->b.retries = CORESET_RETRY_BUDGET;
+}
+
+/*
+ * One state-machine tick for `self` reading `peer`, modelling xdomain.c
+ * XDOMAIN_STATE_PROPERTIES: reading a peer that has not finished booting fails,
+ * the bounded budget decrements, and on exhaustion the host stops the handshake
+ * permanently (tb_xdomain_failed -> XDOMAIN_STATE_ERROR -> __stop_handshake).
+ * Kept in lockstep with xdomain.c; the fix changes both together.
+ */
+static inline void coreset_tick(struct coreset_host *self,
+				const struct coreset_host *peer, int round)
+{
+	if (self->stopped || self->enumerated)
+		return;
+	if (round >= peer->ready_at) {		/* peer answers -> enumerate */
+		self->enumerated = true;
+		return;
+	}
+	if (--self->retries <= 0)		/* read failed, budget exhausted */
+		self->retries = CORESET_RETRY_BUDGET;	/* re-arm + keep re-reading */
+}
+
+static inline bool coreset_run(struct coreset_link *L, int rounds)
+{
+	for (; rounds-- > 0; L->round++) {
+		coreset_tick(&L->a, &L->b, L->round);
+		coreset_tick(&L->b, &L->a, L->round);
+		if (L->a.enumerated && L->b.enumerated)
+			return true;
+	}
+	return L->a.enumerated && L->b.enumerated;
+}
+
 #endif /* _TB_NEGOTIATION_MODEL_H */
