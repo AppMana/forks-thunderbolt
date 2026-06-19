@@ -723,6 +723,12 @@ const char *tbv_backend_name(enum tbv_backend_type type);
 int tbv_ibdev_start(struct tbv_state *state, bool register_verbs);
 void tbv_ibdev_stop(struct tbv_state *state);
 const char *tbv_ibdev_roce_netdev_name(void);
+
+/* write()-ABI data-path command mask + ops accessor. Both halves are required
+ * for the provider's ibv_cmd_post_recv (write path) to reach the driver instead
+ * of ENOSYS; KUnit-pinned in tests/post_recv_dispatch_test.c. */
+u64 tbv_ibdev_uverbs_cmd_mask(void);
+const struct ib_device_ops *tbv_ibdev_ops_ref(void);
 /*
  * Notify the verbs layer that rail's data path has come up (joined=true) or
  * is about to be torn down (joined=false). Safe to call repeatedly; only the

@@ -9116,6 +9116,30 @@ static const struct ib_device_ops tbv_ibdev_ops = {
 	INIT_RDMA_OBJ_SIZE(ib_qp, tbv_qp, base),
 };
 
+/*
+ * The write()-ABI data-path command set the userspace provider drives via
+ * ibv_cmd_post_{send,recv}/poll_cq/req_notify_cq. The kernel dispatches each of
+ * these write() commands to tbv_ibdev_ops.<op> ONLY when the matching
+ * uverbs_cmd_mask bit is set. Registering the op (in tbv_ibdev_ops) WITHOUT the
+ * mask bit -- or vice versa -- reopens the historical ENOSYS-on-post_recv hole
+ * (provider ibv_cmd_post_recv -> write() -> kernel ENOSYS -> NCCL retry-spins
+ * ~600s). Kept in one place and KUnit-pinned together with the ops
+ * (tests/post_recv_dispatch_test.c).
+ */
+u64 tbv_ibdev_uverbs_cmd_mask(void)
+{
+	return BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
+	       BIT_ULL(IB_USER_VERBS_CMD_POST_RECV) |
+	       BIT_ULL(IB_USER_VERBS_CMD_POLL_CQ) |
+	       BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
+}
+
+/* Accessor so the KUnit can assert the data-path ops are registered. */
+const struct ib_device_ops *tbv_ibdev_ops_ref(void)
+{
+	return &tbv_ibdev_ops;
+}
+
 static int tbv_ibdev_register_one(struct tbv_state *state,
 				  struct tbv_rail *rail,
 				  const char *name,
@@ -9149,11 +9173,7 @@ static int tbv_ibdev_register_one(struct tbv_state *state,
 			    ((u64)backend << 56) +
 			    ((u64)rail->peer->peer_id << 24) +
 			    rail->rail_id);
-	dev->base.uverbs_cmd_mask |=
-		BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
-		BIT_ULL(IB_USER_VERBS_CMD_POST_RECV) |
-		BIT_ULL(IB_USER_VERBS_CMD_POLL_CQ) |
-		BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
+	dev->base.uverbs_cmd_mask |= tbv_ibdev_uverbs_cmd_mask();
 
 	ib_set_device_ops(&dev->base, &tbv_ibdev_ops);
 
