@@ -1,0 +1,43 @@
+#!/bin/sh
+# tbv-rdma-addr <ifname> -- assign the deterministic per-link routable /64 to a
+# usb4_rdma GID-only rail netdev, so both ends of a cabled link share a subnet.
+# Invoked from udev (RUN+=) after the rail netdev appears, and safe to re-run by
+# hand. Pure derivation lives in tbv-rdma-addr-lib.sh; this only does the sysfs
+# lookups and the `ip` assignment.
+#
+# The rail netdev is parented (SET_NETDEV_DEV) to its XDomain *device* (e.g.
+# "0-1"), whose unique_id is the remote peer's host-router UUID. The local
+# host-router UUID is "<domain>-0" in the same thunderbolt domain. Both ends
+# therefore hold the same unordered UUID pair -> the same /64 (see the lib).
+set -eu
+
+LIB="$(dirname "$0")/tbv-rdma-addr-lib.sh"
+[ -r "$LIB" ] || LIB=/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh
+. "$LIB"
+
+ifc="${1:-}"
+[ -n "$ifc" ] || exit 0
+
+# Resolve the netdev's parent device, tolerating a concurrent udev rename: prefer
+# the passed name, fall back to udev's DEVPATH for this uevent.
+dev="$(readlink -f "/sys/class/net/${ifc}/device" 2>/dev/null || true)"
+if [ -z "${dev}" ] && [ -n "${DEVPATH:-}" ]; then
+	dev="$(readlink -f "/sys${DEVPATH}/device" 2>/dev/null || true)"
+fi
+[ -n "${dev}" ] || exit 0
+
+remote="$(cat "${dev}/unique_id" 2>/dev/null || true)"
+[ -n "${remote}" ] || exit 0                       # not an XDomain-parented rail
+
+xname="$(basename "${dev}")"                        # e.g. 0-1
+domain="${xname%%-*}"                               # e.g. 0
+local="$(cat "/sys/bus/thunderbolt/devices/${domain}-0/unique_id" 2>/dev/null || true)"
+[ -n "${local}" ] || exit 0
+
+addr="$(tbv_link_addr "${local}" "${remote}")"
+
+# nodad: link-local DAD is pointless on a point-to-point GID-only netdev and only
+# adds latency before the GID appears. `replace` keeps the helper idempotent.
+ip -6 addr replace "${addr}" dev "${ifc}" nodad 2>/dev/null || \
+	ip -6 addr replace "${addr}" dev "${ifc}"
+ip link set "${ifc}" up

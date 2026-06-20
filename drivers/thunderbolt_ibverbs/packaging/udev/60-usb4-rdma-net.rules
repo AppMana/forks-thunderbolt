@@ -4,3 +4,7 @@
 # populates (peer hostname / UUID), so this needs NO site configuration and works
 # on any host. A site that wants its own scheme can ship a higher-priority rule.
 SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", PROGRAM="/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname %k", NAME="%c"
+# Assign the deterministic per-link routable /64 (shared by both ends of the
+# cabled link) so the rail gets an honest RoCE GID the kernel RTR backstop and
+# the rdmaroute NCCL plugin can sense. Pure derivation in tbv-rdma-addr-lib.sh.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", RUN+="/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr %k"
