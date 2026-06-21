@@ -9481,6 +9481,18 @@ static void tbv_ibdev_netdev_retry_work(struct work_struct *work)
 	}
 }
 
+bool tbv_netdev_rename_keep(const char *expected_name, const char *new_name)
+{
+	/*
+	 * No externally pinned name => our own per-rail GID-only netdev, which
+	 * udev renames per link by design: KEEP it bound. Otherwise keep only
+	 * while it still carries the pinned name.
+	 */
+	if (!expected_name)
+		return true;
+	return new_name && !strcmp(expected_name, new_name);
+}
+
 static void tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
 					     struct net_device *ndev,
 					     bool detach_renamed)
@@ -9500,8 +9512,8 @@ static void tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
 				continue;
 
 			expected_name = tbv_ibdev_netdev_name(dev);
-			if (detach_renamed && expected_name &&
-			    !strcmp(expected_name, ndev->name))
+			if (detach_renamed &&
+			    tbv_netdev_rename_keep(expected_name, ndev->name))
 				continue;
 
 			pr_info("detaching ib_device %s from %s netdev %s%s%s\n",

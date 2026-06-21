@@ -78,10 +78,41 @@ static void tbv_naming_errors(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, tbv_ibdev_name_index(0, 0, L, 0, L), -ERANGE);
 }
 
+/*
+ * On a netdev rename we must KEEP the ib_device bound to its own per-rail
+ * GID-only netdev (kernel name u4r<N> -> udev renames it to tbr-<peer> per link;
+ * that rename is BY DESIGN). Detaching there both drops the rail's GID and, since
+ * NETDEV_CHANGENAME runs under rtnl, calls unregister_netdev() -> rtnl_lock()
+ * recursively -> deadlock (wedged appmana-018 on cable plug-in, 2026-06-20).
+ * Only an externally pinned roce_netdev (expected_name != NULL) renamed AWAY from
+ * its pinned name should detach.
+ */
+static void tbv_rename_keep_own_gid_netdev(struct kunit *test)
+{
+	/* our per-rail netdev: no pinned name -> keep across any rename */
+	KUNIT_EXPECT_TRUE(test, tbv_netdev_rename_keep(NULL, "tbr-appmana027"));
+	KUNIT_EXPECT_TRUE(test, tbv_netdev_rename_keep(NULL, "u4r0"));
+}
+
+static void tbv_rename_keep_pinned_match(struct kunit *test)
+{
+	/* pinned roce_netdev still at its name -> keep */
+	KUNIT_EXPECT_TRUE(test, tbv_netdev_rename_keep("br0.lan", "br0.lan"));
+}
+
+static void tbv_rename_detach_pinned_diverged(struct kunit *test)
+{
+	/* pinned roce_netdev renamed away -> detach (do not keep) */
+	KUNIT_EXPECT_FALSE(test, tbv_netdev_rename_keep("br0.lan", "eth9"));
+}
+
 static struct kunit_case tbv_ibdev_naming_test_cases[] = {
 	KUNIT_CASE(tbv_naming_two_neighbours_must_differ),
 	KUNIT_CASE(tbv_naming_lanes_disambiguate),
 	KUNIT_CASE(tbv_naming_errors),
+	KUNIT_CASE(tbv_rename_keep_own_gid_netdev),
+	KUNIT_CASE(tbv_rename_keep_pinned_match),
+	KUNIT_CASE(tbv_rename_detach_pinned_diverged),
 	{}
 };
 

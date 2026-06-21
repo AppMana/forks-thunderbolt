@@ -863,6 +863,15 @@ int tbv_ibdev_name_index(int domain_idx, u32 route_port, u32 native_lane,
  * every native rail on a node).
  */
 int tbv_ibdev_rail_name_index(const struct tbv_rail *rail);
+/*
+ * tbv_netdev_rename_keep decides, on a NETDEV_CHANGENAME, whether to KEEP the
+ * ib_device bound to its netdev. Our per-rail GID-only netdev has no externally
+ * pinned name (expected_name == NULL) and is renamed by udev per link by design,
+ * so it must be kept. Only a pinned external roce_netdev renamed AWAY from its
+ * name should detach. Detaching our own netdev here drops the rail GID and
+ * deadlocks (unregister_netdev under the rename's rtnl). Exposed for kunit.
+ */
+bool tbv_netdev_rename_keep(const char *expected_name, const char *new_name);
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
 /*
  * tbv_gid_identity_verdict classifies a dgid against a stored peer identity.
