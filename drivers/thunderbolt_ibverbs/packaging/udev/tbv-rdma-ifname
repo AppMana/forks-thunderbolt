@@ -1,27 +1,32 @@
 #!/bin/sh
 # tbv-rdma-ifname: udev PROGRAM helper. Prints a stable, per-link name for the
-# usb4_rdma GID-only netdev that thunderbolt_ibverbs creates per rail. The name
-# is derived ONLY from what the kernel already exposes on the netdev's parent
-# XDomain device, so it needs NO site configuration and works on any host.
+# usb4_rdma GID-only netdev that thunderbolt_ibverbs creates per rail (kernel
+# name u4r<N>, enumeration-order and unstable).
 #
-# Naming priority (all from sysfs, none site-specific):
-#   1. tbr-<peer-hostname-tail>  -- device_name (peer kernel hostname)
-#   2. tbr-<peer-uuid-prefix>    -- unique_id (stable peer hardware UUID)
+# As of 0.2.15 the peer identity lives on the netdev itself (tbv_peer_name /
+# tbv_peer_uuid), because the netdev parents to the stable NHI device rather
+# than the XDomain device. Falls back to the parent XDomain attrs for older
+# (xd-parented) netdevs. Needs NO site configuration.
+#
+# Naming priority:
+#   1. tbr-<peer-hostname-tail>  -- peer kernel hostname
+#   2. tbr-<peer-uuid-prefix>    -- stable peer hardware UUID
 #   3. (no rename)               -- keep the kernel's u4r<N> name
-#
-# Names are kept within the 15-char ifname limit ("tbr-" + up to 11).
+# Names stay within the 15-char ifname limit ("tbr-" + up to 11).
 set -u
 iface="${1:-}"
 [ -n "$iface" ] || exit 0
-dev="/sys/class/net/${iface}/device"
+nd="/sys/class/net/${iface}"
 
-host=$(cat "${dev}/device_name" 2>/dev/null | tr -cd 'A-Za-z0-9')
+host=$(cat "${nd}/tbv_peer_name" 2>/dev/null | tr -cd 'A-Za-z0-9')
+[ -n "$host" ] || host=$(cat "${nd}/device/device_name" 2>/dev/null | tr -cd 'A-Za-z0-9')
 if [ -n "$host" ]; then
 	printf 'tbr-%s' "$(printf '%s' "$host" | tail -c 11)"
 	exit 0
 fi
 
-uid=$(cat "${dev}/unique_id" 2>/dev/null | tr -cd '0-9a-f')
+uid=$(cat "${nd}/tbv_peer_uuid" 2>/dev/null | tr -cd '0-9a-f')
+[ -n "$uid" ] || uid=$(cat "${nd}/device/unique_id" 2>/dev/null | tr -cd '0-9a-f')
 if [ -n "$uid" ]; then
 	printf 'tbr-%s' "$(printf '%s' "$uid" | cut -c1-12)"
 	exit 0

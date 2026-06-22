@@ -1,18 +1,14 @@
 #!/bin/sh
 # tbv-rdma-addr <ifname> -- assign the deterministic per-link routable /64 to a
 # usb4_rdma GID-only rail netdev, so both ends of a cabled link share a subnet.
-# Invoked from udev (RUN+=) after the rail netdev appears, and safe to re-run by
-# hand. Pure derivation lives in tbv-rdma-addr-lib.sh; this does the sysfs
-# lookups and the `ip` assignment.
+# Invoked from udev (RUN+=) and safe to re-run by hand. Pure derivation is in
+# tbv-rdma-addr-lib.sh; this does the sysfs lookups and the `ip` assignment.
 #
-# The rail netdev is parented (SET_NETDEV_DEV) to its XDomain *device* (e.g.
-# "0-1"), whose unique_id is the remote peer's host-router UUID. The local
-# host-router UUID is "<domain>-0" in the same thunderbolt domain. Both ends
-# therefore hold the same unordered UUID pair -> the same /64 (see the lib).
-#
-# udev renames the netdev (u4r<N> -> tbr-<peer>) BEFORE running RUN+=, so the
-# passed kernel name is stale by the time we run. We therefore resolve the live
-# interface from the stable XDomain parent device (via DEVPATH), not the name.
+# As of 0.2.15 the rail netdev parents to the stable NHI device (NOT the XDomain
+# device -- a direct child of xd->dev crashes on disconnect), so the peer UUID is
+# read from the netdev's own tbv_peer_uuid attribute, and the live interface is
+# resolved by the stable IFINDEX udev provides (robust to udev's concurrent
+# rename). The local host-router UUID is the same for every rail on the host.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 
@@ -21,28 +17,26 @@ LIB="$(dirname "$0")/tbv-rdma-addr-lib.sh"
 . "$LIB"
 
 ifc="${1:-}"
-xdev=""
-# Prefer the passed name if it still resolves; else recover the XDomain parent
-# from DEVPATH (stable across the rename) and read the live name back out of it.
-if [ -n "$ifc" ] && [ -e "/sys/class/net/${ifc}/device" ]; then
-	xdev="$(readlink -f "/sys/class/net/${ifc}/device" 2>/dev/null || true)"
-elif [ -n "${DEVPATH:-}" ]; then
-	xdev="$(readlink -f "/sys${DEVPATH%/net/*}" 2>/dev/null || true)"
-	[ -n "$xdev" ] && ifc="$(ls "${xdev}/net" 2>/dev/null | head -n1)"
+# Resolve the live ifname by the stable ifindex (survives the udev rename).
+if [ -n "${IFINDEX:-}" ]; then
+	for f in /sys/class/net/*/ifindex; do
+		[ "$(cat "$f" 2>/dev/null)" = "$IFINDEX" ] || continue
+		ifc="$(basename "$(dirname "$f")")"
+		break
+	done
 fi
-[ -n "$xdev" ] && [ -n "$ifc" ] && [ -e "/sys/class/net/${ifc}" ] || exit 0
+[ -n "$ifc" ] && [ -e "/sys/class/net/${ifc}" ] || exit 0
 
-remote="$(cat "${xdev}/unique_id" 2>/dev/null || true)"
-[ -n "$remote" ] || exit 0                       # not an XDomain-parented rail
+remote="$(cat "/sys/class/net/${ifc}/tbv_peer_uuid" 2>/dev/null | tr -d '[:space:]')"
+[ -n "$remote" ] || exit 0			# not a tbv rail netdev
 
-domain="$(basename "$xdev")"; domain="${domain%%-*}"
-local="$(cat "/sys/bus/thunderbolt/devices/${domain}-0/unique_id" 2>/dev/null || true)"
+# local host-router UUID (identical for every rail on this host)
+local="$(cat /sys/bus/thunderbolt/devices/0-0/unique_id 2>/dev/null | tr -d '[:space:]')"
+[ -n "$local" ] || local="$(cat /sys/bus/thunderbolt/devices/*-0/unique_id 2>/dev/null | head -n1 | tr -d '[:space:]')"
 [ -n "$local" ] || exit 0
 
 addr="$(tbv_link_addr "$local" "$remote")"
 
-# nodad: link-local DAD is pointless on a point-to-point GID-only netdev and only
-# adds latency before the GID appears. `replace` keeps the helper idempotent.
 ip -6 addr replace "$addr" dev "$ifc" nodad 2>/dev/null || \
 	ip -6 addr replace "$addr" dev "$ifc"
 ip link set "$ifc" up

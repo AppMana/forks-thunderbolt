@@ -872,6 +872,16 @@ int tbv_ibdev_rail_name_index(const struct tbv_rail *rail);
  * deadlocks (unregister_netdev under the rename's rtnl). Exposed for kunit.
  */
 bool tbv_netdev_rename_keep(const char *expected_name, const char *new_name);
+/*
+ * tbv_ibdev_netdev_parent returns the device the per-rail GID netdev must be
+ * parented to. It MUST be a stable, driver-owned device (the NHI/ring device the
+ * ib_device already uses, dev->base.dev.parent), NOT the XDomain device: the
+ * netdev must not be a direct child of xd->dev, or unregister_netdev() races
+ * tb_xdomain_remove()'s child-list iteration and NULL-derefs kernfs. Exposed for
+ * kunit.
+ */
+struct device *tbv_ibdev_netdev_parent(struct device *ib_parent,
+				       struct tb_xdomain *xd);
 bool tbv_gid_matches_identity(const u8 gid[16], u64 eui64, u32 ipv4_be);
 /*
  * tbv_gid_identity_verdict classifies a dgid against a stored peer identity.

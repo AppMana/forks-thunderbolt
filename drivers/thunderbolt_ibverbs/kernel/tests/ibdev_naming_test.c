@@ -106,6 +106,29 @@ static void tbv_rename_detach_pinned_diverged(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tbv_netdev_rename_keep("br0.lan", "eth9"));
 }
 
+/*
+ * The per-rail GID netdev MUST NOT be parented to the XDomain device. xd->dev is
+ * owned/removed by the thunderbolt core; parenting the netdev there makes it a
+ * *sibling* of the tb_services in xd->dev's child list, so unregister_netdev()
+ * (in our service .remove, run from inside tb_xdomain_remove's
+ * device_for_each_child_reverse) mutates that child list mid-iteration ->
+ * kernfs_find_and_get_ns NULL deref -> chain-wide crash cascade on any neighbour
+ * disconnect (kdump appmana-002 2026-06-22). It must instead use the stable
+ * driver-owned NHI/ring device that the ib_device already parents to
+ * (dev->base.dev.parent), so its teardown is ordered and self-contained.
+ */
+static void tbv_netdev_parent_is_stable_not_xdomain(struct kunit *test)
+{
+	struct tb_xdomain xd = {0};
+	struct device nhi_dev = {0};	/* tb_ring_dma_device: stable, driver-owned */
+
+	/* red while it returns &xd.dev; green once it returns the stable parent */
+	KUNIT_EXPECT_PTR_NE(test,
+			    tbv_ibdev_netdev_parent(&nhi_dev, &xd), &xd.dev);
+	KUNIT_EXPECT_PTR_EQ(test,
+			    tbv_ibdev_netdev_parent(&nhi_dev, &xd), &nhi_dev);
+}
+
 static struct kunit_case tbv_ibdev_naming_test_cases[] = {
 	KUNIT_CASE(tbv_naming_two_neighbours_must_differ),
 	KUNIT_CASE(tbv_naming_lanes_disambiguate),
@@ -113,6 +136,7 @@ static struct kunit_case tbv_ibdev_naming_test_cases[] = {
 	KUNIT_CASE(tbv_rename_keep_own_gid_netdev),
 	KUNIT_CASE(tbv_rename_keep_pinned_match),
 	KUNIT_CASE(tbv_rename_detach_pinned_diverged),
+	KUNIT_CASE(tbv_netdev_parent_is_stable_not_xdomain),
 	{}
 };
 

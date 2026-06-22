@@ -399,6 +399,14 @@ struct tbv_ibdev {
 	 * rails for the same peer by tbv_select_qp_rail_locked().
 	 */
 	struct tbv_rail *rail;
+	/*
+	 * Peer identity COPIED from the XDomain at attach (no lifetime tie to
+	 * xd) and exposed as netdev sysfs attrs (tbv_peer_uuid / tbv_peer_name).
+	 * The netdev now parents to the stable NHI, not xd, so udev naming and
+	 * the per-link GID helper read the peer from the netdev itself.
+	 */
+	char peer_uuid[UUID_STRING_LEN + 1];
+	char peer_name[64];
 };
 
 struct tbv_send_ctx {
@@ -2362,6 +2370,55 @@ static void tbv_netdev_setup(struct net_device *ndev)
  * to the rail's Thunderbolt device for matching) so both ends of a link share a
  * subnet. The netdev carries no traffic; the rail's data path is native TB.
  */
+/*
+ * Per-rail netdev sysfs: the COPIED peer identity, read back from the netdev's
+ * drvdata (the tbv_ibdev). Lets udev/GID tooling resolve the peer from the
+ * netdev directly, now that it no longer parents to the XDomain device.
+ */
+static ssize_t tbv_peer_uuid_show(struct device *d,
+				  struct device_attribute *a, char *buf)
+{
+	struct tbv_ibdev *idev = dev_get_drvdata(d);
+
+	return sysfs_emit(buf, "%s\n", idev ? idev->peer_uuid : "");
+}
+static DEVICE_ATTR(tbv_peer_uuid, 0444, tbv_peer_uuid_show, NULL);
+
+static ssize_t tbv_peer_name_show(struct device *d,
+				  struct device_attribute *a, char *buf)
+{
+	struct tbv_ibdev *idev = dev_get_drvdata(d);
+
+	return sysfs_emit(buf, "%s\n", idev ? idev->peer_name : "");
+}
+static DEVICE_ATTR(tbv_peer_name, 0444, tbv_peer_name_show, NULL);
+
+static struct attribute *tbv_rail_netdev_attrs[] = {
+	&dev_attr_tbv_peer_uuid.attr,
+	&dev_attr_tbv_peer_name.attr,
+	NULL,
+};
+static const struct attribute_group tbv_rail_netdev_group = {
+	.attrs = tbv_rail_netdev_attrs,
+};
+
+struct device *tbv_ibdev_netdev_parent(struct device *ib_parent,
+				       struct tb_xdomain *xd)
+{
+	/*
+	 * Parent the per-rail GID netdev to the stable, driver-owned NHI/ring
+	 * device the ib_device already uses -- NOT the XDomain device. A direct
+	 * child of xd->dev is a sibling of the tb_services in xd->dev's child
+	 * list, so unregister_netdev() in our service .remove (called from
+	 * tb_xdomain_remove's device_for_each_child_reverse on peer disconnect)
+	 * mutates that list mid-iteration and NULL-derefs kernfs -- the crash
+	 * cascade of 2026-06-22. Decoupled, the netdev is torn down in order by
+	 * tbv_ibdev_detach_netdev() before its parent.
+	 */
+	(void)xd;
+	return ib_parent;
+}
+
 static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 {
 	struct net_device *ndev;
@@ -2376,13 +2433,16 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	eth_hw_addr_set(ndev, mac);
 
 	/*
-	 * Parent to the per-link XDomain device (NOT the shared NHI ring device
-	 * that ib_device uses): it is unique per cabled neighbour and carries the
-	 * peer hostname in its `device_name` attribute, so udev can resolve the
-	 * peer and rename the netdev per link (mirrors thunderbolt_net).
+	 * Parent to the stable NHI/ring device the ib_device uses, NOT the
+	 * XDomain device: a netdev that is a direct child of xd->dev races
+	 * tb_xdomain_remove()'s child-list teardown on peer disconnect (see
+	 * tbv_ibdev_netdev_parent). udev/GID resolution of the peer now comes
+	 * from the netdev itself, not its parent device.
 	 */
-	if (dev->rail && dev->rail->peer && dev->rail->peer->xd)
-		SET_NETDEV_DEV(ndev, &dev->rail->peer->xd->dev);
+	SET_NETDEV_DEV(ndev,
+		       tbv_ibdev_netdev_parent(dev->base.dev.parent,
+			(dev->rail && dev->rail->peer) ? dev->rail->peer->xd :
+							 NULL));
 
 	ret = register_netdev(ndev);
 	if (ret) {
@@ -2405,6 +2465,22 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	 * from a warm reload (see drivers/thunderbolt/test.c icm_fw model), so a
 	 * load-time hang on these nodes is a driver-software fault, not the ICM.
 	 */
+	/* Copy peer identity from the XDomain and expose it on the netdev. */
+	{
+		struct tb_xdomain *xd = (dev->rail && dev->rail->peer) ?
+					dev->rail->peer->xd : NULL;
+
+		if (xd && xd->remote_uuid)
+			snprintf(dev->peer_uuid, sizeof(dev->peer_uuid), "%pUb",
+				 xd->remote_uuid);
+		if (xd && xd->device_name)
+			strscpy(dev->peer_name, xd->device_name,
+				sizeof(dev->peer_name));
+	}
+	dev_set_drvdata(&ndev->dev, dev);
+	if (sysfs_create_group(&ndev->dev.kobj, &tbv_rail_netdev_group))
+		pr_warn("rail netdev peer-attr group create failed\n");
+
 	netif_carrier_on(ndev);
 	dev->netdev = ndev;
 	return 0;
@@ -2418,6 +2494,7 @@ static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
 		return;
 
 	dev->netdev = NULL;
+	sysfs_remove_group(&ndev->dev.kobj, &tbv_rail_netdev_group);
 	ib_device_set_netdev(&dev->base, NULL, 1);
 	unregister_netdev(ndev);
 	free_netdev(ndev);
