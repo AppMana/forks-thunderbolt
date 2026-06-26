@@ -80,7 +80,7 @@
 #define TBV_GSI_MAD_META_SGID_OFF 0
 #define TBV_GSI_MAD_META_DGID_OFF 16
 #define TBV_GSI_MAD_META_PKEY_OFF 32
-static char *roce_netdev;
+char *roce_netdev;		/* non-static: KUnit sets it to exercise the native-vs-pinned netdev-name path */
 module_param(roce_netdev, charp, 0444);
 MODULE_PARM_DESC(roce_netdev,
 		 "Netdev used for RoCE GID metadata, for example br0.lan");
@@ -2324,15 +2324,30 @@ static enum rdma_link_layer tbv_get_link_layer(struct ib_device *ibdev,
 	return IB_LINK_LAYER_ETHERNET;
 }
 
-static const char *tbv_ibdev_netdev_name_for(struct tbv_state *state,
-					     enum tbv_backend_type backend)
+const char *tbv_ibdev_netdev_name_for(struct tbv_state *state,
+				      enum tbv_backend_type backend)
 {
-	const char *name = roce_netdev;
+	const char *name;
 
-	if (tbv_backend_is_apple(backend) &&
-	    state->tbnet_identity.gid_netdev_name[0])
-		name = state->tbnet_identity.gid_netdev_name;
+	/*
+	 * Native rails register a self-created per-rail "u4rN" GID-only netdev
+	 * (tbv_ibdev_attach_netdev) that udev renames per link to "tbr-<peer>"
+	 * BY DESIGN. It carries no externally pinned name, so the detach-on-
+	 * rename guard (tbv_netdev_rename_keep) must KEEP it bound: return NULL.
+	 *
+	 * Returning roce_netdev ("eno1") here was a latent bug: it made the
+	 * guard compare the new "tbr-<peer>" name against "eno1", mismatch, and
+	 * detach our OWN ib_device mid-bring-up. With native_data_e2e=1 that
+	 * detach tears down the rail's E2E rings under tb_ring_stop's IRQ-off
+	 * spinlocks and hard-locks the node (2026-06-26 incident). Only the
+	 * Apple/stock-proxy backend attaches to a REAL, externally-named netdev
+	 * whose rename is a genuine reassignment worth detaching on.
+	 */
+	if (!tbv_backend_is_apple(backend))
+		return NULL;
 
+	name = state->tbnet_identity.gid_netdev_name[0] ?
+		       state->tbnet_identity.gid_netdev_name : roce_netdev;
 	if (!name || !*name)
 		return NULL;
 

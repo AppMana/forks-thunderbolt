@@ -873,6 +873,16 @@ int tbv_ibdev_rail_name_index(const struct tbv_rail *rail);
  */
 bool tbv_netdev_rename_keep(const char *expected_name, const char *new_name);
 /*
+ * tbv_ibdev_netdev_name_for returns the EXTERNALLY-pinned netdev name the
+ * detach-on-rename guard compares against, or NULL when the ib_device owns a
+ * self-created per-rail netdev (the native backend's u4rN) that udev renames
+ * by design. It MUST return NULL for the native backend: returning roce_netdev
+ * there made the guard detach our own renamed netdev and hard-lock the node
+ * with native_data_e2e=1 (2026-06-26). Exposed for kunit.
+ */
+const char *tbv_ibdev_netdev_name_for(struct tbv_state *state,
+				      enum tbv_backend_type backend);
+/*
  * tbv_ibdev_netdev_parent returns the device the per-rail GID netdev must be
  * parented to. It MUST be a stable, driver-owned device (the NHI/ring device the
  * ib_device already uses, dev->base.dev.parent), NOT the XDomain device: the

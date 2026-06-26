@@ -129,8 +129,38 @@ static void tbv_netdev_parent_is_stable_not_xdomain(struct kunit *test)
 			    tbv_ibdev_netdev_parent(&nhi_dev, &xd), &nhi_dev);
 }
 
+/*
+ * Regression for the 2026-06-26 hard lockup. The detach-on-rename guard's
+ * expected_name comes from tbv_ibdev_netdev_name_for(). For the NATIVE backend
+ * the ib_device owns a self-created u4rN netdev that udev renames to
+ * "tbr-<peer>" by design, so this MUST return NULL -> tbv_netdev_rename_keep
+ * keeps it. The bug returned roce_netdev ("eno1") for native, so the guard
+ * compared "tbr-<peer>" to "eno1", mismatched, and detached our OWN ib_device
+ * mid-bring-up -- which with native_data_e2e=1 tore down the E2E rings under
+ * tb_ring_stop's IRQ-off spinlocks and hard-locked the node. (Returns NULL
+ * before touching state on the native path, so a NULL state is safe here.)
+ */
+extern char *roce_netdev;	/* the module param the buggy code wrongly returned for native */
+
+static void tbv_native_netdev_name_for_is_null(struct kunit *test)
+{
+	char *saved = roce_netdev;
+
+	/*
+	 * Reproduce the field condition: roce_netdev IS set (it is on every
+	 * fleet node, e.g. "eno1"). The buggy code returned it for native ->
+	 * non-NULL -> guard detaches our own renamed netdev. The fix returns
+	 * NULL for native regardless of roce_netdev.
+	 */
+	roce_netdev = "eno1";
+	KUNIT_EXPECT_NULL(test,
+			  tbv_ibdev_netdev_name_for(NULL, TBV_BACKEND_NATIVE));
+	roce_netdev = saved;
+}
+
 static struct kunit_case tbv_ibdev_naming_test_cases[] = {
 	KUNIT_CASE(tbv_naming_two_neighbours_must_differ),
+	KUNIT_CASE(tbv_native_netdev_name_for_is_null),
 	KUNIT_CASE(tbv_naming_lanes_disambiguate),
 	KUNIT_CASE(tbv_naming_errors),
 	KUNIT_CASE(tbv_rename_keep_own_gid_netdev),
