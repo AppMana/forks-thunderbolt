@@ -914,10 +914,10 @@ static unsigned long tbv_send_retry_jiffies(unsigned long qp_timeout,
  * can't exhaust the retry count before it recovers. @base_jiffies == 0 falls
  * back to the flat verbs-derived interval.
  */
-static unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
-						    u8 retries,
-						    unsigned long base_jiffies,
-						    u8 max_retries)
+unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
+					     u8 retries,
+					     unsigned long base_jiffies,
+					     u8 max_retries)
 {
 	unsigned long t;
 

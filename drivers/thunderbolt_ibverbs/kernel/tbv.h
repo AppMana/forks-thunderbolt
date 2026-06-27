@@ -933,6 +933,15 @@ void tbv_path_default_config(enum tbv_backend_type backend,
 			     struct tbv_path_config *cfg);
 void tbv_path_init_optional_symbols(void);
 void tbv_path_exit_optional_symbols(void);
+/*
+ * Exponential-backoff RC retransmit interval for retry @retries: base<<retries
+ * capped at @qp_timeout. Exposed for the KUnit that simulates loss recovery and
+ * pins the cumulative-budget invariant the flat clamp violated.
+ */
+unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
+					     u8 retries,
+					     unsigned long base_jiffies,
+					     u8 max_retries);
 void tbv_path_init(struct tbv_path *path,
 		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
 void tbv_path_reset(struct tbv_path *path);
