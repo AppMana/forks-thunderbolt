@@ -829,6 +829,33 @@ static void tbv_path_rx_supp_poll_work(struct work_struct *work)
 			msecs_to_jiffies(TBV_RX_SUPP_POLL_DELAY_MS));
 }
 
+/*
+ * Poll-mode completion contract: drain @ring to empty via @poll, invoking each
+ * completed frame's callback, then re-arm the ring interrupt exactly ONCE via
+ * @rearm. The poll-mode tasklet calls this with tb_ring_poll +
+ * tb_ring_poll_complete; it is factored out so the drain-then-rearm-once
+ * ORDERING is unit-testable without a live NHI. Re-arming before the ring is
+ * drained loses any completion that lands between the last poll and the unmask
+ * (a stall until the next post); never re-arming wedges the ring. Returns the
+ * number of frames drained.
+ */
+u64 tbv_path_poll_complete_ring(struct tb_ring *ring,
+				struct ring_frame *(*poll)(struct tb_ring *),
+				void (*rearm)(struct tb_ring *))
+{
+	struct ring_frame *frame;
+	u64 drained = 0;
+
+	/* STUB (red-first): re-arm BEFORE draining -- violates the contract. */
+	rearm(ring);
+	while ((frame = poll(ring))) {
+		if (frame->callback)
+			frame->callback(ring, frame, false);
+		drained++;
+	}
+	return drained;
+}
+
 static int tbv_path_post_rx_frame(struct tbv_data_frame *f);
 
 static void tbv_path_rx_start_raw(struct tbv_path *path,

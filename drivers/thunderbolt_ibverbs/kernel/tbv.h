@@ -933,6 +933,14 @@ void tbv_path_default_config(enum tbv_backend_type backend,
 			     struct tbv_path_config *cfg);
 void tbv_path_init_optional_symbols(void);
 void tbv_path_exit_optional_symbols(void);
+/*
+ * Poll-mode (NHI start_poll) completion contract: drain @ring via @poll,
+ * invoking each frame's callback, then re-arm the interrupt once via @rearm.
+ * Exposed for the KUnit that pins the drain-then-rearm-once ordering.
+ */
+u64 tbv_path_poll_complete_ring(struct tb_ring *ring,
+				struct ring_frame *(*poll)(struct tb_ring *),
+				void (*rearm)(struct tb_ring *));
 void tbv_path_init(struct tbv_path *path,
 		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
 void tbv_path_reset(struct tbv_path *path);
