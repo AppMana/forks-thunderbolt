@@ -3322,6 +3322,25 @@ static void tbv_note_matched_send_ack(struct tbv_state *state,
 	}
 }
 
+/*
+ * Reorder-gap NAK decision (pure, unit-testable). When the receive reorder
+ * window is blocked on a missing PSN -- frames are buffered ahead of
+ * rx_expected_psn and the gap has persisted past @min_gap_jiffies (long enough
+ * that it is loss, not still-in-flight reorder) -- return true and set *nak_psn
+ * to the missing (expected) PSN so the receiver can NAK it for fast retransmit,
+ * instead of the gap waiting out the sender's multi-10ms ack timeout (the
+ * measured tail). @reorder_empty and @oldest_first_jiffies are read from the
+ * QP's reorder list under tqp->lock by the caller.
+ */
+bool tbv_rx_reorder_nak_decision(bool reorder_empty,
+				 unsigned long oldest_first_jiffies,
+				 u32 rx_expected_psn, unsigned long now,
+				 unsigned long min_gap_jiffies, u32 *nak_psn)
+{
+	/* STUB (red-first): never NAK. */
+	return false;
+}
+
 static bool tbv_read_complete(struct tbv_read_ctx *read, int status)
 {
 	struct tbv_qp *tqp = read->tqp;

@@ -933,6 +933,16 @@ void tbv_path_default_config(enum tbv_backend_type backend,
 			     struct tbv_path_config *cfg);
 void tbv_path_init_optional_symbols(void);
 void tbv_path_exit_optional_symbols(void);
+/*
+ * Reorder-gap NAK decision: true (with *nak_psn set to the missing PSN) when the
+ * RX reorder window has been blocked on a missing frame past @min_gap_jiffies,
+ * so the receiver can NAK for fast retransmit instead of waiting out the
+ * sender's ack timeout. Pure helper, exposed for KUnit.
+ */
+bool tbv_rx_reorder_nak_decision(bool reorder_empty,
+				 unsigned long oldest_first_jiffies,
+				 u32 rx_expected_psn, unsigned long now,
+				 unsigned long min_gap_jiffies, u32 *nak_psn);
 void tbv_path_init(struct tbv_path *path,
 		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
 void tbv_path_reset(struct tbv_path *path);
