@@ -101,6 +101,20 @@ MODULE_PARM_DESC(qp_timeout_ms,
 		 "Fallback milliseconds for pending native/Apple WRs and partial native receives "
 		 "when a QP has no verbs ACK timeout; 0 disables fallback timeout work");
 
+/*
+ * Cap the RC retransmit timeout. The IB ack_timeout attribute is sized for
+ * WAN/IB fabrics (e.g. ~67ms at timeout=14), but the Thunderbolt RTT here is
+ * sub-millisecond. The retransmit timer's only job on this fabric is loss
+ * recovery, so an uncapped timeout makes a lost frame wait the full ~67ms to be
+ * re-sent -- the measured p99 latency tail (hardware: 022<-021 ib_send_bw, 748
+ * spurious-looking retransmits, ACK-match age bimodal at fast or ~69ms). Cap at
+ * a few ms so recovery is prompt while still far above the RTT. 0 disables.
+ */
+static uint tbv_retransmit_max_ms = 5;
+module_param(tbv_retransmit_max_ms, uint, 0644);
+MODULE_PARM_DESC(tbv_retransmit_max_ms,
+		 "Cap the RC retransmit timeout in ms (loss recovery on the sub-ms TB fabric); 0 = use the verbs ack_timeout unclamped");
+
 static uint apple_tx_max_inflight_wr = 16;
 module_param(apple_tx_max_inflight_wr, uint, 0644);
 MODULE_PARM_DESC(apple_tx_max_inflight_wr,
@@ -829,13 +843,31 @@ static unsigned long tbv_verbs_ack_timeout_jiffies(u8 timeout)
 	return delay ? delay : 1;
 }
 
+/*
+ * Apply the retransmit-timeout cap (tbv_retransmit_max_ms). Pure helper so the
+ * clamp is unit-checkable. @max_jiffies == 0 (cap disabled) or @verbs_jiffies
+ * == 0 (no timeout) pass through unchanged; otherwise return the smaller.
+ */
+static unsigned long tbv_clamp_retransmit_timeout(unsigned long verbs_jiffies,
+						  unsigned long max_jiffies)
+{
+	if (!max_jiffies || !verbs_jiffies)
+		return verbs_jiffies;
+	return min(verbs_jiffies, max_jiffies);
+}
+
 static unsigned long
 tbv_qp_tx_timeout_jiffies_locked(const struct tbv_qp *tqp)
 {
-	if (tqp->type == IB_QPT_RC && tqp->ack_timeout_set)
-		return tbv_verbs_ack_timeout_jiffies(tqp->attr.timeout);
+	unsigned long t;
 
-	return tbv_qp_fallback_timeout_jiffies();
+	if (tqp->type == IB_QPT_RC && tqp->ack_timeout_set)
+		t = tbv_verbs_ack_timeout_jiffies(tqp->attr.timeout);
+	else
+		t = tbv_qp_fallback_timeout_jiffies();
+
+	return tbv_clamp_retransmit_timeout(t,
+		msecs_to_jiffies(READ_ONCE(tbv_retransmit_max_ms)));
 }
 
 static unsigned long
