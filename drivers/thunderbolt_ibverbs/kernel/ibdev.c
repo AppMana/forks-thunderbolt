@@ -3337,8 +3337,17 @@ bool tbv_rx_reorder_nak_decision(bool reorder_empty,
 				 u32 rx_expected_psn, unsigned long now,
 				 unsigned long min_gap_jiffies, u32 *nak_psn)
 {
-	/* STUB (red-first): never NAK. */
-	return false;
+	if (reorder_empty)
+		return false;
+	/*
+	 * A gap younger than @min_gap_jiffies may just be in-flight reorder;
+	 * only NAK once it has persisted long enough to be loss. @nak_psn is the
+	 * frame the window is waiting for (the next expected, in-order PSN).
+	 */
+	if (time_before(now, oldest_first_jiffies + min_gap_jiffies))
+		return false;
+	*nak_psn = rx_expected_psn;
+	return true;
 }
 
 static bool tbv_read_complete(struct tbv_read_ctx *read, int status)
