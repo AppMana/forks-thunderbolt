@@ -846,13 +846,14 @@ u64 tbv_path_poll_complete_ring(struct tb_ring *ring,
 	struct ring_frame *frame;
 	u64 drained = 0;
 
-	/* STUB (red-first): re-arm BEFORE draining -- violates the contract. */
-	rearm(ring);
 	while ((frame = poll(ring))) {
 		if (frame->callback)
 			frame->callback(ring, frame, false);
 		drained++;
 	}
+	/* Re-arm only after the ring is fully drained, so a completion cannot
+	 * land between the last poll and the unmask and get stranded. */
+	rearm(ring);
 	return drained;
 }
 
