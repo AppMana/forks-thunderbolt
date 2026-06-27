@@ -102,18 +102,21 @@ MODULE_PARM_DESC(qp_timeout_ms,
 		 "when a QP has no verbs ACK timeout; 0 disables fallback timeout work");
 
 /*
- * Cap the RC retransmit timeout. The IB ack_timeout attribute is sized for
- * WAN/IB fabrics (e.g. ~67ms at timeout=14), but the Thunderbolt RTT here is
- * sub-millisecond. The retransmit timer's only job on this fabric is loss
- * recovery, so an uncapped timeout makes a lost frame wait the full ~67ms to be
- * re-sent -- the measured p99 latency tail (hardware: 022<-021 ib_send_bw, 748
- * spurious-looking retransmits, ACK-match age bimodal at fast or ~69ms). Cap at
- * a few ms so recovery is prompt while still far above the RTT. 0 disables.
+ * Exponential-backoff base for RC retransmit. The IB ack_timeout is sized for
+ * WAN fabrics (~67ms at timeout=14); on the sub-ms TB fabric the retransmit
+ * timer's only job is loss recovery, so waiting the full ~67ms is the measured
+ * p99 tail (022<-021 ib_send_bw: p99.9=36.6ms). But a FLAT small timeout is
+ * fatal: total budget = interval*max_retries, so a 5ms interval x7 = 35ms < the
+ * ~69ms recovery -> the QP exhausts retries and dies (IBV_WC_GENERAL_ERR,
+ * observed on hardware). Backoff fixes both: retry N waits base<<N (capped at
+ * the verbs timeout), so the FIRST retransmit is fast (~base ms -> short tail)
+ * while the TOTAL budget stays large (sum of doublings >> any single recovery).
+ * 0 disables backoff (flat verbs-derived interval).
  */
-static uint tbv_retransmit_max_ms = 5;
-module_param(tbv_retransmit_max_ms, uint, 0644);
-MODULE_PARM_DESC(tbv_retransmit_max_ms,
-		 "Cap the RC retransmit timeout in ms (loss recovery on the sub-ms TB fabric); 0 = use the verbs ack_timeout unclamped");
+static uint tbv_retransmit_base_ms = 4;
+module_param(tbv_retransmit_base_ms, uint, 0644);
+MODULE_PARM_DESC(tbv_retransmit_base_ms,
+		 "First RC retransmit interval in ms; doubles each retry up to the verbs ack_timeout (exponential backoff). 0 = flat verbs-derived interval");
 
 static uint apple_tx_max_inflight_wr = 16;
 module_param(apple_tx_max_inflight_wr, uint, 0644);
@@ -843,31 +846,13 @@ static unsigned long tbv_verbs_ack_timeout_jiffies(u8 timeout)
 	return delay ? delay : 1;
 }
 
-/*
- * Apply the retransmit-timeout cap (tbv_retransmit_max_ms). Pure helper so the
- * clamp is unit-checkable. @max_jiffies == 0 (cap disabled) or @verbs_jiffies
- * == 0 (no timeout) pass through unchanged; otherwise return the smaller.
- */
-static unsigned long tbv_clamp_retransmit_timeout(unsigned long verbs_jiffies,
-						  unsigned long max_jiffies)
-{
-	if (!max_jiffies || !verbs_jiffies)
-		return verbs_jiffies;
-	return min(verbs_jiffies, max_jiffies);
-}
-
 static unsigned long
 tbv_qp_tx_timeout_jiffies_locked(const struct tbv_qp *tqp)
 {
-	unsigned long t;
-
 	if (tqp->type == IB_QPT_RC && tqp->ack_timeout_set)
-		t = tbv_verbs_ack_timeout_jiffies(tqp->attr.timeout);
-	else
-		t = tbv_qp_fallback_timeout_jiffies();
+		return tbv_verbs_ack_timeout_jiffies(tqp->attr.timeout);
 
-	return tbv_clamp_retransmit_timeout(t,
-		msecs_to_jiffies(READ_ONCE(tbv_retransmit_max_ms)));
+	return tbv_qp_fallback_timeout_jiffies();
 }
 
 static unsigned long
@@ -920,6 +905,27 @@ static unsigned long tbv_send_retry_jiffies(unsigned long qp_timeout,
 	retry = tbv_rel_retry_interval(qp_timeout, max_retries);
 	return retry > MAX_JIFFY_OFFSET ? MAX_JIFFY_OFFSET :
 					  (unsigned long)retry;
+}
+
+/*
+ * Exponential-backoff retransmit interval for retry @retries: base<<retries,
+ * capped at @qp_timeout (the verbs ack_timeout). Gives a fast first retransmit
+ * while the cumulative budget over max_retries stays large, so a lost frame
+ * can't exhaust the retry count before it recovers. @base_jiffies == 0 falls
+ * back to the flat verbs-derived interval.
+ */
+static unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
+						    u8 retries,
+						    unsigned long base_jiffies,
+						    u8 max_retries)
+{
+	unsigned long t;
+
+	if (!base_jiffies || !qp_timeout)
+		return tbv_send_retry_jiffies(qp_timeout, max_retries);
+
+	t = base_jiffies << min_t(unsigned int, retries, 16);
+	return min(t, qp_timeout);
 }
 
 static unsigned long tbv_rnr_timer_jiffies(u8 min_rnr_timer)
@@ -3477,7 +3483,10 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 		u8 max_retries = send->max_retries;
 		unsigned long send_timeout =
 			(send->retryable && max_retries) ?
-				tbv_send_retry_jiffies(timeout, max_retries) :
+				tbv_send_retry_backoff_jiffies(timeout,
+					send->retries,
+					msecs_to_jiffies(READ_ONCE(tbv_retransmit_base_ms)),
+					max_retries) :
 				timeout;
 		unsigned long rnr_timeout =
 			tbv_rnr_timer_jiffies(tqp->attr.min_rnr_timer);
