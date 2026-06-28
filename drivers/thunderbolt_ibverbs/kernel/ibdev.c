@@ -4676,6 +4676,24 @@ out_unlock_paths:
 		return ret;
 	}
 
+	/*
+	 * Reclaim the previous attempt's path credits before this retransmit
+	 * re-charges them. A frame lost in transit was charged a credit the peer
+	 * never returns (it returns per RECEIVED frame); without this refund each
+	 * lost frame leaks one credit and the window drains to a deadlock over a
+	 * long ping-pong. The per-path refund mirrors the per-path reservations
+	 * this attempt is about to charge.
+	 */
+	if (reason == TBV_SEND_POST_RETRY_TIMEOUT ||
+	    reason == TBV_SEND_POST_RETRY_RNR) {
+		u32 i;
+
+		for (i = 0; i < path_count; i++)
+			if (reservations[i])
+				tbv_path_refund_remote_data_credits(
+					paths[i], reservations[i]);
+	}
+
 	do {
 		u32 payload_len = min_t(u32, ctx->total_len - offset,
 					TBV_NATIVE_DATA_MAX_PAYLOAD);

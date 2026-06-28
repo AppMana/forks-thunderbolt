@@ -101,6 +101,24 @@ tbv_native_data_credit_return_threshold(tbv_wire_u32 credit_window)
 	return threshold;
 }
 
+/*
+ * New credit balance after refunding @frames of a failed send attempt, clamped
+ * to @max. Used before a retransmit re-charges the frames so a lost frame's
+ * orphaned credit is reclaimed; the clamp absorbs the over-refund for frames
+ * that did arrive (the peer already returned those). See path.c and
+ * tests/credit_pingpong_test.c.
+ */
+static inline tbv_wire_u32
+tbv_native_data_refund_credits(tbv_wire_u32 credits, tbv_wire_u32 max,
+			       tbv_wire_u32 frames)
+{
+	if (!max)
+		return credits;
+	if (credits >= max || frames > max - credits)
+		return max;
+	return credits + frames;
+}
+
 static inline tbv_wire_u32
 tbv_native_data_start_credit_required(tbv_wire_u32 frames,
 				      tbv_wire_u32 credit_window)

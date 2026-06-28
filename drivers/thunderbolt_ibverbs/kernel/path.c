@@ -454,6 +454,35 @@ void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits)
 	tbv_path_schedule_tx(path);
 }
 
+/*
+ * Reclaim credits for a message about to be retransmitted. A data frame charges
+ * one credit when it leaves (tbv_path_schedule_tx); the peer returns it only
+ * when that frame is RECEIVED (tbv_path_rx_complete). A frame lost in transit is
+ * therefore charged but never returned, and the full-message retransmit charges
+ * a fresh credit for it -- a permanent one-credit-per-lost-frame leak that
+ * drains the window over a long ping-pong (the 16K ib_send_lat hang at the
+ * default 768 window). Refunding the failed attempt's frames before the
+ * retransmit re-charges them heals the leak; the max cap absorbs the
+ * over-refund for frames that DID arrive (the peer already returned those), so
+ * the sender can never exceed the peer's ring depth. See credit_pingpong_test.c.
+ */
+void tbv_path_refund_remote_data_credits(struct tbv_path *path, u32 frames)
+{
+	unsigned long flags;
+
+	if (!path || !frames)
+		return;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	if (path->tx_remote_data_credit_max)
+		path->tx_remote_data_credits = tbv_native_data_refund_credits(
+			path->tx_remote_data_credits,
+			path->tx_remote_data_credit_max, frames);
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	tbv_path_schedule_tx(path);
+}
+
 static int tbv_path_send_rx_credit(struct tbv_path *path, u32 credits)
 {
 	struct tbv_native_data_header hdr = {};

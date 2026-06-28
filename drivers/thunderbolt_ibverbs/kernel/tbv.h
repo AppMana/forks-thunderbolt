@@ -974,6 +974,7 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd);
 void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size);
 void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits);
+void tbv_path_refund_remote_data_credits(struct tbv_path *path, u32 frames);
 int tbv_path_reserve_data(struct tbv_path *path, u32 frames);
 void tbv_path_release_data_reservation(struct tbv_path *path, u32 frames);
 int tbv_path_send(struct tbv_path *path, const void *data, u32 len,

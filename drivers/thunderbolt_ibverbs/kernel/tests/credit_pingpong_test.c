@@ -128,10 +128,103 @@ static void tbv_credit_return_threshold_invariant(struct kunit *test)
 	}
 }
 
+/*
+ * Replay a lossy multi-frame ping-pong with full-message retransmit. A data
+ * frame charges a credit when it leaves; the peer returns it only when RECEIVED.
+ * A frame lost in transit is charged but never returned, and the retransmit
+ * re-charges it -- a per-loss leak. @refund applies tbv_native_data_refund_credits
+ * (the real fix) before each retransmit. Deterministic loss: every @loss_period-th
+ * frame is dropped on its FIRST send (retransmits always deliver). Returns the
+ * round it deadlocked on, or -1 if it survived @rounds.
+ */
+static int credit_lossy_pingpong_stall_round(u32 window, u32 frames_per_msg,
+					     u32 loss_period, bool refund,
+					     u32 rounds)
+{
+	u32 threshold = tbv_native_data_credit_return_threshold(window);
+	u32 credits = window;
+	u32 pending = 0;
+	u64 frame_seq = 0;	/* global frame counter for the loss pattern */
+	u32 r;
+
+	for (r = 0; r < rounds; r++) {
+		u32 attempt = 0;
+		bool delivered = false;
+
+		while (!delivered) {
+			u32 start_required =
+				tbv_native_data_start_credit_required(
+					frames_per_msg, window);
+			bool any_lost = false;
+			u32 f;
+
+			if (start_required < 1)
+				start_required = 1;
+			if (credits < start_required)
+				return r;
+
+			for (f = 0; f < frames_per_msg; f++) {
+				bool lost;
+
+				if (credits < 1)
+					return r;
+				credits--;
+				/* first-send loss only; retransmits deliver */
+				lost = attempt == 0 && loss_period &&
+				       (frame_seq % loss_period) == 0;
+				frame_seq++;
+				if (lost) {
+					any_lost = true;
+					continue;
+				}
+				pending++;
+				if (pending >= threshold) {
+					credits += pending;
+					pending = 0;
+				}
+			}
+
+			if (any_lost) {
+				if (refund)
+					credits = tbv_native_data_refund_credits(
+						credits, window, frames_per_msg);
+				attempt++;
+				continue;
+			}
+			delivered = true;
+		}
+	}
+	return -1;
+}
+
+/*
+ * The leak: under loss, a 5-frame ping-pong at the default window WITHOUT the
+ * refund drains to a deadlock (documents the bug); WITH the refund it survives
+ * indefinitely (the fix). 768 window, ~1.5% loss (1/64 frames).
+ */
+static void tbv_credit_lossy_refund_stops_leak(struct kunit *test)
+{
+	u32 window = 768;	/* default native_ring_size 1024 - 256 reserve */
+	u32 frames = 5;		/* 16K message */
+	u32 loss_period = 64;	/* ~1.5% first-send frame loss */
+
+	/* Without the refund the leak eventually deadlocks the sender. */
+	KUNIT_EXPECT_GE_MSG(test,
+		credit_lossy_pingpong_stall_round(window, frames, loss_period,
+						  false, 100000), 0,
+		"no-refund lossy ping-pong unexpectedly survived (leak absent?)");
+	/* With the refund the sender never stalls. */
+	KUNIT_EXPECT_EQ_MSG(test,
+		credit_lossy_pingpong_stall_round(window, frames, loss_period,
+						  true, 100000), -1,
+		"refund failed to stop the per-loss credit leak");
+}
+
 static struct kunit_case tbv_credit_pingpong_test_cases[] = {
 	KUNIT_CASE(tbv_credit_single_frame_never_stalls),
 	KUNIT_CASE(tbv_credit_multi_frame_never_stalls),
 	KUNIT_CASE(tbv_credit_return_threshold_invariant),
+	KUNIT_CASE(tbv_credit_lossy_refund_stops_leak),
 	{}
 };
 
