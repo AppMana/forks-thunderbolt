@@ -218,6 +218,16 @@ struct tbv_path {
 	atomic64_t control_tx_queue_max_ms;
 	atomic64_t data_tx_credit_stalls;
 	atomic64_t data_tx_credit_received;
+	/*
+	 * Leak reconciliation for the software data-credit window. Across a link
+	 * the sender's consumed (every charged data frame) must equal the
+	 * receiver's eligible (every received credit-consuming frame); locally
+	 * the receiver's eligible must equal credit_sent + rx_data_credit_pending.
+	 * A persistent divergence localizes a credit leak (frames lost in transit
+	 * -> consumed > peer eligible; return-side drop -> eligible > sent+pending).
+	 */
+	atomic64_t data_tx_credit_consumed;
+	atomic64_t data_rx_credit_eligible;
 	atomic64_t data_rx_completed;
 	atomic64_t data_rx_credit_sent;
 	atomic64_t data_rx_credit_send_error;
@@ -578,6 +588,16 @@ struct tbv_state {
 	atomic64_t data_tx_errors;
 	atomic64_t data_tx_credit_stalls;
 	atomic64_t data_tx_credit_received;
+	/*
+	 * Leak reconciliation for the software data-credit window. Across a link
+	 * the sender's consumed (every charged data frame) must equal the
+	 * receiver's eligible (every received credit-consuming frame); locally
+	 * the receiver's eligible must equal credit_sent + rx_data_credit_pending.
+	 * A persistent divergence localizes a credit leak (frames lost in transit
+	 * -> consumed > peer eligible; return-side drop -> eligible > sent+pending).
+	 */
+	atomic64_t data_tx_credit_consumed;
+	atomic64_t data_rx_credit_eligible;
 	atomic64_t data_rx_completed;
 	atomic64_t data_rx_credit_sent;
 	atomic64_t data_rx_credit_send_error;

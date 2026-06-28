@@ -987,6 +987,12 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 		atomic64_inc(&state->data_rx_bad_frame);
 	}
 
+	if (return_rx_credits) {
+		if (state)
+			atomic64_inc(&state->data_rx_credit_eligible);
+		atomic64_inc(&path->data_rx_credit_eligible);
+	}
+
 	if (path->state == TBV_PATH_RING_STARTED ||
 	    path->state == TBV_PATH_TUNNEL_ENABLED) {
 		int ret = tbv_path_post_rx_frame(f);
@@ -1864,6 +1870,9 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			}
 			path->tx_remote_data_credits--;
 			charged_data_credit = true;
+			if (state)
+				atomic64_inc(&state->data_tx_credit_consumed);
+			atomic64_inc(&path->data_tx_credit_consumed);
 		}
 		packet->start_credit_group_frames = 0;
 
