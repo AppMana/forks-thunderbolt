@@ -19,6 +19,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rail_mac_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/nccl_device_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/post_recv_dispatch_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/retransmit_backoff_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/credit_pingpong_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 

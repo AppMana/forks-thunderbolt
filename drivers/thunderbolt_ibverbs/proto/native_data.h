@@ -71,12 +71,34 @@ struct tbv_native_data_header {
 	tbv_wire_u32 frag_offset;
 };
 
+/*
+ * The receiver returns path data-credits batched at this threshold; a
+ * sub-threshold remainder is held until more frames arrive (in a strict
+ * 1-in-flight ping-pong it is never flushed). The peer can therefore withhold
+ * up to (threshold - 1) credits indefinitely, while a multi-frame sender must
+ * acquire min(frames, threshold) credits to START its group
+ * (tbv_native_data_start_credit_required). For the sender never to deadlock the
+ * credits the peer can NEVER withhold must still cover one start:
+ *     window - (threshold - 1) >= min(frames, threshold).
+ * Capping the threshold at half the window guarantees this for every message a
+ * window can hold (window - (threshold-1) >= threshold >= start). The old
+ * min(window, BATCH) returned `window` for window < BATCH -- withholding
+ * window-1 and stranding any multi-frame send (16K ib_send_lat = 5 frames hangs;
+ * 64B = 1 frame never needs >1 credit and is immune). See
+ * tests/credit_pingpong_test.c.
+ */
 static inline tbv_wire_u32
 tbv_native_data_credit_return_threshold(tbv_wire_u32 credit_window)
 {
-	if (credit_window && credit_window < TBV_NATIVE_DATA_CREDIT_BATCH)
-		return credit_window;
-	return TBV_NATIVE_DATA_CREDIT_BATCH;
+	tbv_wire_u32 threshold = TBV_NATIVE_DATA_CREDIT_BATCH;
+
+	if (!credit_window)
+		return threshold;
+	if (threshold > (credit_window + 1u) / 2u)
+		threshold = (credit_window + 1u) / 2u;
+	if (!threshold)
+		threshold = 1u;
+	return threshold;
 }
 
 static inline tbv_wire_u32
