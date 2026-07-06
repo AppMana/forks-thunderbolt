@@ -8,6 +8,7 @@ hand-synced copies:
 - **`thunderbolt`** — the core XDomain/USB4 driver.
 - **`thunderbolt_net`** — IP-over-Thunderbolt (`tbnet`).
 - **`thunderbolt_ibverbs`** — the usb4_rdma RDMA transport + userspace provider.
+- **`rdma_rxe`** — AppMana's soft-RoCE fallback override for `rxe_lan`.
 
 All three negotiate the same XDomain connection and shared the same soft-reconnect
 bug; the fix lives once in `drivers/thunderbolt/thunderbolt_negotiation.h`
@@ -28,6 +29,8 @@ base      = v6.17 + 3 backports already in linux-hwe-6.17
 drivers/thunderbolt/            full subsystem source (patched) + the shared
                                 thunderbolt_negotiation.h (single source of truth)
 drivers/net/thunderbolt/        tbnet driver source (patched)
+drivers/infiniband/sw/rxe/      RXE source from Ubuntu HWE 6.17 with AppMana
+                                `rdma link del` protection for `rxe_lan`
 drivers/thunderbolt_ibverbs/    usb4_rdma RDMA driver, userspace provider, dkms,
                                 tests (merged from the old thunderbolt-ibverbs repo)
 dkms/                           DKMS scaffolding (dkms.conf, Makefile)
@@ -92,6 +95,12 @@ The package stages source under `/usr/src/thunderbolt-tbfix-<version>` and
 runs `dkms autoinstall`. It intentionally does not reload `thunderbolt` or
 `thunderbolt_net`; fleet reload ordering remains owned by Ansible or an
 explicit maintenance command.
+
+The split-package build also emits `rdma-rxe-appmana_<version>_all.deb`.
+That package installs an override `rdma_rxe.ko` which does not advertise
+`IBK_ALLOW_USER_UNREG`. On AppMana, `rxe_lan` is a live NCCL fallback rail;
+`rdma link del rxe_lan` should fail fast instead of unregistering the device
+while Ray/NCCL still owns QPs.
 
 Verify the installed module path:
 

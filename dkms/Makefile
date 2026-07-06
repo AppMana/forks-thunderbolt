@@ -10,7 +10,9 @@ all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/thunderbolt modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/net/thunderbolt \
 		KBUILD_EXTRA_SYMBOLS=$(CURDIR)/drivers/thunderbolt/Module.symvers modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/infiniband/sw/rxe modules
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/thunderbolt clean
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/net/thunderbolt clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/infiniband/sw/rxe clean

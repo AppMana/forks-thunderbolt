@@ -3,6 +3,7 @@
 #   thunderbolt-tbfix-core            -> thunderbolt.ko
 #   thunderbolt-tbfix-net  (Dep core) -> thunderbolt_net.ko
 #   thunderbolt-ibverbs    (Dep core) -> thunderbolt_ibverbs.ko
+#   rdma-rxe-appmana                   -> rdma_rxe.ko
 #
 # Each package preserves the repo's drivers/ layout so the single canonical
 # drivers/thunderbolt/thunderbolt_negotiation.h is reached by the same relative
@@ -112,3 +113,4 @@ PR
 stage_pkg thunderbolt-tbfix-core thunderbolt           drivers/thunderbolt            ""                        0
 stage_pkg thunderbolt-tbfix-net  thunderbolt_net       drivers/net/thunderbolt        thunderbolt-tbfix-core    1
 stage_pkg thunderbolt-ibverbs    thunderbolt_ibverbs   drivers/thunderbolt_ibverbs/kernel thunderbolt-tbfix-core 1
+stage_pkg rdma-rxe-appmana       rdma_rxe              drivers/infiniband/sw/rxe      ""                        0

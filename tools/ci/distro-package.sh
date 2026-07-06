@@ -55,9 +55,10 @@ stage_source() {
 	install -m 0644 "$repo_root/dkms/Makefile" "$stage/Makefile"
 	# Preserve the real drivers/ tree so net's in-tree include of the one
 	# canonical ../../thunderbolt/thunderbolt_negotiation.h resolves as in-tree.
-	install -d -m 0755 "$stage/drivers/net"
+	install -d -m 0755 "$stage/drivers/net" "$stage/drivers/infiniband/sw"
 	tar -C "$repo_root/drivers/thunderbolt" -cf - . | tar -C "$stage/drivers" -xf - --one-top-level=thunderbolt
 	tar -C "$repo_root/drivers/net/thunderbolt" -cf - . | tar -C "$stage/drivers/net" -xf - --one-top-level=thunderbolt
+	tar -C "$repo_root/drivers/infiniband/sw/rxe" -cf - . | tar -C "$stage/drivers/infiniband/sw" -xf - --one-top-level=rxe
 	{
 		printf '# Auto-generated package source metadata\n'
 		printf 'fork-sha=%s\n' "$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)"

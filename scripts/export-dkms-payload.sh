@@ -5,8 +5,9 @@
 #   <target>/
 #     dkms.conf
 #     Makefile
-#     thunderbolt/        <-- drivers/thunderbolt/ verbatim
-#     thunderbolt_net/    <-- drivers/net/thunderbolt/ verbatim
+#     drivers/thunderbolt/           <-- verbatim
+#     drivers/net/thunderbolt/       <-- verbatim
+#     drivers/infiniband/sw/rxe/     <-- verbatim
 #     .tbfix-source       <-- SHA + describe of the fork commit exported
 #
 # Default target is the in-fleet location:
@@ -52,7 +53,7 @@ mkdir -p "$TARGET"
 cd "$REPO_ROOT"
 
 if (( USE_WORKTREE == 0 )); then
-  if ! git diff --quiet -- drivers/thunderbolt drivers/net/thunderbolt dkms; then
+  if ! git diff --quiet -- drivers/thunderbolt drivers/net/thunderbolt drivers/infiniband/sw/rxe dkms; then
     echo "refusing to export: uncommitted DKMS-relevant edits are present" >&2
     echo "commit them first, or use --worktree for an explicit live-test export" >&2
     exit 1
@@ -62,15 +63,17 @@ fi
 cp dkms/dkms.conf      "$TARGET/dkms.conf"
 cp dkms/Makefile       "$TARGET/Makefile"
 
-rm -rf "$TARGET/thunderbolt" "$TARGET/thunderbolt_net"
-mkdir -p "$TARGET/thunderbolt" "$TARGET/thunderbolt_net"
+rm -rf "$TARGET/drivers"
+mkdir -p "$TARGET/drivers/net" "$TARGET/drivers/infiniband/sw"
 
 if (( USE_WORKTREE == 1 )); then
-  cp -a drivers/thunderbolt/. "$TARGET/thunderbolt/"
-  cp -a drivers/net/thunderbolt/. "$TARGET/thunderbolt_net/"
+  cp -a drivers/thunderbolt "$TARGET/drivers/thunderbolt"
+  cp -a drivers/net/thunderbolt "$TARGET/drivers/net/thunderbolt"
+  cp -a drivers/infiniband/sw/rxe "$TARGET/drivers/infiniband/sw/rxe"
 else
-  git archive "$SOURCE_REF" drivers/thunderbolt | tar -x -C "$TARGET/thunderbolt" --strip-components=2
-  git archive "$SOURCE_REF" drivers/net/thunderbolt | tar -x -C "$TARGET/thunderbolt_net" --strip-components=3
+  git archive "$SOURCE_REF" drivers/thunderbolt | tar -x -C "$TARGET"
+  git archive "$SOURCE_REF" drivers/net/thunderbolt | tar -x -C "$TARGET"
+  git archive "$SOURCE_REF" drivers/infiniband/sw/rxe | tar -x -C "$TARGET"
 fi
 
 {
