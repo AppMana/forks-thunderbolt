@@ -607,6 +607,7 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_fallback_striping;
 	atomic64_t data_wr_zcopy_fallback_unsafe_sge;
 	atomic64_t data_wr_zcopy_fallback_peer;
+	atomic64_t data_wr_zcopy_fallback_unaligned;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
@@ -937,6 +938,20 @@ enum tbv_zcopy_tx_mode {
 enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
 					     bool retryable, u32 total_len,
 					     u32 min_bytes, u32 peer_caps);
+/*
+ * Zero-copy TX frames the NHI can transmit without corrupting the on-wire CRC
+ * must start at page offset 0. tbnet, the reference consumer of these rings,
+ * always DMAs driver-owned, offset-0 pages (drivers/net/thunderbolt/main.c);
+ * an ib_umem window whose first mapped byte sits mid-page yields a mid-page
+ * (page_off != 0) buffer_phy, and hardware validation (0.2.26 on 027<->019)
+ * showed exactly those frames fail the receiver CRC. A source is clean for
+ * split zero-copy iff its first mapped byte is page-aligned AND the 4096-byte
+ * split unit divides the page size, so every window maps to one offset-0 page
+ * (full) or one offset-0 trailing partial page. Unclean sources fall back to
+ * the framed copy path. Exposed for kunit (tests/zcopy_split_test.c).
+ */
+bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
+				  u32 page_size);
 /*
  * Byte range [start, end) a retransmit must cover. A NAK carries the missing
  * range; opcodes whose receive path cannot buffer past a hole (SEND streaming,

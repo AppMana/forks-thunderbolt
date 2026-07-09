@@ -91,15 +91,19 @@ const char *tbv_ibdev_roce_netdev_name(void)
 }
 
 /*
- * 8192 = two split windows: below that the per-window stream setup (header
- * frame + page map) costs about what the single-frame bounce copy does, so
- * zero-copy only pays off from a few windows up. NCCL's bulk RDMA_WRITEs
- * (hundreds of KiB to MiB) sit far above it.
+ * Zero-copy split-stream TX threshold. A tuned value of 8192 (two split
+ * windows) is where per-window stream setup starts to beat the bounce copy;
+ * NCCL's bulk RDMA_WRITEs (hundreds of KiB to MiB) sit far above it. Kept at 0
+ * (disabled) as the shipped default after the 0.2.26 hardware run showed the
+ * page-straddling/mid-page zcopy frames failing the receiver CRC; the fix
+ * (tbv_send_segments_split_clean: only page-aligned sources are zero-copied,
+ * every frame page-offset-0 like tbnet) makes >0 safe. Enable per-run for
+ * validation, then flip the default once it holds on hardware.
  */
-static uint zcopy_min_bytes; /* 0 = disabled; see 0.2.26 hardware finding */
+static uint zcopy_min_bytes;
 module_param(zcopy_min_bytes, uint, 0644);
 MODULE_PARM_DESC(zcopy_min_bytes,
-		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE uses per-fragment split streams when the peer advertises support (TBV_NATIVE_WIRE_CAP_SPLIT_DATA), else framed copies. 0 disables zero-copy");
+		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE to a split-capable peer uses per-fragment split streams from PAGE-ALIGNED sources (unaligned sources fall back to framed copies -> data_wr_zcopy_fallback_unaligned). 0 disables zero-copy");
 
 static uint qp_timeout_ms = TBV_QP_TIMEOUT_DEFAULT_MS;
 module_param(qp_timeout_ms, uint, 0644);
@@ -721,6 +725,24 @@ bool tbv_rx_nak_should_send(u32 peer_caps, bool last_valid, u32 last_psn,
 		return true;
 	/* same hole again: re-send only after the re-arm interval (lost NAK) */
 	return time_after(now, last_jiffies + min_interval);
+}
+
+bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
+				  u32 page_size)
+{
+	if (!split_unit || !page_size)
+		return false;
+	/*
+	 * Every window starts at message offset k*split_unit, whose physical
+	 * page offset is (first_page_off + k*split_unit) % page_size. For that
+	 * to be 0 for all k the page size must divide the split unit (so
+	 * k*split_unit is always a page multiple) and the source must start on
+	 * a page boundary. Then each window is one offset-0 page (or, on a page
+	 * smaller than the unit, several offset-0 pages) -- never mid-page.
+	 */
+	if (split_unit % page_size)
+		return false;
+	return first_page_off == 0;
 }
 
 static bool tbv_backend_is_apple(enum tbv_backend_type backend)
@@ -4593,6 +4615,16 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 					      length);
 		if (ret)
 			return ret;
+		/*
+		 * The eligibility gate (tbv_send_segments_split_clean) admits
+		 * only page-aligned sources, so every zcopy frame must start at
+		 * page offset 0 -- the sole shape the NHI transmits without a
+		 * hardware CRC error. A nonzero offset here means a geometry
+		 * regression slipped past the gate; fail the send loudly rather
+		 * than DMA a frame the receiver will drop as corrupt.
+		 */
+		if (WARN_ON_ONCE(*page_off != 0))
+			return -EPROTO;
 
 		stream->offset += *length;
 		refcount_inc(&stream->refs);
@@ -4663,6 +4695,71 @@ static bool tbv_send_segments_zcopy_safe(struct tbv_send_segment *segs,
 			break;
 		}
 
+		if (!found)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Split zero-copy safety: every split window must map to a single page-offset-0
+ * DMA frame. tbv_umem_page_from_addr caps a chunk at the page boundary and at
+ * one frame, so a window returns (page_off==0 && chunk==win_len) iff its bytes
+ * are one contiguous, page-aligned, single-page (or, on a sub-4096 page, an
+ * exact run of offset-0 pages -- rejected here via chunk<win_len, which the
+ * copied path then handles) region. Any mid-page start, sub-page straddle, or
+ * SGE-boundary straddle fails and falls back to the framed copy. This is the
+ * exact shape tbnet transmits (drivers/net/thunderbolt/main.c) and the copied
+ * path always presented; mid-page buffer_phy corrupts the hardware CRC
+ * (0.2.26 hardware finding). A page-aligned single-buffer NCCL write (the
+ * prefill/high-concurrency regime) passes every window and is fully zero-copied.
+ */
+static bool tbv_send_segments_split_clean(struct tbv_send_segment *segs,
+					  int nsegs, u32 total_len)
+{
+	u32 count = tbv_native_data_split_window_count(total_len);
+	u32 idx;
+
+	if (!tbv_zcopy_split_page_aligned(0, TBV_NATIVE_DATA_SPLIT_UNIT,
+					  PAGE_SIZE))
+		return false;
+
+	for (idx = 0; idx < count; idx++) {
+		u32 win_off;
+		u32 win_len;
+		u32 skipped = 0;
+		bool found = false;
+		int i;
+
+		if (tbv_native_data_split_window(total_len, idx, &win_off,
+						 &win_len))
+			return false;
+
+		for (i = 0; i < nsegs; i++) {
+			struct tbv_send_segment *seg = &segs[i];
+			struct page *page;
+			u32 page_off;
+			u32 chunk;
+			u32 seg_off = 0;
+			int ret;
+
+			if (win_off >= skipped + seg->length) {
+				skipped += seg->length;
+				continue;
+			}
+			if (win_off > skipped)
+				seg_off = win_off - skipped;
+
+			ret = tbv_umem_page_from_addr(seg->mr,
+						      seg->addr + seg_off,
+						      win_len, &page, &page_off,
+						      &chunk);
+			if (ret || page_off != 0 || chunk != win_len)
+				return false;
+			found = true;
+			break;
+		}
 		if (!found)
 			return false;
 	}
@@ -4907,6 +5004,18 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			zcopy_mode = TBV_ZCOPY_TX_NONE;
 			atomic64_inc(
 				&tqp->owner->data_wr_zcopy_fallback_unsafe_sge);
+		} else if (zcopy_mode != TBV_ZCOPY_TX_NONE &&
+			   !tbv_send_segments_split_clean(ctx->segs, ctx->nsegs,
+							  ctx->total_len)) {
+			/*
+			 * Source is not page-aligned end to end: some window
+			 * would DMA a mid-page (page_off != 0) frame the NHI
+			 * corrupts. Fall back to the framed copy for the whole
+			 * message (the copied path stages into aligned buffers).
+			 */
+			zcopy_mode = TBV_ZCOPY_TX_NONE;
+			atomic64_inc(
+				&tqp->owner->data_wr_zcopy_fallback_unaligned);
 		}
 		ctx->zcopy_mode = zcopy_mode;
 
