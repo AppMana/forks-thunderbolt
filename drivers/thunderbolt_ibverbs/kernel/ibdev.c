@@ -96,7 +96,7 @@ const char *tbv_ibdev_roce_netdev_name(void)
  * zero-copy only pays off from a few windows up. NCCL's bulk RDMA_WRITEs
  * (hundreds of KiB to MiB) sit far above it.
  */
-static uint zcopy_min_bytes = 8192;
+static uint zcopy_min_bytes; /* 0 = disabled; see 0.2.26 hardware finding */
 module_param(zcopy_min_bytes, uint, 0644);
 MODULE_PARM_DESC(zcopy_min_bytes,
 		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE uses per-fragment split streams when the peer advertises support (TBV_NATIVE_WIRE_CAP_SPLIT_DATA), else framed copies. 0 disables zero-copy");
