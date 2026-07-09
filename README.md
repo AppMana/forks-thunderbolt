@@ -241,6 +241,37 @@ fresh topic branch from `upstream/master` and apply only the minimal
 subsystem-specific change. Thunderbolt networking changes touch netdev;
 storage hotplug changes should not.
 
+## Operational caveats
+
+- **An ICM wedge is cleared only by removing power.** Symptom: `thunderbolt
+  0000:xx:00.0: failed to send driver ready to ICM`, `probe ... error -110`,
+  and no `usb4_rdma*` device. Measured 2026-07-09 on Maple Ridge: warm reboot,
+  PCI secondary-bus reset, D3cold via runtime PM (no `_PR3` on these boards),
+  and the WMI `force_power` toggle **all fail**. `systemctl poweroff` to S5
+  followed by power-on clears it every time. Arm Wake-on-LAN first
+  (`ethtool -s <if> wol g`) or the node needs a physical power button press —
+  some boards (appmana-002, appmana-020) ignore WoL from S5 regardless.
+- **Never live-reload the modules on a chain node.** `rmmod`/`modprobe` of
+  `thunderbolt_ibverbs` under traffic wedges the ICM. The deploy path is
+  `dpkg -i` then `rmmod` the module *before* rebooting (a warm reboot with
+  active NHI rings leaves the ICM mid-transaction) — see
+  `appmana-management/.../scripts/tb-chain-reboot-cover.sh`, which drains,
+  unloads, reboots a pairwise non-adjacent set, and verifies negotiation.
+- **A rail's peers only re-negotiate after its neighbour also rolls.** After
+  rebooting one half of the chain, `data-ready-rails=0` on those nodes is
+  expected until their neighbours reboot too; do not chase it.
+- **Loss recovery is deadline-armed since 0.2.25.** Before that, every lost
+  frame recovered on a ~100 ms grid regardless of `tbv_retransmit_base_ms`,
+  because the backoff deadline was only a threshold checked when the QP timeout
+  work happened to run, and every arming site scheduled that work at
+  `min3(ack_timeout, 1000ms, TBV_READ_RESP_RETRY_MS=100ms)`. Symptom to watch
+  for in `/sys/kernel/debug/thunderbolt_ibverbs/summary`:
+  `data_rx_ack_match_over_64ms` climbing with `data_wr_retransmit`, and
+  `data_rx_duplicate_ack` close to the retransmit count (spurious resends).
+- **`data_rx_bad_header` is real frame corruption**, ~0.1-0.5% of messages on a
+  healthy link. Recovery is cheap since 0.2.25, but it is the remaining source
+  of tail latency and the next bug worth root-causing.
+
 ## Why patches not a submodule
 
 `forks-*` siblings of the appmana monorepo are independent git repos by
