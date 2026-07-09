@@ -383,6 +383,8 @@ struct tbv_qp {
 	bool rx_rnr_active;
 	bool closing;
 	bool timeout_work_armed;
+	/* jiffies expiry of the armed timeout_work; valid while armed */
+	unsigned long timeout_work_expires;
 };
 
 struct tbv_mr {
@@ -928,6 +930,58 @@ unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
 	return min(t, qp_timeout);
 }
 
+/*
+ * Delay until a retryable send's retransmit deadline, backstopped by the
+ * periodic interval. The timeout work only CHECKS deadlines when it runs;
+ * arming it at the flat interval alone quantized every loss recovery to
+ * TBV_READ_RESP_RETRY_MS (measured on hardware as ~100 ms ACK-match stalls
+ * independent of tbv_retransmit_base_ms, data_rx_ack_match_over_64ms ==
+ * retransmits). Pure so the send_timeout_arming KUnit can pin the contract.
+ */
+unsigned long tbv_qp_send_timeout_delay(unsigned long qp_timeout,
+					unsigned long interval,
+					u8 retries,
+					unsigned long base_jiffies,
+					u8 max_retries,
+					unsigned long queued,
+					unsigned long now)
+{
+	unsigned long deadline;
+	unsigned long expires;
+
+	if (!qp_timeout)
+		return 0;
+	if (!interval)
+		interval = 1;
+	if (!max_retries)
+		return interval;
+
+	deadline = tbv_send_retry_backoff_jiffies(qp_timeout, retries,
+						  base_jiffies, max_retries);
+	if (!deadline)
+		return interval;
+
+	expires = queued + deadline;
+	if (time_after_eq(now, expires))
+		return 1;
+
+	return min(expires - now, interval);
+}
+
+/*
+ * Reduce-only re-arm decision: an armed-later timer must be pulled in for an
+ * earlier deadline and never pushed out; @replace keeps the RNR path's
+ * unconditional-override semantics.
+ */
+bool tbv_qp_timeout_rearm_needed(bool armed, unsigned long armed_expires,
+				 unsigned long new_expires, bool replace)
+{
+	if (!armed || replace)
+		return true;
+
+	return time_before(new_expires, armed_expires);
+}
+
 static unsigned long tbv_rnr_timer_jiffies(u8 min_rnr_timer)
 {
 	static const u32 rnr_timer_us[] = {
@@ -969,11 +1023,19 @@ static void tbv_qp_schedule_timeout_delay_locked(struct tbv_qp *tqp,
 {
 	struct workqueue_struct *wq = tqp->owner && tqp->owner->workqueue ?
 				      tqp->owner->workqueue : system_wq;
+	unsigned long expires;
 
-	if (!delay || tqp->closing || (tqp->timeout_work_armed && !replace))
+	if (!delay || tqp->closing)
+		return;
+
+	expires = jiffies + delay;
+	if (!tbv_qp_timeout_rearm_needed(tqp->timeout_work_armed,
+					 tqp->timeout_work_expires, expires,
+					 replace))
 		return;
 
 	tqp->timeout_work_armed = true;
+	tqp->timeout_work_expires = expires;
 	mod_delayed_work(wq, &tqp->timeout_work, delay);
 }
 
@@ -982,6 +1044,25 @@ static void tbv_qp_schedule_timeout_locked(struct tbv_qp *tqp)
 	tbv_qp_schedule_timeout_delay_locked(tqp,
 					     tbv_qp_timeout_interval_jiffies_locked(tqp),
 					     false);
+}
+
+/*
+ * Arm the timeout work at @send's actual retransmit deadline (backoff for its
+ * retry count from queued_jiffies), interval-backstopped. Callers hold
+ * tqp->lock and have just refreshed queued_jiffies via tbv_send_mark_queued.
+ */
+static void tbv_qp_schedule_send_timeout_locked(struct tbv_qp *tqp,
+						const struct tbv_send_ctx *send)
+{
+	unsigned long delay = tbv_qp_send_timeout_delay(
+		tbv_qp_tx_timeout_jiffies_locked(tqp),
+		tbv_qp_timeout_interval_jiffies_locked(tqp),
+		send->retries,
+		msecs_to_jiffies(READ_ONCE(tbv_retransmit_base_ms)),
+		send->retryable ? send->max_retries : 0,
+		send->queued_jiffies, jiffies);
+
+	tbv_qp_schedule_timeout_delay_locked(tqp, delay, false);
 }
 
 static void tbv_qp_schedule_timeout_now_locked(struct tbv_qp *tqp)
@@ -993,6 +1074,7 @@ static void tbv_qp_schedule_timeout_now_locked(struct tbv_qp *tqp)
 		return;
 
 	tqp->timeout_work_armed = true;
+	tqp->timeout_work_expires = jiffies;
 	mod_delayed_work(wq, &tqp->timeout_work, 0);
 }
 
@@ -3440,7 +3522,7 @@ static void tbv_send_tx_done(void *ctx, int status)
 			send->retrying = false;
 			if (!status && send->pending && !send->rnr_waiting) {
 				tbv_send_mark_queued(send, jiffies);
-				tbv_qp_schedule_timeout_locked(tqp);
+				tbv_qp_schedule_send_timeout_locked(tqp, send);
 			}
 		}
 		spin_unlock_irqrestore(&tqp->lock, flags);
@@ -3827,19 +3909,19 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 				send->retries++;
 			}
 			tbv_send_mark_queued(send, jiffies);
-			tbv_qp_schedule_timeout_locked(tqp);
+			tbv_qp_schedule_send_timeout_locked(tqp, send);
 			need_resched = true;
 		} else if (pending && ret == -ENOMEM) {
 			tbv_send_mark_queued(send, jiffies);
 			send->retrying = false;
-			tbv_qp_schedule_timeout_locked(tqp);
+			tbv_qp_schedule_send_timeout_locked(tqp, send);
 			need_resched = true;
 		} else if (pending && ret == -ENOTCONN) {
 			if (send->retries < U8_MAX)
 				send->retries++;
 			tbv_send_mark_queued(send, jiffies);
 			send->retrying = false;
-			tbv_qp_schedule_timeout_locked(tqp);
+			tbv_qp_schedule_send_timeout_locked(tqp, send);
 			need_resched = true;
 		} else if (pending && ret) {
 			if (!send->ready) {

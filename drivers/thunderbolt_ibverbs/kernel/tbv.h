@@ -967,6 +967,23 @@ unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
 					     u8 retries,
 					     unsigned long base_jiffies,
 					     u8 max_retries);
+/*
+ * Deadline-aware timeout-work arming. The reap work only CHECKS deadlines when
+ * it runs; scheduling it at the flat min3 interval quantized every loss
+ * recovery to TBV_READ_RESP_RETRY_MS (~100 ms ACK stalls on hardware). These
+ * pure helpers compute the delay to a send's actual retransmit deadline
+ * (interval-backstopped) and the reduce-only re-arm decision; exposed for the
+ * send_timeout_arming KUnit.
+ */
+unsigned long tbv_qp_send_timeout_delay(unsigned long qp_timeout,
+					unsigned long interval,
+					u8 retries,
+					unsigned long base_jiffies,
+					u8 max_retries,
+					unsigned long queued,
+					unsigned long now);
+bool tbv_qp_timeout_rearm_needed(bool armed, unsigned long armed_expires,
+				 unsigned long new_expires, bool replace);
 void tbv_path_init(struct tbv_path *path,
 		   const struct tbv_path_config *cfg, struct tbv_rail *rail);
 void tbv_path_reset(struct tbv_path *path);
