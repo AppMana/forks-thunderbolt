@@ -28,7 +28,17 @@ enum tbv_native_data_op {
 	TBV_NATIVE_DATA_OP_PATH_CREDIT = 9,
 	TBV_NATIVE_DATA_OP_RDMA_READ_ACK = 10,
 	TBV_NATIVE_DATA_OP_MAD = 11,
-	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_MAD,
+	/*
+	 * Selective retransmit request (requires TBV_NATIVE_WIRE_CAP_NAK from
+	 * the peer's HELLO). psn names the message, frag_offset the first
+	 * missing byte, imm_data the missing byte count (0 = through the end
+	 * of the message). length/remote_addr/rkey/flags are reserved zero.
+	 * frag_offset also serves as a cumulative SACK: every byte below it
+	 * has been received, so the sender may drop those fragments from any
+	 * later timeout retransmit.
+	 */
+	TBV_NATIVE_DATA_OP_NAK = 12,
+	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_NAK,
 };
 
 enum tbv_native_data_flag {
@@ -210,6 +220,13 @@ tbv_native_data_parse_header(const void *buf, size_t size,
 	return 0;
 }
 
+/*
+ * Synthesize the per-fragment header for @payload_len raw bytes of a stream.
+ * The stream header's frag_offset is the stream's base offset within the
+ * operation: legacy full-message streams carry 0 there, per-fragment split
+ * streams (TBV_NATIVE_WIRE_CAP_SPLIT_DATA) carry the fragment's byte offset,
+ * so the synthesized offset is base + bytes already consumed.
+ */
 static inline int
 tbv_native_data_raw_payload_header(const struct tbv_native_data_header *stream,
 				   tbv_wire_u32 done,
@@ -233,8 +250,57 @@ tbv_native_data_raw_payload_header(const struct tbv_native_data_header *stream,
 				  (TBV_NATIVE_DATA_F_LAST |
 				   TBV_NATIVE_DATA_F_SOLICITED);
 	payload->length = payload_len;
-	payload->frag_offset = done;
+	payload->frag_offset = stream->frag_offset + done;
 	return 0;
+}
+
+/*
+ * Per-fragment split-stream framing (TBV_NATIVE_WIRE_CAP_SPLIT_DATA). A split
+ * fragment covers one ring-frame-sized window of the operation so the payload
+ * needs no bounce copy: the window maps to at most two user pages, each posted
+ * as its own raw frame. The unit is the full 4096-byte frame (not the 4048
+ * copied-path payload) because raw frames carry no header; the receive side's
+ * write fragment shape already blesses both units.
+ */
+#define TBV_NATIVE_DATA_SPLIT_UNIT	TBV_NATIVE_DATA_FRAME_SIZE
+
+static inline tbv_wire_u32 tbv_native_data_split_window_count(tbv_wire_u32 total_len)
+{
+	if (!total_len)
+		return 1;
+	return (total_len + TBV_NATIVE_DATA_SPLIT_UNIT - 1u) /
+	       TBV_NATIVE_DATA_SPLIT_UNIT;
+}
+
+static inline int tbv_native_data_split_window(tbv_wire_u32 total_len,
+					       tbv_wire_u32 idx,
+					       tbv_wire_u32 *offset,
+					       tbv_wire_u32 *len)
+{
+	tbv_wire_u32 count = tbv_native_data_split_window_count(total_len);
+
+	if (!offset || !len || idx >= count)
+		return -EINVAL;
+
+	*offset = idx * TBV_NATIVE_DATA_SPLIT_UNIT;
+	*len = idx == count - 1 ? total_len - *offset :
+				  TBV_NATIVE_DATA_SPLIT_UNIT;
+	return 0;
+}
+
+/*
+ * NAK header validation. Only the psn / frag_offset / imm_data fields carry
+ * information (see TBV_NATIVE_DATA_OP_NAK); everything else must be zero so
+ * the fields stay available for later extension.
+ */
+static inline bool
+tbv_native_data_valid_nak(const struct tbv_native_data_header *hdr)
+{
+	return hdr->opcode == TBV_NATIVE_DATA_OP_NAK &&
+	       !hdr->flags &&
+	       !hdr->length &&
+	       !hdr->remote_addr &&
+	       !hdr->rkey;
 }
 
 static inline int
@@ -279,6 +345,67 @@ tbv_native_data_fragment_shape(tbv_wire_u32 total_len,
 	*frag_idx = idx;
 	*frag_count = count;
 	return 0;
+}
+
+/*
+ * Resolve an RDMA_WRITE fragment's (idx, count) against the two legal framing
+ * units: 4048 (copied path) and 4096 (raw/split path). A fragment can validate
+ * under BOTH when its offset is a multiple of lcm(4048,4096) (~1 MiB, e.g.
+ * split window 253) with different indices; picking the wrong one used to be
+ * impossible to hit (raw fragments were never buffered) but split fragments
+ * reorder-buffer routinely. @known_frag_count disambiguates: when the message
+ * already established its count, only the unit reproducing it is accepted.
+ */
+static inline int
+tbv_native_data_write_shape_resolve(tbv_wire_u32 total_len,
+				    tbv_wire_u32 max_frags,
+				    tbv_wire_u32 offset,
+				    tbv_wire_u32 len,
+				    bool last,
+				    tbv_wire_u32 known_frag_count,
+				    tbv_wire_u32 *frag_idx,
+				    tbv_wire_u32 *frag_count)
+{
+	static const tbv_wire_u32 units[2] = {
+		TBV_NATIVE_DATA_MAX_PAYLOAD,
+		TBV_NATIVE_DATA_FRAME_SIZE,
+	};
+	bool have_fallback = false;
+	tbv_wire_u32 fb_idx = 0;
+	tbv_wire_u32 fb_count = 0;
+	unsigned int i;
+
+	for (i = 0; i < 2; i++) {
+		tbv_wire_u32 idx;
+		tbv_wire_u32 count;
+
+		if (tbv_native_data_fragment_shape(total_len, units[i],
+						   max_frags, offset, len, last,
+						   &idx, &count))
+			continue;
+		if (!known_frag_count || count == known_frag_count) {
+			*frag_idx = idx;
+			*frag_count = count;
+			return 0;
+		}
+		if (!have_fallback) {
+			have_fallback = true;
+			fb_idx = idx;
+			fb_count = count;
+		}
+	}
+
+	/*
+	 * Shape-valid under some unit but not the message's established count:
+	 * report that shape so the caller's count-mismatch handling (reorder
+	 * collision) sees it, instead of failing as a malformed fragment.
+	 */
+	if (have_fallback) {
+		*frag_idx = fb_idx;
+		*frag_count = fb_count;
+		return 0;
+	}
+	return -EINVAL;
 }
 
 #endif /* TBV_NATIVE_DATA_H */

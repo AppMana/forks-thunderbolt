@@ -247,12 +247,26 @@ struct tbv_path {
 	u32 rx_raw_done;
 	u32 rx_raw_remaining;
 	u64 rx_raw_base;
+	/*
+	 * Stream base byte offset within the operation (header frag_offset).
+	 * Zero for legacy full-message streams; per-fragment split streams
+	 * (TBV_NATIVE_WIRE_CAP_SPLIT_DATA) carry the fragment's offset.
+	 */
+	u32 rx_raw_frag_base;
 	bool rx_raw_pending;
 	bool tx_poll_enabled;
 	bool rx_supp_poll_enabled;
 	bool tx_scheduling;
 	bool tx_raw_stream_active;
 	bool tx_raw_stream_end_seen;
+	/*
+	 * True from a stream header's DEQUEUE until its end packet's DEQUEUE:
+	 * the window where nothing else may be posted to the ring or the
+	 * receiver would consume it as raw payload. Between windows (chained
+	 * per-fragment split streams) scheduling is normal, so ACKs no longer
+	 * wait for a whole message.
+	 */
+	bool tx_raw_stream_window_open;
 	u32 tx_raw_stream_inflight;
 	void *tx_raw_stream_owner;
 	int local_transmit_path;
@@ -363,6 +377,13 @@ struct tbv_peer {
 	u64 remote_roce_eui64;
 	u32 remote_roce_ipv4;
 	bool remote_identity_valid;
+	/*
+	 * The peer's HELLO capability bits (TBV_NATIVE_WIRE_CAP_*), written
+	 * under state->lock in tbv_native_control_apply_remote() and read
+	 * with READ_ONCE on the data path. Zero until the HELLO lands, so
+	 * every capability-gated behavior defaults off.
+	 */
+	u32 remote_caps;
 };
 
 bool tbv_path_tx_stalled(const struct tbv_path *path);
@@ -568,11 +589,13 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_fallback;
 	atomic64_t data_wr_zcopy_fallback_striping;
 	atomic64_t data_wr_zcopy_fallback_unsafe_sge;
+	atomic64_t data_wr_zcopy_fallback_peer;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
 	atomic64_t data_wr_retransmit;
 	atomic64_t data_wr_rnr_retransmit;
+	atomic64_t data_wr_nak_retransmit;
 	atomic64_t data_wr_retry_enqueue_error;
 	atomic64_t data_wr_retry_exhausted;
 	atomic64_t data_wr_rnr_retry_exhausted;
@@ -626,6 +649,11 @@ struct tbv_state {
 	atomic64_t data_rx_ack_rnr;
 	atomic64_t data_rx_duplicate_ack;
 	atomic64_t data_rx_ack_history_miss;
+	atomic64_t data_tx_nak;
+	atomic64_t data_tx_nak_send_error;
+	atomic64_t data_rx_nak;
+	atomic64_t data_rx_nak_matched;
+	atomic64_t data_rx_nak_miss;
 	atomic64_t data_tx_read_ack_ok;
 	atomic64_t data_tx_read_ack_retry;
 	atomic64_t data_tx_read_ack_error;
@@ -726,6 +754,13 @@ typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
 				     void **done_ctx);
 #define TBV_PATH_SEND_CONTROL	BIT(0)
 #define TBV_PATH_SEND_DEFER	BIT(1)
+/*
+ * Retransmit marker for tbv_path_send_page_stream(): refund one remote data
+ * credit per posted frame before they re-charge, reclaiming the credits the
+ * lost attempt leaked (same contract as tbv_path_refund_remote_data_credits
+ * in the framed retransmit path; see the leak note there).
+ */
+#define TBV_PATH_SEND_REFUND	BIT(2)
 extern const uuid_t tbv_native_service_uuid;
 
 int tbv_config_parse(struct tbv_config *cfg, const char *compat,
@@ -865,6 +900,45 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+/*
+ * Zero-copy TX mode selection for one native send ctx, decided ONCE at the
+ * initial post and pinned for every retransmit (framing must not change
+ * between attempts or the receiver's fragment bitmaps mismatch). SPLIT is the
+ * retransmit-safe per-fragment raw stream and requires the peer to have
+ * advertised TBV_NATIVE_WIRE_CAP_SPLIT_DATA; RAW_STREAM is the legacy
+ * full-message stream, only safe when the ctx can never retransmit. Exposed
+ * for kunit (tests/zcopy_split_test.c).
+ */
+enum tbv_zcopy_tx_mode {
+	TBV_ZCOPY_TX_NONE = 0,
+	TBV_ZCOPY_TX_RAW_STREAM,
+	TBV_ZCOPY_TX_SPLIT,
+};
+enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
+					     bool retryable, u32 total_len,
+					     u32 min_bytes, u32 peer_caps);
+/*
+ * Byte range [start, end) a retransmit must cover. A NAK carries the missing
+ * range; opcodes whose receive path cannot buffer past a hole (SEND streaming,
+ * RDMA_WRITE_IMM) must go-back-N to the end. acked_prefix is the cumulative
+ * SACK floor (bytes below it are known-delivered). Exposed for kunit.
+ */
+void tbv_send_retry_range(u8 opcode, u32 total_len, u32 acked_prefix,
+			  bool nak_retry, u32 nak_start, u32 nak_len,
+			  u32 *start, u32 *end);
+/* Whether fragment [frag_off, frag_off+frag_len) intersects [start, end). */
+bool tbv_send_frag_needed(u32 frag_off, u32 frag_len, u32 start, u32 end);
+/* Monotone cumulative-SACK update, clamped to the message length. */
+u32 tbv_send_acked_prefix_update(u32 cur, u32 missing_start, u32 total_len);
+/*
+ * Receiver-side NAK emission gate: capability + per-QP duplicate suppression
+ * (one NAK per distinct (psn, hole start); re-arm after min_interval so a
+ * lost NAK is eventually re-sent). Exposed for kunit.
+ */
+bool tbv_rx_nak_should_send(u32 peer_caps, bool last_valid, u32 last_psn,
+			    u32 last_start, unsigned long last_jiffies,
+			    u32 psn, u32 start, unsigned long now,
+			    unsigned long min_interval);
 bool tbv_native_control_path_should_replace(u32 data_score, u32 control_score,
 					    bool is_rx_path,
 					    u32 best_data_score,

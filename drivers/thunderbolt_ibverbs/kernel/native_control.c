@@ -35,6 +35,12 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 		caps |= TBV_NATIVE_WIRE_CAP_RC;
 	if (peer->nr_rails > 1)
 		caps |= TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
+	/*
+	 * Receive-side support for both is unconditional in this module:
+	 * split-base raw streams and inbound NAKs need no per-node state.
+	 * The peer gates its own TX on these bits.
+	 */
+	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK;
 
 	return caps;
 }
@@ -346,6 +352,12 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			rail->remote_transmit_path = remote->transmit_path;
 			rail->remote_tx_hop = remote->tx_hop;
 			rail->remote_rx_hop = remote->rx_hop;
+			/*
+			 * Capability bits gate data-plane TX behavior (split
+			 * zcopy, NAK). A re-HELLO overwrites them, so a peer
+			 * that reloads with an older module downgrades us.
+			 */
+			WRITE_ONCE(peer->remote_caps, remote->capabilities);
 			tbv_path_set_remote_rx_capacity(&rail->path,
 							remote->rx_ring_size);
 			/*

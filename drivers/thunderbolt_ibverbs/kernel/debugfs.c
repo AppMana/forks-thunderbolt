@@ -153,6 +153,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_fallback_striping));
 	seq_printf(s, "data_wr_zcopy_fallback_unsafe_sge: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_fallback_unsafe_sge));
+	seq_printf(s, "data_wr_zcopy_fallback_peer: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fallback_peer));
 	seq_printf(s, "data_wr_copy_error: %lld\n",
 		   atomic64_read(&state->data_wr_copy_error));
 	seq_printf(s, "data_wr_path_send: %lld\n",
@@ -163,6 +165,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_retransmit));
 	seq_printf(s, "data_wr_rnr_retransmit: %lld\n",
 		   atomic64_read(&state->data_wr_rnr_retransmit));
+	seq_printf(s, "data_wr_nak_retransmit: %lld\n",
+		   atomic64_read(&state->data_wr_nak_retransmit));
 	seq_printf(s, "data_wr_retry_enqueue_error: %lld\n",
 		   atomic64_read(&state->data_wr_retry_enqueue_error));
 	seq_printf(s, "data_wr_retry_exhausted: %lld\n",
@@ -253,6 +257,16 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_rx_duplicate_ack));
 	seq_printf(s, "data_rx_ack_history_miss: %lld\n",
 		   atomic64_read(&state->data_rx_ack_history_miss));
+	seq_printf(s, "data_tx_nak: %lld\n",
+		   atomic64_read(&state->data_tx_nak));
+	seq_printf(s, "data_tx_nak_send_error: %lld\n",
+		   atomic64_read(&state->data_tx_nak_send_error));
+	seq_printf(s, "data_rx_nak: %lld\n",
+		   atomic64_read(&state->data_rx_nak));
+	seq_printf(s, "data_rx_nak_matched: %lld\n",
+		   atomic64_read(&state->data_rx_nak_matched));
+	seq_printf(s, "data_rx_nak_miss: %lld\n",
+		   atomic64_read(&state->data_rx_nak_miss));
 	seq_printf(s, "data_tx_read_ack_ok: %lld\n",
 		   atomic64_read(&state->data_tx_read_ack_ok));
 	seq_printf(s, "data_tx_read_ack_retry: %lld\n",

@@ -584,15 +584,30 @@ static void tbv_path_count_raw_stream_locked(struct tbv_path *path,
 					     struct tbv_tx_packet *packet)
 {
 	if (packet->raw_stream_start) {
-		path->tx_raw_stream_active = true;
-		path->tx_raw_stream_owner = packet->owner_ctx;
-		path->tx_raw_stream_inflight = 0;
+		/*
+		 * A chained window of the SAME owner (per-fragment split
+		 * streams) must not reset the inflight count: the previous
+		 * window's completions are still pending against it.
+		 */
+		if (!path->tx_raw_stream_active ||
+		    path->tx_raw_stream_owner != packet->owner_ctx) {
+			path->tx_raw_stream_active = true;
+			path->tx_raw_stream_owner = packet->owner_ctx;
+			path->tx_raw_stream_inflight = 0;
+		}
 		path->tx_raw_stream_end_seen = false;
+		path->tx_raw_stream_window_open = true;
 	}
 	if (path->tx_raw_stream_active &&
 	    packet->owner_ctx == path->tx_raw_stream_owner) {
 		path->tx_raw_stream_inflight++;
 		packet->raw_stream_counted = true;
+		/*
+		 * The end packet's DEQUEUE closes the unframed window: from
+		 * here the ring order is safe for unrelated frames again.
+		 */
+		if (packet->raw_stream_end)
+			path->tx_raw_stream_window_open = false;
 	}
 }
 
@@ -622,6 +637,7 @@ static void tbv_path_finish_raw_stream_if_needed(struct tbv_path *path,
 		path->tx_raw_stream_active = false;
 		path->tx_raw_stream_owner = NULL;
 		path->tx_raw_stream_end_seen = false;
+		path->tx_raw_stream_window_open = false;
 		path->tx_raw_stream_inflight = 0;
 	}
 	spin_unlock_irqrestore(&path->tx_lock, flags);
@@ -871,6 +887,7 @@ static void tbv_path_rx_start_raw(struct tbv_path *path,
 	path->rx_raw_imm_data = hdr->imm_data;
 	path->rx_raw_rkey = hdr->rkey;
 	path->rx_raw_base = hdr->remote_addr;
+	path->rx_raw_frag_base = hdr->frag_offset;
 	path->rx_raw_done = 0;
 	path->rx_raw_remaining = hdr->length;
 	path->rx_raw_pending = hdr->length != 0;
@@ -901,6 +918,7 @@ static void tbv_path_rx_raw_payload(struct tbv_path *path,
 	stream.imm_data = path->rx_raw_imm_data;
 	stream.remote_addr = path->rx_raw_base;
 	stream.rkey = path->rx_raw_rkey;
+	stream.frag_offset = path->rx_raw_frag_base;
 
 	ret = tbv_native_data_raw_payload_header(&stream, path->rx_raw_done,
 						 path->rx_raw_remaining, len,
@@ -983,10 +1001,27 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 		    path->rail->peer->backend == TBV_BACKEND_APPLE) {
 			tbv_ibdev_rx_apple_frame(state, path, f->buf, len,
 						 frame->sof, frame->eof);
-		} else if (was_raw_payload) {
+		} else if (was_raw_payload &&
+			   tbv_native_data_parse_header(f->buf, len, &hdr)) {
 			return_rx_credits = 1;
 			tbv_path_rx_raw_payload(path, state, f->buf, len);
 		} else {
+			/*
+			 * A frame that parses as a valid native header cannot
+			 * be raw payload unless the user data forges the TVD1
+			 * magic/version/opcode (~2^-50): the sender never
+			 * interleaves headers inside a stream, so seeing one
+			 * mid-stream means payload frames were LOST. Dropping
+			 * the desynced stream here bounds the damage to the
+			 * stream (one fragment for split streams) instead of
+			 * scattering later headers into user memory; the
+			 * retransmit path resends the fragment.
+			 */
+			if (was_raw_payload) {
+				atomic64_inc(&state->data_rx_bad_frame);
+				path->rx_raw_pending = false;
+				path->rx_raw_remaining = 0;
+			}
 			ret = tbv_native_data_parse_header(f->buf, len, &hdr);
 			if (!ret && hdr.opcode == TBV_NATIVE_DATA_OP_PATH_CREDIT) {
 				if (tbv_native_data_valid_path_credit(&hdr))
@@ -1805,6 +1840,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		bool needs_staging;
 		bool old_raw_stream_active;
 		bool old_raw_stream_end_seen;
+		bool old_raw_stream_window_open;
 		void *old_raw_stream_owner;
 		u32 old_raw_stream_inflight;
 		bool charged_data_credit;
@@ -1821,7 +1857,15 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			return;
 		}
 
-		if (path->tx_raw_stream_active) {
+		/*
+		 * Gate on the OPEN unframed window (header posted, end not
+		 * yet), not on stream-active: between chained per-fragment
+		 * windows the ring order is safe again, so control frames
+		 * (ACKs) and other QPs' data interleave at fragment
+		 * granularity instead of stalling behind a whole message.
+		 */
+		if (path->tx_raw_stream_active &&
+		    path->tx_raw_stream_window_open) {
 			if (list_empty(&path->tx_data_queue)) {
 				path->tx_scheduling = false;
 				spin_unlock_irqrestore(&path->tx_lock, flags);
@@ -1914,6 +1958,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		old_raw_stream_active = path->tx_raw_stream_active;
 		old_raw_stream_owner = path->tx_raw_stream_owner;
 		old_raw_stream_end_seen = path->tx_raw_stream_end_seen;
+		old_raw_stream_window_open = path->tx_raw_stream_window_open;
 		old_raw_stream_inflight = path->tx_raw_stream_inflight;
 		tbv_path_count_raw_stream_locked(path, packet);
 
@@ -1964,6 +2009,8 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			path->tx_raw_stream_active = old_raw_stream_active;
 			path->tx_raw_stream_owner = old_raw_stream_owner;
 			path->tx_raw_stream_end_seen = old_raw_stream_end_seen;
+			path->tx_raw_stream_window_open =
+				old_raw_stream_window_open;
 			path->tx_raw_stream_inflight = old_raw_stream_inflight;
 			packet->raw_stream_counted = false;
 			if (charged_data_credit) {
@@ -2034,6 +2081,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		path->tx_raw_stream_active = old_raw_stream_active;
 		path->tx_raw_stream_owner = old_raw_stream_owner;
 		path->tx_raw_stream_end_seen = old_raw_stream_end_seen;
+		path->tx_raw_stream_window_open = old_raw_stream_window_open;
 		path->tx_raw_stream_inflight = old_raw_stream_inflight;
 		packet->raw_stream_counted = false;
 		if (charged_data_credit) {
@@ -2396,7 +2444,7 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		ret = -EINVAL;
 		goto err_meta_done;
 	}
-	if (send_flags & ~(TBV_PATH_SEND_DEFER)) {
+	if (send_flags & ~(TBV_PATH_SEND_DEFER | TBV_PATH_SEND_REFUND)) {
 		ret = -EINVAL;
 		goto err_meta_done;
 	}
@@ -2426,10 +2474,14 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		goto err_release;
 	}
 
+	/*
+	 * The caller owns F_LAST: a full-message stream sets it, a
+	 * per-fragment split stream sets it only on the message's final
+	 * fragment. Only the raw-stream marker is implied here.
+	 */
 	stream_hdr = *hdr;
 	stream_hdr.length = total_length;
-	stream_hdr.flags |= TBV_NATIVE_DATA_F_LAST |
-			    TBV_NATIVE_DATA_F_RAW_STREAM;
+	stream_hdr.flags |= TBV_NATIVE_DATA_F_RAW_STREAM;
 	ret = tbv_native_data_build_header(hdr_buf, TBV_NATIVE_DATA_HDR_SIZE,
 					   &stream_hdr);
 	if (ret < 0) {
@@ -2497,6 +2549,14 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		prepared += len;
 	}
 
+	/*
+	 * Retransmit: reclaim the previous attempt's credits for exactly the
+	 * frames this attempt re-charges (a lost frame's credit is never
+	 * returned by the peer; see tbv_path_refund_remote_data_credits).
+	 */
+	if (send_flags & TBV_PATH_SEND_REFUND)
+		tbv_path_refund_remote_data_credits(path, packet_count);
+
 	ret = tbv_path_enqueue_data_list(path, &packets, packet_count,
 					 send_flags & TBV_PATH_SEND_DEFER);
 	if (ret)
@@ -2553,6 +2613,7 @@ static void tbv_path_cancel_data_match(struct tbv_path *path,
 		path->tx_raw_stream_active = false;
 		path->tx_raw_stream_owner = NULL;
 		path->tx_raw_stream_end_seen = false;
+		path->tx_raw_stream_window_open = false;
 		path->tx_raw_stream_inflight = 0;
 		raw_stream_canceled = true;
 	}
@@ -2635,6 +2696,7 @@ static void tbv_path_flush_tx_queue(struct tbv_path *path, int status)
 	path->tx_raw_stream_active = false;
 	path->tx_raw_stream_owner = NULL;
 	path->tx_raw_stream_end_seen = false;
+	path->tx_raw_stream_window_open = false;
 	path->tx_raw_stream_inflight = 0;
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 

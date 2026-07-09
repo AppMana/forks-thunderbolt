@@ -53,10 +53,30 @@ enum tbv_native_wire_op {
 	TBV_NATIVE_WIRE_OP_READY_ACK = 4,
 };
 
+/*
+ * Capability bits are the additive negotiation channel: unknown bits are
+ * ignored by older modules (caps are only ever tested with &), so new
+ * data-plane behavior rides a new bit instead of a wire-version bump (which
+ * would make mixed fleets stop negotiating entirely, see the v2 note above).
+ * A sender may only emit the corresponding frames after the peer's HELLO
+ * advertised the bit; absence degrades to the previous behavior.
+ *
+ * SPLIT_DATA: the peer accepts per-fragment raw streams -- a 48-byte native
+ * data header frame with TBV_NATIVE_DATA_F_RAW_STREAM, length <= one ring
+ * frame and a NONZERO frag_offset stream base, followed by that many raw
+ * payload bytes. Pre-SPLIT_DATA receivers assume a zero stream base and would
+ * scatter the payload at the wrong offsets.
+ *
+ * NAK: the peer understands TBV_NATIVE_DATA_OP_NAK (selective retransmit
+ * request). Pre-NAK receivers count the opcode as data_rx_bad_header, so it
+ * must never be sent to them; they recover by their retransmit timer alone.
+ */
 enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_UC = 1u << 0,
 	TBV_NATIVE_WIRE_CAP_RC = 1u << 1,
 	TBV_NATIVE_WIRE_CAP_MULTI_RAIL = 1u << 2,
+	TBV_NATIVE_WIRE_CAP_SPLIT_DATA = 1u << 3,
+	TBV_NATIVE_WIRE_CAP_NAK = 1u << 4,
 };
 
 enum tbv_native_wire_path_flag {
