@@ -990,6 +990,34 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 		atomic64_inc(&state->data_rx_completed);
 	atomic64_inc(&path->data_rx_completed);
 
+	/*
+	 * The NHI reports per-frame CRC failure and RX buffer overrun in
+	 * frame->flags. Parsing such a frame reads corrupt bytes: as a header
+	 * it lands in data_rx_bad_header, and mid-raw-stream it would be
+	 * scattered into a user MR as payload. Drop it here and let the
+	 * sender's NAK/timeout resend it. Counting the two causes separately
+	 * also settles whether the residual bad-header rate is wire corruption
+	 * or a software framing bug.
+	 */
+	if (tbv_frame_hw_error(frame->flags)) {
+		if (state) {
+			if (frame->flags & RING_DESC_CRC_ERROR)
+				atomic64_inc(&state->data_rx_crc_error);
+			else
+				atomic64_inc(&state->data_rx_overrun);
+		}
+		/*
+		 * A corrupt frame inside a raw stream desyncs the receiver's
+		 * byte counter, so abandon the stream; the sender's NAK or
+		 * timeout resends the whole window.
+		 */
+		if (path->rx_raw_pending) {
+			path->rx_raw_pending = false;
+			path->rx_raw_remaining = 0;
+		}
+		goto repost;
+	}
+
 	dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
 				TBV_DATA_FRAME_SIZE, DMA_FROM_DEVICE);
 	was_raw_payload = path->rx_raw_pending;
@@ -1057,6 +1085,7 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 		atomic64_inc(&path->data_rx_credit_eligible);
 	}
 
+repost:
 	if (path->state == TBV_PATH_RING_STARTED ||
 	    path->state == TBV_PATH_TUNNEL_ENABLED) {
 		int ret = tbv_path_post_rx_frame(f);

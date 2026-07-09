@@ -15,6 +15,7 @@
 #include <linux/refcount.h>
 #include <linux/sizes.h>
 #include <linux/spinlock.h>
+#include <linux/thunderbolt.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
@@ -54,6 +55,22 @@
 #define TBV_APPLE_QPN_SHIFT 8
 #define TBV_APPLE_FRAME_SIZE SZ_4K
 #define TBV_APPLE_MAX_MSG_SIZE SZ_16M
+
+/*
+ * True when the NHI flagged the received frame as corrupt. Frame-mode RX sets
+ * RING_DESC_CRC_ERROR on a failed CRC and RING_DESC_BUFFER_OVERRUN when the
+ * frame did not fit; the payload is garbage in both cases and must not be
+ * parsed as a header or scattered into a user MR.
+ *
+ * enum ring_desc_flags aliases TX and RX meanings on the same bits
+ * (0x1 ISOCH/CRC_ERROR, 0x4 POSTED/BUFFER_OVERRUN), so this is only meaningful
+ * on an RX completion, where the NHI has written descriptor status. Pure so
+ * the KUnit can pin it.
+ */
+static inline bool tbv_frame_hw_error(u32 flags)
+{
+	return flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN);
+}
 
 static inline bool tbv_dma_device_ready(const struct device *dev)
 {
@@ -627,6 +644,9 @@ struct tbv_state {
 	atomic64_t data_rx_repost_failed;
 	atomic64_t data_rx_bad_frame;
 	atomic64_t data_rx_bad_header;
+	/* NHI-reported per-frame errors; see tbv_frame_hw_error(). */
+	atomic64_t data_rx_crc_error;
+	atomic64_t data_rx_overrun;
 	atomic64_t data_rx_send;
 	atomic64_t data_rx_op_send;
 	atomic64_t data_rx_op_send_imm;
