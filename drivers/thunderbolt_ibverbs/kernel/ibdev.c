@@ -105,6 +105,19 @@ module_param(zcopy_min_bytes, uint, 0644);
 MODULE_PARM_DESC(zcopy_min_bytes,
 		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE to a split-capable peer uses per-fragment split streams from PAGE-ALIGNED sources (unaligned sources fall back to framed copies -> data_wr_zcopy_fallback_unaligned). 0 disables zero-copy");
 
+/*
+ * CRC-investigation diagnostic: when set, a message with ANY partial (non-4096)
+ * window falls the WHOLE message back to the framed copy path, so only exact-
+ * 4096-multiple messages are zero-copied. If enabling this drops the peer's
+ * data_rx_crc_error to background, the corruption is partial-window-specific
+ * (the map-length over-read theory); if CRC stays high, full 4096 windows also
+ * corrupt and the cause is elsewhere (page provenance / concurrent writer).
+ */
+static bool zcopy_full_windows_only;
+module_param(zcopy_full_windows_only, bool, 0644);
+MODULE_PARM_DESC(zcopy_full_windows_only,
+		 "Diagnostic: zero-copy only messages with no partial window (exact 4096 multiples); others use framed copies");
+
 static uint qp_timeout_ms = TBV_QP_TIMEOUT_DEFAULT_MS;
 module_param(qp_timeout_ms, uint, 0644);
 MODULE_PARM_DESC(qp_timeout_ms,
@@ -743,6 +756,20 @@ bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
 	if (split_unit % page_size)
 		return false;
 	return first_page_off == 0;
+}
+
+u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
+			    u32 frame_size, bool full_page)
+{
+	u32 to_page_end;
+
+	if (!full_page || !page_size || page_off >= page_size)
+		return payload_len;
+
+	to_page_end = page_size - page_off;
+	if (frame_size && to_page_end > frame_size)
+		to_page_end = frame_size;
+	return to_page_end < payload_len ? payload_len : to_page_end;
 }
 
 static bool tbv_backend_is_apple(enum tbv_backend_type backend)
@@ -4757,6 +4784,19 @@ static bool tbv_send_segments_split_clean(struct tbv_send_segment *segs,
 						      &chunk);
 			if (ret || page_off != 0 || chunk != win_len)
 				return false;
+			/*
+			 * Provenance sanity for the "NHI can't read this memory
+			 * type" hypothesis: NCCL host buffers are normal
+			 * linear-map pages. A highmem page (never on x86_64) or
+			 * one whose kernel VA is vmalloc'd would not be safely
+			 * NHI-DMA'able; count it so a nonzero value on hardware
+			 * localizes provenance. zone_device (GPU) is already
+			 * rejected by tbv_page_zcopy_safe above.
+			 */
+			if (PageHighMem(page) ||
+			    is_vmalloc_addr(page_address(page)))
+				atomic64_inc(
+					&seg->mr->owner->data_wr_zcopy_page_suspect);
 			found = true;
 			break;
 		}
@@ -4857,6 +4897,19 @@ static int tbv_native_send_ctx_post_split(struct tbv_send_ctx *ctx,
 			break;
 		if (!tbv_send_frag_needed(off, len, retry_start, retry_end))
 			continue;
+
+		/* CRC-investigation discriminators: which window class we emit */
+		if (idx == 0)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_window_first);
+		else
+			atomic64_inc(&tqp->owner->data_wr_zcopy_window_rest);
+		if (len == TBV_NATIVE_DATA_SPLIT_UNIT)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_full);
+		else
+			atomic64_inc(&tqp->owner->data_wr_zcopy_partial);
+		if (retransmit)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_retransmit);
+		atomic64_inc(&tqp->owner->data_wr_zcopy_frames);
 
 		tbv_send_ctx_build_native_header(ctx, off, len,
 						 off + len == ctx->total_len,
@@ -5016,6 +5069,11 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			zcopy_mode = TBV_ZCOPY_TX_NONE;
 			atomic64_inc(
 				&tqp->owner->data_wr_zcopy_fallback_unaligned);
+		} else if (zcopy_mode == TBV_ZCOPY_TX_SPLIT &&
+			   READ_ONCE(zcopy_full_windows_only) &&
+			   ctx->total_len % TBV_NATIVE_DATA_SPLIT_UNIT) {
+			/* diagnostic: only exact-4096-multiple messages zcopy */
+			zcopy_mode = TBV_ZCOPY_TX_NONE;
 		}
 		ctx->zcopy_mode = zcopy_mode;
 

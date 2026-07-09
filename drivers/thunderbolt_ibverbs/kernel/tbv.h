@@ -608,6 +608,20 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_fallback_unsafe_sge;
 	atomic64_t data_wr_zcopy_fallback_peer;
 	atomic64_t data_wr_zcopy_fallback_unaligned;
+	/*
+	 * Hypothesis-discriminating emission counters for the zcopy CRC
+	 * investigation: which window class the sender emitted. Correlated
+	 * with the peer's data_rx_crc_error across A/B runs they localize the
+	 * corrupting class (the receiver cannot attribute a CRC-dropped frame
+	 * to a window, so the discrimination is sender-side + module params).
+	 */
+	atomic64_t data_wr_zcopy_window_first;
+	atomic64_t data_wr_zcopy_window_rest;
+	atomic64_t data_wr_zcopy_full;
+	atomic64_t data_wr_zcopy_partial;
+	atomic64_t data_wr_zcopy_retransmit;
+	atomic64_t data_wr_zcopy_frames;
+	atomic64_t data_wr_zcopy_page_suspect;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
@@ -952,6 +966,20 @@ enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
  */
 bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
 				  u32 page_size);
+/*
+ * DMA map length for a zero-copy TX frame. The copied path always presents a
+ * full 4096-byte mapping (dma_map_single of a kmalloc'd frame) and transmits
+ * frame->size <= 4096, so an NHI burst that rounds the read up past the frame
+ * size stays inside the mapping. A zcopy frame that maps only payload_len
+ * leaves the tail of the page unmapped; a rounded-up read there faults the
+ * IOMMU (iommu=pt makes external TB devices translated, not identity) and the
+ * NHI emits a corrupt frame the receiver drops as a CRC error. Mapping to the
+ * page boundary (page-aligned frames only, so page_off==0 => a full page)
+ * closes that gap while frame->size still transmits exactly payload_len.
+ * Exposed for kunit.
+ */
+u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
+			    u32 frame_size, bool full_page);
 /*
  * Byte range [start, end) a retransmit must cover. A NAK carries the missing
  * range; opcodes whose receive path cannot buffer past a hole (SEND streaming,

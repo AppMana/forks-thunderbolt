@@ -157,6 +157,20 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_fallback_peer));
 	seq_printf(s, "data_wr_zcopy_fallback_unaligned: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_fallback_unaligned));
+	seq_printf(s, "data_wr_zcopy_window_first: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_window_first));
+	seq_printf(s, "data_wr_zcopy_window_rest: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_window_rest));
+	seq_printf(s, "data_wr_zcopy_full: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_full));
+	seq_printf(s, "data_wr_zcopy_partial: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_partial));
+	seq_printf(s, "data_wr_zcopy_retransmit: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_retransmit));
+	seq_printf(s, "data_wr_zcopy_frames: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_frames));
+	seq_printf(s, "data_wr_zcopy_page_suspect: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_page_suspect));
 	seq_printf(s, "data_wr_copy_error: %lld\n",
 		   atomic64_read(&state->data_wr_copy_error));
 	seq_printf(s, "data_wr_path_send: %lld\n",

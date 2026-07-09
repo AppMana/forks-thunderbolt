@@ -131,6 +131,18 @@ module_param(destroy_disable_paths, bool, 0644);
 MODULE_PARM_DESC(destroy_disable_paths,
 		 "Call tb_xdomain_disable_paths() during path teardown; set to 0 for recovery-oriented native testing");
 
+/*
+ * Map each zero-copy TX frame to the page boundary rather than to the exact
+ * transmitted length, so an NHI read that bursts past frame->size cannot fault
+ * the unmapped tail of the page (the copied path always maps a full 4096
+ * buffer). Default on -- the fix for the 0.2.26 zcopy receiver-CRC storm.
+ * Settable to 0 to A/B the exact-length mapping on hardware.
+ */
+static bool zcopy_map_full_page = true;
+module_param(zcopy_map_full_page, bool, 0644);
+MODULE_PARM_DESC(zcopy_map_full_page,
+		 "Map zero-copy TX frames to the page boundary so an NHI over-read cannot fault past the mapping; 0 maps exactly the transmitted length");
+
 static uint tx_stall_warn_ms = 5000;
 module_param(tx_stall_warn_ms, uint, 0644);
 MODULE_PARM_DESC(tx_stall_warn_ms,
@@ -180,6 +192,13 @@ struct tbv_tx_packet {
 	u32 len;
 	struct ring_frame frame;
 	dma_addr_t dma;
+	/*
+	 * Bytes actually dma_map'd for a zcopy frame. May exceed len (the
+	 * transmitted frame->size) when the frame is mapped to the page
+	 * boundary so an NHI over-read cannot fault past the mapping; unmap
+	 * must use this, not len.
+	 */
+	u32 dma_len;
 	tbv_path_tx_done_fn done;
 	void *done_ctx;
 	void *owner_ctx;
@@ -272,7 +291,9 @@ static void tbv_path_tx_packet_release(struct tbv_tx_packet *packet, int status)
 		struct device *dma_dev = tb_ring_dma_device(path->tx_ring);
 
 		if (tbv_dma_device_ready(dma_dev))
-			dma_unmap_page(dma_dev, packet->dma, packet->len,
+			dma_unmap_page(dma_dev, packet->dma,
+				       packet->dma_len ? packet->dma_len :
+							 packet->len,
 				       DMA_TO_DEVICE);
 		else
 			pr_warn_ratelimited("TX ring DMA device is not ready for zcopy unmapping\n");
@@ -1620,8 +1641,8 @@ static struct tbv_tx_packet *tbv_path_alloc_pooled_data_packet(
 
 static struct tbv_tx_packet *
 tbv_path_alloc_zcopy_packet(struct tbv_path *path, dma_addr_t dma, u32 len,
-			    bool unmap_dma, tbv_path_tx_done_fn done,
-			    void *done_ctx)
+			    u32 dma_len, bool unmap_dma,
+			    tbv_path_tx_done_fn done, void *done_ctx)
 {
 	struct tbv_tx_packet *packet;
 
@@ -1634,6 +1655,7 @@ tbv_path_alloc_zcopy_packet(struct tbv_path *path, dma_addr_t dma, u32 len,
 	packet->path = path;
 	packet->len = len;
 	packet->dma = dma;
+	packet->dma_len = dma_len;
 	packet->done = done;
 	packet->done_ctx = done_ctx;
 	packet->owner_ctx = done_ctx;
@@ -2538,6 +2560,7 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		dma_addr_t dma;
 		u32 page_off = 0;
 		u32 len = 0;
+		u32 map_len;
 
 		ret = next(next_ctx, &page, &page_off, &len, &done, &done_ctx);
 		if (ret)
@@ -2553,7 +2576,18 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 
 		last = prepared + len == total_length;
 
-		dma = dma_map_page(dma_dev, page, page_off, len,
+		/*
+		 * Map to the page boundary, not just the transmitted len, so an
+		 * NHI read that rounds up past frame->size cannot fault the tail
+		 * of the page (the copied path always maps a full 4096 buffer);
+		 * frame->size below still transmits exactly len. Only page-
+		 * aligned sources reach here (tbv_send_segments_split_clean), so
+		 * page_off is 0 and map_len is a whole page.
+		 */
+		map_len = tbv_zcopy_frame_map_len(page_off, len, PAGE_SIZE,
+						  TBV_DATA_FRAME_SIZE,
+						  READ_ONCE(zcopy_map_full_page));
+		dma = dma_map_page(dma_dev, page, page_off, map_len,
 				   DMA_TO_DEVICE);
 		if (dma_mapping_error(dma_dev, dma)) {
 			if (done)
@@ -2562,10 +2596,10 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 			goto err_release;
 		}
 
-		packet = tbv_path_alloc_zcopy_packet(path, dma, len, true,
-						     done, done_ctx);
+		packet = tbv_path_alloc_zcopy_packet(path, dma, len, map_len,
+						     true, done, done_ctx);
 		if (!packet) {
-			dma_unmap_page(dma_dev, dma, len, DMA_TO_DEVICE);
+			dma_unmap_page(dma_dev, dma, map_len, DMA_TO_DEVICE);
 			if (done)
 				done(done_ctx, -ENOMEM);
 			ret = -ENOMEM;

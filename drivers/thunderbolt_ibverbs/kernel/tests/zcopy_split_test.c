@@ -381,11 +381,42 @@ static void tbv_raw_desync_header_is_detected(struct kunit *test)
 					     &parsed), 0);
 }
 
+static void tbv_zcopy_frame_map_len_covers_page(struct kunit *test)
+{
+	/*
+	 * full_page: map to the page boundary regardless of payload, so an NHI
+	 * burst read past frame->size stays inside the mapping (the copied
+	 * path always maps a full 4096 buffer). page_off is always 0 after the
+	 * alignment gate, so a partial last window maps the whole page.
+	 */
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(0, 100, 4096, 4096, true), 4096u);
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(0, 4096, 4096, 4096, true), 4096u);
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(0, 3276, 4096, 4096, true), 4096u);
+	/* legacy/off: map exactly the transmitted payload (the CRC-buggy len) */
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(0, 100, 4096, 4096, false), 100u);
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(0, 4096, 4096, 4096, false), 4096u);
+
+	/* invariants: never below the payload, never across the page boundary */
+	KUNIT_EXPECT_GE(test,
+		tbv_zcopy_frame_map_len(0, 100, 4096, 4096, true), 100u);
+	KUNIT_EXPECT_LE(test,
+		tbv_zcopy_frame_map_len(0, 100, 4096, 4096, true), 4096u);
+	/* a nonzero page_off (defensive: gate forbids it) maps only to end */
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_frame_map_len(1000, 100, 4096, 4096, true), 3096u);
+}
+
 static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_zcopy_mode_selection),
 	KUNIT_CASE(tbv_split_window_framing),
 	KUNIT_CASE(tbv_split_geometry_identical_to_copied),
 	KUNIT_CASE(tbv_split_page_alignment_gate),
+	KUNIT_CASE(tbv_zcopy_frame_map_len_covers_page),
 	KUNIT_CASE(tbv_write_shape_resolver_prefers_known_count),
 	KUNIT_CASE(tbv_raw_desync_header_is_detected),
 	{}
