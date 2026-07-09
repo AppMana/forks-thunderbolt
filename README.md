@@ -268,9 +268,20 @@ storage hotplug changes should not.
   for in `/sys/kernel/debug/thunderbolt_ibverbs/summary`:
   `data_rx_ack_match_over_64ms` climbing with `data_wr_retransmit`, and
   `data_rx_duplicate_ack` close to the retransmit count (spurious resends).
-- **`data_rx_bad_header` is real frame corruption**, ~0.1-0.5% of messages on a
-  healthy link. Recovery is cheap since 0.2.25, but it is the remaining source
-  of tail latency and the next bug worth root-causing.
+- **`data_rx_bad_header` is not necessarily wire corruption.** Until 0.2.26 the
+  RX path never inspected `frame->flags`, so frames the NHI had already marked
+  `RING_DESC_CRC_ERROR` / `RING_DESC_BUFFER_OVERRUN` were parsed anyway. The
+  `data_rx_crc_error` / `data_rx_overrun` counters now separate hardware-flagged
+  corruption from software framing bugs. Note `enum ring_desc_flags` aliases TX
+  and RX meanings on the same bits (`0x1` ISOCH/CRC_ERROR, `0x4` POSTED/
+  BUFFER_OVERRUN) — the check is only valid on an RX completion.
+- **Hardware E2E flow control is NOT a throughput win.** The `c5ec614` commit
+  message reports ~28 Gb/s duplex with E2E vs ~3 Gb/s on software credits; that
+  came from a synthetic bandwidth sweep and does not reproduce on real NCCL
+  message shapes, where the two are about the same. E2E remains off for the
+  native backend: it buys nothing measurable and carries the Maple Ridge
+  ring-teardown lockup and AMD TX-completion wedge history. Do not re-derive a
+  policy change from that commit message alone.
 
 ## Why patches not a submodule
 
