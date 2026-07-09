@@ -616,7 +616,7 @@ static int tb_xdp_link_state_change_response(struct tb_ctl *ctl, u64 route,
  */
 int tb_register_protocol_handler(struct tb_protocol_handler *handler)
 {
-	if (!handler->uuid || !handler->callback)
+	if (!handler->uuid || (!handler->callback && !handler->callback_xd))
 		return -EINVAL;
 	if (uuid_equal(handler->uuid, &tb_xdp_uuid))
 		return -EINVAL;
@@ -2475,8 +2475,10 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 {
 	const struct tb_protocol_handler *handler, *tmp;
 	const struct tb_xdp_header *hdr = buf;
+	struct tb_xdomain *source_xd = NULL;
 	unsigned int length;
 	int ret = 0;
+	u64 route;
 
 	/* We expect the packet is at least size of the header */
 	length = hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK;
@@ -2496,19 +2498,28 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 		return false;
 	}
 
+	route = ((u64)hdr->xd_hdr.route_hi << 32 | hdr->xd_hdr.route_lo) &
+		~BIT_ULL(63);
+	source_xd = tb_xdomain_find_by_route_locked(tb, route);
+
 	mutex_lock(&xdomain_lock);
 	list_for_each_entry_safe(handler, tmp, &protocol_handlers, list) {
 		if (!uuid_equal(&hdr->uuid, handler->uuid))
 			continue;
 
 		mutex_unlock(&xdomain_lock);
-		ret = handler->callback(buf, size, handler->data);
+		if (handler->callback_xd)
+			ret = handler->callback_xd(source_xd, buf, size,
+						   handler->data);
+		else if (handler->callback)
+			ret = handler->callback(buf, size, handler->data);
 		mutex_lock(&xdomain_lock);
 
 		if (ret)
 			break;
 	}
 	mutex_unlock(&xdomain_lock);
+	tb_xdomain_put(source_xd);
 
 	return ret > 0;
 }

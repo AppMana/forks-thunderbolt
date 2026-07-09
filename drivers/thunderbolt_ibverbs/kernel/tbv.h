@@ -865,6 +865,11 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+bool tbv_native_control_path_should_replace(u32 data_score, u32 control_score,
+					    bool is_rx_path,
+					    u32 best_data_score,
+					    u32 best_control_score,
+					    bool best_is_rx_path);
 s32 tbv_psn_delta(u32 a, u32 b);
 /*
  * tbv_ibdev_name_index maps (tb domain, route downstream-port, native lane) to

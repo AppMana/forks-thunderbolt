@@ -145,6 +145,16 @@ static void tbv_ack_route_peer_all_null(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, tbv_ack_route_peer(NULL, NULL));
 }
 
+static void tbv_control_path_tie_prefers_rx_path(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  tbv_native_control_path_should_replace(0, 0, true,
+								 0, 0, false));
+	KUNIT_EXPECT_FALSE(test,
+			   tbv_native_control_path_should_replace(0, 0, false,
+								  0, 0, true));
+}
+
 static void tbv_psn_delta_basic(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, tbv_psn_delta(5, 3), 2);
@@ -490,6 +500,7 @@ static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_ack_route_peer_falls_back_to_qp),
 	KUNIT_CASE(tbv_ack_route_peer_rx_path_without_rail),
 	KUNIT_CASE(tbv_ack_route_peer_all_null),
+	KUNIT_CASE(tbv_control_path_tie_prefers_rx_path),
 	KUNIT_CASE(tbv_psn_delta_basic),
 	KUNIT_CASE(tbv_psn_delta_wraps),
 	KUNIT_CASE(tbv_gid_match_link_local),

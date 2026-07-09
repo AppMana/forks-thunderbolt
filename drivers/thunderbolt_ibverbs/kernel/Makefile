@@ -5,6 +5,11 @@
 KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 PWD := $(shell pwd)
+TBFIX_SYMVERS ?= $(shell ls -1 /usr/src/thunderbolt-tbfix-*/Module.symvers 2>/dev/null | sort -V | tail -1)
+
+ifneq ($(TBFIX_SYMVERS),)
+EXTRA_SYMBOLS := KBUILD_EXTRA_SYMBOLS=$(TBFIX_SYMVERS)
+endif
 
 obj-m := thunderbolt_ibverbs.o
 thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
@@ -28,7 +33,7 @@ ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 all: modules
 
 modules:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) $(EXTRA_SYMBOLS) modules
 
 modules_install:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install

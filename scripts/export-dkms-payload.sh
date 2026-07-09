@@ -20,7 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-DEFAULT_TARGET="$(realpath "$REPO_ROOT/../appmana-management/src/appmana_management/files/thunderbolt_net/tbfix-dkms")"
+DEFAULT_TARGET="$(realpath -m "$REPO_ROOT/../appmana/appmana-management/src/appmana_management/files/thunderbolt_net/tbfix-dkms")"
 TARGET="$DEFAULT_TARGET"
 SOURCE_REF=HEAD
 USE_WORKTREE=0

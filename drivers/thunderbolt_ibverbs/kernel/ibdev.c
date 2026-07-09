@@ -2033,6 +2033,19 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 	return qp_rail ? qp_rail->peer : NULL;
 }
 
+bool tbv_native_control_path_should_replace(u32 data_score, u32 control_score,
+					    bool is_rx_path,
+					    u32 best_data_score,
+					    u32 best_control_score,
+					    bool best_is_rx_path)
+{
+	if (data_score != best_data_score)
+		return data_score < best_data_score;
+	if (control_score != best_control_score)
+		return control_score < best_control_score;
+	return is_rx_path && !best_is_rx_path;
+}
+
 static struct tbv_path *
 tbv_select_native_control_path_for_qp_locked(struct tbv_qp *tqp,
 					     struct tbv_path *rx_path)
@@ -2055,11 +2068,13 @@ tbv_select_native_control_path_for_qp_locked(struct tbv_qp *tqp,
 
 		tbv_native_control_path_score(&rail->path, &data_score,
 					      &control_score);
-		if (!best || data_score < best_data_score ||
-		    (data_score == best_data_score &&
-		     (control_score < best_control_score ||
-		      (control_score == best_control_score && rx_path &&
-		       &best->path == rx_path && &rail->path != rx_path)))) {
+		if (!best ||
+		    tbv_native_control_path_should_replace(data_score,
+							  control_score,
+							  &rail->path == rx_path,
+							  best_data_score,
+							  best_control_score,
+							  &best->path == rx_path)) {
 			if (best)
 				tbv_rail_put(best);
 			best = rail;
