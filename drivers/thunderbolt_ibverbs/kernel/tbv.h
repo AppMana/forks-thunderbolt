@@ -15,6 +15,7 @@
 #include <linux/refcount.h>
 #include <linux/sizes.h>
 #include <linux/spinlock.h>
+#include <linux/thunderbolt.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
@@ -54,6 +55,22 @@
 #define TBV_APPLE_QPN_SHIFT 8
 #define TBV_APPLE_FRAME_SIZE SZ_4K
 #define TBV_APPLE_MAX_MSG_SIZE SZ_16M
+
+/*
+ * True when the NHI flagged the received frame as corrupt. Frame-mode RX sets
+ * RING_DESC_CRC_ERROR on a failed CRC and RING_DESC_BUFFER_OVERRUN when the
+ * frame did not fit; the payload is garbage in both cases and must not be
+ * parsed as a header or scattered into a user MR.
+ *
+ * enum ring_desc_flags aliases TX and RX meanings on the same bits
+ * (0x1 ISOCH/CRC_ERROR, 0x4 POSTED/BUFFER_OVERRUN), so this is only meaningful
+ * on an RX completion, where the NHI has written descriptor status. Pure so
+ * the KUnit can pin it.
+ */
+static inline bool tbv_frame_hw_error(u32 flags)
+{
+	return flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN);
+}
 
 static inline bool tbv_dma_device_ready(const struct device *dev)
 {
@@ -247,12 +264,26 @@ struct tbv_path {
 	u32 rx_raw_done;
 	u32 rx_raw_remaining;
 	u64 rx_raw_base;
+	/*
+	 * Stream base byte offset within the operation (header frag_offset).
+	 * Zero for legacy full-message streams; per-fragment split streams
+	 * (TBV_NATIVE_WIRE_CAP_SPLIT_DATA) carry the fragment's offset.
+	 */
+	u32 rx_raw_frag_base;
 	bool rx_raw_pending;
 	bool tx_poll_enabled;
 	bool rx_supp_poll_enabled;
 	bool tx_scheduling;
 	bool tx_raw_stream_active;
 	bool tx_raw_stream_end_seen;
+	/*
+	 * True from a stream header's DEQUEUE until its end packet's DEQUEUE:
+	 * the window where nothing else may be posted to the ring or the
+	 * receiver would consume it as raw payload. Between windows (chained
+	 * per-fragment split streams) scheduling is normal, so ACKs no longer
+	 * wait for a whole message.
+	 */
+	bool tx_raw_stream_window_open;
 	u32 tx_raw_stream_inflight;
 	void *tx_raw_stream_owner;
 	int local_transmit_path;
@@ -363,6 +394,13 @@ struct tbv_peer {
 	u64 remote_roce_eui64;
 	u32 remote_roce_ipv4;
 	bool remote_identity_valid;
+	/*
+	 * The peer's HELLO capability bits (TBV_NATIVE_WIRE_CAP_*), written
+	 * under state->lock in tbv_native_control_apply_remote() and read
+	 * with READ_ONCE on the data path. Zero until the HELLO lands, so
+	 * every capability-gated behavior defaults off.
+	 */
+	u32 remote_caps;
 };
 
 bool tbv_path_tx_stalled(const struct tbv_path *path);
@@ -568,11 +606,61 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_fallback;
 	atomic64_t data_wr_zcopy_fallback_striping;
 	atomic64_t data_wr_zcopy_fallback_unsafe_sge;
+	atomic64_t data_wr_zcopy_fallback_peer;
+	atomic64_t data_wr_zcopy_fallback_unaligned;
+	/*
+	 * Hypothesis-discriminating emission counters for the zcopy CRC
+	 * investigation: which window class the sender emitted. Correlated
+	 * with the peer's data_rx_crc_error across A/B runs they localize the
+	 * corrupting class (the receiver cannot attribute a CRC-dropped frame
+	 * to a window, so the discrimination is sender-side + module params).
+	 */
+	atomic64_t data_wr_zcopy_window_first;
+	atomic64_t data_wr_zcopy_window_rest;
+	atomic64_t data_wr_zcopy_full;
+	atomic64_t data_wr_zcopy_partial;
+	atomic64_t data_wr_zcopy_retransmit;
+	atomic64_t data_wr_zcopy_frames;
+	atomic64_t data_wr_zcopy_page_suspect;
+	/*
+	 * Sender frame-class counts, paired with the receiver's crc_error
+	 * split so one run says which class corrupts: _hdr = the 48-byte
+	 * staged header frame per window, _payload_full = a full 4096 zcopy
+	 * payload frame, _payload_tail = a sub-4096 last-window payload frame.
+	 */
+	atomic64_t data_wr_zcopy_hdr;
+	atomic64_t data_wr_zcopy_payload_full;
+	atomic64_t data_wr_zcopy_payload_tail;
+	/* payload frames served from a stable kernel copy (zcopy_stage_payload) */
+	atomic64_t data_wr_zcopy_staged;
+	/*
+	 * Persistent-mapping confirmation: _mr_mapped counts frames served
+	 * from the MR's existing umem DMA mapping (no per-frame map/unmap),
+	 * _remapped counts frames that fell back to a per-frame dma_map_page
+	 * because the send's rail used a different DMA device. Expect
+	 * _mr_mapped ~= _frames and _remapped ~= 0 once the churn is gone.
+	 */
+	atomic64_t data_wr_zcopy_mr_mapped;
+	atomic64_t data_wr_zcopy_remapped;
+	/*
+	 * Self-explaining fallback reasons (why a frame did NOT use the
+	 * persistent MR mapping), so a nonzero _remapped on hardware names the
+	 * cause instead of costing another cold boot. no_mr_mapping is the
+	 * predicate that was silently false in 8d31089 (dma_dev NULL under
+	 * virt DMA); once fixed, all of these stay 0.
+	 */
+	atomic64_t data_wr_zcopy_fb_no_mr_mapping;
+	atomic64_t data_wr_zcopy_fb_device_mismatch;
+	atomic64_t data_wr_zcopy_fb_dmabuf_or_odp;
+	atomic64_t data_wr_zcopy_fb_offset_not_found;
+	atomic64_t data_wr_zcopy_fb_other;
+	atomic_t zcopy_fallback_reported;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
 	atomic64_t data_wr_retransmit;
 	atomic64_t data_wr_rnr_retransmit;
+	atomic64_t data_wr_nak_retransmit;
 	atomic64_t data_wr_retry_enqueue_error;
 	atomic64_t data_wr_retry_exhausted;
 	atomic64_t data_wr_rnr_retry_exhausted;
@@ -604,6 +692,19 @@ struct tbv_state {
 	atomic64_t data_rx_repost_failed;
 	atomic64_t data_rx_bad_frame;
 	atomic64_t data_rx_bad_header;
+	/* NHI-reported per-frame errors; see tbv_frame_hw_error(). */
+	atomic64_t data_rx_crc_error;
+	atomic64_t data_rx_overrun;
+	/*
+	 * Frame-class localization of the residual zcopy CRC corruption:
+	 * _in_stream = corrupt frame arrived mid-raw-stream (a zcopy PAYLOAD
+	 * frame), _standalone = a raw-stream header / copied / control frame,
+	 * _maxsize = the corrupt frame was exactly one full frame (4096).
+	 */
+	atomic64_t data_rx_crc_error_in_stream;
+	atomic64_t data_rx_crc_error_standalone;
+	atomic64_t data_rx_crc_error_maxsize;
+	atomic_t crc_error_reported;
 	atomic64_t data_rx_send;
 	atomic64_t data_rx_op_send;
 	atomic64_t data_rx_op_send_imm;
@@ -626,6 +727,11 @@ struct tbv_state {
 	atomic64_t data_rx_ack_rnr;
 	atomic64_t data_rx_duplicate_ack;
 	atomic64_t data_rx_ack_history_miss;
+	atomic64_t data_tx_nak;
+	atomic64_t data_tx_nak_send_error;
+	atomic64_t data_rx_nak;
+	atomic64_t data_rx_nak_matched;
+	atomic64_t data_rx_nak_miss;
 	atomic64_t data_tx_read_ack_ok;
 	atomic64_t data_tx_read_ack_retry;
 	atomic64_t data_tx_read_ack_error;
@@ -720,12 +826,33 @@ struct tb_ring;
 struct tb_xdomain;
 typedef void (*tbv_path_tx_done_fn)(void *ctx, int status);
 typedef int (*tbv_path_tx_fill_fn)(void *ctx, void *dst, u32 len);
+/*
+ * Yield the next zero-copy TX fragment, one of three ways:
+ *   - *owned set: a kmalloc'd kernel buffer holding a COPY of *length payload
+ *     bytes (the zcopy_stage_payload diagnostic). The path frames it as a
+ *     normal owned data packet (staged into the ring's kernel TX frame), so
+ *     the NHI DMA-reads stable kernel memory, not the live MR. The path frees
+ *     the buffer on completion.
+ *   - *premapped set: *dma is a DMA address from the MR's PERSISTENT mapping;
+ *     the path must NOT dma_map/unmap it (page/page_off unused).
+ *   - otherwise: the path dma_map_page(*page, *page_off, ...) itself and unmaps
+ *     on completion (the churning fallback for a rail on a different device).
+ */
 typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
+				     dma_addr_t *dma, bool *premapped,
+				     void **owned,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx);
 #define TBV_PATH_SEND_CONTROL	BIT(0)
 #define TBV_PATH_SEND_DEFER	BIT(1)
+/*
+ * Retransmit marker for tbv_path_send_page_stream(): refund one remote data
+ * credit per posted frame before they re-charge, reclaiming the credits the
+ * lost attempt leaked (same contract as tbv_path_refund_remote_data_credits
+ * in the framed retransmit path; see the leak note there).
+ */
+#define TBV_PATH_SEND_REFUND	BIT(2)
 extern const uuid_t tbv_native_service_uuid;
 
 int tbv_config_parse(struct tbv_config *cfg, const char *compat,
@@ -865,6 +992,115 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+/*
+ * Task 2 (local-completion WC) contract, design-only -- pins the floor the
+ * implementation must not drop below, unwired from the WC path for now. The
+ * earliest point at which a signaled send WC may fire depends on where the
+ * payload lives during TX: a copied send stages the payload into a kernel ring
+ * frame at post, so the user buffer is free immediately; a zero-copy send has
+ * the NHI DMA-read the live user MR pages, so the buffer is not reusable until
+ * local TX-ring completion (firing earlier reintroduces the reuse race the
+ * current ACK-gating prevents by construction). See docs/dsv4_2026_07_09_
+ * changes.md "Task 2 design" and kernel/tests/send_wc_completion_test.c.
+ */
+enum tbv_wc_completion_point {
+	TBV_WC_AT_POST = 0,	/* buffer free right after post (copied: staged) */
+	TBV_WC_AT_LOCAL_TX = 1,	/* buffer free after the NHI finished the read (zcopy) */
+	TBV_WC_AT_REMOTE_ACK = 2, /* current conservative baseline: after peer ACK */
+};
+enum tbv_wc_completion_point tbv_send_wc_earliest_point(bool zcopy);
+bool tbv_send_wc_may_fire(enum tbv_wc_completion_point earliest,
+			  bool posted, bool local_tx_complete,
+			  bool remote_acked);
+/*
+ * Zero-copy TX mode selection for one native send ctx, decided ONCE at the
+ * initial post and pinned for every retransmit (framing must not change
+ * between attempts or the receiver's fragment bitmaps mismatch). SPLIT is the
+ * retransmit-safe per-fragment raw stream and requires the peer to have
+ * advertised TBV_NATIVE_WIRE_CAP_SPLIT_DATA; RAW_STREAM is the legacy
+ * full-message stream, only safe when the ctx can never retransmit. Exposed
+ * for kunit (tests/zcopy_split_test.c).
+ */
+enum tbv_zcopy_tx_mode {
+	TBV_ZCOPY_TX_NONE = 0,
+	TBV_ZCOPY_TX_RAW_STREAM,
+	TBV_ZCOPY_TX_SPLIT,
+};
+enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
+					     bool retryable, u32 total_len,
+					     u32 min_bytes, u32 peer_caps);
+/*
+ * Zero-copy TX frames the NHI can transmit without corrupting the on-wire CRC
+ * must start at page offset 0. tbnet, the reference consumer of these rings,
+ * always DMAs driver-owned, offset-0 pages (drivers/net/thunderbolt/main.c);
+ * an ib_umem window whose first mapped byte sits mid-page yields a mid-page
+ * (page_off != 0) buffer_phy, and hardware validation (0.2.26 on 027<->019)
+ * showed exactly those frames fail the receiver CRC. A source is clean for
+ * split zero-copy iff its first mapped byte is page-aligned AND the 4096-byte
+ * split unit divides the page size, so every window maps to one offset-0 page
+ * (full) or one offset-0 trailing partial page. Unclean sources fall back to
+ * the framed copy path. Exposed for kunit (tests/zcopy_split_test.c).
+ */
+bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
+				  u32 page_size);
+/*
+ * DMA map length for a zero-copy TX frame. The copied path always presents a
+ * full 4096-byte mapping (dma_map_single of a kmalloc'd frame) and transmits
+ * frame->size <= 4096, so an NHI burst that rounds the read up past the frame
+ * size stays inside the mapping. A zcopy frame that maps only payload_len
+ * leaves the tail of the page unmapped; a rounded-up read there faults the
+ * IOMMU (iommu=pt makes external TB devices translated, not identity) and the
+ * NHI emits a corrupt frame the receiver drops as a CRC error. Mapping to the
+ * page boundary (page-aligned frames only, so page_off==0 => a full page)
+ * closes that gap while frame->size still transmits exactly payload_len.
+ * Exposed for kunit.
+ */
+u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
+			    u32 frame_size, bool full_page);
+/*
+ * A zero-copy send derives its frame DMA addresses from the MR's PERSISTENT
+ * umem mapping (ib_umem_get already dma_map'd the sgt to the ib_device's DMA
+ * device) only when the send's rail uses that same DMA device. Per-frame
+ * dma_map_page/dma_unmap_page (191k/run) under lazy AMD-Vi IOTLB invalidation
+ * recycles IOVAs before the flush, and a transfer that catches a torn-down
+ * translation aborts mid-read -> a wire frame that fails its CRC (0.2.26
+ * hardware finding, case 2). Reusing the persistent mapping removes the churn
+ * entirely; a rail on a different NHI (different DMA device) falls back to the
+ * framed copy. Exposed for kunit.
+ */
+bool tbv_zcopy_use_persistent(const void *mr_dma_dev, const void *path_dma_dev);
+/*
+ * Locate a byte offset within a DMA-mapped scatter/gather table (coalesced
+ * segments, so fewer/larger than the CPU page list). Returns the segment
+ * index, the intra-segment byte offset, and the contiguous chunk available
+ * from there (capped at max_len), or -EFAULT if offset is past the mapped
+ * bytes. The real walk (tbv_umem_dma_from_addr) reads sg_dma_address/
+ * sg_dma_len from those segments; this pins the arithmetic. Exposed for kunit.
+ */
+int tbv_dma_sgt_locate(const u32 *seg_dma_lens, u32 nsegs, u32 offset,
+		       u32 max_len, u32 *seg_idx, u32 *seg_off, u32 *chunk);
+/*
+ * Byte range [start, end) a retransmit must cover. A NAK carries the missing
+ * range; opcodes whose receive path cannot buffer past a hole (SEND streaming,
+ * RDMA_WRITE_IMM) must go-back-N to the end. acked_prefix is the cumulative
+ * SACK floor (bytes below it are known-delivered). Exposed for kunit.
+ */
+void tbv_send_retry_range(u8 opcode, u32 total_len, u32 acked_prefix,
+			  bool nak_retry, u32 nak_start, u32 nak_len,
+			  u32 *start, u32 *end);
+/* Whether fragment [frag_off, frag_off+frag_len) intersects [start, end). */
+bool tbv_send_frag_needed(u32 frag_off, u32 frag_len, u32 start, u32 end);
+/* Monotone cumulative-SACK update, clamped to the message length. */
+u32 tbv_send_acked_prefix_update(u32 cur, u32 missing_start, u32 total_len);
+/*
+ * Receiver-side NAK emission gate: capability + per-QP duplicate suppression
+ * (one NAK per distinct (psn, hole start); re-arm after min_interval so a
+ * lost NAK is eventually re-sent). Exposed for kunit.
+ */
+bool tbv_rx_nak_should_send(u32 peer_caps, bool last_valid, u32 last_psn,
+			    u32 last_start, unsigned long last_jiffies,
+			    u32 psn, u32 start, unsigned long now,
+			    unsigned long min_interval);
 bool tbv_native_control_path_should_replace(u32 data_score, u32 control_score,
 					    bool is_rx_path,
 					    u32 best_data_score,

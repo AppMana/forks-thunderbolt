@@ -90,10 +90,49 @@ const char *tbv_ibdev_roce_netdev_name(void)
 	return roce_netdev;
 }
 
+/*
+ * Zero-copy split-stream TX threshold. A tuned value of 8192 (two split
+ * windows) is where per-window stream setup starts to beat the bounce copy;
+ * NCCL's bulk RDMA_WRITEs (hundreds of KiB to MiB) sit far above it. Kept at 0
+ * (disabled) as the shipped default after the 0.2.26 hardware run showed the
+ * page-straddling/mid-page zcopy frames failing the receiver CRC; the fix
+ * (tbv_send_segments_split_clean: only page-aligned sources are zero-copied,
+ * every frame page-offset-0 like tbnet) makes >0 safe. Enable per-run for
+ * validation, then flip the default once it holds on hardware.
+ */
 static uint zcopy_min_bytes;
 module_param(zcopy_min_bytes, uint, 0644);
 MODULE_PARM_DESC(zcopy_min_bytes,
-		 "Minimum native bytes before raw zero-copy streaming is requested; retryable native RC WRITE falls back to framed copies");
+		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE to a split-capable peer uses per-fragment split streams from PAGE-ALIGNED sources (unaligned sources fall back to framed copies -> data_wr_zcopy_fallback_unaligned). 0 disables zero-copy");
+
+/*
+ * CRC-investigation diagnostic: when set, a message with ANY partial (non-4096)
+ * window falls the WHOLE message back to the framed copy path, so only exact-
+ * 4096-multiple messages are zero-copied. If enabling this drops the peer's
+ * data_rx_crc_error to background, the corruption is partial-window-specific
+ * (the map-length over-read theory); if CRC stays high, full 4096 windows also
+ * corrupt and the cause is elsewhere (page provenance / concurrent writer).
+ */
+static bool zcopy_full_windows_only;
+module_param(zcopy_full_windows_only, bool, 0644);
+MODULE_PARM_DESC(zcopy_full_windows_only,
+		 "Diagnostic: zero-copy only messages with no partial window (exact 4096 multiples); others use framed copies");
+
+/*
+ * Decisive memory-source control for the residual CRC corruption. When set, a
+ * split-zcopy send COPIES each payload window into a stable kernel buffer and
+ * the NHI DMA-reads that (like the copied path) instead of the live MR pages,
+ * while the split framing (header frame + raw payload frames) is unchanged. If
+ * the receiver's data_rx_crc_error drops to background with this on, the fault
+ * is the NHI reading live MR memory; if it persists, the fault is the framing
+ * or the RX raw-stream reassembly, not the memory source. Snapshotted ONCE per
+ * WR at the initial post (ctx->zcopy_stage) so a window is never half-staged
+ * even if this is toggled mid-flight. Runtime-writable for one-boot A/B.
+ */
+static bool zcopy_stage_payload;
+module_param(zcopy_stage_payload, bool, 0644);
+MODULE_PARM_DESC(zcopy_stage_payload,
+		 "Diagnostic: stage split-zcopy payloads through a kernel copy (NHI reads kernel memory, not live MR) to isolate the memory source of the CRC corruption");
 
 static uint qp_timeout_ms = TBV_QP_TIMEOUT_DEFAULT_MS;
 module_param(qp_timeout_ms, uint, 0644);
@@ -305,6 +344,12 @@ enum tbv_send_post_reason {
 	TBV_SEND_POST_INITIAL,
 	TBV_SEND_POST_RETRY_TIMEOUT,
 	TBV_SEND_POST_RETRY_RNR,
+	/*
+	 * Peer-requested selective retransmit (TBV_NATIVE_DATA_OP_NAK). Does
+	 * not consume the retry budget: the deadline timer still owns
+	 * exhaustion, the NAK only accelerates recovery.
+	 */
+	TBV_SEND_POST_RETRY_NAK,
 };
 
 struct tbv_send_ctx;
@@ -361,6 +406,14 @@ struct tbv_qp {
 	u32 rx_rnr_src_qp;
 	u32 rx_rnr_frag_offset;
 	u64 rx_rnr_remote_addr;
+	/*
+	 * Outbound-NAK duplicate suppression (one per distinct (psn, hole
+	 * start), re-armed after a short interval). Owned by rx_lock.
+	 */
+	u32 nak_tx_psn;
+	u32 nak_tx_start;
+	unsigned long nak_tx_jiffies;
+	bool nak_tx_valid;
 	struct tbv_rx_message rx_msg;
 	struct tbv_rx_write rx_write;
 	struct list_head rx_reorder;
@@ -391,6 +444,21 @@ struct tbv_mr {
 	struct ib_mr base;
 	struct tbv_state *owner;
 	struct ib_umem *umem;
+	/*
+	 * Persistent DMA mapping of the MR pages to the NHI, built ONCE at
+	 * registration. The tbv ib_device is registered with dma_device=NULL
+	 * (RDMA-core virtual DMA, for kernel/MAD SGEs), so ib_umem_get() does
+	 * NOT real-DMA-map to the NHI -- it only stashes CPU VAs. A zero-copy
+	 * send therefore maps the pages itself here, to pd->device->dev.parent
+	 * (== tb_ring_dma_device()). dma_sgt is a private, IOMMU-coalesced,
+	 * DMA-mapped table; frames read sg_dma_address from it with NO per-
+	 * frame dma_map/unmap (the IOTLB churn that corrupted the wire CRC).
+	 * dma_dev/dma_mapped are zero for a kernel DMA MR or if the map failed
+	 * (then zcopy falls back to the framed copy).
+	 */
+	struct device *dma_dev;
+	struct sg_table dma_sgt;
+	bool dma_mapped;
 	refcount_t refs;
 	struct work_struct free_work;
 	u64 start;
@@ -444,6 +512,28 @@ struct tbv_send_ctx {
 	u32 rkey;
 	u32 imm_data;
 	u32 psn;
+	/*
+	 * Zero-copy framing decided at the INITIAL post and pinned for every
+	 * retransmit: the receiver's fragment bitmaps key on the framing unit,
+	 * so it must not change between attempts (zcopy_min_bytes is a
+	 * writable module param).
+	 */
+	enum tbv_zcopy_tx_mode zcopy_mode;
+	/*
+	 * Snapshot of zcopy_stage_payload at the initial post: all windows of
+	 * this WR (and its retransmits) stage or don't as one, so a window is
+	 * never half-staged if the param toggles mid-flight.
+	 */
+	bool zcopy_stage;
+	/*
+	 * Cumulative SACK floor from NAKs (bytes below are known-delivered)
+	 * and the pending NAK's missing range. Written under tqp->lock; read
+	 * by the single retransmitting thread (retrying==true).
+	 */
+	u32 acked_prefix;
+	u32 nak_start;
+	u32 nak_len;
+	bool nak_retry;
 	enum tbv_native_data_op opcode;
 	enum ib_wc_opcode wc_opcode;
 	atomic_t apple_pending;
@@ -528,6 +618,13 @@ struct tbv_send_page_stream {
 	u32 total_len;
 	u32 max_chunk;
 	int nsegs;
+	/*
+	 * DMA device of the rail this stream posts to. When a segment's MR was
+	 * dma-mapped (ib_umem_get) to this same device, each frame's DMA
+	 * address comes from the persistent mapping (no per-frame map/unmap);
+	 * a different device forces the churning dma_map_page fallback.
+	 */
+	struct device *dma_dev;
 };
 
 struct tbv_apple_send_fill {
@@ -561,6 +658,8 @@ static int tbv_send_read_response_ctx(struct tbv_read_resp_ctx *ctx);
 static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 				   struct page **page_out,
 				   u32 *page_off_out, u32 *len_out);
+static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
+				  dma_addr_t *dma_out, u32 *len_out);
 static int tbv_rx_copy_to_wqe(struct tbv_state *state,
 			      const struct tbv_recv_wqe *wqe, u32 offset,
 			      const void *payload, u32 len, u32 *delivered);
@@ -623,6 +722,155 @@ s32 tbv_psn_delta(u32 a, u32 b)
 	if (delta & 0x00800000u)
 		return (s32)(delta | 0xff000000u);
 	return (s32)delta;
+}
+
+enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
+					     bool retryable, u32 total_len,
+					     u32 min_bytes, u32 peer_caps)
+{
+	if (!is_write || striping || !min_bytes || !total_len ||
+	    total_len < min_bytes)
+		return TBV_ZCOPY_TX_NONE;
+	if (!retryable)
+		return TBV_ZCOPY_TX_RAW_STREAM;
+	if (peer_caps & TBV_NATIVE_WIRE_CAP_SPLIT_DATA)
+		return TBV_ZCOPY_TX_SPLIT;
+	return TBV_ZCOPY_TX_NONE;
+}
+
+void tbv_send_retry_range(u8 opcode, u32 total_len, u32 acked_prefix,
+			  bool nak_retry, u32 nak_start, u32 nak_len,
+			  u32 *start, u32 *end)
+{
+	*start = min(acked_prefix, total_len);
+	*end = total_len;
+	if (!nak_retry)
+		return;
+
+	if (nak_start > *start)
+		*start = min(nak_start, total_len);
+	/*
+	 * Only the plain-WRITE receive path buffers fragments past a hole and
+	 * merges them once it fills, so only there is resending the hole alone
+	 * sufficient. SEND streaming and RDMA_WRITE_IMM drop past a hole and
+	 * need everything from the hole onward.
+	 */
+	if (opcode != TBV_NATIVE_DATA_OP_RDMA_WRITE || !nak_len)
+		return;
+	if (nak_len < total_len - nak_start)
+		*end = max(*start, nak_start + nak_len);
+}
+
+bool tbv_send_frag_needed(u32 frag_off, u32 frag_len, u32 start, u32 end)
+{
+	if (!frag_len)
+		return true;	/* the zero-length message's single frame */
+	return frag_off < end && frag_off + frag_len > start;
+}
+
+u32 tbv_send_acked_prefix_update(u32 cur, u32 missing_start, u32 total_len)
+{
+	return min(max(cur, missing_start), total_len);
+}
+
+bool tbv_rx_nak_should_send(u32 peer_caps, bool last_valid, u32 last_psn,
+			    u32 last_start, unsigned long last_jiffies,
+			    u32 psn, u32 start, unsigned long now,
+			    unsigned long min_interval)
+{
+	if (!(peer_caps & TBV_NATIVE_WIRE_CAP_NAK))
+		return false;
+	if (!last_valid || last_psn != psn || last_start != start)
+		return true;
+	/* same hole again: re-send only after the re-arm interval (lost NAK) */
+	return time_after(now, last_jiffies + min_interval);
+}
+
+bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
+				  u32 page_size)
+{
+	if (!split_unit || !page_size)
+		return false;
+	/*
+	 * Every window starts at message offset k*split_unit, whose physical
+	 * page offset is (first_page_off + k*split_unit) % page_size. For that
+	 * to be 0 for all k the page size must divide the split unit (so
+	 * k*split_unit is always a page multiple) and the source must start on
+	 * a page boundary. Then each window is one offset-0 page (or, on a page
+	 * smaller than the unit, several offset-0 pages) -- never mid-page.
+	 */
+	if (split_unit % page_size)
+		return false;
+	return first_page_off == 0;
+}
+
+u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
+			    u32 frame_size, bool full_page)
+{
+	u32 to_page_end;
+
+	if (!full_page || !page_size || page_off >= page_size)
+		return payload_len;
+
+	to_page_end = page_size - page_off;
+	if (frame_size && to_page_end > frame_size)
+		to_page_end = frame_size;
+	return to_page_end < payload_len ? payload_len : to_page_end;
+}
+
+bool tbv_zcopy_use_persistent(const void *mr_dma_dev, const void *path_dma_dev)
+{
+	return mr_dma_dev && mr_dma_dev == path_dma_dev;
+}
+
+enum tbv_wc_completion_point tbv_send_wc_earliest_point(bool zcopy)
+{
+	/*
+	 * Copied sends stage the payload into a kernel ring frame at post, so
+	 * the user buffer is free immediately. Zero-copy sends have the NHI
+	 * read the live user MR pages, so the buffer is not reusable until the
+	 * local TX ring completes that read.
+	 */
+	return zcopy ? TBV_WC_AT_LOCAL_TX : TBV_WC_AT_POST;
+}
+
+bool tbv_send_wc_may_fire(enum tbv_wc_completion_point earliest,
+			  bool posted, bool local_tx_complete,
+			  bool remote_acked)
+{
+	switch (earliest) {
+	case TBV_WC_AT_POST:
+		return posted;
+	case TBV_WC_AT_LOCAL_TX:
+		return local_tx_complete;
+	case TBV_WC_AT_REMOTE_ACK:
+	default:
+		return remote_acked;
+	}
+}
+
+int tbv_dma_sgt_locate(const u32 *seg_dma_lens, u32 nsegs, u32 offset,
+		       u32 max_len, u32 *seg_idx, u32 *seg_off, u32 *chunk)
+{
+	u32 i;
+
+	if (!seg_dma_lens || !seg_idx || !seg_off || !chunk || !max_len)
+		return -EINVAL;
+
+	for (i = 0; i < nsegs; i++) {
+		u32 seg_len = seg_dma_lens[i];
+
+		if (offset >= seg_len) {
+			offset -= seg_len;
+			continue;
+		}
+		*seg_idx = i;
+		*seg_off = offset;
+		*chunk = min(seg_len - offset, max_len);
+		return 0;
+	}
+
+	return -EFAULT;
 }
 
 static bool tbv_backend_is_apple(enum tbv_backend_type backend)
@@ -761,8 +1009,82 @@ out:
 	return mr;
 }
 
+/*
+ * Build the MR's persistent NHI DMA mapping. @dma_dev is the ring NHI device
+ * (pd->device->dev.parent). We map a PRIVATE per-page sg_table (not the umem's
+ * own sgt, which ib_umem_get virt-"mapped" to CPU VAs) so the umem stays
+ * untouched and ib_umem_release never fights this real mapping. Best-effort:
+ * on failure the MR simply has no persistent mapping and zcopy falls back to
+ * the framed copy. Runs once at registration, so no per-frame churn.
+ */
+static void tbv_mr_dma_map(struct tbv_mr *mr, struct device *dma_dev)
+{
+	struct sg_page_iter piter;
+	struct scatterlist *sg;
+	unsigned long npages;
+	int ret;
+
+	if (!dma_dev || !mr->umem || mr->dma_mr)
+		return;
+	/*
+	 * ODP/dmabuf umems have no stable pinned page list to map here (ODP is
+	 * demand-faulted, dmabuf is owned by the exporter). Leave them
+	 * unmapped; zcopy falls back to the framed copy (counted
+	 * fb_dmabuf_or_odp).
+	 */
+	if (mr->umem->is_odp || mr->umem->is_dmabuf)
+		return;
+
+	npages = ib_umem_num_pages(mr->umem);
+	if (!npages)
+		return;
+
+	if (sg_alloc_table(&mr->dma_sgt, npages, GFP_KERNEL))
+		return;
+
+	sg = mr->dma_sgt.sgl;
+	for_each_sgtable_page(&mr->umem->sgt_append.sgt, &piter, 0) {
+		if (!sg) {
+			sg_free_table(&mr->dma_sgt);
+			return;
+		}
+		sg_set_page(sg, sg_page_iter_page(&piter), PAGE_SIZE, 0);
+		sg = sg_next(sg);
+	}
+
+	/*
+	 * DMA_TO_DEVICE: this mapping is used ONLY by zero-copy TX, where the
+	 * NHI reads the send source -- exactly the direction the copied path's
+	 * dma_map_single() uses. Matching it removes a difference from the
+	 * proven-good path. (A future zcopy RDMA_READ-response write path would
+	 * need its own bidirectional mapping.)
+	 */
+	ret = dma_map_sgtable(dma_dev, &mr->dma_sgt, DMA_TO_DEVICE, 0);
+	if (ret) {
+		pr_warn_ratelimited("MR zcopy dma_map_sgtable to %s failed: %d (zcopy will fall back to framed copy)\n",
+				    dev_name(dma_dev), ret);
+		sg_free_table(&mr->dma_sgt);
+		return;
+	}
+
+	mr->dma_dev = dma_dev;
+	mr->dma_mapped = true;
+}
+
+static void tbv_mr_dma_unmap(struct tbv_mr *mr)
+{
+	if (!mr->dma_mapped)
+		return;
+	dma_unmap_sgtable(mr->dma_dev, &mr->dma_sgt, DMA_TO_DEVICE, 0);
+	sg_free_table(&mr->dma_sgt);
+	mr->dma_mapped = false;
+	mr->dma_dev = NULL;
+}
+
 static void tbv_mr_free(struct tbv_mr *mr)
 {
+	/* unmap the NHI mapping while the umem pages are still pinned */
+	tbv_mr_dma_unmap(mr);
 	if (mr->umem)
 		ib_umem_release(mr->umem);
 	if (mr->owner)
@@ -3632,6 +3954,26 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			continue;
 		}
 
+		/*
+		 * Peer-requested selective retransmit: fire immediately, do
+		 * not wait for the deadline and do not charge the retry
+		 * budget (the deadline timer still owns exhaustion).
+		 */
+		if (send->nak_retry && send->retryable && !send->retrying &&
+		    !tqp->closing && tqp->state != IB_QPS_ERR) {
+			if (atomic_read(&send->tx_pending)) {
+				/* frames still posting; retry once drained */
+				need_resched = true;
+			} else {
+				send->nak_retry = false;
+				send->retrying = true;
+				send->retry_reason = TBV_SEND_POST_RETRY_NAK;
+				tbv_send_ctx_get(send);
+				list_add_tail(&send->retry_node, retry_sends);
+				continue;
+			}
+		}
+
 		if (!tbv_qp_entry_expired(send->queued_jiffies, now,
 					  send_timeout))
 			continue;
@@ -3905,7 +4247,8 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 			if (reason == TBV_SEND_POST_RETRY_RNR) {
 				if (send->rnr_retries < U8_MAX)
 					send->rnr_retries++;
-			} else if (send->retries < U8_MAX) {
+			} else if (reason != TBV_SEND_POST_RETRY_NAK &&
+				   send->retries < U8_MAX) {
 				send->retries++;
 			}
 			tbv_send_mark_queued(send, jiffies);
@@ -4444,12 +4787,45 @@ static void tbv_send_page_stream_done(void *ctx, int status)
 	tbv_send_page_stream_put(stream);
 }
 
+/*
+ * One-shot dump of exactly why the FIRST zcopy frame fell back to a per-frame
+ * dma_map_page, so a hardware run is self-explaining: the MR's mapped device vs
+ * the rail's device (name + pointer -- the 8d31089 bug was a NULL mr dma_dev),
+ * whether the MR is persistently mapped, the private DMA sgt's nents and its
+ * first segment's DMA address/len, and the umem geometry.
+ */
+static void tbv_zcopy_report_fallback_once(struct tbv_state *state,
+					   const struct tbv_mr *mr,
+					   struct device *path_dma_dev)
+{
+	struct scatterlist *sg;
+
+	if (atomic_cmpxchg(&state->zcopy_fallback_reported, 0, 1))
+		return;
+
+	sg = mr->dma_mapped ? mr->dma_sgt.sgl : NULL;
+	pr_info("zcopy fallback (first): mr_dma_dev=%p(%s) path_dma_dev=%p(%s) dma_mapped=%d nents=%u first_sg_dma_addr=0x%llx first_sg_dma_len=%u umem_addr=0x%lx umem_len=%zu odp=%d dmabuf=%d\n",
+		mr->dma_dev, mr->dma_dev ? dev_name(mr->dma_dev) : "(null)",
+		path_dma_dev,
+		path_dma_dev ? dev_name(path_dma_dev) : "(null)",
+		mr->dma_mapped, mr->dma_mapped ? mr->dma_sgt.nents : 0,
+		sg ? (unsigned long long)sg_dma_address(sg) : 0ULL,
+		sg ? sg_dma_len(sg) : 0,
+		mr->umem ? mr->umem->address : 0,
+		mr->umem ? mr->umem->length : 0,
+		mr->umem ? mr->umem->is_odp : 0,
+		mr->umem ? mr->umem->is_dmabuf : 0);
+}
+
 static int tbv_send_page_stream_next(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
+				     dma_addr_t *dma, bool *premapped,
+				     void **owned,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx)
 {
 	struct tbv_send_page_stream *stream = ctx;
+	struct tbv_state *state = stream->send->tqp->owner;
 	u32 skipped = 0;
 	int i;
 
@@ -4469,12 +4845,89 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 		remaining = min_t(u32, seg->length - seg_off,
 				  stream->total_len - stream->offset);
 		remaining = min_t(u32, remaining, stream->max_chunk);
+
+		if (stream->send->zcopy_stage) {
+			/*
+			 * Diagnostic: copy the window into a stable kernel
+			 * buffer (one buffer for the whole window -- no user
+			 * page straddle) and hand it to the path as an owned
+			 * frame. The NHI then DMA-reads kernel memory, not the
+			 * live MR. Same split framing, different memory source.
+			 */
+			void *buf = kmalloc(remaining, GFP_KERNEL);
+
+			if (!buf)
+				return -ENOMEM;
+			ret = ib_umem_copy_from(buf, seg->mr->umem,
+						seg->addr + seg_off -
+							seg->mr->start,
+						remaining);
+			if (ret) {
+				kfree(buf);
+				return ret;
+			}
+			*owned = buf;
+			*length = remaining;
+			atomic64_inc(&state->data_wr_zcopy_staged);
+			goto accounted;
+		}
+
+		if (tbv_zcopy_use_persistent(seg->mr->dma_dev,
+					     stream->dma_dev)) {
+			/*
+			 * Rail uses the device the MR was persistently mapped
+			 * to: take the frame's DMA address straight from that
+			 * mapping -- NO dma_map_page. This is the fix: it
+			 * removes the per-frame IOTLB churn that aborted
+			 * transfers under lazy AMD-Vi invalidation and
+			 * corrupted the wire CRC.
+			 */
+			ret = tbv_umem_dma_from_addr(seg->mr,
+						     seg->addr + seg_off,
+						     remaining, dma, length);
+			if (!ret) {
+				*premapped = true;
+				atomic64_inc(&state->data_wr_zcopy_mr_mapped);
+				goto accounted;
+			}
+			atomic64_inc(
+				&state->data_wr_zcopy_fb_offset_not_found);
+		} else if (!seg->mr->dma_mapped) {
+			if (seg->mr->umem &&
+			    (seg->mr->umem->is_odp || seg->mr->umem->is_dmabuf))
+				atomic64_inc(
+					&state->data_wr_zcopy_fb_dmabuf_or_odp);
+			else
+				atomic64_inc(
+					&state->data_wr_zcopy_fb_no_mr_mapping);
+		} else {
+			atomic64_inc(&state->data_wr_zcopy_fb_device_mismatch);
+		}
+
+		/*
+		 * Fallback: per-frame dma_map_page in tbv_path_send_page_stream
+		 * (the IOTLB-churning path). Should never run once the MR is
+		 * persistently mapped to this rail's device; _remapped and the
+		 * fb_* reasons make a regression self-explaining, and the
+		 * one-shot below dumps the exact device/sgt state. The gate
+		 * admits only page-aligned sources, so page_off must be 0.
+		 */
 		ret = tbv_umem_page_from_addr(seg->mr, seg->addr + seg_off,
 					      remaining, page, page_off,
 					      length);
 		if (ret)
 			return ret;
+		if (WARN_ON_ONCE(*page_off != 0))
+			return -EPROTO;
+		*premapped = false;
+		atomic64_inc(&state->data_wr_zcopy_remapped);
+		tbv_zcopy_report_fallback_once(state, seg->mr, stream->dma_dev);
 
+accounted:
+		if (*length >= TBV_NATIVE_DATA_FRAME_SIZE)
+			atomic64_inc(&state->data_wr_zcopy_payload_full);
+		else
+			atomic64_inc(&state->data_wr_zcopy_payload_tail);
 		stream->offset += *length;
 		refcount_inc(&stream->refs);
 		atomic_inc(&stream->send->tx_pending);
@@ -4490,17 +4943,6 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 static bool tbv_should_zcopy_payload(u32 len)
 {
 	return len && zcopy_min_bytes && len >= zcopy_min_bytes;
-}
-
-static bool tbv_send_ctx_allows_raw_zcopy(const struct tbv_send_ctx *ctx)
-{
-	/*
-	 * Raw page streams remove the per-frame native header. That is not safe
-	 * for retryable RC operations: a retransmit can reach a receiver path
-	 * that is still consuming raw bytes from the earlier attempt, and
-	 * arbitrary user payload cannot be distinguished from a new frame header.
-	 */
-	return ctx && !ctx->retryable;
 }
 
 static bool tbv_page_zcopy_safe(struct page *page)
@@ -4562,6 +5004,84 @@ static bool tbv_send_segments_zcopy_safe(struct tbv_send_segment *segs,
 	return true;
 }
 
+/*
+ * Split zero-copy safety: every split window must map to a single page-offset-0
+ * DMA frame. tbv_umem_page_from_addr caps a chunk at the page boundary and at
+ * one frame, so a window returns (page_off==0 && chunk==win_len) iff its bytes
+ * are one contiguous, page-aligned, single-page (or, on a sub-4096 page, an
+ * exact run of offset-0 pages -- rejected here via chunk<win_len, which the
+ * copied path then handles) region. Any mid-page start, sub-page straddle, or
+ * SGE-boundary straddle fails and falls back to the framed copy. This is the
+ * exact shape tbnet transmits (drivers/net/thunderbolt/main.c) and the copied
+ * path always presented; mid-page buffer_phy corrupts the hardware CRC
+ * (0.2.26 hardware finding). A page-aligned single-buffer NCCL write (the
+ * prefill/high-concurrency regime) passes every window and is fully zero-copied.
+ */
+static bool tbv_send_segments_split_clean(struct tbv_send_segment *segs,
+					  int nsegs, u32 total_len)
+{
+	u32 count = tbv_native_data_split_window_count(total_len);
+	u32 idx;
+
+	if (!tbv_zcopy_split_page_aligned(0, TBV_NATIVE_DATA_SPLIT_UNIT,
+					  PAGE_SIZE))
+		return false;
+
+	for (idx = 0; idx < count; idx++) {
+		u32 win_off;
+		u32 win_len;
+		u32 skipped = 0;
+		bool found = false;
+		int i;
+
+		if (tbv_native_data_split_window(total_len, idx, &win_off,
+						 &win_len))
+			return false;
+
+		for (i = 0; i < nsegs; i++) {
+			struct tbv_send_segment *seg = &segs[i];
+			struct page *page;
+			u32 page_off;
+			u32 chunk;
+			u32 seg_off = 0;
+			int ret;
+
+			if (win_off >= skipped + seg->length) {
+				skipped += seg->length;
+				continue;
+			}
+			if (win_off > skipped)
+				seg_off = win_off - skipped;
+
+			ret = tbv_umem_page_from_addr(seg->mr,
+						      seg->addr + seg_off,
+						      win_len, &page, &page_off,
+						      &chunk);
+			if (ret || page_off != 0 || chunk != win_len)
+				return false;
+			/*
+			 * Provenance sanity for the "NHI can't read this memory
+			 * type" hypothesis: NCCL host buffers are normal
+			 * linear-map pages. A highmem page (never on x86_64) or
+			 * one whose kernel VA is vmalloc'd would not be safely
+			 * NHI-DMA'able; count it so a nonzero value on hardware
+			 * localizes provenance. zone_device (GPU) is already
+			 * rejected by tbv_page_zcopy_safe above.
+			 */
+			if (PageHighMem(page) ||
+			    is_vmalloc_addr(page_address(page)))
+				atomic64_inc(
+					&seg->mr->owner->data_wr_zcopy_page_suspect);
+			found = true;
+			break;
+		}
+		if (!found)
+			return false;
+	}
+
+	return true;
+}
+
 static bool tbv_send_ctx_is_send(const struct tbv_send_ctx *ctx)
 {
 	return ctx->opcode == TBV_NATIVE_DATA_OP_SEND ||
@@ -4611,6 +5131,115 @@ static void tbv_send_ctx_build_native_header(struct tbv_send_ctx *ctx,
 	}
 }
 
+/*
+ * Post the ctx as per-fragment split raw streams: every 4096-byte window of
+ * the message is one bounded stream (48-byte header frame + <= 2 raw page
+ * frames), zero-copy from the MR's pinned pages. The umem pages stay pinned
+ * and unmodified until the ACK (the segs[] MR refs + the verbs contract), so
+ * a retransmit re-posts the SAME pages and is byte-identical -- the property
+ * the full-message raw stream could not give a retryable ctx. Only windows
+ * intersecting [retry_start, retry_end) are posted (selective retransmit).
+ *
+ * DMA note: each page frame is dma_map_page'd per attempt and unmapped at TX
+ * completion (packet lifetime). Mapping once per ctx instead was considered
+ * and rejected: the path is re-selected per attempt and can move to another
+ * NHI (different DMA device) or be torn down while the ctx still waits for
+ * its ACK, so a ctx-lifetime mapping table has no safe device to unmap
+ * against. Retransmits are rare enough that the remap cost is noise.
+ */
+static int tbv_native_send_ctx_post_split(struct tbv_send_ctx *ctx,
+					  struct tbv_path *path,
+					  u32 retry_start, u32 retry_end,
+					  bool retransmit)
+{
+	struct tbv_qp *tqp = ctx->tqp;
+	u32 count = tbv_native_data_split_window_count(ctx->total_len);
+	unsigned int send_flags = TBV_PATH_SEND_DEFER |
+				  (retransmit ? TBV_PATH_SEND_REFUND : 0);
+	u32 idx;
+	bool sent_any = false;
+	int ret = 0;
+
+	for (idx = 0; idx < count; idx++) {
+		struct tbv_native_data_header hdr = {};
+		struct tbv_send_page_stream *stream;
+		u32 off;
+		u32 len;
+
+		ret = tbv_native_data_split_window(ctx->total_len, idx, &off,
+						   &len);
+		if (ret)
+			break;
+		if (!tbv_send_frag_needed(off, len, retry_start, retry_end))
+			continue;
+
+		/* CRC-investigation discriminators: which window class we emit */
+		if (idx == 0)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_window_first);
+		else
+			atomic64_inc(&tqp->owner->data_wr_zcopy_window_rest);
+		if (len == TBV_NATIVE_DATA_SPLIT_UNIT)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_full);
+		else
+			atomic64_inc(&tqp->owner->data_wr_zcopy_partial);
+		if (retransmit)
+			atomic64_inc(&tqp->owner->data_wr_zcopy_retransmit);
+		atomic64_inc(&tqp->owner->data_wr_zcopy_frames);
+		/* one staged 48-byte header frame precedes each window's payload */
+		atomic64_inc(&tqp->owner->data_wr_zcopy_hdr);
+
+		tbv_send_ctx_build_native_header(ctx, off, len,
+						 off + len == ctx->total_len,
+						 &hdr);
+
+		stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+		if (!stream) {
+			ret = -ENOMEM;
+			break;
+		}
+		refcount_set(&stream->refs, 1);
+		stream->send = ctx;
+		stream->offset = off;
+		stream->total_len = off + len;
+		stream->max_chunk = TBV_NATIVE_DATA_FRAME_SIZE;
+		stream->nsegs = ctx->nsegs;
+		stream->dma_dev = tb_ring_dma_device(path->tx_ring);
+		tbv_get_send_segments(stream->segs, ctx->segs, ctx->nsegs);
+
+		tbv_send_ctx_get(ctx);
+		tbv_send_ctx_get(ctx);
+		atomic_inc(&ctx->tx_pending);
+		atomic64_inc(&tqp->owner->data_wr_path_send);
+		ret = tbv_path_send_page_stream(path, &hdr, len, send_flags,
+						tbv_send_tx_done, ctx,
+						tbv_send_page_stream_next,
+						stream);
+		tbv_send_page_stream_put(stream);
+		if (ret) {
+			tbv_send_ctx_put(ctx);
+			atomic64_inc(&tqp->owner->data_wr_path_send_error);
+			break;
+		}
+		tbv_send_ctx_put(ctx);
+		sent_any = true;
+	}
+
+	if (sent_any)
+		tbv_path_kick_tx(path);
+	if (ret && sent_any) {
+		/*
+		 * Partially posted: the ctx stays pending and the deadline
+		 * timer retransmits whatever the receiver does not ACK, like
+		 * the framed path's partial reserved enqueue.
+		 */
+		pr_warn_ratelimited("native partial split post qpn=0x%x dest_qp=0x%x psn=%u total=%u ret=%d\n",
+				    tqp->base.qp_num, tqp->attr.dest_qp_num,
+				    ctx->psn, ctx->total_len, ret);
+		ret = 0;
+	}
+	return ret;
+}
+
 static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 					   enum tbv_send_post_reason reason)
 {
@@ -4632,9 +5261,9 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 	u32 frag_idx = 0;
 	u32 path_count = 0;
 	u32 list_idx;
-	bool zcopy_requested;
-	bool raw_zcopy_allowed = false;
-	bool zcopy_safe = false;
+	u32 retry_start = 0;
+	u32 retry_end = ctx->total_len;
+	enum tbv_zcopy_tx_mode zcopy_mode;
 	bool sent_any = false;
 	int ret = 0;
 
@@ -4643,40 +5272,106 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 		INIT_LIST_HEAD(&packet_lists[list_idx]);
 	}
 
-	if (reason == TBV_SEND_POST_RETRY_TIMEOUT ||
-	    reason == TBV_SEND_POST_RETRY_RNR) {
+	if (reason != TBV_SEND_POST_INITIAL) {
 		unsigned long age_ms = ctx->queued_jiffies ?
 			jiffies_to_msecs(jiffies - ctx->queued_jiffies) : 0;
 
 		if (reason == TBV_SEND_POST_RETRY_RNR)
 			atomic64_inc(&tqp->owner->data_wr_rnr_retransmit);
+		else if (reason == TBV_SEND_POST_RETRY_NAK)
+			atomic64_inc(&tqp->owner->data_wr_nak_retransmit);
 		else
 			atomic64_inc(&tqp->owner->data_wr_retransmit);
-		pr_warn_ratelimited("native retransmit qpn=0x%x dest_qp=0x%x psn=%u opcode=%u total=%u retries=%u max_retries=%u rnr_retries=%u max_rnr_retries=%u reason=%u age_ms=%lu tx_pending=%d\n",
+		pr_warn_ratelimited("native retransmit qpn=0x%x dest_qp=0x%x psn=%u opcode=%u total=%u retries=%u max_retries=%u rnr_retries=%u max_rnr_retries=%u reason=%u age_ms=%lu tx_pending=%d acked_prefix=%u nak=%u+%u\n",
 				    tqp->base.qp_num, tqp->attr.dest_qp_num,
 				    ctx->psn, ctx->opcode, ctx->total_len,
 				    ctx->retries, ctx->max_retries,
 				    ctx->rnr_retries, ctx->max_rnr_retries,
-				    reason, age_ms, atomic_read(&ctx->tx_pending));
+				    reason, age_ms, atomic_read(&ctx->tx_pending),
+				    ctx->acked_prefix, ctx->nak_start,
+				    ctx->nak_len);
 	}
 
-	zcopy_requested = !fragment_striping && tbv_send_ctx_is_write(ctx) &&
-			  tbv_should_zcopy_payload(ctx->total_len);
-	if (zcopy_requested) {
-		raw_zcopy_allowed = tbv_send_ctx_allows_raw_zcopy(ctx);
-		if (raw_zcopy_allowed)
-			zcopy_safe = tbv_send_segments_zcopy_safe(
-				ctx->segs, ctx->nsegs, ctx->total_len);
+	/*
+	 * Selective retransmit range. An RNR retry must resend everything (the
+	 * receiver dropped the message start for want of a recv WQE); timeout
+	 * and NAK retries skip fragments the peer confirmed via the NAK's
+	 * cumulative-SACK frag_offset.
+	 */
+	if (reason == TBV_SEND_POST_RETRY_TIMEOUT ||
+	    reason == TBV_SEND_POST_RETRY_NAK) {
+		tbv_send_retry_range(ctx->opcode, ctx->total_len,
+				     ctx->acked_prefix,
+				     reason == TBV_SEND_POST_RETRY_NAK,
+				     ctx->nak_start, ctx->nak_len,
+				     &retry_start, &retry_end);
+		/* never let a stale/degenerate range retransmit nothing */
+		if (retry_start >= retry_end) {
+			retry_start = 0;
+			retry_end = ctx->total_len;
+		}
 	}
 
-	if (zcopy_requested && raw_zcopy_allowed && zcopy_safe) {
-		struct tbv_send_page_stream *stream;
+	/*
+	 * The framing mode is decided once and pinned: retransmits must
+	 * produce the same fragment shapes the receiver already bitmapped.
+	 */
+	if (reason == TBV_SEND_POST_INITIAL) {
+		u32 peer_caps = tqp->rail && tqp->rail->peer ?
+				READ_ONCE(tqp->rail->peer->remote_caps) : 0;
+		bool wanted = !fragment_striping &&
+			      tbv_send_ctx_is_write(ctx) &&
+			      tbv_should_zcopy_payload(ctx->total_len);
 
-		if (reason == TBV_SEND_POST_INITIAL)
+		zcopy_mode = tbv_zcopy_select_mode(tbv_send_ctx_is_write(ctx),
+						   fragment_striping,
+						   ctx->retryable,
+						   ctx->total_len,
+						   READ_ONCE(zcopy_min_bytes),
+						   peer_caps);
+		if (zcopy_mode != TBV_ZCOPY_TX_NONE &&
+		    !tbv_send_segments_zcopy_safe(ctx->segs, ctx->nsegs,
+						  ctx->total_len)) {
+			zcopy_mode = TBV_ZCOPY_TX_NONE;
+			atomic64_inc(
+				&tqp->owner->data_wr_zcopy_fallback_unsafe_sge);
+		} else if (zcopy_mode != TBV_ZCOPY_TX_NONE &&
+			   !tbv_send_segments_split_clean(ctx->segs, ctx->nsegs,
+							  ctx->total_len)) {
+			/*
+			 * Source is not page-aligned end to end: some window
+			 * would DMA a mid-page (page_off != 0) frame the NHI
+			 * corrupts. Fall back to the framed copy for the whole
+			 * message (the copied path stages into aligned buffers).
+			 */
+			zcopy_mode = TBV_ZCOPY_TX_NONE;
+			atomic64_inc(
+				&tqp->owner->data_wr_zcopy_fallback_unaligned);
+		} else if (zcopy_mode == TBV_ZCOPY_TX_SPLIT &&
+			   READ_ONCE(zcopy_full_windows_only) &&
+			   ctx->total_len % TBV_NATIVE_DATA_SPLIT_UNIT) {
+			/* diagnostic: only exact-4096-multiple messages zcopy */
+			zcopy_mode = TBV_ZCOPY_TX_NONE;
+		}
+		ctx->zcopy_mode = zcopy_mode;
+		/* snapshot the stage-payload diagnostic once for the whole WR */
+		ctx->zcopy_stage = zcopy_mode != TBV_ZCOPY_TX_NONE &&
+				   READ_ONCE(zcopy_stage_payload);
+
+		if (zcopy_mode != TBV_ZCOPY_TX_NONE) {
 			atomic64_inc(&tqp->owner->data_wr_zcopy);
-		tbv_send_ctx_build_native_header(ctx, 0, ctx->total_len,
-						 true, &hdr);
+		} else if (wanted) {
+			atomic64_inc(&tqp->owner->data_wr_zcopy_fallback);
+			if (ctx->retryable &&
+			    !(peer_caps & TBV_NATIVE_WIRE_CAP_SPLIT_DATA))
+				atomic64_inc(
+					&tqp->owner->data_wr_zcopy_fallback_peer);
+		}
+	} else {
+		zcopy_mode = ctx->zcopy_mode;
+	}
 
+	if (zcopy_mode != TBV_ZCOPY_TX_NONE) {
 		mutex_lock(&tqp->owner->lock);
 		path = tbv_select_native_data_path_for_qp_locked(tqp);
 		mutex_unlock(&tqp->owner->lock);
@@ -4685,50 +5380,79 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			return -ENOTCONN;
 		}
 
-		stream = kzalloc(sizeof(*stream), GFP_KERNEL);
-		if (!stream) {
+		if (zcopy_mode == TBV_ZCOPY_TX_SPLIT) {
+			ret = tbv_native_send_ctx_post_split(
+				ctx, path, retry_start, retry_end,
+				reason != TBV_SEND_POST_INITIAL);
 			tbv_release_path_refs(&path, 1);
-			return -ENOMEM;
-		}
-		refcount_set(&stream->refs, 1);
-		stream->send = ctx;
-		stream->total_len = ctx->total_len;
-		stream->max_chunk = TBV_NATIVE_DATA_FRAME_SIZE;
-		stream->nsegs = ctx->nsegs;
-		tbv_get_send_segments(stream->segs, ctx->segs, ctx->nsegs);
-
-		tbv_send_ctx_get(ctx);
-		tbv_send_ctx_get(ctx);
-		atomic_inc(&ctx->tx_pending);
-		atomic64_inc(&tqp->owner->data_wr_path_send);
-		ret = tbv_path_send_page_stream(path, &hdr, ctx->total_len, 0,
-						tbv_send_tx_done, ctx,
-						tbv_send_page_stream_next,
-						stream);
-		tbv_release_path_refs(&path, 1);
-		tbv_send_page_stream_put(stream);
-		if (ret) {
-			tbv_send_ctx_put(ctx);
-			atomic64_inc(&tqp->owner->data_wr_path_send_error);
 			return ret;
 		}
-		tbv_send_ctx_put(ctx);
-		return 0;
+
+		{
+			struct tbv_send_page_stream *stream;
+
+			tbv_send_ctx_build_native_header(ctx, 0, ctx->total_len,
+							 true, &hdr);
+
+			stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+			if (!stream) {
+				tbv_release_path_refs(&path, 1);
+				return -ENOMEM;
+			}
+			refcount_set(&stream->refs, 1);
+			stream->send = ctx;
+			stream->total_len = ctx->total_len;
+			stream->max_chunk = TBV_NATIVE_DATA_FRAME_SIZE;
+			stream->nsegs = ctx->nsegs;
+			stream->dma_dev = tb_ring_dma_device(path->tx_ring);
+			tbv_get_send_segments(stream->segs, ctx->segs,
+					      ctx->nsegs);
+
+			tbv_send_ctx_get(ctx);
+			tbv_send_ctx_get(ctx);
+			atomic_inc(&ctx->tx_pending);
+			atomic64_inc(&tqp->owner->data_wr_path_send);
+			ret = tbv_path_send_page_stream(path, &hdr,
+							ctx->total_len, 0,
+							tbv_send_tx_done, ctx,
+							tbv_send_page_stream_next,
+							stream);
+			tbv_release_path_refs(&path, 1);
+			tbv_send_page_stream_put(stream);
+			if (ret) {
+				tbv_send_ctx_put(ctx);
+				atomic64_inc(&tqp->owner->data_wr_path_send_error);
+				return ret;
+			}
+			tbv_send_ctx_put(ctx);
+			return 0;
+		}
 	}
 
-	if (reason == TBV_SEND_POST_INITIAL) {
-		if (zcopy_requested) {
-			atomic64_inc(&tqp->owner->data_wr_zcopy_fallback);
-			if (raw_zcopy_allowed && !zcopy_safe)
-				atomic64_inc(
-					&tqp->owner->data_wr_zcopy_fallback_unsafe_sge);
-		}
+	if (reason == TBV_SEND_POST_INITIAL)
 		atomic64_inc(&tqp->owner->data_wr_copied);
+
+	/* count only the fragments the retry range keeps */
+	if (ctx->total_len && (retry_start || retry_end != ctx->total_len)) {
+		u32 needed = 0;
+		u32 off;
+
+		for (off = 0; off < ctx->total_len;
+		     off += TBV_NATIVE_DATA_MAX_PAYLOAD) {
+			u32 flen = min_t(u32, ctx->total_len - off,
+					 TBV_NATIVE_DATA_MAX_PAYLOAD);
+
+			if (tbv_send_frag_needed(off, flen, retry_start,
+						 retry_end))
+				needed++;
+		}
+		nfrags = needed;
 	}
 
 	mutex_lock(&tqp->owner->lock);
 	if (fragment_striping) {
 		u32 i;
+		u32 off = 0;
 
 		path_count = tbv_collect_native_data_paths_for_qp_locked(
 			tqp, paths, ARRAY_SIZE(paths));
@@ -4736,8 +5460,21 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			ret = -ENOTCONN;
 			goto out_unlock_paths;
 		}
-		for (i = 0; i < nfrags; i++)
-			reservations[(ctx->psn + i) % path_count]++;
+		/*
+		 * i is the ABSOLUTE fragment index so a filtered retransmit
+		 * keeps each fragment on the path the initial post used.
+		 */
+		for (i = 0;; i++) {
+			u32 flen = min_t(u32, ctx->total_len - off,
+					 TBV_NATIVE_DATA_MAX_PAYLOAD);
+
+			if (tbv_send_frag_needed(off, flen, retry_start,
+						 retry_end))
+				reservations[(ctx->psn + i) % path_count]++;
+			off += flen;
+			if (off >= ctx->total_len)
+				break;
+		}
 	} else {
 		path = tbv_select_native_data_path_for_qp_locked(tqp);
 		if (!path) {
@@ -4800,6 +5537,13 @@ out_unlock_paths:
 		u32 packet_len = TBV_NATIVE_DATA_HDR_SIZE + payload_len;
 		struct tbv_path_owned_frame *owned;
 		u8 *frame;
+
+		if (!tbv_send_frag_needed(offset, payload_len, retry_start,
+					  retry_end)) {
+			offset += payload_len;
+			frag_idx++;
+			continue;
+		}
 
 		frame = kmalloc(packet_len, GFP_KERNEL);
 		if (!frame) {
@@ -6077,6 +6821,63 @@ static int tbv_send_ack(struct tbv_qp *tqp, u32 dest_qp, u32 src_qp,
 	return tbv_send_ack_on_path(tqp, NULL, dest_qp, src_qp, psn, status);
 }
 
+/*
+ * How long before an unanswered NAK for the SAME hole is re-sent. Recovery is
+ * expected in ~1 RTT (tens of µs); 2 ms only covers a lost NAK frame while
+ * staying well under the 10 ms retransmit deadline it is meant to beat.
+ */
+#define TBV_NAK_REARM_MS 2
+
+/*
+ * Name a receive gap to the sender so it retransmits immediately instead of
+ * waiting out its deadline timer (>= tbv_retransmit_base_ms). @missing_len 0
+ * means "through the end of the message"; (0, 0) with psn = the expected PSN
+ * requests a whole missing message. Capability-gated: peers that did not
+ * advertise TBV_NATIVE_WIRE_CAP_NAK get nothing and recover by timer as
+ * before. Caller holds tqp->rx_lock (nak_tx_* suppression state).
+ */
+static void tbv_rx_maybe_send_nak(struct tbv_state *state, struct tbv_qp *tqp,
+				  struct tbv_path *rx_path, u32 requester_qp,
+				  u32 psn, u32 missing_start, u32 missing_len)
+{
+	struct tbv_native_data_header hdr = {};
+	u8 frame[TBV_NATIVE_DATA_HDR_SIZE];
+	unsigned long now = jiffies;
+	u32 peer_caps = 0;
+	int len;
+	int ret;
+
+	if (rx_path && rx_path->rail && rx_path->rail->peer)
+		peer_caps = READ_ONCE(rx_path->rail->peer->remote_caps);
+	if (!tbv_rx_nak_should_send(peer_caps, tqp->nak_tx_valid,
+				    tqp->nak_tx_psn, tqp->nak_tx_start,
+				    tqp->nak_tx_jiffies, psn, missing_start,
+				    now, msecs_to_jiffies(TBV_NAK_REARM_MS)))
+		return;
+
+	tqp->nak_tx_valid = true;
+	tqp->nak_tx_psn = psn;
+	tqp->nak_tx_start = missing_start;
+	tqp->nak_tx_jiffies = now;
+
+	hdr.opcode = TBV_NATIVE_DATA_OP_NAK;
+	hdr.dest_qp = requester_qp;
+	hdr.src_qp = tqp->base.qp_num;
+	hdr.psn = psn;
+	hdr.frag_offset = missing_start;
+	hdr.imm_data = missing_len;
+
+	len = tbv_native_data_build_header(frame, sizeof(frame), &hdr);
+	if (len < 0)
+		return;
+
+	ret = tbv_send_control_frame_on_path(tqp, rx_path, frame, len);
+	if (ret)
+		atomic64_inc(&state->data_tx_nak_send_error);
+	else
+		atomic64_inc(&state->data_tx_nak);
+}
+
 static void tbv_count_tx_read_ack(struct tbv_state *state, int status)
 {
 	switch (status) {
@@ -6800,6 +7601,59 @@ static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 	return -EFAULT;
 }
 
+/*
+ * Return the DMA address of @addr from the MR's PERSISTENT umem mapping (set up
+ * by ib_umem_get) plus the contiguous DMA bytes available there (capped at
+ * @max_len and one frame). No dma_map/unmap: the umem stayed mapped since
+ * registration, so there is no per-frame IOTLB churn. The DMA sgt is IOMMU-
+ * coalesced (fewer, larger segments than the page list); the arithmetic
+ * matches tbv_dma_sgt_locate() (kunit-pinned). Caller must ensure the send's
+ * rail uses mr->dma_dev (tbv_zcopy_use_persistent).
+ */
+static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
+				  dma_addr_t *dma_out, u32 *len_out)
+{
+	struct sg_table *sgt = &mr->dma_sgt;
+	struct scatterlist *sg;
+	size_t offset;
+	u64 end;
+	u64 mr_end;
+	unsigned int i;
+
+	if (!max_len)
+		return -EINVAL;
+	if (mr->dma_mr || !mr->dma_mapped)
+		return -EOPNOTSUPP;
+	if (check_add_overflow(addr, (u64)max_len, &end))
+		return -EINVAL;
+	if (check_add_overflow(mr->start, mr->length, &mr_end))
+		return -EINVAL;
+	if (addr < mr->start || end > mr_end)
+		return -EFAULT;
+
+	offset = ib_umem_offset(mr->umem) + addr - mr->start;
+	for_each_sgtable_dma_sg(sgt, sg, i) {
+		unsigned int seg_len = sg_dma_len(sg);
+		u32 chunk;
+
+		if (offset >= seg_len) {
+			offset -= seg_len;
+			continue;
+		}
+
+		chunk = min_t(u32, seg_len - offset, max_len);
+		chunk = min_t(u32, chunk, TBV_NATIVE_DATA_FRAME_SIZE);
+		if (!chunk)
+			return -EFAULT;
+
+		*dma_out = sg_dma_address(sg) + offset;
+		*len_out = chunk;
+		return 0;
+	}
+
+	return -EFAULT;
+}
+
 static int tbv_copy_to_read_segments(struct tbv_read_ctx *read, u32 offset,
 				     const void *payload, u32 len)
 {
@@ -7041,17 +7895,21 @@ static bool tbv_rx_fragment_shape(u32 total_len, u32 offset, u32 len,
 					 frag_count);
 }
 
+/*
+ * @known_frag_count: the fragment count the reorder message already
+ * established (0 = none yet). It disambiguates offsets that are valid under
+ * both the 4048 (copied) and 4096 (raw/split) framing units; see
+ * tbv_native_data_write_shape_resolve().
+ */
 static bool tbv_rx_write_fragment_shape(u32 total_len, u32 offset, u32 len,
-					bool last, u32 *frag_idx,
-					u32 *frag_count)
+					bool last, u32 known_frag_count,
+					u32 *frag_idx, u32 *frag_count)
 {
-	if (tbv_rx_fragment_shape(total_len, offset, len, last, frag_idx,
-				  frag_count))
-		return true;
-
-	return tbv_rx_fragment_shape_max(total_len, TBV_NATIVE_DATA_FRAME_SIZE,
-					 offset, len, last, frag_idx,
-					 frag_count);
+	return !tbv_native_data_write_shape_resolve(total_len,
+						    TBV_RX_REORDER_MAX_FRAGS,
+						    offset, len, last,
+						    known_frag_count,
+						    frag_idx, frag_count);
 }
 
 static void tbv_rx_reorder_unlink_msg_locked(struct tbv_qp *tqp,
@@ -7735,6 +8593,15 @@ static void tbv_rx_buffer_fragment_locked(struct tbv_state *state,
 		return;
 	}
 
+	/*
+	 * An entire earlier message is missing. Fragment striping legally
+	 * reorders messages across rails, so only a non-striped (single-path
+	 * FIFO) QP can treat a PSN gap as loss.
+	 */
+	if (delta > 0 && !state->native_fragment_striping)
+		tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+				      tqp->rx_expected_psn, 0, 0);
+
 	msg = tbv_rx_reorder_find(tqp, psn);
 	if (!msg) {
 		if (tqp->rx_reorder_count >= TBV_RX_REORDER_MAX_MESSAGES) {
@@ -7831,15 +8698,28 @@ static void tbv_rx_buffer_write_fragment_locked(
 				     psn, TBV_NATIVE_SEND_ACK_ERROR);
 		return;
 	}
+
+	/* an entire earlier message is missing: ask for it now */
+	if (delta > 0)
+		tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+				      tqp->rx_expected_psn, 0, 0);
+
+	msg = tbv_rx_reorder_find(tqp, psn);
 	if (!tbv_rx_write_fragment_shape(total_len, offset, hdr->length, last,
+					 msg && msg->kind == TBV_RX_REORDER_WRITE ?
+						 msg->frag_count : 0,
 					 &frag_idx, &frag_count)) {
-		atomic64_inc(&state->data_rx_send_bad_fragment);
-		tbv_send_ack_on_path(tqp, rx_path, hdr->src_qp, hdr->dest_qp,
-				     psn, TBV_NATIVE_SEND_ACK_ERROR);
+		/*
+		 * Not malformed (the caller already bounds-checked it), just
+		 * unbufferable: a split-stream PART delivered behind a gap has
+		 * a mid-window offset that fits no framing unit. Drop it; the
+		 * NAK/timer retransmit re-delivers the fragment in order,
+		 * where the streaming path takes any offset.
+		 */
+		atomic64_inc(&state->data_rx_reorder_dropped);
 		return;
 	}
 
-	msg = tbv_rx_reorder_find(tqp, psn);
 	if (!msg) {
 		if (tqp->rx_reorder_count >= TBV_RX_REORDER_MAX_MESSAGES) {
 			atomic64_inc(&state->data_rx_reorder_window);
@@ -8110,6 +8990,14 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 				   msg->with_imm == with_imm &&
 				   msg->imm_data == imm_data &&
 				   offset > msg->received) {
+				/*
+				 * Fragment(s) lost inside the active SEND;
+				 * this path drops ahead-of-watermark bytes,
+				 * so the sender must go back to the hole.
+				 */
+				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+						      psn, msg->received,
+						      offset - msg->received);
 				mutex_unlock(&tqp->rx_lock);
 				return;
 			} else {
@@ -8241,6 +9129,118 @@ static void tbv_rx_fail_active_write_locked(struct tbv_state *state,
 	tbv_rx_finish_write_locked(state, tqp, rx_path, status);
 }
 
+/*
+ * Merge same-PSN fragments buffered PAST a hole back into the active plain
+ * WRITE once the hole fills. Without this, a hole-only (NAK) retransmit can
+ * never complete the message: the tail fragments -- including LAST -- sit in
+ * the reorder entry, which tbv_rx_drain_reorder_locked() will not touch while
+ * the write is active. The whole-message retransmit never needed the merge
+ * because it re-delivered the tail in order. Caller holds tqp->rx_lock.
+ */
+static void tbv_rx_write_merge_buffered_locked(struct tbv_state *state,
+					       struct tbv_qp *tqp,
+					       struct tbv_path *rx_path)
+{
+	struct tbv_rx_write *wrx = &tqp->rx_write;
+	struct tbv_rx_reorder_msg *msg;
+
+	if (!wrx->active || wrx->with_imm)
+		return;
+	msg = tbv_rx_reorder_find(tqp, wrx->psn);
+	if (!msg || msg->kind != TBV_RX_REORDER_WRITE ||
+	    msg->src_qp != wrx->src_qp ||
+	    msg->remote_addr != wrx->remote_addr ||
+	    msg->rkey != wrx->rkey)
+		return;
+
+	for (;;) {
+		struct tbv_rx_reorder_frag *frag = NULL;
+		struct tbv_rx_reorder_frag *pos;
+		struct tbv_mr *mr;
+		u64 copy_addr;
+		int ret;
+
+		list_for_each_entry(pos, &msg->frags, node) {
+			if (pos->offset == wrx->received) {
+				frag = pos;
+				break;
+			}
+		}
+		if (!frag)
+			break;
+
+		if (check_add_overflow(wrx->remote_addr, (u64)frag->offset,
+				       &copy_addr)) {
+			atomic64_inc(&state->data_rx_copy_error);
+			tbv_rx_fail_active_write_locked(state, tqp, rx_path,
+							IB_WC_LOC_PROT_ERR);
+			break;
+		}
+		mr = tbv_mr_get(state, wrx->rkey);
+		if (!mr || !(mr->access & IB_ACCESS_REMOTE_WRITE)) {
+			if (mr)
+				tbv_mr_put(mr);
+			atomic64_inc(&state->data_rx_copy_error);
+			tbv_rx_fail_active_write_locked(state, tqp, rx_path,
+							IB_WC_LOC_PROT_ERR);
+			break;
+		}
+		ret = tbv_umem_copy_to_iova(mr, copy_addr, frag->data,
+					    frag->len);
+		tbv_mr_put(mr);
+		if (ret) {
+			atomic64_inc(&state->data_rx_copy_error);
+			tbv_rx_fail_active_write_locked(state, tqp, rx_path,
+							IB_WC_LOC_PROT_ERR);
+			break;
+		}
+
+		wrx->received = frag->offset + frag->len;
+		if (msg->buffered_bytes >= frag->len)
+			msg->buffered_bytes -= frag->len;
+		else
+			msg->buffered_bytes = 0;
+		if (tqp->rx_reorder_bytes >= frag->len)
+			tqp->rx_reorder_bytes -= frag->len;
+		else
+			tqp->rx_reorder_bytes = 0;
+		list_del(&frag->node);
+		kfree(frag);
+	}
+
+	if (!wrx->active)
+		return;
+
+	if (list_empty(&msg->frags)) {
+		u32 total_len = msg->total_len;
+
+		tbv_rx_reorder_unlink_msg_locked(tqp, msg);
+		tbv_rx_reorder_free_msg(msg);
+		/* the buffered tail contained LAST: the message is complete */
+		if (total_len && wrx->received == total_len)
+			tbv_rx_finish_write_locked(state, tqp, rx_path,
+						   IB_WC_SUCCESS);
+	} else {
+		/*
+		 * A SECOND hole: everything after it is already buffered, so
+		 * no future arrival will trigger the gap NAK -- name it now
+		 * or recovery waits for the sender's deadline timer.
+		 */
+		struct tbv_rx_reorder_frag *next;
+		u32 gap_end = 0;
+
+		list_for_each_entry(next, &msg->frags, node) {
+			if (next->offset > wrx->received &&
+			    (!gap_end || next->offset < gap_end))
+				gap_end = next->offset;
+		}
+		if (gap_end)
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, wrx->src_qp,
+					      wrx->psn, wrx->received,
+					      gap_end - wrx->received);
+	}
+}
+
 static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 					      struct tbv_qp *tqp,
 					      const struct tbv_native_data_header *hdr,
@@ -8325,6 +9325,12 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 					mutex_unlock(&tqp->rx_lock);
 					return;
 				}
+				/* WRITE_IMM ahead of PSN: unbufferable, see
+				 * above -- NAK the missing message and drop.
+				 */
+				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+						      tqp->rx_expected_psn, 0,
+						      0);
 				mutex_unlock(&tqp->rx_lock);
 				return;
 			}
@@ -8346,6 +9352,17 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			copy_offset = wrx->received;
 			copy_len = hdr->length - duplicate;
 		} else if (offset > wrx->received) {
+			/*
+			 * Hole in the active WRITE. Plain writes buffer the
+			 * ahead fragment and merge once the hole fills, so
+			 * the sender only needs the hole; WRITE_IMM cannot
+			 * buffer (total length is unknowable, imm_data
+			 * carries the user immediate) so the fragment is
+			 * dropped and the NAK's go-back-N recovers it.
+			 */
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp, psn,
+					      wrx->received,
+					      offset - wrx->received);
 			if (!with_imm)
 				tbv_rx_buffer_write_fragment_locked(
 					state, tqp, rx_path, hdr, psn,
@@ -8363,6 +9380,13 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				mutex_unlock(&tqp->rx_lock);
 				return;
 			}
+			/* WRITE_IMM ahead of PSN: NAK the missing message,
+			 * drop the fragment (unbufferable, see above).
+			 */
+			if (tbv_psn_delta(psn, tqp->rx_expected_psn) > 0)
+				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+						      tqp->rx_expected_psn, 0,
+						      0);
 			mutex_unlock(&tqp->rx_lock);
 			return;
 		}
@@ -8374,6 +9398,9 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			return;
 		}
 		if (offset) {
+			/* the message START was lost: name bytes [0, offset) */
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp, psn,
+					      0, offset);
 			if (!with_imm) {
 				tbv_rx_buffer_write_fragment_locked(
 					state, tqp, rx_path, hdr, psn,
@@ -8381,10 +9408,13 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				mutex_unlock(&tqp->rx_lock);
 				return;
 			}
+			/*
+			 * WRITE_IMM starting mid-message means loss, not a
+			 * protocol violation: drop and let the retransmit
+			 * deliver it in order (the ACK_ERROR this used to
+			 * send killed the whole WR for a single lost frame).
+			 */
 			mutex_unlock(&tqp->rx_lock);
-			tbv_send_ack_on_path(tqp, rx_path, hdr->src_qp,
-					     hdr->dest_qp, hdr->psn,
-					     TBV_NATIVE_SEND_ACK_ERROR);
 			return;
 		}
 		if (with_imm && !tbv_qp_pop_recv(tqp, &wrx->imm_wqe)) {
@@ -8453,8 +9483,10 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		}
 
 		wrx->received = copy_offset + copy_len;
+		/* a filled hole may unlock buffered same-PSN tail fragments */
+		tbv_rx_write_merge_buffered_locked(state, tqp, rx_path);
 	}
-	if (last) {
+	if (last && tqp->rx_write.active) {
 		tbv_rx_finish_write_locked(state, tqp, rx_path,
 					       IB_WC_SUCCESS);
 	}
@@ -9007,6 +10039,7 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 	case TBV_NATIVE_DATA_OP_RDMA_WRITE:
 	case TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM:
 	case TBV_NATIVE_DATA_OP_MAD:
+	case TBV_NATIVE_DATA_OP_NAK:
 		break;
 	default:
 		atomic64_inc(&state->data_rx_bad_header);
@@ -9134,6 +10167,49 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 					    tqp->base.qp_num);
 			tbv_qp_mark_error(tqp);
 		}
+		tbv_qp_put(tqp);
+		return;
+	}
+
+	if (hdr->opcode == TBV_NATIVE_DATA_OP_NAK) {
+		struct tbv_send_ctx *send;
+		unsigned long flags;
+		bool matched = false;
+
+		atomic64_inc(&state->data_rx_nak);
+		if (!tbv_native_data_valid_nak(hdr)) {
+			atomic64_inc(&state->data_rx_bad_header);
+			tbv_qp_put(tqp);
+			return;
+		}
+
+		spin_lock_irqsave(&tqp->lock, flags);
+		list_for_each_entry(send, &tqp->pending_sends, node) {
+			if (send->psn != (hdr->psn & TBV_PSN_MASK))
+				continue;
+			matched = true;
+			if (!send->ready && send->retryable) {
+				/*
+				 * frag_offset doubles as a cumulative SACK:
+				 * the receiver delivered everything below it.
+				 */
+				send->acked_prefix =
+					tbv_send_acked_prefix_update(
+						send->acked_prefix,
+						hdr->frag_offset,
+						send->total_len);
+				send->nak_start = hdr->frag_offset;
+				send->nak_len = hdr->imm_data;
+				send->nak_retry = true;
+				tbv_qp_schedule_timeout_now_locked(tqp);
+			}
+			break;
+		}
+		spin_unlock_irqrestore(&tqp->lock, flags);
+		if (matched)
+			atomic64_inc(&state->data_rx_nak_matched);
+		else
+			atomic64_inc(&state->data_rx_nak_miss);
 		tbv_qp_put(tqp);
 		return;
 	}
@@ -9295,6 +10371,16 @@ static struct ib_mr *tbv_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->length = length;
 	mr->virt_addr = virt_addr;
 	mr->access = access;
+	/*
+	 * Build the persistent NHI DMA mapping for zero-copy TX. The device is
+	 * pd->device->dev.parent (== tb_ring_dma_device()), NOT
+	 * pd->device->dma_device: the latter is NULL because tbv registers with
+	 * RDMA-core virtual DMA (ib_register_device(.., NULL)), so ib_umem_get()
+	 * only stashed CPU VAs in the umem sgt (ib_dma_virt_map_sg) -- never real
+	 * NHI IOVAs. Best-effort; a failure leaves the MR without a mapping and
+	 * zcopy falls back to the framed copy.
+	 */
+	tbv_mr_dma_map(mr, pd->device->dev.parent);
 	ret = tbv_mr_publish(mr, pd);
 	if (ret) {
 		ib_umem_release(mr->umem);
