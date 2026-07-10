@@ -81,10 +81,21 @@ build_deb() {
 	install -d -m 0755 "$stage/DEBIAN"
 	stage_source "$stage/usr/src/${modname}-${version}"
 
+	# initramfs-tools hook: adds thunderbolt/thunderbolt_net BY NAME so the
+	# updates/dkms builds land in the initramfs (the MODULES=most net section
+	# path-copies the stock kernel/drivers/net tree with no name resolution;
+	# without this hook the initramfs's own modules.dep resolves to the stock
+	# thunderbolt_net and every boot logs the -22 flood). Package-owned path
+	# per policy: /usr/share/initramfs-tools/hooks (not /etc, which belongs to
+	# the local admin).
+	install -D -m 0755 "$repo_root/packaging/initramfs-tools/thunderbolt-tbfix" \
+		"$stage/usr/share/initramfs-tools/hooks/thunderbolt-tbfix"
+
 	substitute "$repo_root/packaging/debian/control" "$stage/DEBIAN/control"
 	substitute "$repo_root/packaging/debian/postinst" "$stage/DEBIAN/postinst"
 	substitute "$repo_root/packaging/debian/prerm" "$stage/DEBIAN/prerm"
-	chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"
+	substitute "$repo_root/packaging/debian/postrm" "$stage/DEBIAN/postrm"
+	chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm" "$stage/DEBIAN/postrm"
 
 	local deb="$out_dir/${pkgname}_${version}_all.deb"
 	dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null

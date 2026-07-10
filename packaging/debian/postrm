@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# dpkg has already deleted our packaged files by now, including the
+# initramfs-tools hook (/usr/share/initramfs-tools/hooks/thunderbolt-tbfix)
+# and -- via prerm's dkms remove -- the updates/dkms modules. Regenerate the
+# initramfs so the next boot resolves thunderbolt/thunderbolt_net back to the
+# stock in-tree copies instead of carrying stale references to ours. Upgrades
+# are handled by the new version's postinst; act only on real removal/purge.
+case "$1" in
+    remove|purge)
+        if command -v update-initramfs >/dev/null 2>&1; then
+            update-initramfs -u -k all || true
+        fi
+        ;;
+esac
+
+exit 0

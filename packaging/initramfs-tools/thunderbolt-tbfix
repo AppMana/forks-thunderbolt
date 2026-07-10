@@ -1,0 +1,45 @@
+#!/bin/sh
+# initramfs-tools hook shipped by thunderbolt-tbfix-dkms.
+#
+# Why this exists: the MODULES=most `net` section of initramfs-tools pulls
+# network drivers in by DIRECTORY (`_call_dracut_install ... "=drivers/net"`,
+# hook-functions auto_add_modules), which path-copies the STOCK
+# kernel/drivers/net/thunderbolt/thunderbolt_net.ko into the initramfs -- no
+# name resolution, so the depmod "search updates ubuntu built-in" precedence
+# that makes our updates/dkms build win everywhere else never applies. The
+# initramfs's own modules.dep then points at the stock copy, early boot loads
+# it against our patched core, and every boot logs the -22 symbol-mismatch
+# flood (observed on appmana-020 with tbfix 2.11: lsinitramfs showed
+# kernel/.../thunderbolt_net.ko.zst and NOT updates/dkms/...). Our core only
+# got in by luck: path-copied typec_thunderbolt depends on "thunderbolt" BY
+# NAME, and name resolution goes through modules.dep -> updates/dkms.
+#
+# Fix: add both modules BY NAME. manual_add_modules -> dracut-install -o -m
+# -> libkmod -> modules.dep, so the updates/dkms builds land in the initramfs
+# and its internal depmod resolves to them; the stock path-copied file becomes
+# inert. No deletion, no dpkg-divert, no blacklist (a same-named module cannot
+# be blacklisted without blocking ours too).
+#
+# The -o (optional) flag makes missing modules non-fatal, so initramfs builds
+# keep working on machines without the modules and before the first dkms build
+# (where the names simply resolve to the stock copies -- unchanged behaviour).
+
+PREREQ=""
+
+prereqs()
+{
+	echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+manual_add_modules thunderbolt thunderbolt_net
+
+exit 0
