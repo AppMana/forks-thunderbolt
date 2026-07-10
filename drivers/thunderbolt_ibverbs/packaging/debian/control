@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: kernel
 Priority: optional
 Architecture: all
-Depends: dkms (>= 2.1.0.0), kmod, libc6
+Depends: dkms (>= 2.1.0.0), kmod, libc6, thunderbolt-tbfix-dkms
 Maintainer: AppMana <ops@appmana.com>
 Homepage: https://github.com/AppMana/forks-thunderbolt-ibverbs
 Description: ALPHA Thunderbolt/USB4 host-to-host RDMA verbs kernel module (DKMS source)
