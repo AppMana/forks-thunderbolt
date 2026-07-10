@@ -177,6 +177,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_payload_full));
 	seq_printf(s, "data_wr_zcopy_payload_tail: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_payload_tail));
+	seq_printf(s, "data_wr_zcopy_staged: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_staged));
 	seq_printf(s, "data_wr_zcopy_mr_mapped: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_mr_mapped));
 	seq_printf(s, "data_wr_zcopy_remapped: %lld\n",

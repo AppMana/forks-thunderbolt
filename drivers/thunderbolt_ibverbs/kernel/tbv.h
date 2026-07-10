@@ -631,6 +631,8 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_hdr;
 	atomic64_t data_wr_zcopy_payload_full;
 	atomic64_t data_wr_zcopy_payload_tail;
+	/* payload frames served from a stable kernel copy (zcopy_stage_payload) */
+	atomic64_t data_wr_zcopy_staged;
 	/*
 	 * Persistent-mapping confirmation: _mr_mapped counts frames served
 	 * from the MR's existing umem DMA mapping (no per-frame map/unmap),
@@ -825,15 +827,21 @@ struct tb_xdomain;
 typedef void (*tbv_path_tx_done_fn)(void *ctx, int status);
 typedef int (*tbv_path_tx_fill_fn)(void *ctx, void *dst, u32 len);
 /*
- * Yield the next zero-copy TX fragment. When *premapped is set, *dma is a DMA
- * address from a PERSISTENT mapping (the MR's umem) and the path must NOT
- * dma_map/unmap it -- page/page_off are unused. Otherwise the path
- * dma_map_page(*page, *page_off, ...) itself and unmaps on completion (the
- * legacy churning fallback for a rail on a different DMA device).
+ * Yield the next zero-copy TX fragment, one of three ways:
+ *   - *owned set: a kmalloc'd kernel buffer holding a COPY of *length payload
+ *     bytes (the zcopy_stage_payload diagnostic). The path frames it as a
+ *     normal owned data packet (staged into the ring's kernel TX frame), so
+ *     the NHI DMA-reads stable kernel memory, not the live MR. The path frees
+ *     the buffer on completion.
+ *   - *premapped set: *dma is a DMA address from the MR's PERSISTENT mapping;
+ *     the path must NOT dma_map/unmap it (page/page_off unused).
+ *   - otherwise: the path dma_map_page(*page, *page_off, ...) itself and unmaps
+ *     on completion (the churning fallback for a rail on a different device).
  */
 typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
 				     dma_addr_t *dma, bool *premapped,
+				     void **owned,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx);
 #define TBV_PATH_SEND_CONTROL	BIT(0)
@@ -984,6 +992,26 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+/*
+ * Task 2 (local-completion WC) contract, design-only -- pins the floor the
+ * implementation must not drop below, unwired from the WC path for now. The
+ * earliest point at which a signaled send WC may fire depends on where the
+ * payload lives during TX: a copied send stages the payload into a kernel ring
+ * frame at post, so the user buffer is free immediately; a zero-copy send has
+ * the NHI DMA-read the live user MR pages, so the buffer is not reusable until
+ * local TX-ring completion (firing earlier reintroduces the reuse race the
+ * current ACK-gating prevents by construction). See docs/dsv4_2026_07_09_
+ * changes.md "Task 2 design" and kernel/tests/send_wc_completion_test.c.
+ */
+enum tbv_wc_completion_point {
+	TBV_WC_AT_POST = 0,	/* buffer free right after post (copied: staged) */
+	TBV_WC_AT_LOCAL_TX = 1,	/* buffer free after the NHI finished the read (zcopy) */
+	TBV_WC_AT_REMOTE_ACK = 2, /* current conservative baseline: after peer ACK */
+};
+enum tbv_wc_completion_point tbv_send_wc_earliest_point(bool zcopy);
+bool tbv_send_wc_may_fire(enum tbv_wc_completion_point earliest,
+			  bool posted, bool local_tx_complete,
+			  bool remote_acked);
 /*
  * Zero-copy TX mode selection for one native send ctx, decided ONCE at the
  * initial post and pinned for every retransmit (framing must not change

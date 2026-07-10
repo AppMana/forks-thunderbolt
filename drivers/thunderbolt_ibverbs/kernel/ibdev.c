@@ -118,6 +118,22 @@ module_param(zcopy_full_windows_only, bool, 0644);
 MODULE_PARM_DESC(zcopy_full_windows_only,
 		 "Diagnostic: zero-copy only messages with no partial window (exact 4096 multiples); others use framed copies");
 
+/*
+ * Decisive memory-source control for the residual CRC corruption. When set, a
+ * split-zcopy send COPIES each payload window into a stable kernel buffer and
+ * the NHI DMA-reads that (like the copied path) instead of the live MR pages,
+ * while the split framing (header frame + raw payload frames) is unchanged. If
+ * the receiver's data_rx_crc_error drops to background with this on, the fault
+ * is the NHI reading live MR memory; if it persists, the fault is the framing
+ * or the RX raw-stream reassembly, not the memory source. Snapshotted ONCE per
+ * WR at the initial post (ctx->zcopy_stage) so a window is never half-staged
+ * even if this is toggled mid-flight. Runtime-writable for one-boot A/B.
+ */
+static bool zcopy_stage_payload;
+module_param(zcopy_stage_payload, bool, 0644);
+MODULE_PARM_DESC(zcopy_stage_payload,
+		 "Diagnostic: stage split-zcopy payloads through a kernel copy (NHI reads kernel memory, not live MR) to isolate the memory source of the CRC corruption");
+
 static uint qp_timeout_ms = TBV_QP_TIMEOUT_DEFAULT_MS;
 module_param(qp_timeout_ms, uint, 0644);
 MODULE_PARM_DESC(qp_timeout_ms,
@@ -504,6 +520,12 @@ struct tbv_send_ctx {
 	 */
 	enum tbv_zcopy_tx_mode zcopy_mode;
 	/*
+	 * Snapshot of zcopy_stage_payload at the initial post: all windows of
+	 * this WR (and its retransmits) stage or don't as one, so a window is
+	 * never half-staged if the param toggles mid-flight.
+	 */
+	bool zcopy_stage;
+	/*
 	 * Cumulative SACK floor from NAKs (bytes below are known-delivered)
 	 * and the pending NAK's missing range. Written under tqp->lock; read
 	 * by the single retransmitting thread (retrying==true).
@@ -801,6 +823,32 @@ bool tbv_zcopy_use_persistent(const void *mr_dma_dev, const void *path_dma_dev)
 	return mr_dma_dev && mr_dma_dev == path_dma_dev;
 }
 
+enum tbv_wc_completion_point tbv_send_wc_earliest_point(bool zcopy)
+{
+	/*
+	 * Copied sends stage the payload into a kernel ring frame at post, so
+	 * the user buffer is free immediately. Zero-copy sends have the NHI
+	 * read the live user MR pages, so the buffer is not reusable until the
+	 * local TX ring completes that read.
+	 */
+	return zcopy ? TBV_WC_AT_LOCAL_TX : TBV_WC_AT_POST;
+}
+
+bool tbv_send_wc_may_fire(enum tbv_wc_completion_point earliest,
+			  bool posted, bool local_tx_complete,
+			  bool remote_acked)
+{
+	switch (earliest) {
+	case TBV_WC_AT_POST:
+		return posted;
+	case TBV_WC_AT_LOCAL_TX:
+		return local_tx_complete;
+	case TBV_WC_AT_REMOTE_ACK:
+	default:
+		return remote_acked;
+	}
+}
+
 int tbv_dma_sgt_locate(const u32 *seg_dma_lens, u32 nsegs, u32 offset,
 		       u32 max_len, u32 *seg_idx, u32 *seg_off, u32 *chunk)
 {
@@ -1005,13 +1053,13 @@ static void tbv_mr_dma_map(struct tbv_mr *mr, struct device *dma_dev)
 	}
 
 	/*
-	 * DMA_BIDIRECTIONAL, matching ib_umem_get()'s own choice (umem.c): the
-	 * mapping serves zero-copy TX (the NHI reads the send source) today,
-	 * and an MR is a bidirectional object -- a future zcopy RDMA_READ
-	 * response would have the NHI write into it. Bidirectional is the
-	 * correct conservative direction for a long-lived MR mapping.
+	 * DMA_TO_DEVICE: this mapping is used ONLY by zero-copy TX, where the
+	 * NHI reads the send source -- exactly the direction the copied path's
+	 * dma_map_single() uses. Matching it removes a difference from the
+	 * proven-good path. (A future zcopy RDMA_READ-response write path would
+	 * need its own bidirectional mapping.)
 	 */
-	ret = dma_map_sgtable(dma_dev, &mr->dma_sgt, DMA_BIDIRECTIONAL, 0);
+	ret = dma_map_sgtable(dma_dev, &mr->dma_sgt, DMA_TO_DEVICE, 0);
 	if (ret) {
 		pr_warn_ratelimited("MR zcopy dma_map_sgtable to %s failed: %d (zcopy will fall back to framed copy)\n",
 				    dev_name(dma_dev), ret);
@@ -1027,7 +1075,7 @@ static void tbv_mr_dma_unmap(struct tbv_mr *mr)
 {
 	if (!mr->dma_mapped)
 		return;
-	dma_unmap_sgtable(mr->dma_dev, &mr->dma_sgt, DMA_BIDIRECTIONAL, 0);
+	dma_unmap_sgtable(mr->dma_dev, &mr->dma_sgt, DMA_TO_DEVICE, 0);
 	sg_free_table(&mr->dma_sgt);
 	mr->dma_mapped = false;
 	mr->dma_dev = NULL;
@@ -4772,6 +4820,7 @@ static void tbv_zcopy_report_fallback_once(struct tbv_state *state,
 static int tbv_send_page_stream_next(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
 				     dma_addr_t *dma, bool *premapped,
+				     void **owned,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx)
 {
@@ -4796,6 +4845,32 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 		remaining = min_t(u32, seg->length - seg_off,
 				  stream->total_len - stream->offset);
 		remaining = min_t(u32, remaining, stream->max_chunk);
+
+		if (stream->send->zcopy_stage) {
+			/*
+			 * Diagnostic: copy the window into a stable kernel
+			 * buffer (one buffer for the whole window -- no user
+			 * page straddle) and hand it to the path as an owned
+			 * frame. The NHI then DMA-reads kernel memory, not the
+			 * live MR. Same split framing, different memory source.
+			 */
+			void *buf = kmalloc(remaining, GFP_KERNEL);
+
+			if (!buf)
+				return -ENOMEM;
+			ret = ib_umem_copy_from(buf, seg->mr->umem,
+						seg->addr + seg_off -
+							seg->mr->start,
+						remaining);
+			if (ret) {
+				kfree(buf);
+				return ret;
+			}
+			*owned = buf;
+			*length = remaining;
+			atomic64_inc(&state->data_wr_zcopy_staged);
+			goto accounted;
+		}
 
 		if (tbv_zcopy_use_persistent(seg->mr->dma_dev,
 					     stream->dma_dev)) {
@@ -5279,6 +5354,9 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			zcopy_mode = TBV_ZCOPY_TX_NONE;
 		}
 		ctx->zcopy_mode = zcopy_mode;
+		/* snapshot the stage-payload diagnostic once for the whole WR */
+		ctx->zcopy_stage = zcopy_mode != TBV_ZCOPY_TX_NONE &&
+				   READ_ONCE(zcopy_stage_payload);
 
 		if (zcopy_mode != TBV_ZCOPY_TX_NONE) {
 			atomic64_inc(&tqp->owner->data_wr_zcopy);

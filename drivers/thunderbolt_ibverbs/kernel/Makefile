@@ -29,6 +29,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_timeout_arming_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rx_hw_error_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/zcopy_split_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/nak_protocol_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_wc_completion_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 

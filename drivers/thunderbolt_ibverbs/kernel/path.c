@@ -1948,14 +1948,24 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			}
 			packet = list_first_entry(&path->tx_data_queue,
 						  struct tbv_tx_packet, node);
-			if (!packet->zcopy || packet->raw_stream_start ||
+			/*
+			 * While a window is open only its own payload frames may
+			 * go out (a foreign frame between header and payload
+			 * would desync the receiver's raw parser). A payload
+			 * frame is any owner-matched packet that is not the next
+			 * header; it may be zcopy (DMA from the MR / persistent
+			 * mapping) OR staged (a kernel copy, zcopy_stage_payload)
+			 * -- staged ones still need a ring frame, so key
+			 * needs_staging off zcopy, not a hardcoded false.
+			 */
+			if (packet->raw_stream_start ||
 			    packet->owner_ctx != path->tx_raw_stream_owner) {
 				path->tx_scheduling = false;
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				return;
 			}
 			from_control_queue = false;
-			needs_staging = false;
+			needs_staging = !packet->zcopy;
 		} else if (!list_empty(&path->tx_control_queue)) {
 			packet = list_first_entry(&path->tx_control_queue,
 						  struct tbv_tx_packet, node);
@@ -2580,6 +2590,7 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		tbv_path_tx_done_fn done = NULL;
 		struct page *page = NULL;
 		void *done_ctx = NULL;
+		void *owned = NULL;
 		bool last;
 		bool premapped = false;
 		dma_addr_t dma = 0;
@@ -2588,14 +2599,17 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		u32 map_len = 0;
 
 		ret = next(next_ctx, &page, &page_off, &len, &dma, &premapped,
-			   &done, &done_ctx);
-		if (ret)
+			   &owned, &done, &done_ctx);
+		if (ret) {
+			kfree(owned);
 			goto err_release;
+		}
 		if (!len || len > max_raw_payload ||
 		    len > total_length - prepared ||
-		    (!premapped &&
+		    (!owned && !premapped &&
 		     (!page || page_off > PAGE_SIZE ||
 		      len > PAGE_SIZE - page_off))) {
+			kfree(owned);
 			if (done)
 				done(done_ctx, -EINVAL);
 			ret = -EINVAL;
@@ -2603,6 +2617,28 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		}
 
 		last = prepared + len == total_length;
+
+		if (owned) {
+			/*
+			 * zcopy_stage_payload: a kernel copy of the window.
+			 * Frame it as a normal owned data packet so schedule_tx
+			 * stages it into the ring's persistent kernel TX frame
+			 * (memcpy + dma_sync), i.e. the NHI DMA-reads stable
+			 * kernel memory. Isolates "reading live MR memory" from
+			 * the split framing, which is otherwise unchanged.
+			 */
+			packet = tbv_path_alloc_data_packet_owned(path, owned,
+								  len, done,
+								  done_ctx);
+			if (!packet) {
+				kfree(owned);
+				if (done)
+					done(done_ctx, -ENOMEM);
+				ret = -ENOMEM;
+				goto err_release;
+			}
+			goto have_packet;
+		}
 
 		if (premapped) {
 			/*
