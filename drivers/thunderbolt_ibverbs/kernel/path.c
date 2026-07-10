@@ -2865,6 +2865,48 @@ static void tbv_path_flush_tx_queue(struct tbv_path *path, int status)
 	}
 }
 
+/*
+ * tbv_path_fence() - stop the NHI rings so in-flight frames are reclaimed
+ *
+ * tb_ring_stop() cancels every frame in the ring's in-flight list and runs its
+ * completion callback with canceled=true (drivers/thunderbolt/nhi.c ring_work,
+ * the !ring->running branch). That is the ONLY way to reclaim a frame already
+ * handed to the ring: on a dead link (peer rebooted / cable pulled) hardware
+ * never completes it, so the send/read context that owns it -- and the QP ref
+ * it transitively pins -- would otherwise be held forever.
+ *
+ * tbv_peer_remove_rail() calls this BEFORE wait_for_completion(refs_zero) so
+ * that wait can converge; the pre-fix ordering only reached tb_ring_stop()
+ * inside tbv_path_destroy(), which runs AFTER the wait it was meant to unblock,
+ * so rmmod / .shutdown hung in D-state until a cold boot. Leaves path->state
+ * intact (tbv_path_destroy still needs it to gate the tunnel/hopid teardown);
+ * only records rings_fenced so the ring is not stopped twice.
+ *
+ * Sleeping context only (tb_ring_stop flush_work()s the ring worker); never
+ * from a ring frame callback or under a spinlock shared with the completion
+ * path -- the forbidden-context deadlock guarded here and in tbv_path_destroy.
+ */
+void tbv_path_fence(struct tbv_path *path)
+{
+	bool rings_started = path->state == TBV_PATH_TUNNEL_ENABLED ||
+			     path->state == TBV_PATH_RING_STARTED;
+
+	might_sleep();
+
+	if (!rings_started || path->rings_fenced)
+		return;
+
+	if (path->rx_ring)
+		tb_ring_stop(path->rx_ring);
+	if (path->tx_ring)
+		tb_ring_stop(path->tx_ring);
+	path->rings_fenced = true;
+
+	/* No new poll-driven completions after the rings are down. */
+	cancel_delayed_work_sync(&path->tx_poll_work);
+	cancel_delayed_work_sync(&path->rx_supp_poll_work);
+}
+
 void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 {
 	bool tunnel_enabled = path->state == TBV_PATH_TUNNEL_ENABLED;
@@ -2883,10 +2925,18 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 	might_sleep();
 
 	if (rings_started) {
-		if (path->rx_ring)
-			tb_ring_stop(path->rx_ring);
-		if (path->tx_ring)
-			tb_ring_stop(path->tx_ring);
+		/*
+		 * tbv_path_fence() may already have stopped the rings ahead of
+		 * the refs_zero wait; do not stop them twice (dev_WARN "already
+		 * stopped"). The tunnel/hopid teardown below still runs -- it is
+		 * gated on path->state, which fence deliberately left intact.
+		 */
+		if (!path->rings_fenced) {
+			if (path->rx_ring)
+				tb_ring_stop(path->rx_ring);
+			if (path->tx_ring)
+				tb_ring_stop(path->tx_ring);
+		}
 		path->state = TBV_PATH_RING_ALLOCATED;
 	}
 	cancel_delayed_work_sync(&path->tx_poll_work);

@@ -28,6 +28,25 @@ MODULE_PARM_DESC(native_lane_bonding,
 #define TBV_LANE_BOND_MAX_ATTEMPTS 12
 #define TBV_LANE_BOND_RETRY_MS 1000
 
+/*
+ * Rail-teardown wait budget. The ring fence in tbv_peer_remove_rail actively
+ * drives QP refs to zero, so refs_zero normally completes on the first tick;
+ * warn each interval, then FORCE progress at the hard cap so a genuinely leaked
+ * ref cannot wedge rmmod / .shutdown forever (a held power button at reboot is
+ * the worst outcome). 0 disables the cap (wait forever, old behaviour) for
+ * debugging a suspected leak. Overridable so a slow real drain can be granted
+ * more time without a rebuild.
+ */
+static unsigned int rail_teardown_warn_ms = 10000;
+module_param(rail_teardown_warn_ms, uint, 0644);
+MODULE_PARM_DESC(rail_teardown_warn_ms,
+		 "Interval (ms) between rail-teardown 'waiting for QP refs' warnings");
+
+static unsigned int rail_teardown_force_ms = 60000;
+module_param(rail_teardown_force_ms, uint, 0644);
+MODULE_PARM_DESC(rail_teardown_force_ms,
+		 "Hard cap (ms) after which rail teardown force-proceeds with an NHI-safe leak; 0 = wait forever");
+
 bool tbv_xdomain_bond_sync(struct tb_xdomain *xd)
 {
 	int attempt;
@@ -369,6 +388,34 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 	return rail;
 }
 
+/*
+ * Wait for every QP-held rail ref to drain, bounded by rail_teardown_force_ms.
+ * Returns true if the refs reached zero (safe to free), false if the hard cap
+ * expired (caller must take the NHI-safe forced-leak path). Warns each
+ * rail_teardown_warn_ms so a slow drain is attributable from console/pstore.
+ */
+static bool tbv_rail_wait_refs_zero(struct tbv_rail *rail, struct tbv_peer *peer)
+{
+	unsigned int warn = rail_teardown_warn_ms ? rail_teardown_warn_ms : 10000;
+	unsigned int cap = rail_teardown_force_ms;
+	unsigned int waited = 0;
+
+	for (;;) {
+		if (wait_for_completion_timeout(&rail->refs_zero,
+						msecs_to_jiffies(warn)))
+			return true;
+
+		waited += warn;
+		pr_err("rail teardown waiting for QP refs peer=%u rail=%u refs=%u (%ums%s)\n",
+		       peer->peer_id, rail->rail_id,
+		       refcount_read(&rail->refcnt), waited,
+		       cap ? "" : ", no cap");
+
+		if (cap && waited >= cap)
+			return false;
+	}
+}
+
 void tbv_peer_remove_rail(struct tbv_rail *rail)
 {
 	struct tbv_peer *peer;
@@ -393,30 +440,61 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	mutex_unlock(&peer->state->lock);
 
 	/*
-	 * Tear down the per-rail ib_device (if any) before the path. Any QPs
-	 * pinned to this rail hold a rail refcount, so ib_unregister_device's
-	 * destroy_qp callbacks must complete before wait_for_completion
-	 * (refs_zero) can return. This serializes data-path cleanup with
-	 * verbs lifecycle and removes any chance of post_send racing
-	 * tbv_path_destroy.
+	 * Fence the NHI rings BEFORE tearing down the ib_device. Any QP pinned to
+	 * this rail holds a rail refcount that is dropped only when the QP finishes
+	 * destroying (tbv_qp_unbind_rail, the last thing tbv_destroy_qp does), and
+	 * that in turn needs the QP's in-flight frames to complete. tb_ring_stop
+	 * cancels every frame in the ring in-flight list and runs its completion
+	 * canceled=true, which is the ONLY way to reclaim a frame already handed to
+	 * the ring: on a dead link (peer rebooted / cable pulled) hardware never
+	 * completes it. So fencing here releases the send/read context -- and the
+	 * QP ref it transitively pins -- letting the ib_unregister_device below
+	 * drain destroy_qp all the way to tbv_qp_unbind_rail. The pre-fix ordering
+	 * only reached tb_ring_stop inside tbv_path_destroy(), AFTER the wait it
+	 * was meant to unblock, so a dead-link QP hung rmmod / .shutdown in D-state
+	 * until a cold boot -- the root of "every change needs a cold boot" and the
+	 * fleet version skew. Process context, no locks held: the tb_ring_stop
+	 * IRQ-off/flush_work contract (might_sleep in tbv_path_fence) is satisfied.
+	 * KUnit: tbv_teardown_dead_link_drains_and_frees.
+	 */
+	tbv_path_fence(&rail->path);
+
+	/*
+	 * Tear down the per-rail ib_device before the path: ib_unregister_device's
+	 * destroy_qp callbacks must complete before wait_for_completion(refs_zero)
+	 * can return, serializing data-path cleanup with verbs lifecycle so nothing
+	 * post_sends into a half-freed path.
 	 */
 	tbv_ibdev_rail_event(peer->state, rail, false);
 
 	tbv_native_control_cancel_rail(rail);
 	tbv_rail_put(rail);
+
 	/*
-	 * This wait runs on module unload AND at reboot (.shutdown ->
-	 * nhi_remove -> tb_domain_remove unbinds the services). A stuck QP
-	 * teardown here used to hang silently forever -- after journald is
-	 * already dead at shutdown, that is an invisible wedge that ends in a
-	 * held power button. Keep waiting (freeing the rings under a live QP
-	 * would be worse), but say so loudly every 30 s so the hang is
-	 * attributable from the console/pstore.
+	 * Bounded wait. The fence above actively drove the QP refs to zero, so
+	 * this normally returns on the first tick. Cap the total wait so a
+	 * genuinely leaked ref cannot wedge a reboot forever. On expiry proceed
+	 * with an NHI-SAFE forced teardown: the rings are already fenced, so
+	 * freeing the path cannot race live DMA; the rail struct itself is
+	 * deliberately LEAKED (unlinked but not kfree'd) because a still-held ref
+	 * means a QP still points at rail/tqp->rail -- freeing would be a UAF. A
+	 * residual leak here is a real bug to chase, but it must never cost a
+	 * data-center trip.
 	 */
-	while (!wait_for_completion_timeout(&rail->refs_zero, 30 * HZ))
-		pr_err("rail teardown stuck waiting for QP refs peer=%u rail=%u refs=%u (unload/reboot will not progress)\n",
+	if (!tbv_rail_wait_refs_zero(rail, peer)) {
+		pr_err("rail teardown FORCED peer=%u rail=%u refs=%u: rings fenced, leaking rail to avoid UAF; unload/reboot proceeds\n",
 		       peer->peer_id, rail->rail_id,
 		       refcount_read(&rail->refcnt));
+		tbv_path_destroy(&rail->path, peer->xd);
+		mutex_lock(&peer->state->lock);
+		if (!list_empty(&rail->node)) {
+			list_del_init(&rail->node);
+			if (peer->nr_rails)
+				peer->nr_rails--;
+		}
+		mutex_unlock(&peer->state->lock);
+		return;
+	}
 
 	/*
 	 * All QPs that held a ref on this rail have now been destroyed

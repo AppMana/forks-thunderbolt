@@ -7,6 +7,21 @@ KDIR ?= /lib/modules/$(KVER)/build
 PWD := $(shell pwd)
 TBFIX_SYMVERS ?= $(shell ls -1 /usr/src/thunderbolt-tbfix-*/Module.symvers 2>/dev/null | sort -V | tail -1)
 
+# thunderbolt_ibverbs references our PATCHED core's exports (tb_ring_*,
+# tb_xdomain_*). Without the tbfix core Module.symvers, MODVERSIONS records the
+# wrong/absent CRCs and the module loads with "disagrees about version of
+# symbol ... Unknown symbol (err -22)" -- a silent-at-build, dead-at-load
+# failure. Building against the core symvers is not optional, so a missing one
+# is a hard error (not a silent EXTRA_SYMBOLS-less build). thunderbolt-tbfix-dkms
+# is a package Depends and its POST_INSTALL writes the symvers to
+# /usr/src/thunderbolt-tbfix-<ver>/Module.symvers before ibverbs builds.
+#
+# NOTE (cross-kernel): that symvers file is a single per-source-version file, so
+# if tbfix has not (re)built for THIS kernel yet, it can carry another kernel's
+# CRCs. Order is enforced at the package layer (Depends) and, on a kernel
+# update, both DKMS packages autoinstall for the new kernel; tbfix must build
+# first. Verified matching on the fleet today; the new-kernel autoinstall
+# ordering wants a hardware-validated roll to confirm.
 ifneq ($(TBFIX_SYMVERS),)
 EXTRA_SYMBOLS := KBUILD_EXTRA_SYMBOLS=$(TBFIX_SYMVERS)
 endif
@@ -30,6 +45,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rx_hw_error_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/zcopy_split_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/nak_protocol_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_wc_completion_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/reload_quiesce_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
@@ -37,7 +53,17 @@ ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
 all: modules
 
+# A missing tbfix core symvers is only a WARNING, not a hard failure: the nix
+# flake and local overlay builds resolve the core exports differently, and the
+# KUnit harness generates its own Makefile. thunderbolt-tbfix-dkms is a package
+# Depends so the DKMS/apt path always has it; this catches a hand-run build that
+# forgot it (the module would otherwise build clean and -22 at load).
 modules:
+ifeq ($(TBFIX_SYMVERS),)
+	@echo "WARNING: no thunderbolt-tbfix Module.symvers under /usr/src/thunderbolt-tbfix-*/;" >&2
+	@echo "         thunderbolt_ibverbs built without it may fail to load (-22). Install/" >&2
+	@echo "         rebuild thunderbolt-tbfix-dkms for this kernel first." >&2
+endif
 	$(MAKE) -C $(KDIR) M=$(PWD) $(EXTRA_SYMBOLS) modules
 
 modules_install:

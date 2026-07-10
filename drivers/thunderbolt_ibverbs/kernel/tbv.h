@@ -290,6 +290,14 @@ struct tbv_path {
 	int local_tx_hop;
 	int local_rx_hop;
 	int remote_transmit_path;
+	/*
+	 * Set by tbv_path_fence() once the NHI rings are stopped (in-flight
+	 * frames canceled) ahead of the refs_zero wait in tbv_peer_remove_rail.
+	 * tbv_path_destroy() consults it so it does not tb_ring_stop() a ring
+	 * that is already stopped (dev_WARN "already stopped"), while still
+	 * running the tunnel/hopid teardown its state gates.
+	 */
+	bool rings_fenced;
 };
 
 struct tbv_rail {
@@ -1278,6 +1286,7 @@ void tbv_path_kick_tx(struct tbv_path *path);
 void tbv_path_cancel_data_done_ctx(struct tbv_path *path,
 				   tbv_path_tx_done_fn done, void *done_ctx);
 void tbv_path_cancel_data_owner_ctx(struct tbv_path *path, void *owner_ctx);
+void tbv_path_fence(struct tbv_path *path);
 void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd);
 
 const struct tbv_backend_ops *tbv_backend_get(enum tbv_backend_type type);
