@@ -17,6 +17,10 @@
 # taken each run) and the SINGLE source of the header shim -- run-kunit.sh calls
 # it too, so the KUnit overlay and the DKMS build never drift.
 #
+# POSIX sh + awk ONLY. A DKMS kernel-module build runs in a minimal environment
+# (CI's ubuntu:24.04 container, a new-kernel autoinstall on a node): it has
+# make/coreutils/awk/sed but NOT python3. Do not reintroduce a python dependency.
+#
 # Usage: tbfix-gen-thunderbolt-header.sh <kernel_source_dir> <out_include_dir>
 set -eu
 
@@ -34,43 +38,55 @@ if [ ! -f "$src" ]; then
 fi
 
 mkdir -p "$out/linux"
+dst="$out/linux/thunderbolt.h"
 
-python3 - "$src" "$out/linux/thunderbolt.h" <<'PY'
-import pathlib
-import sys
+# Idempotency: only apply a change the stock header does not already carry.
+add_completion=1; grep -q '#include <linux/completion.h>' "$src" && add_completion=0
+add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handler=0
+add_nhi=1;        grep -q 'domain_released' "$src" && add_nhi=0
 
-src, dst = sys.argv[1], sys.argv[2]
-text = pathlib.Path(src).read_text()
+# Struct-scoped transformation. Anchors:
+#   1. after "#include <linux/workqueue.h>"           -> add completion.h
+#   2. inside struct tb_protocol_handler, after the
+#      "int (*callback)(...)" line, BEFORE ->data     -> insert macro+callback_xd
+#   3. inside struct tb_nhi, before its closing "};"   -> append domain_released
+awk -v add_completion="$add_completion" \
+    -v add_handler="$add_handler" \
+    -v add_nhi="$add_nhi" '
+	add_completion == 1 && $0 == "#include <linux/workqueue.h>" {
+		print
+		print "#include <linux/completion.h>"
+		next
+	}
+	/^struct tb_protocol_handler \{/ { in_ph = 1 }
+	/^struct tb_nhi \{/            { in_nhi = 1 }
+	add_handler == 1 && in_ph == 1 && \
+	    $0 ~ /int \(\*callback\)\(const void \*buf, size_t size, void \*data\);/ {
+		print
+		print "#define TB_PROTOCOL_HANDLER_HAS_XDOMAIN 1"
+		print "\tint (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,"
+		print "\t\t\t   void *data);"
+		next
+	}
+	add_nhi == 1 && in_nhi == 1 && $0 == "};" {
+		print "\tstruct completion domain_released;"
+		print
+		in_nhi = 0
+		next
+	}
+	in_ph == 1 && $0 == "};" { in_ph = 0 }
+	{ print }
+' "$src" > "$dst"
 
-# 1) struct completion is needed for tb_nhi::domain_released below.
-if "#include <linux/completion.h>" not in text:
-    needle = "#include <linux/workqueue.h>\n"
-    if needle not in text:
-        raise SystemExit("tbfix header shim: workqueue include anchor not found")
-    text = text.replace(needle, needle + "#include <linux/completion.h>\n", 1)
-
-# 2) Source-aware XDomain protocol handler (callback_xd) + capability macro.
-if "TB_PROTOCOL_HANDLER_HAS_XDOMAIN" not in text:
-    old = ("\tint (*callback)(const void *buf, size_t size, void *data);\n"
-           "\tvoid *data;")
-    new = ("\tint (*callback)(const void *buf, size_t size, void *data);\n"
-           "#define TB_PROTOCOL_HANDLER_HAS_XDOMAIN 1\n"
-           "\tint (*callback_xd)(struct tb_xdomain *xd, const void *buf,"
-           " size_t size,\n"
-           "\t\t\t   void *data);\n"
-           "\tvoid *data;")
-    if old not in text:
-        raise SystemExit("tbfix header shim: protocol handler anchor not found")
-    text = text.replace(old, new, 1)
-
-# 3) tb_nhi::domain_released completion (nhi.c/domain.c reference it directly).
-if "domain_released" not in text:
-    old = "\tunsigned long quirks;\n};"
-    new = ("\tunsigned long quirks;\n"
-           "\tstruct completion domain_released;\n};")
-    if old not in text:
-        raise SystemExit("tbfix header shim: tb_nhi anchor not found")
-    text = text.replace(old, new, 1)
-
-pathlib.Path(dst).write_text(text)
-PY
+# Post-condition: the generated header MUST carry all three additions, whether
+# they were already present or just inserted. A miss means an anchor did not
+# match (upstream header reshaped) -- fail loudly rather than emit a header that
+# compiles the vendored subsystem to a broken layout.
+fail=0
+for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released'; do
+	if ! grep -q "$tok" "$dst"; then
+		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
+		fail=1
+	fi
+done
+[ "$fail" -eq 0 ] || { rm -f "$dst"; exit 1; }
