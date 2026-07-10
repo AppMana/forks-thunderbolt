@@ -275,4 +275,160 @@ static inline void cm_arm_hotplug(struct cm_host *h)
 		cm_scan_port(h, i);
 }
 
+/*
+ * ---- Software CM: LOST hot events (tb.c reconciliation) ----
+ *
+ * Live evidence (2026-07-09/10, appmana-019<->008): when 019 rebooted at 17:50,
+ * the survivor 008 received NO unplug and NO plug event for its port 3 -- its
+ * kernel log is silent across the whole window while the port's lane adapter
+ * reads UNPLUGGED (LANE_ADP_CS_1 state 0x7). The stale XDomain (and its
+ * usb4_rdma ib_device) stayed registered for 12 hours; NCCL hung instead of
+ * failing. The mirror case also occurs: a link trains but the plug event is
+ * absorbed (the reboot-cover script exists because "module reloads race the
+ * neighbour's one-shot property re-read and usually lose").
+ *
+ * tb_handle_hotplug() is edge-triggered ONLY: if the router's hot event is
+ * lost (wedged port state machine, ctl ring hiccup, event raced during
+ * init/resume), the software topology diverges from the hardware lane state
+ * FOREVER. There is no level-triggered fallback.
+ *
+ * cm_link_up_lost()/cm_link_down_lost() model the lost edges. cm_reconcile()
+ * is kept in LOCKSTEP with tb.c: it models what the driver does to converge
+ * software topology to hardware lane state without an event. While tb.c has
+ * no reconciliation, cm_reconcile() must stay empty and the recovery tests go
+ * red -- exactly like reverting the driver.
+ */
+static inline void cm_link_up_lost(struct cm_host *h, int p)
+{
+	h->port[p].link_up = true;	/* plug event lost: no scan happens */
+}
+
+static inline void cm_link_down_lost(struct cm_host *h, int p)
+{
+	h->port[p].link_up = false;	/* unplug event lost: xdomain stays */
+}
+
+/*
+ * Lockstep with tb.c tb_reconcile_work(): poll each null port's lane state
+ * (tb_port_state) and synthesize the missing hotplug edge so the software
+ * topology converges to the hardware:
+ *   - xdomain present but lane UNPLUGGED  -> synthesized unplug (teardown)
+ *   - lane UP but nothing enumerated      -> synthesized plug (tb_scan_port)
+ * Runs only while hotplug is armed (same tcm->hotplug_active gate).
+ */
+static inline void cm_reconcile(struct cm_host *h)
+{
+	int i;
+
+	if (!h->hotplug_armed)
+		return;
+
+	for (i = 0; i < 2; i++) {
+		if (h->port[i].xdomain && !h->port[i].link_up)
+			h->port[i].xdomain = false;	/* synthesized unplug */
+		else if (!h->port[i].xdomain && h->port[i].link_up)
+			h->port[i].xdomain = true;	/* synthesized plug */
+	}
+}
+
+/*
+ * ---- Stale cached identity loop (xdomain.c PROPERTIES vs UUID) ----
+ *
+ * Live evidence (2026-07-09, appmana-008 port 1): the XDomain was created with
+ * a CORRUPT remote UUID (66518780-00e3-212c-ffff-ffffffffffff -- the tail is
+ * all-ones, a half-trained-link read). XDP property requests carry dst_uuid
+ * and the healthy peer ignores a mismatch, so every read fails. The PROPERTIES
+ * state re-queued itself for 87 minutes (one "failed read XDomain properties"
+ * per ~22 s budget cycle) and never recovered; recovery came only from an
+ * external link edge at 15:33. The same loop absorbs ANY stale identity: a
+ * peer that reboots into a different UUID while the survivor's cached identity
+ * is wrong keeps failing reads forever.
+ *
+ * Upstream already has the right primitive: tb_xdomain_get_uuid() detects a
+ * changed remote UUID and marks the XDomain is_unplugged for the connection
+ * manager to replace. The bug is that the PROPERTIES retry loop NEVER goes
+ * back through UUID verification, so that primitive is unreachable.
+ *
+ * ident_tick() is kept in LOCKSTEP with tb_xdomain_state_work(): while the
+ * driver re-queues PROPERTIES blindly, the model must too (recovery test goes
+ * red). The fix routes PROPERTIES exhaustion back through the UUID state; a
+ * UUID mismatch marks the xd unplugged and the CM reconciliation replaces it.
+ */
+#define IDENT_STATE_PROPERTIES	0
+#define IDENT_STATE_UUID	1
+
+struct ident_peer {
+	u32 true_uuid;		/* identity the peer answers with */
+	bool answers;		/* peer booted/responsive */
+};
+
+struct ident_xd {
+	u32 cached_uuid;	/* xd->remote_uuid */
+	int state;		/* IDENT_STATE_* */
+	bool enumerated;	/* properties read; services probed */
+	bool unplugged;		/* xd->is_unplugged: waiting for CM replace */
+};
+
+/* XDP properties request: dst_uuid must match or the peer ignores it. */
+static inline bool ident_properties_read(const struct ident_xd *xd,
+					 const struct ident_peer *peer)
+{
+	return peer->answers && xd->cached_uuid == peer->true_uuid;
+}
+
+/*
+ * One PROPERTIES/UUID budget cycle, lockstep with tb_xdomain_state_work():
+ * a failed PROPERTIES budget re-verifies the cached identity via the UUID
+ * state; tb_xdomain_get_uuid() marks a mismatch is_unplugged (-ENODEV).
+ */
+static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer)
+{
+	if (xd->enumerated || xd->unplugged)
+		return;
+
+	switch (xd->state) {
+	case IDENT_STATE_PROPERTIES:
+		if (ident_properties_read(xd, peer))
+			xd->enumerated = true;
+		else
+			xd->state = IDENT_STATE_UUID;	/* re-verify identity */
+		break;
+	case IDENT_STATE_UUID:
+		if (!peer->answers)
+			break;			/* re-queue UUID, not terminal */
+		if (xd->cached_uuid != peer->true_uuid)
+			xd->unplugged = true;	/* tb_xdomain_get_uuid mismatch */
+		else
+			xd->state = IDENT_STATE_PROPERTIES;
+		break;
+	}
+}
+
+/*
+ * The CM replacing an is_unplugged XDomain (synthesized unplug + rescan of the
+ * still-up port): the fresh XDomain reads the peer's real UUID.
+ */
+static inline void ident_cm_replace(struct ident_xd *xd,
+				    const struct ident_peer *peer)
+{
+	if (!xd->unplugged)
+		return;
+	xd->cached_uuid = peer->true_uuid;
+	xd->state = IDENT_STATE_PROPERTIES;
+	xd->unplugged = false;
+}
+
+static inline bool ident_run(struct ident_xd *xd, const struct ident_peer *peer,
+			     int cycles, bool cm_reconciles)
+{
+	while (cycles-- > 0) {
+		ident_tick(xd, peer);
+		if (cm_reconciles)
+			ident_cm_replace(xd, peer);
+		if (xd->enumerated)
+			return true;
+	}
+	return xd->enumerated;
+}
+
 #endif /* _TB_NEGOTIATION_MODEL_H */

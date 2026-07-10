@@ -49,6 +49,27 @@ MODULE_PARM_DESC(asym_threshold,
 		"threshold (Mb/s) when to Gen 4 switch link symmetry. 0 disables. (default: "
 		__MODULE_STRING(TB_ASYM_THRESHOLD) ")");
 
+/*
+ * Hot events are edge-triggered and can be LOST (2026-07-09 appmana-019<->008:
+ * the survivor received neither the unplug nor any later plug for its port;
+ * the lane adapter read UNPLUGGED while the stale XDomain stayed registered
+ * for 12 hours). Reconciliation periodically compares each root null port's
+ * hardware lane state against the software topology and synthesizes the
+ * missing hotplug edge, so the CM converges without an event.
+ */
+#define TB_RECONCILE_INTERVAL_MS	2000
+
+static unsigned int port_reconcile_ms = TB_RECONCILE_INTERVAL_MS;
+module_param(port_reconcile_ms, uint, 0644);
+MODULE_PARM_DESC(port_reconcile_ms,
+		 "interval (ms) for reconciling root port lane state with the software topology, 0 disables (default: "
+		 __MODULE_STRING(TB_RECONCILE_INTERVAL_MS) ")");
+
+static bool port_retrain = true;
+module_param(port_retrain, bool, 0644);
+MODULE_PARM_DESC(port_retrain,
+		 "toggle lane disable to re-arm detection on unplugged root ports (default: true)");
+
 /**
  * struct tb_cm - Simple Thunderbolt connection manager
  * @tunnel_list: List of active tunnels
@@ -59,6 +80,8 @@ MODULE_PARM_DESC(asym_threshold,
  *		    after cfg has been paused.
  * @remove_work: Work used to remove any unplugged routers after
  *		 runtime resume
+ * @reconcile_work: Periodic reconciliation of root port lane state with
+ *		    the software topology (synthesizes lost hotplug edges)
  * @groups: Bandwidth groups used in this domain.
  */
 struct tb_cm {
@@ -66,6 +89,7 @@ struct tb_cm {
 	struct list_head dp_resources;
 	bool hotplug_active;
 	struct delayed_work remove_work;
+	struct delayed_work reconcile_work;
 	struct tb_bandwidth_group groups[MAX_GROUPS];
 };
 
@@ -2522,6 +2546,142 @@ out:
 	kfree(ev);
 }
 
+/*
+ * Re-arm lane detection on an unplugged port by toggling lane disable on both
+ * lane adapters (the same recipe icm_reset_phy_port() uses at ICM init). The
+ * 2026-07-10 019<->008 segment sat with BOTH ends' lane adapters reading
+ * UNPLUGGED (state 7) and the CM-lock bit still set through repeated warm
+ * reboots of both endpoints, with a cable present and both routers powered:
+ * detection itself was latched off. A port that is genuinely empty just
+ * re-arms harmlessly. Deliberately-disabled ports (TB_PORT_DISABLED) are left
+ * alone.
+ */
+static void tb_port_kick_detection(struct tb_port *port)
+{
+	if (!port_retrain)
+		return;
+	if (!tb_port_is_null(port) || tb_is_upstream_port(port))
+		return;
+	if (tb_port_state(port) != TB_PORT_UNPLUGGED)
+		return;
+
+	tb_port_dbg(port, "re-arming lane detection on unplugged port\n");
+	if (tb_port_disable(port))
+		return;
+	tb_port_disable(port->dual_link_port);
+	usleep_range(10, 100);
+	tb_port_enable(port);
+	tb_port_enable(port->dual_link_port);
+}
+
+/*
+ * tb_reconcile_work() - converge software topology to hardware lane state
+ *
+ * tb_handle_hotplug() is edge-triggered only. When a hot event is lost (the
+ * router's port state machine wedges, the event is absorbed during
+ * init/resume, or the peer dies without a detectable edge) the software
+ * topology diverges from the hardware FOREVER: a stale XDomain keeps its
+ * services (and usb4_rdma ib_device) registered against a dead link, and a
+ * trained link stays un-enumerated. Observed live 2026-07-09/10 on
+ * appmana-008: zero kernel events across its neighbour 019's reboot while the
+ * port read UNPLUGGED.
+ *
+ * Poll each root null port and synthesize the missing edge through the normal
+ * hotplug path, so all teardown/scan logic and locking is reused:
+ *
+ *   - XDomain/remote present but lane UNPLUGGED   -> synthesized unplug
+ *   - XDomain condemned (xd->is_unplugged, e.g. a UUID re-verification
+ *     mismatch from tb_xdomain_state_work())      -> synthesized unplug
+ *   - lane UP but nothing enumerated              -> synthesized plug
+ *
+ * Kept in lockstep with cm_reconcile() in tests/negotiation_model.h; KUnit
+ * tb_test_cm_reconcile_lost_unplug / tb_test_cm_reconcile_lost_plug.
+ */
+static void tb_reconcile_work(struct work_struct *work)
+{
+	struct tb_cm *tcm = container_of(work, struct tb_cm,
+					 reconcile_work.work);
+	struct tb *tb = tcm_to_tb(tcm);
+	struct tb_port *port;
+	bool active;
+
+	pm_runtime_get_sync(&tb->dev);
+
+	mutex_lock(&tb->lock);
+	active = tcm->hotplug_active && tb->root_switch;
+	if (!active)
+		goto out_unlock;
+
+	tb_switch_for_each_port(tb->root_switch, port) {
+		bool present, gone;
+		int state;
+
+		if (!tb_port_is_null(port) || tb_is_upstream_port(port))
+			continue;
+		if (!port->cap_phy || port->disabled)
+			continue;
+		/* Only the primary lane adapter owns remote/xdomain. */
+		if (port->dual_link_port && port->link_nr)
+			continue;
+
+		state = tb_port_state(port);
+		if (state < 0)
+			continue;
+
+		present = state == TB_PORT_UP ||
+			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
+		gone = state == TB_PORT_UNPLUGGED;
+
+		if ((port->xdomain || port->remote) &&
+		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
+			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
+				continue;
+			port->reconcile_synth = TB_RECONCILE_UNPLUG;
+			tb_port_warn(port,
+				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
+				     port->xdomain ? "XDomain present" :
+						     "router present",
+				     state);
+			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
+					 true);
+			/*
+			 * The segment may be detection-wedged (both ends
+			 * UNPLUGGED with a live cable); give the PHY a fresh
+			 * edge so the peer's port sees one too.
+			 */
+			if (gone)
+				tb_port_kick_detection(port);
+		} else if (!port->xdomain && !port->remote && present) {
+			if (port->reconcile_synth == TB_RECONCILE_PLUG)
+				continue;
+			port->reconcile_synth = TB_RECONCILE_PLUG;
+			tb_port_warn(port,
+				     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
+				     state);
+			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
+					 false);
+		} else {
+			port->reconcile_synth = TB_RECONCILE_NONE;
+		}
+	}
+
+out_unlock:
+	mutex_unlock(&tb->lock);
+
+	pm_runtime_mark_last_busy(&tb->dev);
+	pm_runtime_put_autosuspend(&tb->dev);
+
+	/*
+	 * Self-requeue only while hotplug is armed: tb_stop() runs under
+	 * tb->lock, so it can only cancel_delayed_work() (non-sync); the
+	 * gate guarantees no new timer is armed after stop/suspend, keeping
+	 * destroy_workqueue() safe.
+	 */
+	if (active && port_reconcile_ms)
+		queue_delayed_work(tb->wq, &tcm->reconcile_work,
+				   msecs_to_jiffies(port_reconcile_ms));
+}
+
 static int tb_alloc_dp_bandwidth(struct tb_tunnel *tunnel, int *requested_up,
 				 int *requested_down)
 {
@@ -2928,6 +3088,7 @@ static void tb_stop(struct tb *tb)
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
 
+	cancel_delayed_work(&tcm->reconcile_work);
 	cancel_delayed_work(&tcm->remove_work);
 	/* tunnels are only present after everything has been initialized */
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
@@ -2979,6 +3140,7 @@ static int tb_start(struct tb *tb, bool reset)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	bool discover = true;
+	struct tb_port *port;
 	int ret;
 
 	tb->root_switch = tb_switch_alloc(tb, &tb->dev, 0);
@@ -3066,6 +3228,23 @@ static int tb_start(struct tb *tb, bool reset)
 	 * whose peer booted slowly (appmana-009 never saw appmana-020).
 	 */
 	tb_scan_switch(tb->root_switch);
+
+	/*
+	 * A port whose peer is present but whose segment came up
+	 * detection-wedged (both ends UNPLUGGED through warm reboots,
+	 * 2026-07-10 019<->008) never generates a plug event at all. Re-arm
+	 * detection on every still-unplugged root port once at start; a
+	 * genuinely empty port re-arms harmlessly.
+	 */
+	tb_switch_for_each_port(tb->root_switch, port)
+		if (tb_port_is_null(port) && !tb_is_upstream_port(port) &&
+		    port->cap_phy)
+			tb_port_kick_detection(port);
+
+	/* Level-triggered fallback for lost hot events from here on. */
+	if (port_reconcile_ms)
+		queue_delayed_work(tb->wq, &tcm->reconcile_work,
+				   msecs_to_jiffies(port_reconcile_ms));
 	return 0;
 }
 
@@ -3078,6 +3257,7 @@ static int tb_suspend_noirq(struct tb *tb)
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, false);
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
+	cancel_delayed_work(&tcm->reconcile_work);
 	tb_dbg(tb, "suspend finished\n");
 
 	return 0;
@@ -3171,6 +3351,9 @@ static int tb_resume_noirq(struct tb *tb)
 	tb_switch_enter_redrive(tb->root_switch);
 	 /* Allow tb_handle_hotplug to progress events */
 	tcm->hotplug_active = true;
+	if (port_reconcile_ms)
+		queue_delayed_work(tb->wq, &tcm->reconcile_work,
+				   msecs_to_jiffies(port_reconcile_ms));
 	tb_dbg(tb, "resume finished\n");
 
 	return 0;
@@ -3240,6 +3423,7 @@ static int tb_runtime_suspend(struct tb *tb)
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, true);
 	tcm->hotplug_active = false;
+	cancel_delayed_work(&tcm->reconcile_work);
 	mutex_unlock(&tb->lock);
 
 	return 0;
@@ -3271,6 +3455,9 @@ static int tb_runtime_resume(struct tb *tb)
 		tb_tunnel_activate(tunnel);
 	tb_switch_enter_redrive(tb->root_switch);
 	tcm->hotplug_active = true;
+	if (port_reconcile_ms)
+		queue_delayed_work(tb->wq, &tcm->reconcile_work,
+				   msecs_to_jiffies(port_reconcile_ms));
 	mutex_unlock(&tb->lock);
 
 	/*
@@ -3388,6 +3575,7 @@ struct tb *tb_probe(struct tb_nhi *nhi)
 	INIT_LIST_HEAD(&tcm->tunnel_list);
 	INIT_LIST_HEAD(&tcm->dp_resources);
 	INIT_DELAYED_WORK(&tcm->remove_work, tb_remove_work);
+	INIT_DELAYED_WORK(&tcm->reconcile_work, tb_reconcile_work);
 	tb_init_bandwidth_groups(tcm);
 
 	tb_dbg(tb, "using software connection manager\n");

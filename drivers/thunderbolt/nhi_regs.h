@@ -134,6 +134,21 @@ struct ring_desc {
 #define REG_FW_STS_ICM_EN_INVERT	BIT(1)
 #define REG_FW_STS_ICM_EN		BIT(0)
 
+/*
+ * Is the ICM firmware running, judged from a raw REG_FW_STS read? Single
+ * source for icm_firmware_running() and the KUnit model.
+ *
+ * A dead or hung NHI reads all-ones from MMIO, which spuriously asserts
+ * ICM_EN (and every other bit). Treating that as "firmware running" routes a
+ * wedged controller into the firmware connection manager, where DRIVER_READY
+ * can only time out and the whole domain is lost with a misleading "failed to
+ * send driver ready to ICM". Treat ~0 as "no firmware".
+ */
+static inline bool tb_icm_fw_sts_running(u32 fw_sts)
+{
+	return fw_sts != (u32)~0U && (fw_sts & REG_FW_STS_ICM_EN);
+}
+
 /* ICL NHI VSEC registers */
 
 /* FW ready */

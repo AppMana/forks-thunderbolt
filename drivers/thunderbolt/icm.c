@@ -438,7 +438,7 @@ static bool icm_firmware_running(const struct tb_nhi *nhi)
 	u32 val;
 
 	val = ioread32(nhi->iobase + REG_FW_STS);
-	return !!(val & REG_FW_STS_ICM_EN);
+	return tb_icm_fw_sts_running(val);
 }
 
 static void icm_xdomain_activated(struct tb_xdomain *xd, bool activated)
@@ -2748,8 +2748,27 @@ static int icm_driver_ready(struct tb *tb)
 
 	ret = __icm_driver_ready(tb, &tb->security_level, &icm->proto_version,
 				 &tb->nboot_acl, &icm->rpm);
-	if (ret)
+	if (ret) {
+		/*
+		 * The wedged-but-running ICM: REG_FW_STS still advertises
+		 * ICM_EN, so icm_firmware_start() skipped the reset, but the
+		 * firmware's message loop is dead and DRIVER_READY timed out.
+		 * Do NOT force icm_firmware_reset() here: on Alpine/Titan
+		 * Ridge the NVM authentication asserting NVM_AUTH_DONE is
+		 * performed only by the on-die mask ROM at a true chip reset
+		 * (AppMana/intel-thunderbolt-firmwares,
+		 * out/ICM_8051_FINDINGS.md), so a warm ICM_EN_CPU restart
+		 * comes back UNAUTHENTICATED -- it converts "wedged" into an
+		 * equally terminal "not authenticated" plus a multi-second
+		 * stall (the reverted tbfix 1.7/1.8 experiment). Tell the
+		 * operator the truth instead of a generic timeout. KUnit:
+		 * tb_test_icm_wedged_running.
+		 */
+		if (icm_firmware_running(tb->nhi))
+			tb_err(tb,
+			       "ICM advertises running (ICM_EN) but does not respond; wedged firmware. A warm reset cannot re-authenticate this controller -- a board COLD power cycle is required\n");
 		return ret;
+	}
 
 	/*
 	 * Make sure the number of supported preboot ACL matches what we
