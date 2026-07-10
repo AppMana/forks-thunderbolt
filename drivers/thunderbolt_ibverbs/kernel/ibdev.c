@@ -428,6 +428,14 @@ struct tbv_mr {
 	struct ib_mr base;
 	struct tbv_state *owner;
 	struct ib_umem *umem;
+	/*
+	 * The DMA device ib_umem_get() persistently mapped the umem sgt to
+	 * (pd->device->dma_device == the ring NHI device). A zero-copy send
+	 * whose rail uses this same device derives frame DMA addresses from
+	 * the existing mapping (sg_dma_address) instead of dma_map_page per
+	 * frame. NULL for a kernel DMA MR (no umem).
+	 */
+	struct device *dma_dev;
 	refcount_t refs;
 	struct work_struct free_work;
 	u64 start;
@@ -581,6 +589,13 @@ struct tbv_send_page_stream {
 	u32 total_len;
 	u32 max_chunk;
 	int nsegs;
+	/*
+	 * DMA device of the rail this stream posts to. When a segment's MR was
+	 * dma-mapped (ib_umem_get) to this same device, each frame's DMA
+	 * address comes from the persistent mapping (no per-frame map/unmap);
+	 * a different device forces the churning dma_map_page fallback.
+	 */
+	struct device *dma_dev;
 };
 
 struct tbv_apple_send_fill {
@@ -614,6 +629,8 @@ static int tbv_send_read_response_ctx(struct tbv_read_resp_ctx *ctx);
 static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 				   struct page **page_out,
 				   u32 *page_off_out, u32 *len_out);
+static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
+				  dma_addr_t *dma_out, u32 *len_out);
 static int tbv_rx_copy_to_wqe(struct tbv_state *state,
 			      const struct tbv_recv_wqe *wqe, u32 offset,
 			      const void *payload, u32 len, u32 *delivered);
@@ -770,6 +787,35 @@ u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
 	if (frame_size && to_page_end > frame_size)
 		to_page_end = frame_size;
 	return to_page_end < payload_len ? payload_len : to_page_end;
+}
+
+bool tbv_zcopy_use_persistent(const void *mr_dma_dev, const void *path_dma_dev)
+{
+	return mr_dma_dev && mr_dma_dev == path_dma_dev;
+}
+
+int tbv_dma_sgt_locate(const u32 *seg_dma_lens, u32 nsegs, u32 offset,
+		       u32 max_len, u32 *seg_idx, u32 *seg_off, u32 *chunk)
+{
+	u32 i;
+
+	if (!seg_dma_lens || !seg_idx || !seg_off || !chunk || !max_len)
+		return -EINVAL;
+
+	for (i = 0; i < nsegs; i++) {
+		u32 seg_len = seg_dma_lens[i];
+
+		if (offset >= seg_len) {
+			offset -= seg_len;
+			continue;
+		}
+		*seg_idx = i;
+		*seg_off = offset;
+		*chunk = min(seg_len - offset, max_len);
+		return 0;
+	}
+
+	return -EFAULT;
 }
 
 static bool tbv_backend_is_apple(enum tbv_backend_type backend)
@@ -4614,10 +4660,12 @@ static void tbv_send_page_stream_done(void *ctx, int status)
 
 static int tbv_send_page_stream_next(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
+				     dma_addr_t *dma, bool *premapped,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx)
 {
 	struct tbv_send_page_stream *stream = ctx;
+	struct tbv_state *state = stream->send->tqp->owner;
 	u32 skipped = 0;
 	int i;
 
@@ -4637,21 +4685,45 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 		remaining = min_t(u32, seg->length - seg_off,
 				  stream->total_len - stream->offset);
 		remaining = min_t(u32, remaining, stream->max_chunk);
-		ret = tbv_umem_page_from_addr(seg->mr, seg->addr + seg_off,
-					      remaining, page, page_off,
-					      length);
-		if (ret)
-			return ret;
-		/*
-		 * The eligibility gate (tbv_send_segments_split_clean) admits
-		 * only page-aligned sources, so every zcopy frame must start at
-		 * page offset 0 -- the sole shape the NHI transmits without a
-		 * hardware CRC error. A nonzero offset here means a geometry
-		 * regression slipped past the gate; fail the send loudly rather
-		 * than DMA a frame the receiver will drop as corrupt.
-		 */
-		if (WARN_ON_ONCE(*page_off != 0))
-			return -EPROTO;
+
+		if (tbv_zcopy_use_persistent(seg->mr->dma_dev,
+					     stream->dma_dev)) {
+			/*
+			 * Rail uses the device the MR was already dma-mapped
+			 * to: take the frame's DMA address straight from the
+			 * persistent umem mapping -- NO dma_map_page. This is
+			 * the fix: it removes the per-frame IOTLB churn that
+			 * aborted transfers under lazy AMD-Vi invalidation and
+			 * corrupted the wire CRC.
+			 */
+			ret = tbv_umem_dma_from_addr(seg->mr,
+						     seg->addr + seg_off,
+						     remaining, dma, length);
+			if (ret)
+				return ret;
+			*premapped = true;
+			atomic64_inc(&state->data_wr_zcopy_mr_mapped);
+		} else {
+			/*
+			 * Rail on a different NHI/DMA device than the MR was
+			 * mapped to (multi-controller node): the persistent
+			 * IOVAs are foreign here, so fall back to per-frame
+			 * dma_map_page in tbv_path_send_page_stream. Counted so
+			 * a nonzero _remapped on hardware flags the churn is
+			 * back. The gate admits only page-aligned sources, so
+			 * page_off must be 0.
+			 */
+			ret = tbv_umem_page_from_addr(seg->mr,
+						      seg->addr + seg_off,
+						      remaining, page, page_off,
+						      length);
+			if (ret)
+				return ret;
+			if (WARN_ON_ONCE(*page_off != 0))
+				return -EPROTO;
+			*premapped = false;
+			atomic64_inc(&state->data_wr_zcopy_remapped);
+		}
 
 		stream->offset += *length;
 		refcount_inc(&stream->refs);
@@ -4926,6 +4998,7 @@ static int tbv_native_send_ctx_post_split(struct tbv_send_ctx *ctx,
 		stream->total_len = off + len;
 		stream->max_chunk = TBV_NATIVE_DATA_FRAME_SIZE;
 		stream->nsegs = ctx->nsegs;
+		stream->dma_dev = tb_ring_dma_device(path->tx_ring);
 		tbv_get_send_segments(stream->segs, ctx->segs, ctx->nsegs);
 
 		tbv_send_ctx_get(ctx);
@@ -5123,6 +5196,7 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			stream->total_len = ctx->total_len;
 			stream->max_chunk = TBV_NATIVE_DATA_FRAME_SIZE;
 			stream->nsegs = ctx->nsegs;
+			stream->dma_dev = tb_ring_dma_device(path->tx_ring);
 			tbv_get_send_segments(stream->segs, ctx->segs,
 					      ctx->nsegs);
 
@@ -7312,6 +7386,59 @@ static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 		*page_out = pfn_to_page(page_to_pfn(sg_page(sg)) +
 					(seg_off >> PAGE_SHIFT));
 		*page_off_out = page_off;
+		*len_out = chunk;
+		return 0;
+	}
+
+	return -EFAULT;
+}
+
+/*
+ * Return the DMA address of @addr from the MR's PERSISTENT umem mapping (set up
+ * by ib_umem_get) plus the contiguous DMA bytes available there (capped at
+ * @max_len and one frame). No dma_map/unmap: the umem stayed mapped since
+ * registration, so there is no per-frame IOTLB churn. The DMA sgt is IOMMU-
+ * coalesced (fewer, larger segments than the page list); the arithmetic
+ * matches tbv_dma_sgt_locate() (kunit-pinned). Caller must ensure the send's
+ * rail uses mr->dma_dev (tbv_zcopy_use_persistent).
+ */
+static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
+				  dma_addr_t *dma_out, u32 *len_out)
+{
+	struct sg_table *sgt = &mr->umem->sgt_append.sgt;
+	struct scatterlist *sg;
+	size_t offset;
+	u64 end;
+	u64 mr_end;
+	unsigned int i;
+
+	if (!max_len)
+		return -EINVAL;
+	if (mr->dma_mr)
+		return -EOPNOTSUPP;
+	if (check_add_overflow(addr, (u64)max_len, &end))
+		return -EINVAL;
+	if (check_add_overflow(mr->start, mr->length, &mr_end))
+		return -EINVAL;
+	if (addr < mr->start || end > mr_end)
+		return -EFAULT;
+
+	offset = ib_umem_offset(mr->umem) + addr - mr->start;
+	for_each_sgtable_dma_sg(sgt, sg, i) {
+		unsigned int seg_len = sg_dma_len(sg);
+		u32 chunk;
+
+		if (offset >= seg_len) {
+			offset -= seg_len;
+			continue;
+		}
+
+		chunk = min_t(u32, seg_len - offset, max_len);
+		chunk = min_t(u32, chunk, TBV_NATIVE_DATA_FRAME_SIZE);
+		if (!chunk)
+			return -EFAULT;
+
+		*dma_out = sg_dma_address(sg) + offset;
 		*len_out = chunk;
 		return 0;
 	}
@@ -10036,6 +10163,8 @@ static struct ib_mr *tbv_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->length = length;
 	mr->virt_addr = virt_addr;
 	mr->access = access;
+	/* the device ib_umem_get() dma_map'd the sgt to (see struct tbv_mr) */
+	mr->dma_dev = pd->device->dma_device;
 	ret = tbv_mr_publish(mr, pd);
 	if (ret) {
 		ib_umem_release(mr->umem);

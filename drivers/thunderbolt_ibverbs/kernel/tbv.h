@@ -622,6 +622,15 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_retransmit;
 	atomic64_t data_wr_zcopy_frames;
 	atomic64_t data_wr_zcopy_page_suspect;
+	/*
+	 * Persistent-mapping confirmation: _mr_mapped counts frames served
+	 * from the MR's existing umem DMA mapping (no per-frame map/unmap),
+	 * _remapped counts frames that fell back to a per-frame dma_map_page
+	 * because the send's rail used a different DMA device. Expect
+	 * _mr_mapped ~= _frames and _remapped ~= 0 once the churn is gone.
+	 */
+	atomic64_t data_wr_zcopy_mr_mapped;
+	atomic64_t data_wr_zcopy_remapped;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
@@ -783,8 +792,16 @@ struct tb_ring;
 struct tb_xdomain;
 typedef void (*tbv_path_tx_done_fn)(void *ctx, int status);
 typedef int (*tbv_path_tx_fill_fn)(void *ctx, void *dst, u32 len);
+/*
+ * Yield the next zero-copy TX fragment. When *premapped is set, *dma is a DMA
+ * address from a PERSISTENT mapping (the MR's umem) and the path must NOT
+ * dma_map/unmap it -- page/page_off are unused. Otherwise the path
+ * dma_map_page(*page, *page_off, ...) itself and unmaps on completion (the
+ * legacy churning fallback for a rail on a different DMA device).
+ */
 typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
+				     dma_addr_t *dma, bool *premapped,
 				     tbv_path_tx_done_fn *done,
 				     void **done_ctx);
 #define TBV_PATH_SEND_CONTROL	BIT(0)
@@ -980,6 +997,28 @@ bool tbv_zcopy_split_page_aligned(u32 first_page_off, u32 split_unit,
  */
 u32 tbv_zcopy_frame_map_len(u32 page_off, u32 payload_len, u32 page_size,
 			    u32 frame_size, bool full_page);
+/*
+ * A zero-copy send derives its frame DMA addresses from the MR's PERSISTENT
+ * umem mapping (ib_umem_get already dma_map'd the sgt to the ib_device's DMA
+ * device) only when the send's rail uses that same DMA device. Per-frame
+ * dma_map_page/dma_unmap_page (191k/run) under lazy AMD-Vi IOTLB invalidation
+ * recycles IOVAs before the flush, and a transfer that catches a torn-down
+ * translation aborts mid-read -> a wire frame that fails its CRC (0.2.26
+ * hardware finding, case 2). Reusing the persistent mapping removes the churn
+ * entirely; a rail on a different NHI (different DMA device) falls back to the
+ * framed copy. Exposed for kunit.
+ */
+bool tbv_zcopy_use_persistent(const void *mr_dma_dev, const void *path_dma_dev);
+/*
+ * Locate a byte offset within a DMA-mapped scatter/gather table (coalesced
+ * segments, so fewer/larger than the CPU page list). Returns the segment
+ * index, the intra-segment byte offset, and the contiguous chunk available
+ * from there (capped at max_len), or -EFAULT if offset is past the mapped
+ * bytes. The real walk (tbv_umem_dma_from_addr) reads sg_dma_address/
+ * sg_dma_len from those segments; this pins the arithmetic. Exposed for kunit.
+ */
+int tbv_dma_sgt_locate(const u32 *seg_dma_lens, u32 nsegs, u32 offset,
+		       u32 max_len, u32 *seg_idx, u32 *seg_off, u32 *chunk);
 /*
  * Byte range [start, end) a retransmit must cover. A NAK carries the missing
  * range; opcodes whose receive path cannot buffer past a hole (SEND streaming,

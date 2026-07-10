@@ -2557,17 +2557,21 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		struct page *page = NULL;
 		void *done_ctx = NULL;
 		bool last;
-		dma_addr_t dma;
+		bool premapped = false;
+		dma_addr_t dma = 0;
 		u32 page_off = 0;
 		u32 len = 0;
-		u32 map_len;
+		u32 map_len = 0;
 
-		ret = next(next_ctx, &page, &page_off, &len, &done, &done_ctx);
+		ret = next(next_ctx, &page, &page_off, &len, &dma, &premapped,
+			   &done, &done_ctx);
 		if (ret)
 			goto err_release;
-		if (!page || !len || len > max_raw_payload ||
+		if (!len || len > max_raw_payload ||
 		    len > total_length - prepared ||
-		    page_off > PAGE_SIZE || len > PAGE_SIZE - page_off) {
+		    (!premapped &&
+		     (!page || page_off > PAGE_SIZE ||
+		      len > PAGE_SIZE - page_off))) {
 			if (done)
 				done(done_ctx, -EINVAL);
 			ret = -EINVAL;
@@ -2576,13 +2580,33 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 
 		last = prepared + len == total_length;
 
+		if (premapped) {
+			/*
+			 * DMA address from the MR's persistent umem mapping.
+			 * No dma_map/unmap here -- this is the whole point: it
+			 * eliminates the per-frame IOTLB churn that corrupted
+			 * frames under lazy AMD-Vi invalidation. unmap_dma is
+			 * false so completion never touches this address.
+			 */
+			packet = tbv_path_alloc_zcopy_packet(path, dma, len, 0,
+							     false, done,
+							     done_ctx);
+			if (!packet) {
+				if (done)
+					done(done_ctx, -ENOMEM);
+				ret = -ENOMEM;
+				goto err_release;
+			}
+			goto have_packet;
+		}
+
 		/*
-		 * Map to the page boundary, not just the transmitted len, so an
-		 * NHI read that rounds up past frame->size cannot fault the tail
-		 * of the page (the copied path always maps a full 4096 buffer);
-		 * frame->size below still transmits exactly len. Only page-
-		 * aligned sources reach here (tbv_send_segments_split_clean), so
-		 * page_off is 0 and map_len is a whole page.
+		 * Fallback (rail on a different DMA device than the MR was
+		 * mapped to): map per frame. Map to the page boundary, not just
+		 * the transmitted len, so an NHI read that rounds up past
+		 * frame->size cannot fault the tail of the page (the copied
+		 * path always maps a full 4096 buffer); frame->size below still
+		 * transmits exactly len.
 		 */
 		map_len = tbv_zcopy_frame_map_len(page_off, len, PAGE_SIZE,
 						  TBV_DATA_FRAME_SIZE,
@@ -2605,6 +2629,7 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 			ret = -ENOMEM;
 			goto err_release;
 		}
+have_packet:
 		packet->owner_ctx = meta_done_ctx ? meta_done_ctx : done_ctx;
 		packet->raw_stream_end = last;
 		list_add_tail(&packet->node, &packets);

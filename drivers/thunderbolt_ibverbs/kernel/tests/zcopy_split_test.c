@@ -411,12 +411,80 @@ static void tbv_zcopy_frame_map_len_covers_page(struct kunit *test)
 		tbv_zcopy_frame_map_len(1000, 100, 4096, 4096, true), 3096u);
 }
 
+static void tbv_zcopy_persistent_device_match(struct kunit *test)
+{
+	int a;
+	int b;
+
+	/* same DMA device -> use the MR's persistent umem mapping */
+	KUNIT_EXPECT_TRUE(test, tbv_zcopy_use_persistent(&a, &a));
+	/* different device (rail on another NHI) -> must fall back */
+	KUNIT_EXPECT_FALSE(test, tbv_zcopy_use_persistent(&a, &b));
+	/* an unmapped MR (no device) is never persistent */
+	KUNIT_EXPECT_FALSE(test, tbv_zcopy_use_persistent(NULL, &a));
+	KUNIT_EXPECT_FALSE(test, tbv_zcopy_use_persistent(NULL, NULL));
+}
+
+static void tbv_dma_sgt_locate_walks_coalesced(struct kunit *test)
+{
+	/* one big IOMMU-coalesced segment */
+	static const u32 one[] = { 8192u };
+	/* two segments (a boundary the IOMMU did not merge) */
+	static const u32 two[] = { 4096u, 4096u };
+	u32 seg_idx;
+	u32 seg_off;
+	u32 chunk;
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(one, 1, 0, 4096, &seg_idx, &seg_off, &chunk),
+		0);
+	KUNIT_EXPECT_EQ(test, seg_idx, 0u);
+	KUNIT_EXPECT_EQ(test, seg_off, 0u);
+	KUNIT_EXPECT_EQ(test, chunk, 4096u);
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(one, 1, 4096, 4096, &seg_idx, &seg_off,
+				   &chunk), 0);
+	KUNIT_EXPECT_EQ(test, seg_idx, 0u);
+	KUNIT_EXPECT_EQ(test, seg_off, 4096u);
+	KUNIT_EXPECT_EQ(test, chunk, 4096u);
+
+	/* a chunk near the end of a segment is capped to what remains */
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(one, 1, 8000, 4096, &seg_idx, &seg_off,
+				   &chunk), 0);
+	KUNIT_EXPECT_EQ(test, chunk, 192u);
+
+	/* second segment: offset lands in it with a fresh intra-offset */
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(two, 2, 4096, 4096, &seg_idx, &seg_off,
+				   &chunk), 0);
+	KUNIT_EXPECT_EQ(test, seg_idx, 1u);
+	KUNIT_EXPECT_EQ(test, seg_off, 0u);
+	KUNIT_EXPECT_EQ(test, chunk, 4096u);
+
+	/* a window that would straddle the segment boundary is capped */
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(two, 2, 5000, 4096, &seg_idx, &seg_off,
+				   &chunk), 0);
+	KUNIT_EXPECT_EQ(test, seg_idx, 1u);
+	KUNIT_EXPECT_EQ(test, seg_off, 904u);
+	KUNIT_EXPECT_EQ(test, chunk, 3192u);
+
+	/* offset past the mapped bytes: -EFAULT */
+	KUNIT_EXPECT_NE(test,
+		tbv_dma_sgt_locate(two, 2, 8192, 4096, &seg_idx, &seg_off,
+				   &chunk), 0);
+}
+
 static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_zcopy_mode_selection),
 	KUNIT_CASE(tbv_split_window_framing),
 	KUNIT_CASE(tbv_split_geometry_identical_to_copied),
 	KUNIT_CASE(tbv_split_page_alignment_gate),
 	KUNIT_CASE(tbv_zcopy_frame_map_len_covers_page),
+	KUNIT_CASE(tbv_zcopy_persistent_device_match),
+	KUNIT_CASE(tbv_dma_sgt_locate_walks_coalesced),
 	KUNIT_CASE(tbv_write_shape_resolver_prefers_known_count),
 	KUNIT_CASE(tbv_raw_desync_header_is_detected),
 	{}

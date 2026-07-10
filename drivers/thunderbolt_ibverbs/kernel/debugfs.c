@@ -171,6 +171,10 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_frames));
 	seq_printf(s, "data_wr_zcopy_page_suspect: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_page_suspect));
+	seq_printf(s, "data_wr_zcopy_mr_mapped: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_mr_mapped));
+	seq_printf(s, "data_wr_zcopy_remapped: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_remapped));
 	seq_printf(s, "data_wr_copy_error: %lld\n",
 		   atomic64_read(&state->data_wr_copy_error));
 	seq_printf(s, "data_wr_path_send: %lld\n",
