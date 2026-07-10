@@ -689,6 +689,8 @@ struct tbv_state {
 	 */
 	struct mutex rail_register_lock;
 	struct work_struct ibdev_netdev_retry_work;
+	/* Reaps netdevs unbound from notifier context (RTNL held there). */
+	struct work_struct ibdev_netdev_reap_work;
 	/*
 	 * Up-event gate, owned by rail_register_lock. Set to true by
 	 * tbv_ibdev_start() before any rising-edge events may publish; cleared
