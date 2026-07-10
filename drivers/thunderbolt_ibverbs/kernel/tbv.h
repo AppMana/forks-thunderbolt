@@ -623,6 +623,15 @@ struct tbv_state {
 	atomic64_t data_wr_zcopy_frames;
 	atomic64_t data_wr_zcopy_page_suspect;
 	/*
+	 * Sender frame-class counts, paired with the receiver's crc_error
+	 * split so one run says which class corrupts: _hdr = the 48-byte
+	 * staged header frame per window, _payload_full = a full 4096 zcopy
+	 * payload frame, _payload_tail = a sub-4096 last-window payload frame.
+	 */
+	atomic64_t data_wr_zcopy_hdr;
+	atomic64_t data_wr_zcopy_payload_full;
+	atomic64_t data_wr_zcopy_payload_tail;
+	/*
 	 * Persistent-mapping confirmation: _mr_mapped counts frames served
 	 * from the MR's existing umem DMA mapping (no per-frame map/unmap),
 	 * _remapped counts frames that fell back to a per-frame dma_map_page
@@ -684,6 +693,16 @@ struct tbv_state {
 	/* NHI-reported per-frame errors; see tbv_frame_hw_error(). */
 	atomic64_t data_rx_crc_error;
 	atomic64_t data_rx_overrun;
+	/*
+	 * Frame-class localization of the residual zcopy CRC corruption:
+	 * _in_stream = corrupt frame arrived mid-raw-stream (a zcopy PAYLOAD
+	 * frame), _standalone = a raw-stream header / copied / control frame,
+	 * _maxsize = the corrupt frame was exactly one full frame (4096).
+	 */
+	atomic64_t data_rx_crc_error_in_stream;
+	atomic64_t data_rx_crc_error_standalone;
+	atomic64_t data_rx_crc_error_maxsize;
+	atomic_t crc_error_reported;
 	atomic64_t data_rx_send;
 	atomic64_t data_rx_op_send;
 	atomic64_t data_rx_op_send_imm;

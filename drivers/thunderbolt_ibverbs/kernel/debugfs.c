@@ -171,6 +171,12 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_frames));
 	seq_printf(s, "data_wr_zcopy_page_suspect: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_page_suspect));
+	seq_printf(s, "data_wr_zcopy_hdr: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_hdr));
+	seq_printf(s, "data_wr_zcopy_payload_full: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_payload_full));
+	seq_printf(s, "data_wr_zcopy_payload_tail: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_payload_tail));
 	seq_printf(s, "data_wr_zcopy_mr_mapped: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_mr_mapped));
 	seq_printf(s, "data_wr_zcopy_remapped: %lld\n",
@@ -247,6 +253,12 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_rx_crc_error));
 	seq_printf(s, "data_rx_overrun: %lld\n",
 		   atomic64_read(&state->data_rx_overrun));
+	seq_printf(s, "data_rx_crc_error_in_stream: %lld\n",
+		   atomic64_read(&state->data_rx_crc_error_in_stream));
+	seq_printf(s, "data_rx_crc_error_standalone: %lld\n",
+		   atomic64_read(&state->data_rx_crc_error_standalone));
+	seq_printf(s, "data_rx_crc_error_maxsize: %lld\n",
+		   atomic64_read(&state->data_rx_crc_error_maxsize));
 	seq_printf(s, "data_rx_send: %lld\n",
 		   atomic64_read(&state->data_rx_send));
 	seq_printf(s, "data_rx_op_send: %lld\n",

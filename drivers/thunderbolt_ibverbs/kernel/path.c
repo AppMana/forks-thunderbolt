@@ -1022,10 +1022,34 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	 */
 	if (tbv_frame_hw_error(frame->flags)) {
 		if (state) {
-			if (frame->flags & RING_DESC_CRC_ERROR)
+			if (frame->flags & RING_DESC_CRC_ERROR) {
 				atomic64_inc(&state->data_rx_crc_error);
-			else
+				/*
+				 * Localize WHICH frame class the NHI CRCs bad:
+				 * mid-raw-stream (rx_raw_pending) means a zcopy
+				 * PAYLOAD frame; otherwise a standalone frame (a
+				 * raw-stream HEADER, a copied data frame, or a
+				 * control frame -- all staged from kernel buffers).
+				 * If in_stream dominates, the corruption is the
+				 * zcopy payload frames specifically. maxsize splits
+				 * out exactly-4096 frames (the frame-budget theory).
+				 */
+				if (path->rx_raw_pending)
+					atomic64_inc(&state->data_rx_crc_error_in_stream);
+				else
+					atomic64_inc(&state->data_rx_crc_error_standalone);
+				if (len >= TBV_DATA_FRAME_SIZE)
+					atomic64_inc(&state->data_rx_crc_error_maxsize);
+				if (!atomic_cmpxchg(&state->crc_error_reported, 0, 1))
+					pr_info("first CRC-error frame: size=%u sof=%u eof=%u flags=0x%x rx_raw_pending=%d raw_op=%u raw_done=%u raw_remaining=%u\n",
+						len, frame->sof, frame->eof,
+						frame->flags, path->rx_raw_pending,
+						path->rx_raw_opcode,
+						path->rx_raw_done,
+						path->rx_raw_remaining);
+			} else {
 				atomic64_inc(&state->data_rx_overrun);
+			}
 		}
 		/*
 		 * A corrupt frame inside a raw stream desyncs the receiver's

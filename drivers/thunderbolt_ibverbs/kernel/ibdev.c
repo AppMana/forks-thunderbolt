@@ -4849,6 +4849,10 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 		tbv_zcopy_report_fallback_once(state, seg->mr, stream->dma_dev);
 
 accounted:
+		if (*length >= TBV_NATIVE_DATA_FRAME_SIZE)
+			atomic64_inc(&state->data_wr_zcopy_payload_full);
+		else
+			atomic64_inc(&state->data_wr_zcopy_payload_tail);
 		stream->offset += *length;
 		refcount_inc(&stream->refs);
 		atomic_inc(&stream->send->tx_pending);
@@ -5106,6 +5110,8 @@ static int tbv_native_send_ctx_post_split(struct tbv_send_ctx *ctx,
 		if (retransmit)
 			atomic64_inc(&tqp->owner->data_wr_zcopy_retransmit);
 		atomic64_inc(&tqp->owner->data_wr_zcopy_frames);
+		/* one staged 48-byte header frame precedes each window's payload */
+		atomic64_inc(&tqp->owner->data_wr_zcopy_hdr);
 
 		tbv_send_ctx_build_native_header(ctx, off, len,
 						 off + len == ctx->total_len,
