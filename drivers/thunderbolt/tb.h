@@ -273,6 +273,9 @@ struct tb_bandwidth_group {
  * @max_bw: Maximum possible bandwidth through this adapter if set to
  *	    non-zero.
  * @redrive: For DP IN, if true the adapter is in redrive mode.
+ * @reconcile_synth: Which synthetic hotplug edge (%TB_RECONCILE_*) the
+ *		     reconciliation worker already sent for the port's
+ *		     CURRENT divergence, so it is sent once, not every pass.
  *
  * In USB4 terminology this structure represents an adapter (protocol or
  * lane adapter).
@@ -302,7 +305,13 @@ struct tb_port {
 	struct list_head group_list;
 	unsigned int max_bw;
 	bool redrive;
+	u8 reconcile_synth;
 };
+
+/* Values for tb_port.reconcile_synth */
+#define TB_RECONCILE_NONE	0
+#define TB_RECONCILE_UNPLUG	1
+#define TB_RECONCILE_PLUG	2
 
 /**
  * struct usb4_port - USB4 port device

@@ -1602,7 +1602,19 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
-			tb_xdomain_failed(xd);
+			/*
+			 * A condemned identity (the peer answered with a
+			 * DIFFERENT UUID: xd->is_unplugged) is terminal for
+			 * THIS XDomain -- the connection manager replaces it
+			 * (tb.c reconciliation synthesizes the unplug). A mere
+			 * timeout is not: the peer may still be booting
+			 * (the co-reset strand, f876653), so keep re-verifying
+			 * instead of stopping the handshake.
+			 */
+			if (xd->is_unplugged || ret == -ENOMEM)
+				tb_xdomain_failed(xd);
+			else
+				tb_xdomain_queue_uuid(xd);
 		} else {
 			tb_xdomain_queue_properties_changed(xd);
 			if (xd->bonding_possible)
@@ -1676,10 +1688,25 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			 * exhaust the read budget before either answers, both
 			 * stop, and a stopped host sends no XDP request so
 			 * neither Maple ICM re-arms its announce
-			 * (appmana-020<->009). Re-arm the budget and keep
-			 * re-reading instead, recovering once the peer boots.
+			 * (appmana-020<->009). Keep re-reading instead.
+			 *
+			 * But do NOT re-queue PROPERTIES blindly: property
+			 * requests carry dst_uuid and a healthy peer ignores a
+			 * mismatch, so a STALE/CORRUPT cached identity fails
+			 * this read forever (appmana-008 port 1 looped 87
+			 * minutes against a corrupt half-trained-link UUID,
+			 * ...-ffff-ffffffffffff). Route the retry back through
+			 * the UUID state: a still-booting peer keeps the loop
+			 * alive exactly as before, while a peer that answers
+			 * with a different UUID condemns this XDomain
+			 * (tb_xdomain_get_uuid -> is_unplugged) so the
+			 * connection manager replaces it. KUnit:
+			 * tb_test_xdomain_stale_identity_recovery.
 			 */
-			tb_xdomain_queue_properties(xd);
+			if (xd->remote_uuid)
+				tb_xdomain_queue_uuid(xd);
+			else
+				tb_xdomain_queue_properties(xd);
 		} else {
 			xd->state = XDOMAIN_STATE_ENUMERATED;
 		}

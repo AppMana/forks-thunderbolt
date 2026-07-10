@@ -2871,6 +2871,17 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 	bool rings_started = tunnel_enabled ||
 			     path->state == TBV_PATH_RING_STARTED;
 
+	/*
+	 * tb_ring_stop() spins on nhi->lock with IRQs off and then
+	 * flush_work()s the ring worker; tb_ring_free() sleeps too. Calling
+	 * this from atomic context, under a spinlock shared with the ring
+	 * completion path, or from a ring frame callback deadlocks the node
+	 * (the 2026-06-26 chain-wide hard lock rode a teardown reached from
+	 * forbidden context). Enforce the contract loudly instead of relying
+	 * on every caller remembering it.
+	 */
+	might_sleep();
+
 	if (rings_started) {
 		if (path->rx_ring)
 			tb_ring_stop(path->rx_ring);

@@ -404,7 +404,19 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 
 	tbv_native_control_cancel_rail(rail);
 	tbv_rail_put(rail);
-	wait_for_completion(&rail->refs_zero);
+	/*
+	 * This wait runs on module unload AND at reboot (.shutdown ->
+	 * nhi_remove -> tb_domain_remove unbinds the services). A stuck QP
+	 * teardown here used to hang silently forever -- after journald is
+	 * already dead at shutdown, that is an invisible wedge that ends in a
+	 * held power button. Keep waiting (freeing the rings under a live QP
+	 * would be worse), but say so loudly every 30 s so the hang is
+	 * attributable from the console/pstore.
+	 */
+	while (!wait_for_completion_timeout(&rail->refs_zero, 30 * HZ))
+		pr_err("rail teardown stuck waiting for QP refs peer=%u rail=%u refs=%u (unload/reboot will not progress)\n",
+		       peer->peer_id, rail->rail_id,
+		       refcount_read(&rail->refcnt));
 
 	/*
 	 * All QPs that held a ref on this rail have now been destroyed

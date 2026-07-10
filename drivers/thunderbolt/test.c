@@ -11,6 +11,7 @@
 
 #include "tb.h"
 #include "tunnel.h"
+#include "nhi_regs.h"
 #include "tests/negotiation_model.h"
 
 static int __ida_init(struct kunit_resource *res, void *context)
@@ -3011,6 +3012,7 @@ static void tb_test_xdomain_late_second_link(struct kunit *test)
 struct icm_fw_model {
 	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
 	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
+	bool responsive; /* ICM message loop alive (a wedged ICM keeps ICM_EN) */
 };
 
 /* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
@@ -3018,6 +3020,18 @@ static void icm_fw_cold_boot(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
 	fw->authed = true;
+	fw->responsive = true;
+}
+
+/*
+ * The observed wedge: the ICM stops servicing its message loop (DRIVER_READY
+ * times out) but its status register still advertises ICM_EN -- the running
+ * flag is NOT a liveness signal. icm_firmware_start()'s "already running ->
+ * skip reset" gate therefore cannot distinguish a healthy ICM from this state.
+ */
+static void icm_fw_wedge(struct icm_fw_model *fw)
+{
+	fw->responsive = false;
 }
 
 /*
@@ -3030,12 +3044,13 @@ static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
 {
 	fw->icm_en = true;
 	fw->authed = !ar_tr;
+	fw->responsive = true;
 }
 
-/* ICM_DRIVER_READY succeeds only if the firmware is running AND authenticated. */
+/* ICM_DRIVER_READY succeeds only if running AND authenticated AND alive. */
 static bool icm_fw_driver_ready(struct icm_fw_model *fw)
 {
-	return fw->icm_en && fw->authed;
+	return fw->icm_en && fw->authed && fw->responsive;
 }
 
 static void tb_test_icm_warm_restart_reauth(struct kunit *test)
@@ -3073,12 +3088,167 @@ static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 }
 
+/*
+ * A wedged-but-running ICM: the message loop is dead (DRIVER_READY times out)
+ * while REG_FW_STS still advertises ICM_EN. icm_firmware_start()'s "already
+ * running -> skip reset" gate cannot see the difference, and a dead NHI whose
+ * MMIO reads all-ones ALSO advertises ICM_EN. The first must produce an
+ * explicit terminal diagnosis (warm reset provably cannot re-authenticate
+ * AR/TR -- out/ICM_8051_FINDINGS.md); the second must not be treated as
+ * "firmware running" at all.
+ */
+static void tb_test_icm_wedged_running(struct kunit *test)
+{
+	struct icm_fw_model fw;
+
+	/* The wedge keeps ICM_EN: the reset gate's blind spot is real. */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+	KUNIT_EXPECT_TRUE(test, fw.icm_en);
+	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
+
+	/*
+	 * Forcing the warm reset the task-obvious "fix" would do: on AR/TR the
+	 * firmware comes back UNAUTHENTICATED (mask ROM not re-entered), so the
+	 * reset converts "wedged" into "unauthenticated" -- still dead, plus a
+	 * multi-second stall. This is why icm.c must NOT blindly reset and must
+	 * say "cold power cycle required" instead.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
+	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
+
+	/*
+	 * Maple Ridge would recover from the same forced reset (real reset
+	 * vector re-authenticates) -- relevant only if a Maple Ridge cio_reset
+	 * path is ever wired up; icm_probe() does not set one today.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
+	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
+
+	/*
+	 * Dead NHI: MMIO reads all-ones, so REG_FW_STS spuriously asserts
+	 * ICM_EN. The REAL predicate icm_firmware_running() is built on must
+	 * treat ~0 as "no firmware", or a hung controller is routed into the
+	 * firmware CM where DRIVER_READY can only time out.
+	 */
+	KUNIT_EXPECT_TRUE(test, tb_icm_fw_sts_running(REG_FW_STS_ICM_EN));
+	KUNIT_EXPECT_FALSE(test, tb_icm_fw_sts_running(0));
+	KUNIT_EXPECT_FALSE(test, tb_icm_fw_sts_running((u32)~0U));
+}
+
+/*
+ * Reproduces the 2026-07-09/10 appmana-019<->008 stranding: the survivor gets
+ * NO unplug event when its neighbour's link drops (008's kernel log is silent
+ * across 019's reboot while the lane adapter reads UNPLUGGED), and a plug
+ * event can be lost the same way. tb_handle_hotplug() is edge-triggered only,
+ * so the software topology diverges from hardware forever: the stale XDomain
+ * (and its usb4_rdma ib_device) stays registered against a dead link -- NCCL
+ * hangs -- and a trained link stays un-enumerated. cm_reconcile() is lockstep
+ * with tb.c's reconciliation; without it in the driver these go red.
+ */
+static void tb_test_cm_reconcile_lost_unplug(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.port[0].link_up = true;
+	h.port[1].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_scan_port(&h, 1);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);
+
+	/* 019 reboots; 008's unplug event never arrives (observed live). */
+	cm_link_down_lost(&h, 1);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);	/* stale, NCCL hangs */
+
+	/* Reconciliation converges software topology to the lane state. */
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[1].xdomain);
+
+	/* The healthy port is untouched. */
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+
+	/* Peer's link trains but the plug event is lost/absorbed. */
+	cm_link_up_lost(&h, 1);
+	KUNIT_EXPECT_FALSE(test, h.port[1].xdomain);	/* missed by both paths */
+
+	cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);	/* synthesized plug */
+
+	/* Reconciliation while disarmed (init/suspend) must do nothing. */
+	memset(&h, 0, sizeof(h));
+	cm_link_up_lost(&h, 0);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+}
+
+/*
+ * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
+ * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
+ * tail from a half-trained-link read) fails every property read -- the healthy
+ * peer ignores mismatched dst_uuid -- and the PROPERTIES state re-queued
+ * itself for 87 minutes without ever re-verifying the identity. The model is
+ * lockstep with tb_xdomain_state_work(): while the driver re-queues PROPERTIES
+ * blindly, ident_tick() must too, and the recovery expectation goes red.
+ */
+static void tb_test_xdomain_stale_identity_recovery(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x66518780u, .answers = true };
+	struct ident_xd xd = { .cached_uuid = 0xffffffffu };
+
+	/* Corrupt cached identity against a healthy peer: must recover via
+	 * UUID re-verification + CM replacement of the unplugged XDomain. */
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 32, /*cm_reconciles=*/true));
+
+	/*
+	 * Co-reset guard (f876653 behaviour must be preserved): a peer that is
+	 * merely still BOOTING (answers nothing) must not be stranded by a
+	 * terminal state; once it boots with the SAME identity the existing
+	 * XDomain enumerates without CM replacement.
+	 */
+	memset(&xd, 0, sizeof(xd));
+	xd.cached_uuid = 0x66518780u;
+	peer.answers = false;
+	KUNIT_EXPECT_FALSE(test, ident_run(&xd, &peer, 8, /*cm_reconciles=*/false));
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8, /*cm_reconciles=*/false));
+
+	/*
+	 * A peer that rebooted into a NEW identity while our read loop was
+	 * failing: same corrupt-cache shape, recovers only through replacement.
+	 */
+	memset(&xd, 0, sizeof(xd));
+	xd.cached_uuid = 0x11111111u;
+	peer.true_uuid = 0x22222222u;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 32, /*cm_reconciles=*/true));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),
 	KUNIT_CASE(tb_test_xdomain_late_second_link),
+	KUNIT_CASE(tb_test_xdomain_stale_identity_recovery),
+	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
+	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
+	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

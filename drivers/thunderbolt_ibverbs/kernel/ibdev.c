@@ -141,6 +141,25 @@ MODULE_PARM_DESC(qp_timeout_ms,
 		 "when a QP has no verbs ACK timeout; 0 disables fallback timeout work");
 
 /*
+ * CREDDBG credit/RNR telemetry is a field-diagnosis aid, but on a busy chain
+ * it floods the kernel ring buffer (appmana-019's boot evidence was reduced
+ * to six CREDDBG lines) and buries the crash forensics it was meant to help.
+ * Default OFF; flip at runtime via /sys/module/thunderbolt_ibverbs/parameters/
+ * creddbg when actively chasing a credit bug.
+ */
+static bool creddbg;
+module_param(creddbg, bool, 0644);
+MODULE_PARM_DESC(creddbg,
+		 "Emit ratelimited CREDDBG credit/RNR telemetry to the kernel log (default: false)");
+
+#define tbv_creddbg(fmt, ...)						\
+	do {								\
+		if (unlikely(READ_ONCE(creddbg)))			\
+			pr_info_ratelimited("CREDDBG " fmt,		\
+					    ##__VA_ARGS__);		\
+	} while (0)
+
+/*
  * Exponential-backoff base for RC retransmit. The IB ack_timeout is sized for
  * WAN fabrics (~67ms at timeout=14); on the sub-ms TB fabric the retransmit
  * timer's only job is loss recovery, so waiting the full ~67ms is the measured
@@ -479,6 +498,12 @@ struct tbv_ibdev {
 	struct tbv_state *state;
 	enum tbv_backend_type backend;
 	struct net_device *netdev;
+	/*
+	 * Netdev unbound from netdev-notifier context (RTNL held, where
+	 * unregister_netdev() would self-deadlock); reaped by
+	 * tbv_ibdev_netdev_reap_work() outside RTNL.
+	 */
+	struct net_device *netdev_defunct;
 	struct tbv_qp *gsi_qp;
 	/*
 	 * Per-rail device identity. Apple and GSI QPs stay on this rail.
@@ -1500,7 +1525,7 @@ tbv_qp_accept_recv_credit(struct tbv_qp *tqp,
 		} else if (!check_add_overflow(tqp->remote_recv_credits,
 					       hdr->imm_data, &new_credits)) {
 			tqp->remote_recv_credits = new_credits;
-			pr_info_ratelimited("CREDDBG tx-credit-accept qpn=0x%x +%u -> %u\n",
+			tbv_creddbg("tx-credit-accept qpn=0x%x +%u -> %u\n",
 					    tqp->base.qp_num, hdr->imm_data,
 					    new_credits);
 		}
@@ -1909,7 +1934,7 @@ static bool tbv_qp_note_rnr_ack(struct tbv_qp *tqp, u32 psn,
 			*matched_out = send;
 		if (tbv_send_rnr_retry_exhausted(send) || tqp->closing ||
 		    tqp->state == IB_QPS_ERR) {
-			pr_info_ratelimited("CREDDBG tx-RNR-FATAL qpn=0x%x psn=%u exhausted=%d closing=%d qperr=%d rnr=%u/%u\n",
+			tbv_creddbg("tx-RNR-FATAL qpn=0x%x psn=%u exhausted=%d closing=%d qperr=%d rnr=%u/%u\n",
 					    tqp->base.qp_num, psn & TBV_PSN_MASK,
 					    tbv_send_rnr_retry_exhausted(send),
 					    tqp->closing,
@@ -1929,7 +1954,7 @@ static bool tbv_qp_note_rnr_ack(struct tbv_qp *tqp, u32 psn,
 		send->rnr_waiting = true;
 		send->retrying = false;
 		tbv_send_mark_queued(send, jiffies);
-		pr_info_ratelimited("CREDDBG tx-RNR-NAK qpn=0x%x psn=%u rnr_retries=%u/%u credits=%u delay_j=%lu\n",
+		tbv_creddbg("tx-RNR-NAK qpn=0x%x psn=%u rnr_retries=%u/%u credits=%u delay_j=%lu\n",
 				    tqp->base.qp_num, psn & TBV_PSN_MASK,
 				    send->rnr_retries, send->max_rnr_retries,
 				    tqp->remote_recv_credits, delay);
@@ -2958,7 +2983,16 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	return 0;
 }
 
-static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
+/*
+ * Unbind the rail's netdev WITHOUT unregistering it. Safe to call from a
+ * netdev-notifier (RTNL held): unregister_netdev() takes rtnl_lock() and
+ * self-deadlocks there -- with RTNL then held forever by udev's rename ioctl,
+ * every subsequent networking operation on the node blocks (the "node fell
+ * off the LAN" reload signature; the trigger f8adde6 removed, class now
+ * removed). The stashed netdev is reaped outside RTNL by
+ * tbv_ibdev_netdev_reap_work() or by the next full detach.
+ */
+static void tbv_ibdev_unbind_netdev(struct tbv_ibdev *dev, bool stash_for_reap)
 {
 	struct net_device *ndev = dev->netdev;
 
@@ -2968,6 +3002,28 @@ static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
 	dev->netdev = NULL;
 	sysfs_remove_group(&ndev->dev.kobj, &tbv_rail_netdev_group);
 	ib_device_set_netdev(&dev->base, NULL, 1);
+	if (stash_for_reap)
+		dev->netdev_defunct = ndev;
+}
+
+/* Full detach: sleeping context only, RTNL must NOT be held. */
+static void tbv_ibdev_detach_netdev(struct tbv_ibdev *dev)
+{
+	struct net_device *ndev = dev->netdev;
+	struct net_device *defunct = dev->netdev_defunct;
+
+	might_sleep();
+
+	dev->netdev_defunct = NULL;
+	if (defunct) {
+		unregister_netdev(defunct);
+		free_netdev(defunct);
+	}
+
+	if (!ndev)
+		return;
+
+	tbv_ibdev_unbind_netdev(dev, false);
 	unregister_netdev(ndev);
 	free_netdev(ndev);
 }
@@ -7018,7 +7074,7 @@ static void tbv_qp_advertise_recv_credits(struct tbv_qp *tqp)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 
 	ret = tbv_send_recv_credit(tqp, dest_qp, tqp->base.qp_num, credits);
-	pr_info_ratelimited("CREDDBG rx-credit-advertise qpn=0x%x dest=0x%x credits=%u ret=%d\n",
+	tbv_creddbg("rx-credit-advertise qpn=0x%x dest=0x%x credits=%u ret=%d\n",
 			    tqp->base.qp_num, dest_qp, credits, ret);
 	if (!ret)
 		return;
@@ -8207,7 +8263,7 @@ static bool tbv_rx_deliver_reorder_msg_locked(struct tbv_state *state,
 
 	if (!tbv_qp_pop_recv(tqp, &wqe)) {
 		atomic64_inc(&state->data_rx_rnr);
-		pr_info_ratelimited("CREDDBG rx-RNR(site7094) qpn=0x%x recv_count=%u advertised=%u\n",
+		tbv_creddbg("rx-RNR(site7094) qpn=0x%x recv_count=%u advertised=%u\n",
 				    tqp->base.qp_num, tqp->recv_count,
 				    tqp->recv_credits_advertised);
 		tbv_send_ack_on_path(tqp, rx_path, msg->src_qp,
@@ -8276,7 +8332,7 @@ static bool tbv_rx_deliver_reorder_write_locked(struct tbv_state *state,
 
 	if (msg->with_imm && !tbv_qp_pop_recv(tqp, &tqp->rx_write.imm_wqe)) {
 		atomic64_inc(&state->data_rx_rnr);
-		pr_info_ratelimited("CREDDBG rx-RNR(reorder) qpn=0x%x psn=%u recv_count=%u advertised=%u\n",
+		tbv_creddbg("rx-RNR(reorder) qpn=0x%x psn=%u recv_count=%u advertised=%u\n",
 				    tqp->base.qp_num, msg->psn,
 				    tqp->recv_count,
 				    tqp->recv_credits_advertised);
@@ -8894,7 +8950,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		} else {
 			if (!tbv_qp_pop_recv(tqp, &msg->wqe)) {
 				atomic64_inc(&state->data_rx_rnr);
-				pr_info_ratelimited("CREDDBG rx-RNR(site7756) qpn=0x%x recv_count=%u advertised=%u\n",
+				tbv_creddbg("rx-RNR(site7756) qpn=0x%x recv_count=%u advertised=%u\n",
 						    tqp->base.qp_num, tqp->recv_count,
 						    tqp->recv_credits_advertised);
 				tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
@@ -9026,7 +9082,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		}
 		if (!tbv_qp_pop_recv(tqp, &msg->wqe)) {
 			atomic64_inc(&state->data_rx_rnr);
-			pr_info_ratelimited("CREDDBG rx-RNR(site7877) qpn=0x%x recv_count=%u advertised=%u\n",
+			tbv_creddbg("rx-RNR(site7877) qpn=0x%x recv_count=%u advertised=%u\n",
 					    tqp->base.qp_num, tqp->recv_count,
 					    tqp->recv_credits_advertised);
 			tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
@@ -9419,7 +9475,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		}
 		if (with_imm && !tbv_qp_pop_recv(tqp, &wrx->imm_wqe)) {
 			atomic64_inc(&state->data_rx_rnr);
-			pr_info_ratelimited("CREDDBG rx-RNR(site8125) qpn=0x%x recv_count=%u advertised=%u\n",
+			tbv_creddbg("rx-RNR(site8125) qpn=0x%x recv_count=%u advertised=%u\n",
 					    tqp->base.qp_num, tqp->recv_count,
 					    tqp->recv_credits_advertised);
 			tbv_rx_mark_rnr_locked(tqp, hdr->src_qp, psn,
@@ -10163,7 +10219,7 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 			tbv_send_ctx_put(send);
 		}
 		if (completed_error && completed_ack) {
-			pr_info_ratelimited("CREDDBG qp-mark-error qpn=0x%x (send completed with error after ACK)\n",
+			tbv_creddbg("qp-mark-error qpn=0x%x (send completed with error after ACK)\n",
 					    tqp->base.qp_num);
 			tbv_qp_mark_error(tqp);
 		}
@@ -10827,11 +10883,19 @@ bool tbv_netdev_rename_keep(const char *expected_name, const char *new_name)
 	return new_name && !strcmp(expected_name, new_name);
 }
 
-static void tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
+/*
+ * Runs in netdev-notifier context with RTNL held: only UNBIND here (a full
+ * detach calls unregister_netdev(), which takes rtnl_lock() and would
+ * self-deadlock, wedging RTNL node-wide). Renamed netdevs are stashed and
+ * reaped by tbv_ibdev_netdev_reap_work() outside RTNL; an externally
+ * unregistering netdev is merely unbound (its owner unregisters and frees it).
+ */
+static bool tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
 					     struct net_device *ndev,
 					     bool detach_renamed)
 {
 	struct tbv_peer *peer;
+	bool stashed = false;
 
 	mutex_lock(&state->rail_register_lock);
 	mutex_lock(&state->lock);
@@ -10850,7 +10914,7 @@ static void tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
 			    tbv_netdev_rename_keep(expected_name, ndev->name))
 				continue;
 
-			pr_info("detaching ib_device %s from %s netdev %s%s%s\n",
+			pr_info("unbinding ib_device %s from %s netdev %s%s%s\n",
 				dev_name(&dev->base.dev),
 				detach_renamed ? "renamed" : "unregistering",
 				ndev->name,
@@ -10858,11 +10922,57 @@ static void tbv_ibdev_detach_matching_netdev(struct tbv_state *state,
 					", expected " : "",
 				detach_renamed && expected_name ?
 					expected_name : "");
-			tbv_ibdev_detach_netdev(dev);
+			tbv_ibdev_unbind_netdev(dev, detach_renamed);
+			stashed |= detach_renamed;
 		}
 	}
 	mutex_unlock(&state->lock);
 	mutex_unlock(&state->rail_register_lock);
+
+	return stashed;
+}
+
+/*
+ * Reap netdevs unbound from notifier context: unregister_netdev() sleeps and
+ * takes RTNL, so it must happen here, never in the notifier. Collect under
+ * the state locks, unregister outside them (a concurrent notifier holds RTNL
+ * and takes the state locks, so holding them across rtnl_lock() would ABBA).
+ */
+static void tbv_ibdev_netdev_reap_work(struct work_struct *work)
+{
+	struct tbv_state *state =
+		container_of(work, struct tbv_state, ibdev_netdev_reap_work);
+
+	for (;;) {
+		struct net_device *defunct = NULL;
+		struct tbv_peer *peer;
+
+		mutex_lock(&state->rail_register_lock);
+		mutex_lock(&state->lock);
+		list_for_each_entry(peer, &state->peers, node) {
+			struct tbv_rail *rail;
+
+			list_for_each_entry(rail, &peer->rails, node) {
+				struct tbv_ibdev *dev = rail->ibdev;
+
+				if (dev && dev->netdev_defunct) {
+					defunct = dev->netdev_defunct;
+					dev->netdev_defunct = NULL;
+					break;
+				}
+			}
+			if (defunct)
+				break;
+		}
+		mutex_unlock(&state->lock);
+		mutex_unlock(&state->rail_register_lock);
+
+		if (!defunct)
+			return;
+
+		unregister_netdev(defunct);
+		free_netdev(defunct);
+	}
 }
 
 static int tbv_ibdev_netdev_event(struct notifier_block *nb,
@@ -10882,7 +10992,10 @@ static int tbv_ibdev_netdev_event(struct notifier_block *nb,
 				   &state->ibdev_netdev_retry_work);
 		return NOTIFY_DONE;
 	case NETDEV_CHANGENAME:
-		tbv_ibdev_detach_matching_netdev(state, ndev, true);
+		if (tbv_ibdev_detach_matching_netdev(state, ndev, true) &&
+		    state->workqueue)
+			queue_work(state->workqueue,
+				   &state->ibdev_netdev_reap_work);
 		if (state->workqueue)
 			queue_work(state->workqueue,
 				   &state->ibdev_netdev_retry_work);
@@ -10904,6 +11017,8 @@ static int tbv_ibdev_register_netdev_notifier(struct tbv_state *state)
 
 	INIT_WORK(&state->ibdev_netdev_retry_work,
 		  tbv_ibdev_netdev_retry_work);
+	INIT_WORK(&state->ibdev_netdev_reap_work,
+		  tbv_ibdev_netdev_reap_work);
 	state->ibdev_netdev_nb.notifier_call = tbv_ibdev_netdev_event;
 	ret = register_netdevice_notifier(&state->ibdev_netdev_nb);
 	if (ret)
@@ -10921,6 +11036,13 @@ static void tbv_ibdev_unregister_netdev_notifier(struct tbv_state *state)
 	unregister_netdevice_notifier(&state->ibdev_netdev_nb);
 	state->ibdev_netdev_nb_registered = false;
 	cancel_work_sync(&state->ibdev_netdev_retry_work);
+	/*
+	 * Run (not just cancel) any pending reap so unbound-but-unreaped
+	 * netdevs are not leaked; the rail teardown that follows also reaps
+	 * per-device leftovers in tbv_ibdev_detach_netdev().
+	 */
+	if (state->workqueue)
+		flush_work(&state->ibdev_netdev_reap_work);
 }
 
 int tbv_ibdev_start(struct tbv_state *state, bool register_verbs)
