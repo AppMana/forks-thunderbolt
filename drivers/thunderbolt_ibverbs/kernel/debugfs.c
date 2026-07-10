@@ -175,6 +175,16 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_zcopy_mr_mapped));
 	seq_printf(s, "data_wr_zcopy_remapped: %lld\n",
 		   atomic64_read(&state->data_wr_zcopy_remapped));
+	seq_printf(s, "data_wr_zcopy_fb_no_mr_mapping: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fb_no_mr_mapping));
+	seq_printf(s, "data_wr_zcopy_fb_device_mismatch: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fb_device_mismatch));
+	seq_printf(s, "data_wr_zcopy_fb_dmabuf_or_odp: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fb_dmabuf_or_odp));
+	seq_printf(s, "data_wr_zcopy_fb_offset_not_found: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fb_offset_not_found));
+	seq_printf(s, "data_wr_zcopy_fb_other: %lld\n",
+		   atomic64_read(&state->data_wr_zcopy_fb_other));
 	seq_printf(s, "data_wr_copy_error: %lld\n",
 		   atomic64_read(&state->data_wr_copy_error));
 	seq_printf(s, "data_wr_path_send: %lld\n",

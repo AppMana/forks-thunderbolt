@@ -477,6 +477,34 @@ static void tbv_dma_sgt_locate_walks_coalesced(struct kunit *test)
 				   &chunk), 0);
 }
 
+static void tbv_dma_sgt_locate_nonzero_mr_offset(struct kunit *test)
+{
+	/*
+	 * A non-page-aligned MR start: tbv_umem_dma_from_addr passes
+	 * offset = ib_umem_offset(umem) + (addr - mr->start). Model umem
+	 * offset 512 into a big coalesced segment and a window at MR byte
+	 * 4096 -> sgt offset 4608, still inside segment 0.
+	 */
+	static const u32 seg[] = { 2u * 1024u * 1024u };	/* 2 MiB, coalesced */
+	u32 umem_offset = 512u;
+	u32 seg_idx;
+	u32 seg_off;
+	u32 chunk;
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(seg, 1, umem_offset + 4096u, 4096,
+				   &seg_idx, &seg_off, &chunk), 0);
+	KUNIT_EXPECT_EQ(test, seg_idx, 0u);
+	KUNIT_EXPECT_EQ(test, seg_off, 4608u);
+	KUNIT_EXPECT_EQ(test, chunk, 4096u);
+
+	/* the umem-offset shifts the very first byte off the segment start */
+	KUNIT_ASSERT_EQ(test,
+		tbv_dma_sgt_locate(seg, 1, umem_offset, 4096, &seg_idx,
+				   &seg_off, &chunk), 0);
+	KUNIT_EXPECT_EQ(test, seg_off, 512u);
+}
+
 static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_zcopy_mode_selection),
 	KUNIT_CASE(tbv_split_window_framing),
@@ -485,6 +513,7 @@ static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_zcopy_frame_map_len_covers_page),
 	KUNIT_CASE(tbv_zcopy_persistent_device_match),
 	KUNIT_CASE(tbv_dma_sgt_locate_walks_coalesced),
+	KUNIT_CASE(tbv_dma_sgt_locate_nonzero_mr_offset),
 	KUNIT_CASE(tbv_write_shape_resolver_prefers_known_count),
 	KUNIT_CASE(tbv_raw_desync_header_is_detected),
 	{}

@@ -429,13 +429,20 @@ struct tbv_mr {
 	struct tbv_state *owner;
 	struct ib_umem *umem;
 	/*
-	 * The DMA device ib_umem_get() persistently mapped the umem sgt to
-	 * (pd->device->dma_device == the ring NHI device). A zero-copy send
-	 * whose rail uses this same device derives frame DMA addresses from
-	 * the existing mapping (sg_dma_address) instead of dma_map_page per
-	 * frame. NULL for a kernel DMA MR (no umem).
+	 * Persistent DMA mapping of the MR pages to the NHI, built ONCE at
+	 * registration. The tbv ib_device is registered with dma_device=NULL
+	 * (RDMA-core virtual DMA, for kernel/MAD SGEs), so ib_umem_get() does
+	 * NOT real-DMA-map to the NHI -- it only stashes CPU VAs. A zero-copy
+	 * send therefore maps the pages itself here, to pd->device->dev.parent
+	 * (== tb_ring_dma_device()). dma_sgt is a private, IOMMU-coalesced,
+	 * DMA-mapped table; frames read sg_dma_address from it with NO per-
+	 * frame dma_map/unmap (the IOTLB churn that corrupted the wire CRC).
+	 * dma_dev/dma_mapped are zero for a kernel DMA MR or if the map failed
+	 * (then zcopy falls back to the framed copy).
 	 */
 	struct device *dma_dev;
+	struct sg_table dma_sgt;
+	bool dma_mapped;
 	refcount_t refs;
 	struct work_struct free_work;
 	u64 start;
@@ -954,8 +961,82 @@ out:
 	return mr;
 }
 
+/*
+ * Build the MR's persistent NHI DMA mapping. @dma_dev is the ring NHI device
+ * (pd->device->dev.parent). We map a PRIVATE per-page sg_table (not the umem's
+ * own sgt, which ib_umem_get virt-"mapped" to CPU VAs) so the umem stays
+ * untouched and ib_umem_release never fights this real mapping. Best-effort:
+ * on failure the MR simply has no persistent mapping and zcopy falls back to
+ * the framed copy. Runs once at registration, so no per-frame churn.
+ */
+static void tbv_mr_dma_map(struct tbv_mr *mr, struct device *dma_dev)
+{
+	struct sg_page_iter piter;
+	struct scatterlist *sg;
+	unsigned long npages;
+	int ret;
+
+	if (!dma_dev || !mr->umem || mr->dma_mr)
+		return;
+	/*
+	 * ODP/dmabuf umems have no stable pinned page list to map here (ODP is
+	 * demand-faulted, dmabuf is owned by the exporter). Leave them
+	 * unmapped; zcopy falls back to the framed copy (counted
+	 * fb_dmabuf_or_odp).
+	 */
+	if (mr->umem->is_odp || mr->umem->is_dmabuf)
+		return;
+
+	npages = ib_umem_num_pages(mr->umem);
+	if (!npages)
+		return;
+
+	if (sg_alloc_table(&mr->dma_sgt, npages, GFP_KERNEL))
+		return;
+
+	sg = mr->dma_sgt.sgl;
+	for_each_sgtable_page(&mr->umem->sgt_append.sgt, &piter, 0) {
+		if (!sg) {
+			sg_free_table(&mr->dma_sgt);
+			return;
+		}
+		sg_set_page(sg, sg_page_iter_page(&piter), PAGE_SIZE, 0);
+		sg = sg_next(sg);
+	}
+
+	/*
+	 * DMA_BIDIRECTIONAL, matching ib_umem_get()'s own choice (umem.c): the
+	 * mapping serves zero-copy TX (the NHI reads the send source) today,
+	 * and an MR is a bidirectional object -- a future zcopy RDMA_READ
+	 * response would have the NHI write into it. Bidirectional is the
+	 * correct conservative direction for a long-lived MR mapping.
+	 */
+	ret = dma_map_sgtable(dma_dev, &mr->dma_sgt, DMA_BIDIRECTIONAL, 0);
+	if (ret) {
+		pr_warn_ratelimited("MR zcopy dma_map_sgtable to %s failed: %d (zcopy will fall back to framed copy)\n",
+				    dev_name(dma_dev), ret);
+		sg_free_table(&mr->dma_sgt);
+		return;
+	}
+
+	mr->dma_dev = dma_dev;
+	mr->dma_mapped = true;
+}
+
+static void tbv_mr_dma_unmap(struct tbv_mr *mr)
+{
+	if (!mr->dma_mapped)
+		return;
+	dma_unmap_sgtable(mr->dma_dev, &mr->dma_sgt, DMA_BIDIRECTIONAL, 0);
+	sg_free_table(&mr->dma_sgt);
+	mr->dma_mapped = false;
+	mr->dma_dev = NULL;
+}
+
 static void tbv_mr_free(struct tbv_mr *mr)
 {
+	/* unmap the NHI mapping while the umem pages are still pinned */
+	tbv_mr_dma_unmap(mr);
 	if (mr->umem)
 		ib_umem_release(mr->umem);
 	if (mr->owner)
@@ -4658,6 +4739,36 @@ static void tbv_send_page_stream_done(void *ctx, int status)
 	tbv_send_page_stream_put(stream);
 }
 
+/*
+ * One-shot dump of exactly why the FIRST zcopy frame fell back to a per-frame
+ * dma_map_page, so a hardware run is self-explaining: the MR's mapped device vs
+ * the rail's device (name + pointer -- the 8d31089 bug was a NULL mr dma_dev),
+ * whether the MR is persistently mapped, the private DMA sgt's nents and its
+ * first segment's DMA address/len, and the umem geometry.
+ */
+static void tbv_zcopy_report_fallback_once(struct tbv_state *state,
+					   const struct tbv_mr *mr,
+					   struct device *path_dma_dev)
+{
+	struct scatterlist *sg;
+
+	if (atomic_cmpxchg(&state->zcopy_fallback_reported, 0, 1))
+		return;
+
+	sg = mr->dma_mapped ? mr->dma_sgt.sgl : NULL;
+	pr_info("zcopy fallback (first): mr_dma_dev=%p(%s) path_dma_dev=%p(%s) dma_mapped=%d nents=%u first_sg_dma_addr=0x%llx first_sg_dma_len=%u umem_addr=0x%lx umem_len=%zu odp=%d dmabuf=%d\n",
+		mr->dma_dev, mr->dma_dev ? dev_name(mr->dma_dev) : "(null)",
+		path_dma_dev,
+		path_dma_dev ? dev_name(path_dma_dev) : "(null)",
+		mr->dma_mapped, mr->dma_mapped ? mr->dma_sgt.nents : 0,
+		sg ? (unsigned long long)sg_dma_address(sg) : 0ULL,
+		sg ? sg_dma_len(sg) : 0,
+		mr->umem ? mr->umem->address : 0,
+		mr->umem ? mr->umem->length : 0,
+		mr->umem ? mr->umem->is_odp : 0,
+		mr->umem ? mr->umem->is_dmabuf : 0);
+}
+
 static int tbv_send_page_stream_next(void *ctx, struct page **page,
 				     u32 *page_off, u32 *length,
 				     dma_addr_t *dma, bool *premapped,
@@ -4689,42 +4800,55 @@ static int tbv_send_page_stream_next(void *ctx, struct page **page,
 		if (tbv_zcopy_use_persistent(seg->mr->dma_dev,
 					     stream->dma_dev)) {
 			/*
-			 * Rail uses the device the MR was already dma-mapped
-			 * to: take the frame's DMA address straight from the
-			 * persistent umem mapping -- NO dma_map_page. This is
-			 * the fix: it removes the per-frame IOTLB churn that
-			 * aborted transfers under lazy AMD-Vi invalidation and
+			 * Rail uses the device the MR was persistently mapped
+			 * to: take the frame's DMA address straight from that
+			 * mapping -- NO dma_map_page. This is the fix: it
+			 * removes the per-frame IOTLB churn that aborted
+			 * transfers under lazy AMD-Vi invalidation and
 			 * corrupted the wire CRC.
 			 */
 			ret = tbv_umem_dma_from_addr(seg->mr,
 						     seg->addr + seg_off,
 						     remaining, dma, length);
-			if (ret)
-				return ret;
-			*premapped = true;
-			atomic64_inc(&state->data_wr_zcopy_mr_mapped);
+			if (!ret) {
+				*premapped = true;
+				atomic64_inc(&state->data_wr_zcopy_mr_mapped);
+				goto accounted;
+			}
+			atomic64_inc(
+				&state->data_wr_zcopy_fb_offset_not_found);
+		} else if (!seg->mr->dma_mapped) {
+			if (seg->mr->umem &&
+			    (seg->mr->umem->is_odp || seg->mr->umem->is_dmabuf))
+				atomic64_inc(
+					&state->data_wr_zcopy_fb_dmabuf_or_odp);
+			else
+				atomic64_inc(
+					&state->data_wr_zcopy_fb_no_mr_mapping);
 		} else {
-			/*
-			 * Rail on a different NHI/DMA device than the MR was
-			 * mapped to (multi-controller node): the persistent
-			 * IOVAs are foreign here, so fall back to per-frame
-			 * dma_map_page in tbv_path_send_page_stream. Counted so
-			 * a nonzero _remapped on hardware flags the churn is
-			 * back. The gate admits only page-aligned sources, so
-			 * page_off must be 0.
-			 */
-			ret = tbv_umem_page_from_addr(seg->mr,
-						      seg->addr + seg_off,
-						      remaining, page, page_off,
-						      length);
-			if (ret)
-				return ret;
-			if (WARN_ON_ONCE(*page_off != 0))
-				return -EPROTO;
-			*premapped = false;
-			atomic64_inc(&state->data_wr_zcopy_remapped);
+			atomic64_inc(&state->data_wr_zcopy_fb_device_mismatch);
 		}
 
+		/*
+		 * Fallback: per-frame dma_map_page in tbv_path_send_page_stream
+		 * (the IOTLB-churning path). Should never run once the MR is
+		 * persistently mapped to this rail's device; _remapped and the
+		 * fb_* reasons make a regression self-explaining, and the
+		 * one-shot below dumps the exact device/sgt state. The gate
+		 * admits only page-aligned sources, so page_off must be 0.
+		 */
+		ret = tbv_umem_page_from_addr(seg->mr, seg->addr + seg_off,
+					      remaining, page, page_off,
+					      length);
+		if (ret)
+			return ret;
+		if (WARN_ON_ONCE(*page_off != 0))
+			return -EPROTO;
+		*premapped = false;
+		atomic64_inc(&state->data_wr_zcopy_remapped);
+		tbv_zcopy_report_fallback_once(state, seg->mr, stream->dma_dev);
+
+accounted:
 		stream->offset += *length;
 		refcount_inc(&stream->refs);
 		atomic_inc(&stream->send->tx_pending);
@@ -7405,7 +7529,7 @@ static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 				  dma_addr_t *dma_out, u32 *len_out)
 {
-	struct sg_table *sgt = &mr->umem->sgt_append.sgt;
+	struct sg_table *sgt = &mr->dma_sgt;
 	struct scatterlist *sg;
 	size_t offset;
 	u64 end;
@@ -7414,7 +7538,7 @@ static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 
 	if (!max_len)
 		return -EINVAL;
-	if (mr->dma_mr)
+	if (mr->dma_mr || !mr->dma_mapped)
 		return -EOPNOTSUPP;
 	if (check_add_overflow(addr, (u64)max_len, &end))
 		return -EINVAL;
@@ -10163,8 +10287,16 @@ static struct ib_mr *tbv_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->length = length;
 	mr->virt_addr = virt_addr;
 	mr->access = access;
-	/* the device ib_umem_get() dma_map'd the sgt to (see struct tbv_mr) */
-	mr->dma_dev = pd->device->dma_device;
+	/*
+	 * Build the persistent NHI DMA mapping for zero-copy TX. The device is
+	 * pd->device->dev.parent (== tb_ring_dma_device()), NOT
+	 * pd->device->dma_device: the latter is NULL because tbv registers with
+	 * RDMA-core virtual DMA (ib_register_device(.., NULL)), so ib_umem_get()
+	 * only stashed CPU VAs in the umem sgt (ib_dma_virt_map_sg) -- never real
+	 * NHI IOVAs. Best-effort; a failure leaves the MR without a mapping and
+	 * zcopy falls back to the framed copy.
+	 */
+	tbv_mr_dma_map(mr, pd->device->dev.parent);
 	ret = tbv_mr_publish(mr, pd);
 	if (ret) {
 		ib_umem_release(mr->umem);

@@ -631,6 +631,19 @@ struct tbv_state {
 	 */
 	atomic64_t data_wr_zcopy_mr_mapped;
 	atomic64_t data_wr_zcopy_remapped;
+	/*
+	 * Self-explaining fallback reasons (why a frame did NOT use the
+	 * persistent MR mapping), so a nonzero _remapped on hardware names the
+	 * cause instead of costing another cold boot. no_mr_mapping is the
+	 * predicate that was silently false in 8d31089 (dma_dev NULL under
+	 * virt DMA); once fixed, all of these stay 0.
+	 */
+	atomic64_t data_wr_zcopy_fb_no_mr_mapping;
+	atomic64_t data_wr_zcopy_fb_device_mismatch;
+	atomic64_t data_wr_zcopy_fb_dmabuf_or_odp;
+	atomic64_t data_wr_zcopy_fb_offset_not_found;
+	atomic64_t data_wr_zcopy_fb_other;
+	atomic_t zcopy_fallback_reported;
 	atomic64_t data_wr_copy_error;
 	atomic64_t data_wr_path_send;
 	atomic64_t data_wr_path_send_error;
