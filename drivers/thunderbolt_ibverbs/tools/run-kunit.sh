@@ -28,37 +28,15 @@ fi
 echo ">> overlaying fork drivers onto $TREE"
 rsync -a --delete --exclude='.git' "$REPO/drivers/thunderbolt/" "$TREE/drivers/thunderbolt/"
 rsync -a --delete --exclude='.git' "$REPO/drivers/net/thunderbolt/" "$TREE/drivers/net/thunderbolt/"
-python3 - "$TREE/include/linux/thunderbolt.h" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-if "#include <linux/completion.h>" not in text:
-    needle = "#include <linux/workqueue.h>\n"
-    if needle not in text:
-        raise SystemExit(f"could not patch {path}: workqueue include not found")
-    text = text.replace(needle, needle + "#include <linux/completion.h>\n", 1)
-if "TB_PROTOCOL_HANDLER_HAS_XDOMAIN" not in text:
-    old = "\tint (*callback)(const void *buf, size_t size, void *data);\n\tvoid *data;"
-    new = (
-        "\tint (*callback)(const void *buf, size_t size, void *data);\n"
-        "#define TB_PROTOCOL_HANDLER_HAS_XDOMAIN 1\n"
-        "\tint (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,\n"
-        "\t\t\t   void *data);\n"
-        "\tvoid *data;"
-    )
-    if old not in text:
-        raise SystemExit(f"could not patch {path}: protocol handler shape changed")
-    text = text.replace(old, new, 1)
-if "domain_released" not in text:
-    old = "\tunsigned long quirks;\n};"
-    new = "\tunsigned long quirks;\n\tstruct completion domain_released;\n};"
-    if old not in text:
-        raise SystemExit(f"could not patch {path}: tb_nhi shape changed")
-    text = text.replace(old, new, 1)
-path.write_text(text)
-PY
+# Patch the overlay's public header via the SAME shim the DKMS build uses, so
+# the KUnit tree and the shipped package never drift on the header additions
+# (completion.h, callback_xd/TB_PROTOCOL_HANDLER_HAS_XDOMAIN, domain_released).
+# The shim reads <ksrc>/include/linux/thunderbolt.h and writes <out>/linux/;
+# here ksrc == the overlay tree, and we copy the result back in place.
+HDR_GEN="$(mktemp -d)"
+"$REPO/dkms/tbfix-gen-thunderbolt-header.sh" "$TREE" "$HDR_GEN"
+cp "$HDR_GEN/linux/thunderbolt.h" "$TREE/include/linux/thunderbolt.h"
+rm -rf "$HDR_GEN"
 mkdir -p "$TREE/drivers/thunderbolt_ibverbs/kernel" "$TREE/drivers/thunderbolt_ibverbs/proto"
 rsync -a --delete \
 	--exclude='*.o' --exclude='*.ko' --exclude='*.mod*' --exclude='.*.cmd' \

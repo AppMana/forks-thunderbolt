@@ -26,6 +26,15 @@ ifneq ($(TBFIX_SYMVERS),)
 EXTRA_SYMBOLS := KBUILD_EXTRA_SYMBOLS=$(TBFIX_SYMVERS)
 endif
 
+# Shadow the kernel's <linux/thunderbolt.h> with the fork-patched copy the top
+# Makefile generated (source-aware handler additions), so ibverbs sees the same
+# public struct layout as the core it links against. Prepended to LINUXINCLUDE
+# ahead of the kernel include dirs. Empty when built without the tbfix shim or
+# under the KUnit overlay (which patches the header directly).
+ifneq ($(TBV_THUNDERBOLT_H_DIR),)
+LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
+endif
+
 obj-m := thunderbolt_ibverbs.o
 thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
 

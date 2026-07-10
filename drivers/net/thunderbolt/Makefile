@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
+
+# Shadow the kernel's <linux/thunderbolt.h> with the fork-patched copy so tbnet
+# sees the same struct layout as the vendored core it is built against. See
+# drivers/thunderbolt/Makefile for the rationale; empty in-tree / under KUnit.
+ifneq ($(TBV_THUNDERBOLT_H_DIR),)
+LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
+endif
+
 obj-$(CONFIG_USB4_NET) := thunderbolt_net.o
 thunderbolt_net-objs := main.o trace.o
 
