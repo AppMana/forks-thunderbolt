@@ -9,6 +9,16 @@ case "$1" in
         if command -v dkms >/dev/null 2>&1; then
             dkms remove -m "$NAME" -v "$VERSION" --all 2>/dev/null || true
         fi
+        # Restore the distro thunderbolt_net.ko that POST_INSTALL stashed out of
+        # each kernel's module tree, so the stock module is back once our DKMS
+        # build is gone. Idempotent per kernel; refreshes depmod + initramfs.
+        SUPPRESS="/usr/src/$NAME-$VERSION/tbfix-net-suppress.sh"
+        if [ -x "$SUPPRESS" ] && [ -d /var/lib/thunderbolt-tbfix/disabled-net ]; then
+            for kdir in /var/lib/thunderbolt-tbfix/disabled-net/*; do
+                [ -d "$kdir" ] || continue
+                "$SUPPRESS" restore "$(basename "$kdir")" || true
+            done
+        fi
         # Regenerate the initramfs so the stock in-tree thunderbolt is restored
         # at the next boot rather than the removed DKMS build (upgrade is handled
         # by the new version's postinst, so skip it here).

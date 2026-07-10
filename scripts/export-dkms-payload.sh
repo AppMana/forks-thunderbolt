@@ -60,8 +60,10 @@ if (( USE_WORKTREE == 0 )); then
   fi
 fi
 
-cp dkms/dkms.conf      "$TARGET/dkms.conf"
-cp dkms/Makefile       "$TARGET/Makefile"
+cp dkms/dkms.conf              "$TARGET/dkms.conf"
+cp dkms/Makefile               "$TARGET/Makefile"
+cp dkms/tbfix-net-suppress.sh  "$TARGET/tbfix-net-suppress.sh"
+chmod +x                       "$TARGET/tbfix-net-suppress.sh"
 
 rm -rf "$TARGET/drivers"
 mkdir -p "$TARGET/drivers/net" "$TARGET/drivers/infiniband/sw"
