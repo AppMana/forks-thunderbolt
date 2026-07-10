@@ -12,10 +12,13 @@ case "$1" in
             fi
             dkms autoinstall -m "$NAME"/"$VERSION" || true
         fi
-        # `thunderbolt` is loaded from the initramfs (early boot), so a DKMS
-        # rebuild alone is NOT enough: without regenerating the initramfs the
-        # stale in-initramfs module loads at the next boot and the freshly built
-        # one never runs. Refresh it for all installed kernels.
+        # thunderbolt/thunderbolt_net are pulled into the initramfs (early boot).
+        # dkms.conf REMAKE_INITRD=yes already refreshes it for the built kernel;
+        # this covers ALL installed kernels as a belt so a STALE initramfs can't
+        # keep loading the in-tree kernel/ copy instead of our updates/dkms one
+        # (that stale-initramfs case was the old boot -22). initramfs-tools
+        # resolves module names via modules.dep, which the "search updates ..."
+        # depmod order points at updates/dkms/, so the refresh bakes OUR modules.
         if command -v update-initramfs >/dev/null 2>&1; then
             update-initramfs -u -k all || true
         fi

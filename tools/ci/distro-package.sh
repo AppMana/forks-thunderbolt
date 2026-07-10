@@ -53,13 +53,10 @@ stage_source() {
 	install -d -m 0755 "$stage"
 	install -m 0644 "$repo_root/dkms/dkms.conf" "$stage/dkms.conf"
 	install -m 0644 "$repo_root/dkms/Makefile" "$stage/Makefile"
-	# Build-time header shim (self-contained <linux/thunderbolt.h>) and the
-	# distro-net suppression POST_INSTALL both live at the package top and must
-	# be executable in the staged /usr/src tree.
+	# Build-time header shim (self-contained <linux/thunderbolt.h>) lives at the
+	# package top and must be executable in the staged /usr/src tree.
 	install -m 0755 "$repo_root/dkms/tbfix-gen-thunderbolt-header.sh" \
 		"$stage/tbfix-gen-thunderbolt-header.sh"
-	install -m 0755 "$repo_root/dkms/tbfix-net-suppress.sh" \
-		"$stage/tbfix-net-suppress.sh"
 	# Preserve the real drivers/ tree so net's in-tree include of the one
 	# canonical ../../thunderbolt/thunderbolt_negotiation.h resolves as in-tree.
 	install -d -m 0755 "$stage/drivers/net" "$stage/drivers/infiniband/sw"
