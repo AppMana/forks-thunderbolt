@@ -2288,15 +2288,14 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 	 * not completed, or a reconcile / re-announce pass transiently re-armed
 	 * it after the ib_device was already published. Do NOT fail create_qp
 	 * with -ENOTCONN here -- an RC/UC QP is born in RESET, and peer
-	 * connectivity is only meaningful at modify_qp(RTR) and at send time,
-	 * where the data path is re-selected per-send by destination GID
-	 * (tbv_select_native_data_path_for_qp_locked). The create-time rail is a
-	 * placeholder for refcount accounting only. Bind the home rail, which is
-	 * a REAL rail (home != NULL and !removing, checked above), so this never
-	 * weakens the genuine no-rail error. Requiring the link up at CREATE was
-	 * a latent bug (byte-identical since 0.2.25) that 0.2.32's core self-heal
-	 * bring-up timing exposed as a racy NCCL-init ibv_create_qp -ENOTCONN.
-	 * KUnit: thunderbolt_ibverbs_create_qp_rail_bind.
+	 * connectivity is only meaningful once the destination is known at
+	 * modify_qp(RTR), where the QP is rebound to the destination's rail
+	 * (tbv_qp_rebind_to_dgid). Bind the home rail as the create-time
+	 * placeholder; it is a REAL rail (home != NULL and !removing, checked
+	 * above), so this never weakens the genuine no-rail error. Requiring the
+	 * link up at CREATE was a latent bug (byte-identical since 0.2.25) that
+	 * 0.2.32's core self-heal bring-up timing exposed as a racy NCCL-init
+	 * ibv_create_qp -ENOTCONN. KUnit: thunderbolt_ibverbs_create_qp_rail_bind.
 	 */
 	refcount_inc(&home->refcnt);
 	return home;
@@ -2313,6 +2312,114 @@ static void tbv_qp_unbind_rail(struct tbv_qp *tqp)
 	}
 	tbv_rail_put(tqp->rail);
 	tqp->rail = NULL;
+}
+
+/*
+ * The native peer that owns a destination GID, matched against the identity
+ * each peer advertised in its wire-v2 HELLO (remote_roce_eui64/ipv4). Returns
+ * NULL when no peer conclusively matches (unknown destination, or a peer that
+ * HELLOed before DHCP so its identity is INCONCLUSIVE -- never treat that as a
+ * match). state->lock held.
+ */
+static struct tbv_peer *tbv_peer_for_dgid_locked(struct tbv_state *state,
+						 const u8 dgid[16])
+{
+	struct tbv_peer *peer;
+	struct tbv_peer *match = NULL;
+
+	list_for_each_entry(peer, &state->peers, node) {
+		if (peer->backend != TBV_BACKEND_NATIVE ||
+		    !peer->remote_identity_valid)
+			continue;
+		if (tbv_gid_identity_verdict(dgid, true, peer->remote_roce_eui64,
+					     peer->remote_roce_ipv4) !=
+		    TBV_IDENTITY_MATCH)
+			continue;
+		if (match && match != peer)
+			return NULL;	/* ambiguous: two peers claim the GID */
+		match = peer;
+	}
+
+	return match;
+}
+
+/*
+ * Pick a rail of @peer to carry a QP's data. Prefer a data-ready, published
+ * rail; fall back to any non-removing rail so the QP is routed to the correct
+ * neighbour even if that rail's handshake is still completing (the send waits
+ * for readiness rather than egressing the wrong neighbour's rail). state->lock
+ * held.
+ */
+static struct tbv_rail *tbv_peer_pick_rail_locked(struct tbv_peer *peer)
+{
+	struct tbv_rail *rail;
+	struct tbv_rail *fallback = NULL;
+
+	list_for_each_entry(rail, &peer->rails, node) {
+		if (rail->removing)
+			continue;
+		if (tbv_rail_data_ready(rail) && READ_ONCE(rail->ibdev))
+			return rail;
+		if (!fallback)
+			fallback = rail;
+	}
+
+	return fallback;
+}
+
+/*
+ * Rebind a native RC/UC QP to the rail of the peer that actually owns the
+ * destination GID, now that modify_qp(RTR) has told us the destination.
+ *
+ * The QP was rail-bound at create_qp BEFORE the destination was known -- on a
+ * mid-chain node cabled to two neighbours that bind is effectively a coin flip
+ * (the ib_device's home peer). A QP bound toward the wrong neighbour sends
+ * every data frame (tbv_select_native_data_path_for_qp_locked returns
+ * tqp->rail->path -- there is NO per-send dgid re-selection) out the WRONG
+ * neighbour's rail: that third node never matches the QPN, drops the frame
+ * silently (no NAK), and the sender dies IBV_WC_RETRY_EXC_ERR while the
+ * responder never even saw the write. This is the "ACKs misrouted" hang. The
+ * rebind (long documented, the peer identity is stored expressly for it, but
+ * never actually wired until now) moves tqp->rail to the destination's peer.
+ *
+ * A dgid that matches no peer, or is inconclusive, leaves the create-time
+ * binding untouched -- never fail RTR here (that would reintroduce the
+ * ENOTCONN-class breakage): a wrong-but-present binding degrades to the
+ * pre-existing behaviour, a correct one is the fix. KUnit:
+ * thunderbolt_ibverbs_qp_dgid_rebind.
+ */
+static void tbv_qp_rebind_to_dgid(struct tbv_qp *tqp, const u8 dgid[16])
+{
+	struct tbv_state *state;
+	struct tbv_peer *peer;
+	struct tbv_rail *new_rail;
+
+	if (!tqp->owner || tbv_backend_is_apple(tqp->backend) ||
+	    tqp->type == IB_QPT_GSI)
+		return;
+
+	state = tqp->owner;
+	mutex_lock(&state->lock);
+	if (!tqp->rail || tqp->rail->peer->backend != TBV_BACKEND_NATIVE)
+		goto out;
+
+	peer = tbv_peer_for_dgid_locked(state, dgid);
+	if (!peer || peer == tqp->rail->peer)
+		goto out;		/* unknown/inconclusive, or already right */
+
+	new_rail = tbv_peer_pick_rail_locked(peer);
+	if (!new_rail)
+		goto out;
+
+	refcount_inc(&new_rail->refcnt);
+	tbv_qp_unbind_rail(tqp);	/* drops the create-time rail */
+	tqp->rail = new_rail;
+	tqp->rail_binding_counted = false;
+	pr_info_ratelimited("native QP dgid-rebind qpn=0x%x -> peer %u route=0x%llx rail=0x%x\n",
+			    tqp->base.qp_num, peer->peer_id,
+			    new_rail->key.route, new_rail->rail_id);
+out:
+	mutex_unlock(&state->lock);
 }
 
 /*
@@ -3537,6 +3644,21 @@ out_unlock:
 		return ret;
 	if (flush_error)
 		tbv_qp_flush_error(tqp);
+	/*
+	 * RTR carries the destination GID. Rebind the QP to the rail of the peer
+	 * that actually owns it, so data frames egress the correct neighbour's
+	 * rail rather than the create-time coin-flip binding. Done outside
+	 * tqp->lock (it takes state->lock) and before advertising credits so the
+	 * credit advertisement rides the corrected rail.
+	 */
+	if ((attr_mask & IB_QP_AV) &&
+	    attr->ah_attr.type == RDMA_AH_ATTR_TYPE_ROCE) {
+		const struct ib_global_route *grh =
+			rdma_ah_read_grh(&attr->ah_attr);
+
+		if (grh)
+			tbv_qp_rebind_to_dgid(tqp, grh->dgid.raw);
+	}
 	if (attr_mask & (IB_QP_STATE | IB_QP_DEST_QPN))
 		tbv_qp_advertise_recv_credits(tqp);
 	return 0;
