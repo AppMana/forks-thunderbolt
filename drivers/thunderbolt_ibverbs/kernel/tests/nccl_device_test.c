@@ -111,11 +111,16 @@ static void nccl_select_off_link_127(struct kunit *test)
  */
 static void nccl_rails_have_distinct_gids(struct kunit *test)
 {
+	static const u8 host_uuid[16] = {
+		0x7e, 0x12, 0xc9, 0x64, 0x0b, 0xd5, 0x48, 0x93,
+		0xa0, 0x8e, 0x27, 0x4c, 0xf1, 0x66, 0x39, 0x0d,
+	};
+	u32 h = tbv_host_identity_hash(host_uuid);
 	u8 r0[6], r1[6];
 
-	/* one node, two rails: node_guid differs by peer_id (see ibdev.c) */
-	tbv_rail_netdev_mac(0x0200544256524253ULL + (1ull << 24), r0);
-	tbv_rail_netdev_mac(0x0200544256524253ULL + (2ull << 24), r1);
+	/* one node, two rails toward different peers (see ibdev.c) */
+	tbv_rail_netdev_mac(h, 1, 0, r0);
+	tbv_rail_netdev_mac(h, 2, 0, r1);
 	KUNIT_EXPECT_NE(test, 0, memcmp(r0, r1, 6));
 }
 

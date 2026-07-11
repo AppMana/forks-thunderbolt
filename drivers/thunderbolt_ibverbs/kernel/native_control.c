@@ -113,22 +113,70 @@ static void tbv_native_control_local_identity(u64 *eui64, u32 *ipv4_be)
 }
 
 /*
- * Per-rail MAC for the rail's private GID-only netdev. The rail's node_guid is
- * already distinct per rail (backend+peer_id+rail_id, see tbv_ibdev_register),
- * so its low 40 bits give each rail a distinct MAC, hence a distinct per-rail
- * link-local/EUI RoCE GID. Locally administered + unicast (0x02). udev assigns
- * the per-link routable address on top.
+ * 24-bit host identity hash for the rail netdev MAC / RAIL_EUI64 identity,
+ * folded from the host router UUID (tb_xdomain local_uuid -- stable across
+ * boots, identical for every rail on the host, unique per host). Never
+ * returns 0 so an advertised rail identity can never look "unknown"; a NULL
+ * uuid (should not happen for a connected XDomain) gets the same constant
+ * fallback on every call site, keeping the node self-consistent.
  *
  * Unit-tested: kernel/tests/rail_mac_test.c (run via tools/run-kunit.sh).
  */
-void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6])
+u32 tbv_host_identity_hash(const u8 uuid[16])
+{
+	u32 h = 0;
+	int i;
+
+	if (!uuid)
+		return 0x544256; /* "TBV" */
+	for (i = 0; i < 16; i++)
+		h = h * 31 + uuid[i];
+	h &= 0xffffffu;
+	return h ? h : 0x544256;
+}
+
+/*
+ * Per-rail MAC for the rail's private GID-only netdev: 02:H1:H2:H3:P:R --
+ * locally administered + unicast, H = tbv_host_identity_hash (host-unique),
+ * P/R = the local peer_id/rail_id. Every rail on a host gets a distinct MAC
+ * (distinct P:R), and rails on DIFFERENT hosts get distinct MACs too
+ * (distinct H). udev assigns the per-link routable address on top.
+ *
+ * The host part matters: the pre-0.2.35 derivation used the ib node_guid's
+ * low 40 bits, whose only variables were the LOCAL peer_id and rail_id -- so
+ * every node's "peer 1" rail carried the SAME MAC fleet-wide (02:42:57:52:
+ * 42:53 on both appmana-002 and appmana-018), hence the same link-local GID
+ * and no value a peer could ever resolve a destination GID against. The
+ * RAIL_EUI64 HELLO identity matches on the host part only (eui64 >> 16, the
+ * upper 48 bits), because P:R are the REMOTE node's private numbering and
+ * differ per rail.
+ *
+ * Unit-tested: kernel/tests/rail_mac_test.c (run via tools/run-kunit.sh).
+ */
+void tbv_rail_netdev_mac(u32 host_hash, u32 peer_id, u32 rail_id, u8 mac[6])
 {
 	mac[0] = 0x02;
-	mac[1] = (u8)(node_guid >> 32);
-	mac[2] = (u8)(node_guid >> 24);
-	mac[3] = (u8)(node_guid >> 16);
-	mac[4] = (u8)(node_guid >> 8);
-	mac[5] = (u8)node_guid;
+	mac[1] = (u8)(host_hash >> 16);
+	mac[2] = (u8)(host_hash >> 8);
+	mac[3] = (u8)host_hash;
+	mac[4] = (u8)peer_id;
+	mac[5] = (u8)rail_id;
+}
+
+/*
+ * The modified-EUI-64 of a rail netdev MAC (RFC 4291: mac[0..2] ^ U/L bit,
+ * ff:fe, mac[3..5]) -- the interface-id bytes of every link-local/SLAAC GID
+ * ib_core builds for that rail's ib_device, and the value a RAIL_EUI64 HELLO
+ * advertises. Host scope = eui64 >> 16.
+ */
+u64 tbv_rail_identity_eui64(u32 host_hash, u32 peer_id, u32 rail_id)
+{
+	u8 mac[6];
+
+	tbv_rail_netdev_mac(host_hash, peer_id, rail_id, mac);
+	return ((u64)(mac[0] ^ 0x02) << 56) | ((u64)mac[1] << 48) |
+	       ((u64)mac[2] << 40) | (0xffULL << 32) | (0xfeULL << 24) |
+	       ((u64)mac[3] << 16) | ((u64)mac[4] << 8) | (u64)mac[5];
 }
 
 /*
@@ -170,6 +218,26 @@ static void tbv_native_control_fill_hello(const struct tbv_state *state,
 	hello->path_flags = tbv_native_control_path_flags(&rail->path);
 	tbv_native_control_local_identity(&hello->roce_eui64,
 					  &hello->roce_ipv4);
+	/*
+	 * No pinned roce_netdev (the ibverbs-native fleet default: the
+	 * roce_netdev param is an rxe_lan-era knob and is unset): advertise
+	 * the rail netdev's own synthetic identity instead, flagged
+	 * RAIL_EUI64 so the peer host-part-matches it. Without this the HELLO
+	 * carries (0, 0), the peer never sets remote_identity_valid, and
+	 * tbv_qp_rebind_to_dgid() can NEVER resolve a destination GID -- a QP
+	 * created on the ib_device of the other neighbour then egresses every
+	 * data frame out the wrong rail and the first NCCL exchange hangs
+	 * with no WC and no error (appmana-002<->018, 2026-07-11: 018 sent
+	 * 578 data frames to route 0x3 while 002 on route 0x1 received none).
+	 * KUnit: thunderbolt_ibverbs_qp_first_connect.
+	 */
+	if (!hello->roce_eui64 && !hello->roce_ipv4 && peer->xd &&
+	    peer->xd->local_uuid) {
+		hello->roce_eui64 = tbv_rail_identity_eui64(
+			tbv_host_identity_hash(peer->xd->local_uuid->b),
+			peer->peer_id, rail->rail_id);
+		hello->capabilities |= TBV_NATIVE_WIRE_CAP_RAIL_EUI64;
+	}
 }
 
 static bool tbv_native_control_peer_matches_source(
@@ -363,11 +431,19 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			/*
 			 * Record the peer's RoCE GID identity (wire v2) so
 			 * modify_qp(RTR) can resolve destination GIDs to this
-			 * peer. Zero means the peer has no roce_netdev.
+			 * peer. Zero means the peer advertised nothing (pre-
+			 * 0.2.35 module with no pinned roce_netdev).
+			 * RAIL_EUI64 marks a synthetic per-rail identity that
+			 * must be matched on its host part only; the host
+			 * part is the same for every rail of the peer's node,
+			 * so last-HELLO-wins storage is safe even multi-rail.
 			 */
 			if (remote->roce_eui64 || remote->roce_ipv4) {
 				peer->remote_roce_eui64 = remote->roce_eui64;
 				peer->remote_roce_ipv4 = remote->roce_ipv4;
+				peer->remote_identity_rail_scoped =
+					!!(remote->capabilities &
+					   TBV_NATIVE_WIRE_CAP_RAIL_EUI64);
 				peer->remote_identity_valid = true;
 			}
 			/*

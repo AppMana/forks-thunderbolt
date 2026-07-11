@@ -2328,12 +2328,25 @@ static struct tbv_peer *tbv_peer_for_dgid_locked(struct tbv_state *state,
 	struct tbv_peer *match = NULL;
 
 	list_for_each_entry(peer, &state->peers, node) {
+		enum tbv_identity_verdict verdict;
+
 		if (peer->backend != TBV_BACKEND_NATIVE ||
 		    !peer->remote_identity_valid)
 			continue;
-		if (tbv_gid_identity_verdict(dgid, true, peer->remote_roce_eui64,
-					     peer->remote_roce_ipv4) !=
-		    TBV_IDENTITY_MATCH)
+		/*
+		 * A RAIL_EUI64 identity is synthetic and matched on its host
+		 * part only (its low 16 bits are the peer's private
+		 * peer_id/rail_id numbering, different per rail); a pinned
+		 * roce_netdev identity keeps the exact match.
+		 */
+		if (peer->remote_identity_rail_scoped)
+			verdict = tbv_gid_rail_identity_verdict(
+				dgid, peer->remote_roce_eui64);
+		else
+			verdict = tbv_gid_identity_verdict(
+				dgid, true, peer->remote_roce_eui64,
+				peer->remote_roce_ipv4);
+		if (verdict != TBV_IDENTITY_MATCH)
 			continue;
 		if (match && match != peer)
 			return NULL;	/* ambiguous: two peers claim the GID */
@@ -2341,6 +2354,18 @@ static struct tbv_peer *tbv_peer_for_dgid_locked(struct tbv_state *state,
 	}
 
 	return match;
+}
+
+/* Native peers on this node. state->lock held. */
+static u32 tbv_native_peer_count_locked(struct tbv_state *state)
+{
+	struct tbv_peer *peer;
+	u32 count = 0;
+
+	list_for_each_entry(peer, &state->peers, node)
+		if (peer->backend == TBV_BACKEND_NATIVE)
+			count++;
+	return count;
 }
 
 /*
@@ -2404,8 +2429,27 @@ static void tbv_qp_rebind_to_dgid(struct tbv_qp *tqp, const u8 dgid[16])
 		goto out;
 
 	peer = tbv_peer_for_dgid_locked(state, dgid);
-	if (!peer || peer == tqp->rail->peer)
-		goto out;		/* unknown/inconclusive, or already right */
+	if (!peer) {
+		/*
+		 * The create-time binding stands. On a MULTI-peer node that is
+		 * a coin flip, and if it is wrong every data frame egresses
+		 * the wrong neighbour with no NAK, no WC error and no
+		 * retransmit warn from the destination's point of view -- the
+		 * silent first-connect NCCL hang of 2026-07-11 (appmana-018
+		 * pushed 578 frames to route 0x3 while appmana-002 waited on
+		 * route 0x1; every peer identity was invalid because unpinned
+		 * nodes advertised a zero identity). Scream once per burst so
+		 * an unresolved dgid on a multi-peer node is never silent
+		 * again.
+		 */
+		if (tbv_native_peer_count_locked(state) > 1)
+			pr_warn_ratelimited("native QP dgid unresolved on multi-peer node: qpn=0x%x dgid=%16phN keeping create-time rail route=0x%llx (frames may egress the wrong neighbour; check peers' advertised identities)\n",
+					    tqp->base.qp_num, dgid,
+					    tqp->rail->key.route);
+		goto out;
+	}
+	if (peer == tqp->rail->peer)
+		goto out;		/* already right */
 
 	new_rail = tbv_peer_pick_rail_locked(peer);
 	if (!new_rail)
@@ -2479,6 +2523,41 @@ enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
 	}
 
 	return TBV_IDENTITY_INCONCLUSIVE;
+}
+
+/*
+ * Classify a dgid against a synthetic RAIL_EUI64 identity
+ * (TBV_NATIVE_WIRE_CAP_RAIL_EUI64): compare interface-ids on the HOST part
+ * only, eui64 >> 16 -- 00:H1:H2:ff:fe:H3 from the rail netdev MAC
+ * 02:H1:H2:H3:P:R. The low 16 bits (P:R) are the ADVERTISING node's private
+ * peer_id/rail_id numbering: they differ across its rails and mean nothing
+ * here, so host-part matching is what lets a dgid resolve to the peer no
+ * matter which of its ib_devices NCCL took the GID from. A v4-mapped dgid
+ * carries no EUI and abstains; an empty identity abstains.
+ *
+ * Pure decision function so the contract is unit-tested: see
+ * kernel/tests/qp_first_connect_test.c.
+ */
+enum tbv_identity_verdict tbv_gid_rail_identity_verdict(const u8 gid[16],
+							u64 rail_eui64)
+{
+	static const u8 v4_prefix[12] = {
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+	};
+	u64 iid;
+
+	if (!rail_eui64)
+		return TBV_IDENTITY_INCONCLUSIVE;
+	if (!memcmp(gid, v4_prefix, sizeof(v4_prefix)))
+		return TBV_IDENTITY_INCONCLUSIVE;
+
+	iid = ((u64)gid[8] << 56) | ((u64)gid[9] << 48) |
+	      ((u64)gid[10] << 40) | ((u64)gid[11] << 32) |
+	      ((u64)gid[12] << 24) | ((u64)gid[13] << 16) |
+	      ((u64)gid[14] << 8) | (u64)gid[15];
+
+	return (iid >> 16) == (rail_eui64 >> 16) ? TBV_IDENTITY_MATCH :
+						   TBV_IDENTITY_NO_MATCH;
 }
 
 /*
@@ -3046,6 +3125,8 @@ struct device *tbv_ibdev_netdev_parent(struct device *ib_parent,
 
 static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 {
+	struct tb_xdomain *xd = (dev->rail && dev->rail->peer) ?
+				dev->rail->peer->xd : NULL;
 	struct net_device *ndev;
 	u8 mac[ETH_ALEN];
 	int ret;
@@ -3054,7 +3135,18 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	if (!ndev)
 		return -ENOMEM;
 
-	tbv_rail_netdev_mac(be64_to_cpu(dev->base.node_guid), mac);
+	/*
+	 * 02:H1:H2:H3:P:R -- host-hash + local peer/rail ids. MUST be the
+	 * exact derivation tbv_native_control_fill_hello() advertises as the
+	 * RAIL_EUI64 identity: the GIDs ib_core builds from this MAC are what
+	 * peers resolve against that identity at modify_qp(RTR).
+	 */
+	tbv_rail_netdev_mac(tbv_host_identity_hash(
+				    xd && xd->local_uuid ? xd->local_uuid->b :
+							   NULL),
+			    (dev->rail && dev->rail->peer) ?
+				    dev->rail->peer->peer_id : 0,
+			    dev->rail ? dev->rail->rail_id : 0, mac);
 	eth_hw_addr_set(ndev, mac);
 
 	/*
@@ -3065,9 +3157,7 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	 * from the netdev itself, not its parent device.
 	 */
 	SET_NETDEV_DEV(ndev,
-		       tbv_ibdev_netdev_parent(dev->base.dev.parent,
-			(dev->rail && dev->rail->peer) ? dev->rail->peer->xd :
-							 NULL));
+		       tbv_ibdev_netdev_parent(dev->base.dev.parent, xd));
 
 	ret = register_netdev(ndev);
 	if (ret) {

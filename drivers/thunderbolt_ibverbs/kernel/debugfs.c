@@ -429,9 +429,12 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 	list_for_each_entry(peer, &state->peers, node) {
 		struct tbv_rail *rail;
 
-		seq_printf(s, "peer %u backend=%s rails=%u native_qp_rr_rail_id=%u\n",
+		seq_printf(s, "peer %u backend=%s rails=%u native_qp_rr_rail_id=%u identity_valid=%u rail_scoped=%u remote_eui64=%016llx remote_ipv4=%pI4h\n",
 			   peer->peer_id, tbv_backend_name(peer->backend),
-			   peer->nr_rails, peer->native_qp_rr_rail_id);
+			   peer->nr_rails, peer->native_qp_rr_rail_id,
+			   peer->remote_identity_valid,
+			   peer->remote_identity_rail_scoped,
+			   peer->remote_roce_eui64, &peer->remote_roce_ipv4);
 
 		list_for_each_entry(rail, &peer->rails, node) {
 			bool data_ready;

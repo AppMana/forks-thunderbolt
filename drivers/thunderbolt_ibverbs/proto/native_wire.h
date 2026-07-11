@@ -70,6 +70,17 @@ enum tbv_native_wire_op {
  * NAK: the peer understands TBV_NATIVE_DATA_OP_NAK (selective retransmit
  * request). Pre-NAK receivers count the opcode as data_rx_bad_header, so it
  * must never be sent to them; they recover by their retransmit timer alone.
+ *
+ * RAIL_EUI64: roce_eui64 is a SYNTHETIC per-rail identity (the sender has no
+ * pinned roce_netdev): the modified-EUI-64 of the sender's rail netdev MAC
+ * 02:H1:H2:H3:P:R, where H is a stable 24-bit host hash (host-unique) and
+ * P:R are the sender's LOCAL peer_id/rail_id numbering. P:R mean nothing to
+ * the receiver (every node numbers its peers independently) and differ across
+ * the sender's rails, so the receiver must match destination-GID interface-ids
+ * on the HOST part only (upper 48 bits, eui64 >> 16). That makes every GID of
+ * the sender's node resolvable, whichever of its ib_devices it came from.
+ * Without this bit roce_eui64 is a real (pinned) netdev identity and is
+ * matched exactly, as before.
  */
 enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_UC = 1u << 0,
@@ -77,6 +88,7 @@ enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_MULTI_RAIL = 1u << 2,
 	TBV_NATIVE_WIRE_CAP_SPLIT_DATA = 1u << 3,
 	TBV_NATIVE_WIRE_CAP_NAK = 1u << 4,
+	TBV_NATIVE_WIRE_CAP_RAIL_EUI64 = 1u << 5,
 };
 
 enum tbv_native_wire_path_flag {

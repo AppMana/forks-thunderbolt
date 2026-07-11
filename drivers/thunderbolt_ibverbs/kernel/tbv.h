@@ -403,6 +403,13 @@ struct tbv_peer {
 	u32 remote_roce_ipv4;
 	bool remote_identity_valid;
 	/*
+	 * remote_roce_eui64 is a synthetic RAIL_EUI64 identity (the peer's
+	 * HELLO carried TBV_NATIVE_WIRE_CAP_RAIL_EUI64): match destination
+	 * GIDs on the host part only (eui64 >> 16) -- the low 16 bits are the
+	 * peer's private peer_id/rail_id numbering and differ per rail.
+	 */
+	bool remote_identity_rail_scoped;
+	/*
 	 * The peer's HELLO capability bits (TBV_NATIVE_WIRE_CAP_*), written
 	 * under state->lock in tbv_native_control_apply_remote() and read
 	 * with READ_ONCE on the data path. Zero until the HELLO lands, so
@@ -1188,13 +1195,24 @@ enum tbv_identity_verdict {
 enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
 						   bool identity_valid,
 						   u64 eui64, u32 ipv4_be);
+/*
+ * Classify a dgid against a synthetic RAIL_EUI64 identity: host-part match
+ * (eui64 >> 16) so every GID of the advertising node resolves, whichever of
+ * its rails/ib_devices it came from. v4-mapped dgids and an empty identity
+ * abstain. Pure; KUnit: qp_first_connect_test.c.
+ */
+enum tbv_identity_verdict tbv_gid_rail_identity_verdict(const u8 gid[16],
+							u64 rail_eui64);
 bool tbv_native_control_local_identity_incomplete(void);
 /*
- * tbv_rail_netdev_mac derives a rail's private netdev MAC from its node_guid so
- * each rail gets a distinct RoCE GID. See kernel/native_control.c +
- * tests/rail_mac_test.c.
+ * Per-rail netdev MAC / synthetic RoCE identity: 02:H1:H2:H3:P:R from a
+ * host-unique 24-bit hash + local peer/rail ids, so rails get distinct GIDs
+ * ACROSS hosts too (the node_guid-derived scheme collided fleet-wide). See
+ * kernel/native_control.c + tests/rail_mac_test.c.
  */
-void tbv_rail_netdev_mac(u64 node_guid, u8 mac[6]);
+u32 tbv_host_identity_hash(const u8 uuid[16]);
+void tbv_rail_netdev_mac(u32 host_hash, u32 peer_id, u32 rail_id, u8 mac[6]);
+u64 tbv_rail_identity_eui64(u32 host_hash, u32 peer_id, u32 rail_id);
 void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
 int tbv_native_control_identity_notifier_register(struct tbv_state *state);
 void tbv_native_control_identity_notifier_unregister(void);
