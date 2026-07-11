@@ -2266,6 +2266,7 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 			  bool gsi, bool *counted)
 {
 	struct tbv_rail *home = dev->rail;
+	struct tbv_rail *rail;
 
 	*counted = false;
 	if (WARN_ON_ONCE(!home))
@@ -2278,7 +2279,27 @@ tbv_select_qp_rail_locked(struct tbv_ibdev *dev, enum tbv_backend_type backend,
 		return home;
 	}
 
-	return tbv_select_rail_from_peer_locked(home->peer, true, counted);
+	rail = tbv_select_rail_from_peer_locked(home->peer, true, counted);
+	if (rail)
+		return rail;
+
+	/*
+	 * No peer rail is data-ready yet: the native HELLO/READY handshake has
+	 * not completed, or a reconcile / re-announce pass transiently re-armed
+	 * it after the ib_device was already published. Do NOT fail create_qp
+	 * with -ENOTCONN here -- an RC/UC QP is born in RESET, and peer
+	 * connectivity is only meaningful at modify_qp(RTR) and at send time,
+	 * where the data path is re-selected per-send by destination GID
+	 * (tbv_select_native_data_path_for_qp_locked). The create-time rail is a
+	 * placeholder for refcount accounting only. Bind the home rail, which is
+	 * a REAL rail (home != NULL and !removing, checked above), so this never
+	 * weakens the genuine no-rail error. Requiring the link up at CREATE was
+	 * a latent bug (byte-identical since 0.2.25) that 0.2.32's core self-heal
+	 * bring-up timing exposed as a racy NCCL-init ibv_create_qp -ENOTCONN.
+	 * KUnit: thunderbolt_ibverbs_create_qp_rail_bind.
+	 */
+	refcount_inc(&home->refcnt);
+	return home;
 }
 
 static void tbv_qp_unbind_rail(struct tbv_qp *tqp)

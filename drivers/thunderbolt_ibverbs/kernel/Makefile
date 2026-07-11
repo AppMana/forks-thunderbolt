@@ -55,6 +55,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/zcopy_split_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/nak_protocol_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_wc_completion_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/reload_quiesce_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/create_qp_rail_bind_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
