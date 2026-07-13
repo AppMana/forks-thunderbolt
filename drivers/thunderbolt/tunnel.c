@@ -1987,6 +1987,54 @@ bool tb_tunnel_match_dma(const struct tb_tunnel *tunnel, int transmit_path,
 	return true;
 }
 
+/**
+ * tb_tunnel_dma_hw_active() - Read back whether a DMA tunnel still passes
+ * @tunnel: DMA tunnel to check
+ *
+ * A DMA tunnel can die underneath its consumer without any software event:
+ * the appmana fleet loses hotplug edges, and a peer reboot / link retrain
+ * leaves the local hop entries deactivated (enable=0) while the tb_tunnel
+ * object still sits in the tunnel list looking healthy. Read every hop entry
+ * of every path back from the routers' path config space and verify the
+ * enable bit, so a service driver (thunderbolt_net's session verify) can
+ * distinguish a live tunnel from a zombie.
+ *
+ * Return: %1 if all hop entries are programmed and enabled, %0 if the tunnel
+ * was deactivated (software or hardware), negative errno on a config read
+ * failure (state unknown -- callers must not treat that as dead).
+ */
+int tb_tunnel_dma_hw_active(const struct tb_tunnel *tunnel)
+{
+	int i, j;
+
+	if (WARN_ON(!tb_tunnel_is_dma(tunnel)))
+		return -EINVAL;
+
+	for (i = 0; i < tunnel->npaths; i++) {
+		const struct tb_path *path = tunnel->paths[i];
+
+		if (!path)
+			continue;
+		if (!path->activated)
+			return 0;
+
+		for (j = 0; j < path->path_length; j++) {
+			const struct tb_path_hop *hop = &path->hops[j];
+			struct tb_regs_hop regs;
+			int ret;
+
+			ret = tb_port_read(hop->in_port, &regs, TB_CFG_HOPS,
+					   2 * hop->in_hop_index, 2);
+			if (ret)
+				return ret;
+			if (!regs.enable)
+				return 0;
+		}
+	}
+
+	return 1;
+}
+
 static int tb_usb3_max_link_rate(struct tb_port *up, struct tb_port *down)
 {
 	int ret, up_max_rate, down_max_rate;

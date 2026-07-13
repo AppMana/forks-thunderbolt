@@ -2427,6 +2427,43 @@ static int tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	return 0;
 }
 
+static int tb_check_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
+					 int transmit_path, int transmit_ring,
+					 int receive_path, int receive_ring)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_port *nhi_port, *dst_port;
+	struct tb_tunnel *tunnel;
+	struct tb_switch *sw;
+	int ret = 0;
+
+	sw = tb_to_switch(xd->dev.parent);
+	dst_port = tb_port_at(xd->route, sw);
+	nhi_port = tb_switch_find_port(tb->root_switch, TB_TYPE_NHI);
+
+	mutex_lock(&tb->lock);
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (!tb_tunnel_is_dma(tunnel))
+			continue;
+		if (tunnel->src_port != nhi_port || tunnel->dst_port != dst_port)
+			continue;
+		if (!tb_tunnel_match_dma(tunnel, transmit_path, transmit_ring,
+					 receive_path, receive_ring))
+			continue;
+		/*
+		 * The tunnel object exists; read the routers' hop entries back
+		 * so a hardware/CM deactivation that happened without the
+		 * consumer's knowledge (lost hotplug edge, peer reboot) is
+		 * still reported as dead. See tb_tunnel_dma_hw_active().
+		 */
+		ret = tb_tunnel_dma_hw_active(tunnel);
+		break;
+	}
+	mutex_unlock(&tb->lock);
+
+	return ret;
+}
+
 /* hotplug handling */
 
 /*
@@ -3485,6 +3522,7 @@ static const struct tb_cm_ops tb_cm_ops = {
 	.approve_switch = tb_tunnel_pci,
 	.approve_xdomain_paths = tb_approve_xdomain_paths,
 	.disconnect_xdomain_paths = tb_disconnect_xdomain_paths,
+	.xdomain_paths_active = tb_check_xdomain_paths_active,
 };
 
 /*

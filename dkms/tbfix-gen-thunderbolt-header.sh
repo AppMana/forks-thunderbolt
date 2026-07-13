@@ -44,15 +44,19 @@ dst="$out/linux/thunderbolt.h"
 add_completion=1; grep -q '#include <linux/completion.h>' "$src" && add_completion=0
 add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handler=0
 add_nhi=1;        grep -q 'domain_released' "$src" && add_nhi=0
+add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_active=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
 #   2. inside struct tb_protocol_handler, after the
 #      "int (*callback)(...)" line, BEFORE ->data     -> insert macro+callback_xd
 #   3. inside struct tb_nhi, before its closing "};"   -> append domain_released
+#   4. after the tb_xdomain_disable_paths() declaration (first line matched,
+#      insertion after its closing ");")               -> add paths_active decl
 awk -v add_completion="$add_completion" \
     -v add_handler="$add_handler" \
-    -v add_nhi="$add_nhi" '
+    -v add_nhi="$add_nhi" \
+    -v add_paths_active="$add_paths_active" '
 	add_completion == 1 && $0 == "#include <linux/workqueue.h>" {
 		print
 		print "#include <linux/completion.h>"
@@ -75,6 +79,19 @@ awk -v add_completion="$add_completion" \
 		next
 	}
 	in_ph == 1 && $0 == "};" { in_ph = 0 }
+	add_paths_active == 1 && \
+	    $0 ~ /^int tb_xdomain_disable_paths\(struct tb_xdomain \*xd, int transmit_path,/ {
+		in_disable = 1
+	}
+	add_paths_active == 1 && in_disable == 1 && $0 ~ /\);$/ {
+		print
+		print "#define TB_XDOMAIN_HAS_PATHS_ACTIVE 1"
+		print "int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,"
+		print "\t\t\t    int transmit_ring, int receive_path,"
+		print "\t\t\t    int receive_ring);"
+		in_disable = 0
+		next
+	}
 	{ print }
 ' "$src" > "$dst"
 
@@ -83,7 +100,7 @@ awk -v add_completion="$add_completion" \
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released'; do
+for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE'; do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1

@@ -503,6 +503,10 @@ struct tb_path {
  * @disconnect_pcie_paths: Disconnects PCIe paths before NVM update
  * @approve_xdomain_paths: Approve (establish) XDomain DMA paths
  * @disconnect_xdomain_paths: Disconnect XDomain DMA paths
+ * @xdomain_paths_active: Read back whether previously approved XDomain DMA
+ *			  paths are still programmed (hop entries enabled).
+ *			  Level-triggered zombie detection for service
+ *			  drivers; optional (unset means unknown).
  * @usb4_switch_op: Optional proxy for USB4 router operations. If set
  *		    this will be called whenever USB4 router operation is
  *		    performed. If this returns %-EOPNOTSUPP then the
@@ -543,6 +547,9 @@ struct tb_cm_ops {
 	int (*disconnect_xdomain_paths)(struct tb *tb, struct tb_xdomain *xd,
 					int transmit_path, int transmit_ring,
 					int receive_path, int receive_ring);
+	int (*xdomain_paths_active)(struct tb *tb, struct tb_xdomain *xd,
+				    int transmit_path, int transmit_ring,
+				    int receive_path, int receive_ring);
 	int (*usb4_switch_op)(struct tb_switch *sw, u16 opcode, u32 *metadata,
 			      u8 *status, const void *tx_data, size_t tx_data_len,
 			      void *rx_data, size_t rx_data_len);
@@ -799,6 +806,9 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring);
+int tb_domain_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
+				   int transmit_path, int transmit_ring,
+				   int receive_path, int receive_ring);
 int tb_domain_disconnect_all_paths(struct tb *tb);
 
 static inline struct tb *tb_domain_get(struct tb *tb)

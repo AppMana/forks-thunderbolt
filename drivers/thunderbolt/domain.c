@@ -840,6 +840,36 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 			transmit_ring, receive_path, receive_ring);
 }
 
+/**
+ * tb_domain_xdomain_paths_active() - Are XDomain DMA paths still programmed?
+ * @tb: Domain the DMA paths belong to
+ * @xd: XDomain the DMA paths are created to
+ * @transmit_path: HopID we are using to send out packets
+ * @transmit_ring: DMA ring used to send out packets
+ * @receive_path: HopID the other end is using to send packets to us
+ * @receive_ring: DMA ring used to receive packets from @receive_path
+ *
+ * Asks the connection manager whether the DMA tunnel previously approved
+ * with these parameters is still programmed, reading the routers' hop
+ * entries back. Level-triggered zombie detection for service drivers whose
+ * session outlives the tunnel (lost hotplug edges, peer reboots).
+ *
+ * Return: %1 if the tunnel is programmed and enabled, %0 if it is gone or
+ * deactivated, negative errno if the state cannot be determined (including
+ * %-ENOTSUPP when the connection manager does not implement the check --
+ * callers must treat that as unknown, not as dead).
+ */
+int tb_domain_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
+				   int transmit_path, int transmit_ring,
+				   int receive_path, int receive_ring)
+{
+	if (!tb->cm_ops->xdomain_paths_active)
+		return -ENOTSUPP;
+
+	return tb->cm_ops->xdomain_paths_active(tb, xd, transmit_path,
+			transmit_ring, receive_path, receive_ring);
+}
+
 static int disconnect_xdomain(struct device *dev, void *data)
 {
 	struct tb_xdomain *xd;

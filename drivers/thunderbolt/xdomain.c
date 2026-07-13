@@ -2372,6 +2372,36 @@ int tb_xdomain_disable_paths(struct tb_xdomain *xd, int transmit_path,
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_disable_paths);
 
+/**
+ * tb_xdomain_paths_active() - Are previously enabled DMA paths still live?
+ * @xd: XDomain connection
+ * @transmit_path: HopID we are using to send out packets
+ * @transmit_ring: DMA ring used to send out packets
+ * @receive_path: HopID the other end is using to send packets to us
+ * @receive_ring: DMA ring used to receive packets from @receive_path
+ *
+ * Level-triggered revalidation for service drivers: reads the routers' path
+ * config space back and reports whether the DMA tunnel established with
+ * tb_xdomain_enable_paths() is still programmed (hop entries enabled). A
+ * peer reboot or re-negotiation without a processed hotplug edge deactivates
+ * the tunnel underneath the service while its session (e.g. ThunderboltIP
+ * login, carrier) stays latched -- the zombie this call lets callers detect
+ * so they can tear down and re-run their spec negotiation.
+ *
+ * Return: %1 when the tunnel is programmed and enabled, %0 when it is gone
+ * or deactivated, negative errno when the state cannot be determined
+ * (callers must treat that as unknown, not as dead).
+ */
+int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,
+			    int transmit_ring, int receive_path,
+			    int receive_ring)
+{
+	return tb_domain_xdomain_paths_active(xd->tb, xd, transmit_path,
+					      transmit_ring, receive_path,
+					      receive_ring);
+}
+EXPORT_SYMBOL_GPL(tb_xdomain_paths_active);
+
 struct tb_xdomain_lookup {
 	const uuid_t *uuid;
 	u8 link;

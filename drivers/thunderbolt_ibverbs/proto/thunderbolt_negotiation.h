@@ -140,6 +140,36 @@ static inline bool tb_xdomain_handshake_supersede(struct tb_xdomain_handshake *h
 	return true;
 }
 
+/**
+ * tb_xdomain_session_zombie() - is an established session dead on the wire?
+ * @h: the service's login/HELLO handshake state
+ * @paths_active: whether the DMA tunnel backing the session is still
+ *		  programmed (software tunnel present AND the routers' hop
+ *		  entries still have their enable bits set)
+ *
+ * The level-triggered revalidation contract, from the appmana-018<->027
+ * post-mortem (2026-07): a peer that reboots or re-negotiates WITHOUT a
+ * processed hotplug edge leaves the survivor's session "established"
+ * (carrier on, handshake latched complete) while the underlying DMA paths
+ * are gone -- the routers' lane-adapter hop entries read back enable=0, so
+ * every frame is silently dropped at the adapter. Both ends latch complete,
+ * so neither ever re-runs its one-shot LOGIN/HELLO: a permanent mutual
+ * zombie. The edge-triggered signals upstream relies on (hotplug unplug,
+ * LOGOUT) demonstrably do not arrive on this hardware.
+ *
+ * A service driver MUST therefore periodically evaluate this predicate while
+ * its session is established (thunderbolt_net: while carrier is on) and, on
+ * true, tear the session down and re-run its normal spec negotiation
+ * (LOGIN/HELLO retries). Only an ESTABLISHED session can zombie; a session
+ * mid-handshake is governed by the login retry loop and must not be touched.
+ */
+static inline bool
+tb_xdomain_session_zombie(const struct tb_xdomain_handshake *h,
+			  bool paths_active)
+{
+	return tb_xdomain_handshake_complete(h) && !paths_active;
+}
+
 /*
  * Service-set negotiation. One XDomain link advertises a SET of protocol
  * services in its property directory; the peer's core enumerates the set and

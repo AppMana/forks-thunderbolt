@@ -177,6 +177,9 @@ struct tbnet_ring {
  * @connected_work: Worker that finalizes the ThunderboltIP connection
  *		    setup and enables DMA paths for high speed data
  *		    transfers
+ * @verify_work: Worker that periodically re-checks (while carrier is on)
+ *		 that the DMA tunnel behind the session is still programmed
+ *		 in the routers, and re-runs the login when it is not
  * @disconnect_work: Worker that handles tearing down the ThunderboltIP
  *		     connection
  * @rx_hdr: Copy of the currently processed Rx frame. Used when a
@@ -206,6 +209,7 @@ struct tbnet {
 	int login_retries;
 	struct delayed_work login_work;
 	struct work_struct connected_work;
+	struct delayed_work verify_work;
 	struct work_struct disconnect_work;
 	struct thunderbolt_ip_frame_header rx_hdr;
 	struct tbnet_ring rx_ring;
@@ -231,6 +235,22 @@ static struct tb_property_dir *tbnet_dir;
 static bool tbnet_e2e = true;
 module_param_named(e2e, tbnet_e2e, bool, 0444);
 MODULE_PARM_DESC(e2e, "USB4NET full end-to-end flow control (default: true)");
+
+/*
+ * Level-triggered session revalidation cadence. The ThunderboltIP session is
+ * one-shot: once carrier is on, login_work and connected_work both
+ * early-return, so a DMA tunnel that dies underneath the session (peer
+ * reboot or re-negotiation without a processed hotplug edge -- the routers'
+ * hop entries read back enable=0) leaves a permanent carrier-up/zero-packet
+ * zombie on BOTH ends: each side latches "login complete" and neither ever
+ * sends a LOGIN again. While carrier is on, re-check the tunnel against the
+ * routers' path config space every this many ms and, when it is gone, tear
+ * the session down and re-run the normal LOGIN negotiation. 0 disables.
+ */
+static uint tbnet_session_verify_ms = 5000;
+module_param_named(session_verify_ms, tbnet_session_verify_ms, uint, 0644);
+MODULE_PARM_DESC(session_verify_ms,
+		 "Re-check the DMA tunnel behind an established ThunderboltIP session every N ms; re-login when it died (0 disables)");
 
 static void tbnet_fill_header(struct thunderbolt_ip_header *hdr, u64 route,
 	u8 sequence, const uuid_t *initiator_uuid, const uuid_t *target_uuid,
@@ -389,6 +409,13 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 	netif_stop_queue(net->dev);
 
 	stop_login(net);
+	/*
+	 * Non-sync on purpose: tbnet_verify_work() itself calls
+	 * tbnet_tear_down() when it finds the tunnel dead. Full-stop points
+	 * (ndo_stop, suspend) cancel it synchronously before the rings go
+	 * away.
+	 */
+	cancel_delayed_work(&net->verify_work);
 
 	mutex_lock(&net->connection_lock);
 
@@ -426,6 +453,68 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 	netdev_dbg(net->dev, "network traffic stopped\n");
 
 	mutex_unlock(&net->connection_lock);
+}
+
+static void tbnet_queue_verify(struct tbnet *net)
+{
+	unsigned int ms = READ_ONCE(tbnet_session_verify_ms);
+
+	if (!IS_ENABLED(TB_XDOMAIN_HAS_PATHS_ACTIVE) || !ms)
+		return;
+
+	queue_delayed_work(system_long_wq, &net->verify_work,
+			   msecs_to_jiffies(ms));
+}
+
+static void tbnet_verify_work(struct work_struct *work)
+{
+#ifdef TB_XDOMAIN_HAS_PATHS_ACTIVE
+	struct tbnet *net = container_of(work, typeof(*net), verify_work.work);
+	int transmit_path = -1, transmit_ring = -1;
+	int receive_path = -1, receive_ring = -1;
+	bool established;
+	int ret;
+
+	if (!netif_carrier_ok(net->dev))
+		return;
+
+	mutex_lock(&net->connection_lock);
+	established = tb_xdomain_handshake_complete(&net->login_hs) &&
+		      net->tx_ring.ring && net->rx_ring.ring;
+	if (established) {
+		transmit_path = net->local_transmit_path;
+		transmit_ring = net->tx_ring.ring->hop;
+		receive_path = net->remote_transmit_path;
+		receive_ring = net->rx_ring.ring->hop;
+	}
+	mutex_unlock(&net->connection_lock);
+
+	if (!established) {
+		tbnet_queue_verify(net);
+		return;
+	}
+
+	ret = tb_xdomain_paths_active(net->xd, transmit_path, transmit_ring,
+				      receive_path, receive_ring);
+	if (ret != 0) {
+		/* Still programmed (>0), or state unknown (<0): keep watching. */
+		tbnet_queue_verify(net);
+		return;
+	}
+
+	/*
+	 * The routers no longer carry our DMA tunnel (peer reboot or
+	 * re-negotiation without a processed hotplug edge). The session is a
+	 * zombie: carrier on, hop entries enable=0, every frame silently
+	 * dropped at the lane adapter, and both ends latched "login complete"
+	 * so neither would ever re-login. Tear down and re-run the normal
+	 * spec negotiation.
+	 */
+	netdev_warn(net->dev,
+		    "ThunderboltIP session lost its DMA tunnel; tearing down and re-logging in\n");
+	tbnet_tear_down(net, false);
+	start_login(net);
+#endif /* TB_XDOMAIN_HAS_PATHS_ACTIVE */
 }
 
 static int tbnet_handle_packet(const void *buf, size_t size, void *data)
@@ -700,6 +789,9 @@ static void tbnet_connected_work(struct work_struct *work)
 
 	netif_carrier_on(net->dev);
 	netif_start_queue(net->dev);
+
+	/* Level-triggered zombie detection while the session is established. */
+	tbnet_queue_verify(net);
 
 	netdev_dbg(net->dev, "network traffic started\n");
 	return;
@@ -1043,6 +1135,7 @@ static int tbnet_stop(struct net_device *dev)
 
 	napi_disable(&net->napi);
 
+	cancel_delayed_work_sync(&net->verify_work);
 	cancel_work_sync(&net->disconnect_work);
 	tbnet_tear_down(net, true);
 
@@ -1478,6 +1571,7 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	net = netdev_priv(dev);
 	INIT_DELAYED_WORK(&net->login_work, tbnet_login_work);
 	INIT_WORK(&net->connected_work, tbnet_connected_work);
+	INIT_DELAYED_WORK(&net->verify_work, tbnet_verify_work);
 	INIT_WORK(&net->disconnect_work, tbnet_disconnect_work);
 	mutex_init(&net->connection_lock);
 	atomic_set(&net->command_id, 0);
@@ -1556,6 +1650,7 @@ static int tbnet_suspend(struct device *dev)
 	struct tbnet *net = tb_service_get_drvdata(svc);
 
 	stop_login(net);
+	cancel_delayed_work_sync(&net->verify_work);
 	if (netif_running(net->dev)) {
 		netif_device_detach(net->dev);
 		tbnet_tear_down(net, true);
