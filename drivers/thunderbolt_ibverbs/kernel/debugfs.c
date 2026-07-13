@@ -38,6 +38,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 	seq_printf(s, "native_legacy_ambiguous_limited: %lld\n",
 		   atomic64_read(&state->native_legacy_ambiguous_limited));
 	seq_printf(s, "configured_links: %u\n", tbv_link_count(state));
+	seq_printf(s, "link_owner: %s\n",
+		   tbv_link_owner_name(READ_ONCE(state->link_owner)));
 	seq_printf(s, "tbnet_identity: %s\n",
 		   tbv_tbnet_identity_name(state->cfg.tbnet_identity));
 	mutex_lock(&state->tbnet_identity.lock);

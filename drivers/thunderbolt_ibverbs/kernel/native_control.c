@@ -872,6 +872,15 @@ static int tbv_native_control_enable_tunnel_once(struct tbv_peer *peer,
 	int ret;
 
 	/*
+	 * Tunnel-enable choke point: when the operator handed the link's data
+	 * path to thunderbolt_net (link_owner=tbnet), a peer re-HELLO must not
+	 * re-arm our tunnel behind their back. The negotiation itself keeps
+	 * running so a runtime handback re-enables without re-probing.
+	 */
+	if (!tbv_link_owner_rdma_data_allowed(READ_ONCE(peer->state->link_owner)))
+		return -EPERM;
+
+	/*
 	 * Tunnel activation programs the same XDomain control path as native
 	 * HELLO/READY traffic.  Serialize it with those transactions so two
 	 * rails on one link do not race Thunderbolt config-space operations.
@@ -971,6 +980,15 @@ static void tbv_native_control_work(struct work_struct *work)
 			goto out;
 		}
 	}
+
+	/*
+	 * Link handed to thunderbolt_net: HELLO negotiation above stays live
+	 * (so a runtime handback re-enables without re-probing) but the
+	 * tunnel/READY phases are gated -- do not burn tunnel attempts or warn.
+	 * A handback queues this work again through tbv_link_owner_work_fn().
+	 */
+	if (!tbv_link_owner_rdma_data_allowed(READ_ONCE(state->link_owner)))
+		goto out;
 
 	/*
 	 * Peer reloaded with a different out-hop (flagged by the inbound-HELLO

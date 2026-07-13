@@ -57,6 +57,33 @@ static char *lanes = "auto";
 module_param(lanes, charp, 0444);
 MODULE_PARM_DESC(lanes, "Lane request: auto, N, or MIN-MAX");
 
+/*
+ * Which subsystem owns the Thunderbolt DMA data path on this host. Default
+ * "rdma" preserves today's behavior (tbv enables its tunnels). "tbnet" hands
+ * the link's data path to thunderbolt_net so tb-ch* passes packets: tbv keeps
+ * its services, rings and negotiation bound but disables its DMA tunnels and
+ * gates every tunnel-enable choke point (see link_owner.h/link_owner.c).
+ *
+ * RUNTIME-writable (0644): the store queues a bounded, wedge-free workqueue
+ * apply -- the deterministic on-demand handoff, no rmmod/insmod:
+ *   echo tbnet > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+ *   echo rdma  > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+ * Persist across boots via /etc/modprobe.d.
+ */
+static int tbv_link_owner_param_set(const char *val,
+				    const struct kernel_param *kp);
+static int tbv_link_owner_param_get(char *buffer,
+				    const struct kernel_param *kp);
+static const struct kernel_param_ops tbv_link_owner_param_ops = {
+	.set = tbv_link_owner_param_set,
+	.get = tbv_link_owner_param_get,
+};
+static enum tbv_link_owner link_owner_param = TBV_LINK_OWNER_RDMA;
+module_param_cb(link_owner, &tbv_link_owner_param_ops, &link_owner_param,
+		0644);
+MODULE_PARM_DESC(link_owner,
+		 "Thunderbolt DMA data-path owner: rdma (default) or tbnet; runtime-writable handoff");
+
 static bool bind_services;
 module_param(bind_services, bool, 0444);
 MODULE_PARM_DESC(bind_services,
@@ -146,6 +173,36 @@ MODULE_PARM_DESC(register_verbs,
 		 "Register a guarded libibverbs device skeleton");
 
 static struct tbv_state tbv_driver_state;
+/* Guards tbv_loaded vs the runtime link_owner store racing init/exit. */
+static DEFINE_MUTEX(tbv_lifecycle_lock);
+static bool tbv_loaded;
+
+static int tbv_link_owner_param_set(const char *val,
+				    const struct kernel_param *kp)
+{
+	enum tbv_link_owner desired;
+	int ret = 0;
+
+	if (sysfs_streq(val, "rdma"))
+		desired = TBV_LINK_OWNER_RDMA;
+	else if (sysfs_streq(val, "tbnet"))
+		desired = TBV_LINK_OWNER_TBNET;
+	else
+		return -EINVAL;
+
+	mutex_lock(&tbv_lifecycle_lock);
+	link_owner_param = desired;
+	if (tbv_loaded)
+		ret = tbv_link_owner_request(&tbv_driver_state, desired);
+	mutex_unlock(&tbv_lifecycle_lock);
+
+	return ret;
+}
+
+static int tbv_link_owner_param_get(char *buffer, const struct kernel_param *kp)
+{
+	return sysfs_emit(buffer, "%s\n", tbv_link_owner_name(link_owner_param));
+}
 
 static int __init tbv_init(void)
 {
@@ -203,6 +260,7 @@ static int __init tbv_init(void)
 	ret = tbv_core_init(&tbv_driver_state, &resolved, &identity_cfg);
 	if (ret)
 		goto err_path_symbols;
+	tbv_link_owner_init(&tbv_driver_state, link_owner_param);
 	tbv_driver_state.native_fragment_striping = native_fragment_striping;
 	tbv_driver_state.native_data = native_data;
 	tbv_driver_state.apple_data = apple_data;
@@ -253,7 +311,7 @@ static int __init tbv_init(void)
 		snprintf(lanes_desc, sizeof(lanes_desc), "%u-%u",
 			 cfg.lanes_min, cfg.lanes_max);
 
-	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u native_home_rail_qp=%u native_data_e2e=%u\n",
+	pr_info("loaded compat=%s profile=%s resolved_profile=%s tbnet=%s tbnet_identity=%s tbnet_identity_minimal_e2e=%u tbnet_identity_minimal_apple_only=%u lanes=%s link_owner=%s native_control=%s native_data=%u apple_data=%u native_fragment_striping=%u native_home_rail_qp=%u native_data_e2e=%u\n",
 		tbv_compat_name(cfg.compat),
 		tbv_profile_name(cfg.profile),
 		tbv_profile_name(resolved.profile),
@@ -262,12 +320,17 @@ static int __init tbv_init(void)
 		tbnet_identity_minimal_e2e,
 		tbnet_identity_minimal_apple_only,
 		lanes_desc,
+		tbv_link_owner_name(tbv_driver_state.link_owner),
 		tbv_native_control_mode_name(&tbv_driver_state),
 		native_data,
 		apple_data,
 		native_fragment_striping,
 		native_home_rail_qp,
 		native_data_e2e);
+
+	mutex_lock(&tbv_lifecycle_lock);
+	tbv_loaded = true;
+	mutex_unlock(&tbv_lifecycle_lock);
 
 	return 0;
 
@@ -278,6 +341,12 @@ err_path_symbols:
 
 static void __exit tbv_exit(void)
 {
+	/* No new runtime link_owner applies past this point. */
+	mutex_lock(&tbv_lifecycle_lock);
+	tbv_loaded = false;
+	mutex_unlock(&tbv_lifecycle_lock);
+	cancel_work_sync(&tbv_driver_state.link_owner_work);
+
 	tbv_native_control_identity_notifier_unregister();
 	cancel_work_sync(&tbv_driver_state.identity_refresh_work);
 	tbv_ibdev_stop(&tbv_driver_state);

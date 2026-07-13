@@ -36,7 +36,7 @@ LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
 endif
 
 obj-m := thunderbolt_ibverbs.o
-thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
+thunderbolt_ibverbs-y := main.o profile.o backend.o configfs.o core.o debugfs.o ibdev.o link.o link_owner.o native.o apple.o trace.o native_control.o native_control_legacy.o native_control_xdomain.o path.o peer.o rail.o service.o tbnet_identity.o tbnet_minimal.o ../proto/config.o ../proto/identity.o ../proto/reliability.o
 
 # KUnit contract tests for driver logic (ACK routing, PSN, negotiation, naming,
 # per-rail MAC). Only compiled in on a CONFIG_KUNIT kernel. Run them with
@@ -58,6 +58,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/reload_quiesce_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/create_qp_rail_bind_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/qp_dgid_rebind_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/qp_first_connect_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/link_owner_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 

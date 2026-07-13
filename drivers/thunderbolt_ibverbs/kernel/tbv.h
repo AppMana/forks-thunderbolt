@@ -20,6 +20,8 @@
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
+#include "link_owner.h"
+
 /*
  * The shared XDomain negotiation header. thunderbolt_ibverbs keeps a
  * byte-identical copy under proto/ (kept in sync with the canonical
@@ -591,6 +593,19 @@ struct tbv_state {
 	bool native_home_rail_qp;
 	int native_data_e2e; /* -1 auto, 0 off, 1 on */
 	bool register_verbs;
+	/*
+	 * Which subsystem owns this host's Thunderbolt DMA data path.
+	 * Seeded from the link_owner module param at load and RUNTIME-writable
+	 * through the same (0644) parameter: the store queues link_owner_work,
+	 * a bounded apply that toggles ONLY tbv's DMA tunnels (see
+	 * link_owner.h/link_owner.c). TBV_LINK_OWNER_TBNET keeps services,
+	 * rings and negotiation bound but gates every tunnel-enable choke
+	 * point, so thunderbolt_net owns the link's data path and tb-ch*
+	 * actually passes packets.
+	 */
+	enum tbv_link_owner link_owner;
+	enum tbv_link_owner link_owner_desired;
+	struct work_struct link_owner_work;
 	bool services_registered;
 	bool verbs_registered;
 	bool native_control_registered;
@@ -978,6 +993,11 @@ void tbv_native_control_queue_rail(struct tbv_state *state,
 void tbv_native_control_cancel_rail(struct tbv_rail *rail);
 int tbv_native_control_exchange(struct tbv_state *state, struct tbv_peer *peer,
 				struct tbv_rail *rail);
+/* link_owner.c: runtime usb4_rdma <-> thunderbolt_net data-path handoff */
+const char *tbv_link_owner_name(enum tbv_link_owner owner);
+void tbv_link_owner_init(struct tbv_state *state, enum tbv_link_owner owner);
+int tbv_link_owner_request(struct tbv_state *state,
+			   enum tbv_link_owner desired);
 void tbv_rail_key_init(struct tbv_rail_key *key, u64 route,
 		       u32 local_adapter, u32 remote_adapter, u32 path_id);
 int tbv_rail_key_cmp(const struct tbv_rail_key *a,

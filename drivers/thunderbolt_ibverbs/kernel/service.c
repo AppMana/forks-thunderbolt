@@ -184,6 +184,10 @@ static int tbv_service_enable_apple_tunnel(struct tbv_rail *rail)
 	struct tbv_peer *peer = rail->peer;
 	int ret;
 
+	/* Tunnel-enable choke point: the link's data path may belong to tbnet. */
+	if (!tbv_link_owner_rdma_data_allowed(READ_ONCE(peer->state->link_owner)))
+		return -EPERM;
+
 	ret = tbv_path_enable_tunnel(&rail->path, peer->xd,
 				     rail->path.cfg.receive_path);
 	if (ret)
@@ -642,10 +646,21 @@ int tbv_services_start(struct tbv_state *state, bool bind_services,
 {
 	int ret;
 
+	/*
+	 * link_owner=tbnet does NOT strip rings or negotiation here: rails
+	 * keep allocating/starting rings and running HELLO so a runtime
+	 * handback (echo rdma > /sys/module/thunderbolt_ibverbs/parameters/
+	 * link_owner) can re-enable tunnels without re-probing anything. The
+	 * owner is enforced at the tunnel-enable choke points instead
+	 * (tbv_native_control_work(), tbv_service_enable_apple_tunnel()); see
+	 * link_owner.h/link_owner.c.
+	 */
 	state->allocate_rings = service_cfg->allocate_rings;
 	state->start_rings = service_cfg->start_rings;
 	state->negotiate_native = service_cfg->negotiate_native;
 	state->enable_tunnels = service_cfg->enable_tunnels;
+	if (!tbv_link_owner_rdma_data_allowed(state->link_owner))
+		pr_info("link_owner=tbnet: tbv DMA tunnels gated; thunderbolt_net owns the link data path\n");
 	/*
 	 * Minimal TBnet identity is still advertised so macOS sees a normal
 	 * ThunderboltIP-capable peer, but Apple AD/FA57 data tunnels must not
