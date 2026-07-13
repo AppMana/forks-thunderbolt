@@ -58,6 +58,71 @@ Read `docs/thunderbolt_fix.md` in the parent `appmana` repo. It covers:
 6. Rebasing on a newer kernel when the fleet bumps.
 7. Preparing upstream topic patches for manual review.
 
+## Who owns the link: `usb4_rdma` vs `thunderbolt_net`
+
+Both drivers can be loaded at once, and both advertise their XDomain services
+(`tbverbs` -> `thunderbolt_ibverbs`, `network` -> `thunderbolt_net`). But **one
+driver owns the link's DMA data path at a time**, and which one is a runtime
+switch — no `rmmod`, no reboot:
+
+```sh
+# hand the link to thunderbolt_net (IP over Thunderbolt: tb-ch* netdevs)
+echo tbnet > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+
+# hand it back to usb4_rdma (RDMA: usb4_rdma* ib_devices)  [default]
+echo rdma  > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+
+# who owns it right now
+grep link_owner /sys/kernel/debug/thunderbolt_ibverbs/summary
+```
+
+`rdma` is the default; set it at boot with
+`options thunderbolt_ibverbs link_owner=tbnet` in `/etc/modprobe.d/`.
+
+- **`link_owner=tbnet`** — `thunderbolt_ibverbs` unpublishes its `usb4_rdma`
+  ib_devices and disables its DMA tunnels. It does *not* tear down rings or
+  negotiation, so the switch back is cheap. `thunderbolt_net` then establishes
+  its tunnel and the `tb-ch*` netdevs start passing packets.
+- **`link_owner=rdma`** — each rail re-runs its HELLO negotiation, re-enables its
+  tunnel and republishes the ib_device. `ib_send_lat` works again.
+
+The switch is idempotent and applied on a bounded workqueue (no RTNL, no hotplug
+notifiers, no ICM interaction), so it cannot wedge the chain the way a module
+reload does.
+
+### Why `thunderbolt_net` used to be a zombie
+
+Before **tbfix 2.13 / tbv 0.2.36**, `thunderbolt_net` on a chain node looked
+healthy — netdev `up`, `carrier=1`, correct IPs, routes resolving — and passed
+**zero packets**. That was *not* a resource conflict with `usb4_rdma`: the two
+use separate NHI rings and separate XDomain hopids, and both hop entries are
+programmed. Reading the hop entries back off the routers showed the real
+mechanism: tbnet's inbound lane-adapter entries were **deactivated**
+(`enable=0`) while tbv's entries on the same adapters were `enable=1` and
+carrying traffic.
+
+tbnet got stuck that way because its ThunderboltIP session is **one-shot**:
+`login_work` and `connected_work` both early-return once carrier is on, so once
+both ends latch "login complete" nothing ever re-LOGINs — and this fleet
+demonstrably loses the hotplug edges upstream relies on to tear the session down
+(a neighbour rebooting can produce *no* thunderbolt event on the surviving node).
+`thunderbolt_ibverbs` survives the identical events because its HELLO
+negotiation is level-triggered.
+
+The fix (in `thunderbolt_net`, using the stock spec LOGIN — the negotiation is
+not reimplemented) is a **level-triggered session verify**: while carrier is on,
+re-check that the DMA tunnel behind the session is still alive
+(`tb_xdomain_paths_active()` reads every hop entry back from the routers), and
+if it died, tear the session down and re-run a normal LOGIN.
+
+```sh
+# how often to re-check the tunnel behind an established session (ms); 0 disables
+cat /sys/module/thunderbolt_net/parameters/session_verify_ms   # default 5000
+```
+
+A healthy link logs nothing; recovery logs
+`ThunderboltIP session lost its DMA tunnel; tearing down and re-logging in`.
+
 ## Install on Ubuntu
 
 ### From the AppMana apt repository

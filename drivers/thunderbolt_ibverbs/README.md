@@ -55,6 +55,32 @@ at a high level:
 2. connect usb4 cables between hosts
 3. run your workload against the device
 
+## can i use thunderbolt_net (IP over Thunderbolt) at the same time?
+
+Both modules can be loaded together, but **one of them owns the link's DMA data
+path at a time**. Which one is a runtime switch — no reload, no reboot:
+
+```sh
+# give the link to thunderbolt_net (tb-ch* netdevs start passing packets)
+echo tbnet > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+
+# take it back for RDMA (usb4_rdma* ib_devices republished)   [default]
+echo rdma  > /sys/module/thunderbolt_ibverbs/parameters/link_owner
+
+grep link_owner /sys/kernel/debug/thunderbolt_ibverbs/summary   # who owns it now
+```
+
+Boot default via `options thunderbolt_ibverbs link_owner=tbnet` in
+`/etc/modprobe.d/`. Under `link_owner=tbnet` this driver disables its DMA
+tunnels and unpublishes its ib_devices but keeps rings and negotiation intact,
+so switching back is cheap; the switch runs on a bounded workqueue and is
+idempotent (it will not wedge the link the way a module reload can).
+
+Note: `thunderbolt_net` needs **tbfix 2.13+** to work alongside this driver at
+all — older versions go "zombie" (netdev up, carrier on, **zero packets**)
+because their ThunderboltIP session is one-shot and never re-LOGINs after its
+DMA tunnel gets deactivated. See the top-level README for the post-mortem.
+
 ## run inside a stock pytorch / vllm / llama.cpp container
 
 the kernel module stays on the host. inside the container you just need our libibverbs provider so the stock `libibverbs.so` enumerates the device. drop the .deb in for your container's ubuntu codename:
