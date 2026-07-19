@@ -2356,6 +2356,70 @@ static struct tbv_peer *tbv_peer_for_dgid_locked(struct tbv_state *state,
 	return match;
 }
 
+/* fc00::/7: an IPv6 unique-local GID (the per-link rail ULAs live here). */
+static bool tbv_gid_is_ula(const u8 gid[16])
+{
+	return (gid[0] & 0xfe) == 0xfc;
+}
+
+/*
+ * Resolve a ULA dgid by the /64 our OWN rails carry. NCCL's rail routing
+ * targets the per-link ULA GIDs (fd<link>::1/::2, tbv-rdma-addr), whose
+ * role-based interface ids can never match a peer's advertised eui64/ipv4
+ * identity -- tbv_peer_for_dgid_locked() is structurally blind to them, the
+ * QP kept its create-time coin flip, and on a mid-chain node the frames
+ * egressed the wrong neighbour (the 2026-07-19 probe-095 lockup: 12-rank
+ * prefill dead at 507k tokens on the 018->027 hop, "dgid unresolved on
+ * multi-peer node" for both rails).
+ *
+ * This resolver needs no peer cooperation: a per-link ULA /64 is shared by
+ * exactly the two cabled ends, and the local half sits in our rail ibdev's
+ * ib_core GID cache (roce_gid_mgmt from the bound tbr- netdev). A dgid
+ * sharing a local rail's ULA /64 belongs to THAT rail's peer. fe80::/64 is
+ * identical on every rail and is excluded by the ULA check; a /64 claimed
+ * by two local rails of different peers is ambiguous and resolves to NULL
+ * (binding stays put). state->lock held. KUnit:
+ * thunderbolt_ibverbs_qp_dgid_rebind (rail-ULA cases).
+ */
+static struct tbv_peer *tbv_peer_for_ula_dgid_locked(struct tbv_state *state,
+						     const u8 dgid[16])
+{
+	struct tbv_peer *peer;
+	struct tbv_peer *match = NULL;
+
+	if (!tbv_gid_is_ula(dgid))
+		return NULL;
+
+	list_for_each_entry(peer, &state->peers, node) {
+		struct tbv_rail *rail;
+
+		if (peer->backend != TBV_BACKEND_NATIVE)
+			continue;
+		list_for_each_entry(rail, &peer->rails, node) {
+			struct tbv_ibdev *idev = READ_ONCE(rail->ibdev);
+			union ib_gid gid;
+			int i;
+
+			if (rail->removing || !idev)
+				continue;
+			for (i = 0; i < TBV_IBDEV_GID_TBL_LEN; i++) {
+				if (rdma_query_gid(&idev->base, 1, i, &gid))
+					continue;
+				if (!tbv_gid_is_ula(gid.raw))
+					continue;
+				if (memcmp(gid.raw, dgid, 8) != 0)
+					continue;
+				if (match && match != peer)
+					return NULL;
+				match = peer;
+				break;
+			}
+		}
+	}
+
+	return match;
+}
+
 /* Native peers on this node. state->lock held. */
 static u32 tbv_native_peer_count_locked(struct tbv_state *state)
 {
@@ -2429,6 +2493,13 @@ static void tbv_qp_rebind_to_dgid(struct tbv_qp *tqp, const u8 dgid[16])
 		goto out;
 
 	peer = tbv_peer_for_dgid_locked(state, dgid);
+	if (!peer) {
+		peer = tbv_peer_for_ula_dgid_locked(state, dgid);
+		if (peer)
+			pr_info_ratelimited("native QP dgid resolved by local rail ULA /64: qpn=0x%x dgid=%16phN peer=%u\n",
+					    tqp->base.qp_num, dgid,
+					    peer->peer_id);
+	}
 	if (!peer) {
 		/*
 		 * The create-time binding stands. On a MULTI-peer node that is
