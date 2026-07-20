@@ -12,6 +12,9 @@
 MODULE_AUTHOR("Bob Pearson, Frank Zago, John Groves, Kamal Heib");
 MODULE_DESCRIPTION("Soft RDMA transport");
 MODULE_LICENSE("Dual BSD/GPL");
+#ifdef TBV_PKG_VERSION
+MODULE_VERSION(TBV_PKG_VERSION);
+#endif
 
 /* free resources for a rxe device all objects created for this device must
  * have been destroyed

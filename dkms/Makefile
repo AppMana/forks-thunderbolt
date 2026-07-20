@@ -1,6 +1,11 @@
 KDIR ?= /lib/modules/$(shell uname -r)/build
 TBFIX_SOURCE_DIR ?= $(shell readlink -f $(CURDIR)/../source 2>/dev/null || pwd)
 
+# MODULE_VERSION is stamped from dkms.conf's PACKAGE_VERSION -- the one place
+# the package version is declared -- so modinfo -F version always matches the
+# installed .deb. Empty (hand build outside this Makefile) compiles the tag out.
+TBV_PKG_VERSION ?= $(shell sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' $(CURDIR)/dkms.conf)
+
 # Build-local directory holding the fork-patched <linux/thunderbolt.h>,
 # generated from the kernel's own header (KDIR) so it tracks the stock header
 # per kernel and adds only the members the vendored subsystem needs. Prepended
@@ -16,13 +21,16 @@ TBV_THUNDERBOLT_H_DIR := $(CURDIR)/.tbfix-gen-include
 # in-tree. net links against the core's freshly built Module.symvers.
 all: gen-header
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/thunderbolt \
-		TBV_THUNDERBOLT_H_DIR=$(TBV_THUNDERBOLT_H_DIR) modules
+		TBV_THUNDERBOLT_H_DIR=$(TBV_THUNDERBOLT_H_DIR) \
+		TBV_PKG_VERSION=$(TBV_PKG_VERSION) modules
 	cp $(CURDIR)/drivers/thunderbolt/Module.symvers $(CURDIR)/Module.symvers
 	cp $(CURDIR)/drivers/thunderbolt/Module.symvers $(TBFIX_SOURCE_DIR)/Module.symvers
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/net/thunderbolt \
 		TBV_THUNDERBOLT_H_DIR=$(TBV_THUNDERBOLT_H_DIR) \
+		TBV_PKG_VERSION=$(TBV_PKG_VERSION) \
 		KBUILD_EXTRA_SYMBOLS=$(CURDIR)/drivers/thunderbolt/Module.symvers modules
-	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/infiniband/sw/rxe modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/drivers/infiniband/sw/rxe \
+		TBV_PKG_VERSION=$(TBV_PKG_VERSION) modules
 
 gen-header:
 	$(CURDIR)/tbfix-gen-thunderbolt-header.sh "$(KDIR)" "$(TBV_THUNDERBOLT_H_DIR)"

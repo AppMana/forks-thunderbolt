@@ -6,6 +6,11 @@ KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 KERNEL_DIR ?= kernel
 
+# MODULE_VERSION is stamped from dkms.conf's PACKAGE_VERSION -- the one place
+# the package version is declared -- so modinfo -F version always matches the
+# installed .deb. Empty (hand build outside this Makefile) compiles the tag out.
+TBV_PKG_VERSION ?= $(shell sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' $(CURDIR)/dkms.conf)
+
 # thunderbolt_ibverbs is built against the fork's PATCHED thunderbolt subsystem
 # and references the same public-header additions the core does (callback_xd /
 # TB_PROTOCOL_HANDLER_HAS_XDOMAIN, behind #ifdef). Generate the fork-patched
@@ -32,6 +37,7 @@ gen-header:
 
 modules: gen-header
 	$(MAKE) -C $(KERNEL_DIR) KVER=$(KVER) KDIR=$(KDIR) \
+		TBV_PKG_VERSION=$(TBV_PKG_VERSION) \
 		$(if $(TBFIX_HEADER_SHIM),TBV_THUNDERBOLT_H_DIR=$(TBV_THUNDERBOLT_H_DIR)) modules
 
 modules_install:

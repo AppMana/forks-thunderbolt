@@ -62,6 +62,12 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/link_owner_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
+# Package version from dkms.conf, passed down by the top-level Makefile; absent
+# on overlay/KUnit builds, where MODULE_VERSION compiles out.
+ifneq ($(TBV_PKG_VERSION),)
+ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
+endif
+
 .PHONY: all clean modules modules_install help
 
 all: modules

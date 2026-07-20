@@ -1,4 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0
+
+# Package version from dkms.conf, passed down by the dkms Makefile; absent
+# in-tree, where MODULE_VERSION compiles out.
+ifneq ($(TBV_PKG_VERSION),)
+ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
+endif
+
 obj-$(CONFIG_RDMA_RXE) += rdma_rxe.o
 
 rdma_rxe-y := \

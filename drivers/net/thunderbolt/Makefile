@@ -7,6 +7,12 @@ ifneq ($(TBV_THUNDERBOLT_H_DIR),)
 LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
 endif
 
+# Package version from dkms.conf, passed down by the dkms Makefile; absent
+# in-tree / under KUnit, where MODULE_VERSION compiles out.
+ifneq ($(TBV_PKG_VERSION),)
+ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
+endif
+
 obj-$(CONFIG_USB4_NET) := thunderbolt_net.o
 thunderbolt_net-objs := main.o trace.o
 
