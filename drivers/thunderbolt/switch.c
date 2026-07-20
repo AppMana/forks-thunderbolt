@@ -6,6 +6,7 @@
  * Copyright (C) 2018, Intel Corporation
  */
 
+#include <linux/hex.h>
 #include <linux/delay.h>
 #include <linux/idr.h>
 #include <linux/module.h>
