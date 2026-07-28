@@ -4033,6 +4033,36 @@ static void tbv_qp_release_apple_tx_window(struct tbv_qp *tqp,
 		wake_up_all(&tqp->apple_tx_wait);
 }
 
+/*
+ * IBTA completion status for the errno the driver stored on a WR. -EAGAIN is
+ * RNR exhaustion, -ETIMEDOUT the transport retry budget, -ECANCELED a flush
+ * of a QP already in ERR. -EIO comes from a TBV_NATIVE_SEND_ACK_ERROR reply,
+ * so the responder rejected the operation: that is a REMOTE error and must not
+ * be reported as a local flush, which tells the application nothing about who
+ * failed. Anything else is a local fault with no more specific mapping.
+ */
+static enum ib_wc_status tbv_send_wc_status(int status)
+{
+	switch (status) {
+	case 0:
+		return IB_WC_SUCCESS;
+	case -EAGAIN:
+		return IB_WC_RNR_RETRY_EXC_ERR;
+	case -ETIMEDOUT:
+		return IB_WC_RETRY_EXC_ERR;
+	case -ECANCELED:
+		return IB_WC_WR_FLUSH_ERR;
+	case -EIO:
+		return IB_WC_REM_OP_ERR;
+	case -EACCES:
+	case -EPERM:
+	case -EFAULT:
+		return IB_WC_REM_ACCESS_ERR;
+	default:
+		return IB_WC_GENERAL_ERR;
+	}
+}
+
 static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 {
 	struct tbv_qp *tqp = send->tqp;
@@ -4066,20 +4096,19 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 		send->apple_window_acquired = false;
 	}
 
-	if (send->signaled) {
+	/*
+	 * IBTA: a WQE completing IN ERROR always generates a CQE, whatever its
+	 * signaling. The signaling rule governs successful completions only.
+	 * Without this an unsignaled WR that times out, exhausts RNR retries or
+	 * is flushed vanishes and the application never learns it failed.
+	 */
+	if (send->signaled || status) {
 		struct tbv_cq *send_cq =
 			container_of(tqp->base.send_cq, struct tbv_cq, base);
 		struct ib_wc wc = {};
 
 		wc.wr_id = send->wr_id;
-		if (!status)
-			wc.status = IB_WC_SUCCESS;
-		else if (status == -EAGAIN)
-			wc.status = IB_WC_RNR_RETRY_EXC_ERR;
-		else if (status == -ETIMEDOUT)
-			wc.status = IB_WC_RETRY_EXC_ERR;
-		else
-			wc.status = IB_WC_WR_FLUSH_ERR;
+		wc.status = tbv_send_wc_status(status);
 		wc.opcode = send->wc_opcode;
 		wc.qp = &tqp->base;
 		wc.port_num = 1;
@@ -4155,17 +4184,10 @@ static void tbv_read_resp_ctx_put(struct tbv_read_resp_ctx *ctx)
 	}
 }
 
+/* READs use the same errno -> status mapping as sends. */
 static enum ib_wc_status tbv_read_wc_status(int status)
 {
-	if (!status)
-		return IB_WC_SUCCESS;
-	if (status == -ETIMEDOUT)
-		return IB_WC_RETRY_EXC_ERR;
-	if (status == -ECANCELED)
-		return IB_WC_WR_FLUSH_ERR;
-	if (status == -EACCES || status == -EFAULT || status == -EPERM)
-		return IB_WC_REM_ACCESS_ERR;
-	return IB_WC_GENERAL_ERR;
+	return tbv_send_wc_status(status);
 }
 
 static void tbv_ibdev_atomic64_max_ms(atomic64_t *counter, u64 value)
@@ -4238,7 +4260,8 @@ static bool tbv_read_complete(struct tbv_read_ctx *read, int status)
 	if (!complete)
 		return false;
 
-	if (read->signaled) {
+	/* an errored WQE always completes -- see tbv_send_complete() */
+	if (read->signaled || status) {
 		struct tbv_cq *send_cq =
 			container_of(tqp->base.send_cq, struct tbv_cq, base);
 		struct ib_wc wc = {};
@@ -4254,6 +4277,145 @@ static bool tbv_read_complete(struct tbv_read_ctx *read, int status)
 
 	return true;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * KUnit hooks (tests/error_completion_test.c). Complete one send / one RDMA
+ * READ WR with @signaled and @status and report what landed on the send CQ.
+ *
+ * Field-reachable state only. signaled mirrors IB_SEND_SIGNALED on the WR, so
+ * false is the ordinary NCCL case. The statuses are exactly the ones the
+ * driver stores in completion_status: -ETIMEDOUT from the reap walk's
+ * exhaustion and tx-stall-ceiling branches, -EAGAIN from RNR exhaustion,
+ * -ECANCELED from tbv_qp_flush_sends()/tbv_qp_flush_reads() during an error
+ * flush, and -EIO from a TBV_NATIVE_SEND_ACK_ERROR reply. tx_pending is 0 and
+ * no apple window or SQ slot is held, which is what a WR the timeout work or
+ * the flush has already unqueued looks like, so tbv_send_complete() takes no
+ * further path.
+ */
+static int tbv_test_complete_wc_setup(struct tbv_state **state_out,
+				      struct tbv_qp **tqp_out,
+				      struct tbv_cq **tcq_out)
+{
+	struct tbv_state *state;
+	struct tbv_qp *tqp;
+	struct tbv_cq *tcq;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	tcq = kzalloc(sizeof(*tcq), GFP_KERNEL);
+	if (!state || !tqp || !tcq)
+		goto err;
+	tcq->entries = kcalloc(4, sizeof(*tcq->entries), GFP_KERNEL);
+	if (!tcq->entries)
+		goto err;
+	spin_lock_init(&tcq->lock);
+	tcq->owner = state;
+	tcq->cqe = 4;
+
+	spin_lock_init(&tqp->lock);
+	init_waitqueue_head(&tqp->apple_tx_wait);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	tqp->base.send_cq = &tcq->base;
+
+	*state_out = state;
+	*tqp_out = tqp;
+	*tcq_out = tcq;
+	return 0;
+err:
+	if (tcq)
+		kfree(tcq->entries);
+	kfree(tcq);
+	kfree(tqp);
+	kfree(state);
+	return -ENOMEM;
+}
+
+static void tbv_test_complete_wc_teardown(struct tbv_state *state,
+					  struct tbv_qp *tqp,
+					  struct tbv_cq *tcq)
+{
+	kfree(tcq->entries);
+	kfree(tcq);
+	kfree(tqp);
+	kfree(state);
+}
+
+int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
+			      int *wc_status_out)
+{
+	struct tbv_send_ctx *send;
+	struct tbv_state *state;
+	struct tbv_cq *tcq;
+	struct tbv_qp *tqp;
+	int ret;
+
+	ret = tbv_test_complete_wc_setup(&state, &tqp, &tcq);
+	if (ret)
+		return ret;
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!send) {
+		tbv_test_complete_wc_teardown(state, tqp, tcq);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	spin_lock_init(&send->lock);
+	refcount_set(&send->refs, 1);
+	send->tqp = tqp;
+	send->psn = 3;
+	send->wr_id = 0xfeed;
+	send->wc_opcode = IB_WC_SEND;
+	send->signaled = signaled;
+
+	tbv_send_complete(send, status);
+
+	*pushed_out = tcq->count;
+	*wc_status_out = tcq->count ? (int)tcq->entries[0].status : -1;
+
+	kfree(send);
+	tbv_test_complete_wc_teardown(state, tqp, tcq);
+	return 0;
+}
+
+int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
+			      int *wc_status_out)
+{
+	struct tbv_read_ctx *read;
+	struct tbv_state *state;
+	struct tbv_cq *tcq;
+	struct tbv_qp *tqp;
+	int ret;
+
+	ret = tbv_test_complete_wc_setup(&state, &tqp, &tcq);
+	if (ret)
+		return ret;
+	read = kzalloc(sizeof(*read), GFP_KERNEL);
+	if (!read) {
+		tbv_test_complete_wc_teardown(state, tqp, tcq);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&read->node);
+	spin_lock_init(&read->lock);
+	refcount_set(&read->refs, 1);
+	read->tqp = tqp;
+	read->wr_id = 0xbeef;
+	read->total_len = 64;
+	read->signaled = signaled;
+
+	tbv_read_complete(read, status);
+
+	*pushed_out = tcq->count;
+	*wc_status_out = tcq->count ? (int)tcq->entries[0].status : -1;
+
+	kfree(read);
+	tbv_test_complete_wc_teardown(state, tqp, tcq);
+	return 0;
+}
+#endif
 
 static void tbv_read_tx_done(void *ctx, int status)
 {

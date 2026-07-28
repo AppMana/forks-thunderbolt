@@ -1077,6 +1077,14 @@ int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
 					 bool *marked_in_push_out,
 					 bool *overflow_noted_out,
 					 bool *marked_after_drain_out);
+/*
+ * Complete one send / one RDMA READ WR with @signaled and @status and report
+ * how many WCs reached the send CQ and the status of the first.
+ */
+int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
+			      int *wc_status_out);
+int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
+			      int *wc_status_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
