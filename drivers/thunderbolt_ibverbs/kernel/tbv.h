@@ -1029,6 +1029,18 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * Scenario hook for tests/timeout_reap_drain_test.c (the QP/send-ctx structs
+ * are ibdev.c-private, so the scenario is built next to them). Models an
+ * exhausted head send with ready out-of-order-acked entries behind it and
+ * runs the timeout reap's TX walk; the pre-fix reap never returned from this
+ * state (mid-walk ready-prefix drain stole the iterator's next cursor).
+ */
+int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
+					       u32 *pending_out,
+					       bool *tx_failed_out);
+#endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
  * implementation must not drop below, unwired from the WC path for now. The

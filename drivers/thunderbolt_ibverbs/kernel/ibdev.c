@@ -4423,6 +4423,93 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 	return need_resched;
 }
 
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * KUnit hook (tests/timeout_reap_drain_test.c). Models the appmana-019
+ * 2026-07-23 hard-lockup pstore state: pending_sends holds a head entry that
+ * exhausted its retry budget with READY (out-of-order-acked) entries queued
+ * behind it, so the ready-prefix drain triggered by the exhausted head covers
+ * the walk's prefetched next cursor. The pre-fix reap drained mid-walk, the
+ * iterator escaped onto the on-stack completed list and never terminated
+ * (hard lockup with IRQs off); the fixed reap defers the drain until the walk
+ * is done. Returns 0 with the completed/pending counts, or -ENOMEM.
+ */
+int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
+					       u32 *pending_out,
+					       bool *tx_failed_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *sends[3] = {};
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct list_head *pos, *tmp;
+	bool tx_failed = false;
+	unsigned long now = jiffies;
+	u32 completed = 0;
+	u32 pending = 0;
+	u32 i;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!state || !tqp)
+		goto out;
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+
+	for (i = 0; i < ARRAY_SIZE(sends); i++) {
+		struct tbv_send_ctx *send = kzalloc(sizeof(*send), GFP_KERNEL);
+
+		if (!send)
+			goto out;
+		sends[i] = send;
+		INIT_LIST_HEAD(&send->node);
+		INIT_LIST_HEAD(&send->retry_node);
+		spin_lock_init(&send->lock);
+		send->tqp = tqp;
+		send->psn = 19 + i;
+		send->pending = true;
+		send->retryable = true;
+		send->max_retries = 7;
+		/* far past any backoff deadline */
+		send->queued_jiffies = now - msecs_to_jiffies(60000);
+		list_add_tail(&send->node, &tqp->pending_sends);
+	}
+	/* the head exhausted its budget; the entries behind it were ACKed out
+	 * of order and wait ready for the ordered drain */
+	sends[0]->retries = 7;
+	sends[1]->ready = true;
+	sends[2]->ready = true;
+
+	tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+			       &timed_out_reads, now,
+			       msecs_to_jiffies(100), &tx_failed);
+
+	list_for_each(pos, &completed_sends)
+		completed++;
+	list_for_each(pos, &tqp->pending_sends)
+		pending++;
+	list_for_each_safe(pos, tmp, &completed_sends)
+		list_del_init(pos);
+
+	*completed_out = completed;
+	*pending_out = pending;
+	*tx_failed_out = tx_failed;
+	ret = 0;
+out:
+	for (i = 0; i < ARRAY_SIZE(sends); i++)
+		kfree(sends[i]);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
+
 static bool tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 				   unsigned long timeout)
 {
