@@ -72,6 +72,11 @@
 #define TBV_QP_TIMEOUT_DEFAULT_MS 5000
 #define TBV_QP_TIMEOUT_WORK_INTERVAL_MS 1000
 #define TBV_SEND_MAX_RETRIES 7
+/*
+ * Consecutive local TX-queue-full retransmit rejections tolerated before one
+ * is charged to the WR retry budget. See tbv_send_apply_retry_result_locked().
+ */
+#define TBV_SEND_ENOMEM_RETRY_GRACE 8
 #define TBV_SEND_RNR_RETRIES_INFINITE ((u8)~0u)
 #define TBV_READ_RESP_RETRY_MS 100
 #define TBV_READ_RESP_MAX_RETRIES 3
@@ -581,6 +586,12 @@ struct tbv_send_ctx {
 	u8 rnr_retries;
 	u8 max_rnr_retries;
 	enum tbv_send_post_reason retry_reason;
+	/*
+	 * Consecutive retransmit attempts rejected by the local path TX queue
+	 * (-ENOMEM). Separate from retries so a brief queue-full burst does
+	 * not spend the WR retry budget, while a persistent one still does.
+	 */
+	u8 enomem_retries;
 	int completion_status;
 	bool signaled;
 	bool completed;
@@ -4801,6 +4812,191 @@ static bool tbv_qp_timeout_reap_read_resps(struct tbv_qp *tqp,
 	return need_resched;
 }
 
+enum tbv_send_retry_result {
+	/* nothing left to do: the send is no longer pending */
+	TBV_SEND_RETRY_IDLE,
+	/* posted or deferred; the caller re-arms the send's deadline */
+	TBV_SEND_RETRY_REARM,
+	/* given up: send made ready with an error and drained to @completed */
+	TBV_SEND_RETRY_FAIL,
+};
+
+/*
+ * Applies the outcome of one retransmit post attempt to @send. Caller holds
+ * tqp->lock. @now is the timestamp the re-armed deadline is measured from.
+ */
+static enum tbv_send_retry_result
+tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
+				   struct tbv_send_ctx *send,
+				   enum tbv_send_post_reason reason, int ret,
+				   unsigned long now,
+				   struct list_head *completed_sends)
+{
+	bool pending = send->pending && !send->completed && !tqp->closing &&
+		       tqp->state != IB_QPS_ERR;
+
+	if (pending && !ret) {
+		if (reason == TBV_SEND_POST_RETRY_RNR) {
+			if (send->rnr_retries < U8_MAX)
+				send->rnr_retries++;
+		} else if (reason != TBV_SEND_POST_RETRY_NAK &&
+			   send->retries < U8_MAX) {
+			send->retries++;
+		}
+		send->enomem_retries = 0;
+		tbv_send_mark_queued(send, now);
+		return TBV_SEND_RETRY_REARM;
+	}
+	if (pending && ret == -ENOMEM) {
+		/*
+		 * The local path TX queue is full. It drains only as the peer's
+		 * software credit window advances, so queue-full is a
+		 * peer-controlled condition with no bound of its own: re-arming
+		 * without charging anything leaves retries below max_retries
+		 * forever and the WR can never exhaust or complete. Charging
+		 * every attempt would instead fail a WR on a momentary
+		 * queue-full, so tolerate a burst and charge one retry per
+		 * TBV_SEND_ENOMEM_RETRY_GRACE consecutive rejections. That
+		 * bounds the wait at GRACE * max_retries attempts. Any post
+		 * that gets through resets the burst counter.
+		 */
+		if (send->enomem_retries + 1 < TBV_SEND_ENOMEM_RETRY_GRACE) {
+			send->enomem_retries++;
+		} else {
+			send->enomem_retries = 0;
+			if (send->retries < U8_MAX)
+				send->retries++;
+		}
+		tbv_send_mark_queued(send, now);
+		send->retrying = false;
+		return TBV_SEND_RETRY_REARM;
+	}
+	if (pending && ret == -ENOTCONN) {
+		if (send->retries < U8_MAX)
+			send->retries++;
+		tbv_send_mark_queued(send, now);
+		send->retrying = false;
+		return TBV_SEND_RETRY_REARM;
+	}
+	if (pending && ret) {
+		if (!send->ready) {
+			send->ready = true;
+			send->completion_status = -ETIMEDOUT;
+			send->retrying = false;
+			send->rnr_waiting = false;
+		}
+		tbv_qp_drain_ready_sends_locked(tqp, completed_sends);
+		return TBV_SEND_RETRY_FAIL;
+	}
+	send->retrying = false;
+	return TBV_SEND_RETRY_IDLE;
+}
+
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * KUnit hook (tests/retry_enomem_bound_test.c). Runs the real reap ->
+ * post -> apply-result cycle of the timeout work against a path TX queue
+ * that is permanently full, so every retransmit post returns -ENOMEM, and
+ * reports how many cycles were needed to converge plus how many posts were
+ * attempted.
+ *
+ * Field-reachable state only. The send is pending/retryable with a live retry
+ * budget, which is what tbv_native_send_ctx_post() leaves behind on a
+ * successful initial post. queued_jiffies is non-zero because
+ * tbv_send_mark_queued() stamps it at that post and again on every re-arm --
+ * unlike the tx-stall case, this send's frames never reach the ring at all, so
+ * tx_pending stays 0 (tbv_path_reserve_data() rejects before any frame is
+ * handed out) and the retransmit clock does run. retrying is set true by the
+ * reap walk before the post and cleared by the -ENOMEM arm, exactly as the
+ * timeout work does it.
+ *
+ * The clock is virtual: both the walk and the apply take @now explicitly, so
+ * every cycle lands past the send's deadline without sleeping.
+ */
+int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
+				  u32 *posts_out, bool *failed_out,
+				  u32 *retries_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *send = NULL;
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct list_head *pos, *tmp;
+	unsigned long timeout = msecs_to_jiffies(100);
+	unsigned long now = jiffies;
+	bool tx_failed = false;
+	u32 posts = 0;
+	u32 used = 0;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!state || !tqp || !send)
+		goto out;
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	spin_lock_init(&send->lock);
+	/* the walk takes a reference per retry; nothing here drops one */
+	refcount_set(&send->refs, 1);
+	send->tqp = tqp;
+	send->psn = 7;
+	send->pending = true;
+	send->retryable = true;
+	send->max_retries = TBV_SEND_MAX_RETRIES;
+	send->queued_jiffies = now;
+	send->first_queued_jiffies = now;
+	list_add_tail(&send->node, &tqp->pending_sends);
+
+	while (used < passes && !list_empty(&tqp->pending_sends)) {
+		unsigned long flags;
+
+		used++;
+		/* well past any backoff deadline this send can compute */
+		now += timeout * (TBV_SEND_MAX_RETRIES + 2);
+		tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+				       &timed_out_reads, now, timeout,
+				       &tx_failed);
+		if (list_empty(&retry_sends))
+			continue;
+		list_del_init(&send->retry_node);
+		posts++;
+		/* stand in for tbv_native_send_ctx_post_frames() -> -ENOMEM */
+		spin_lock_irqsave(&tqp->lock, flags);
+		tbv_send_apply_retry_result_locked(tqp, send,
+						   send->retry_reason, -ENOMEM,
+						   now, &completed_sends);
+		spin_unlock_irqrestore(&tqp->lock, flags);
+	}
+
+	*passes_used_out = used;
+	*posts_out = posts;
+	*failed_out = !list_empty(&completed_sends);
+	*retries_out = send->retries;
+
+	list_for_each_safe(pos, tmp, &completed_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &retry_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &tqp->pending_sends)
+		list_del_init(pos);
+	ret = 0;
+out:
+	kfree(send);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
+
 static void tbv_qp_timeout_work(struct work_struct *work)
 {
 	struct tbv_qp *tqp =
@@ -4849,7 +5045,7 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 			list_first_entry(&retry_sends, struct tbv_send_ctx,
 					 retry_node);
 		enum tbv_send_post_reason reason = send->retry_reason;
-		bool pending = false;
+		enum tbv_send_retry_result res;
 		bool fatal = false;
 		int ret;
 
@@ -4865,43 +5061,14 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 			atomic64_inc(&tqp->owner->data_wr_retry_enqueue_error);
 
 		spin_lock_irqsave(&tqp->lock, flags);
-		pending = send->pending && !send->completed &&
-			  !tqp->closing && tqp->state != IB_QPS_ERR;
-		if (pending && !ret) {
-			if (reason == TBV_SEND_POST_RETRY_RNR) {
-				if (send->rnr_retries < U8_MAX)
-					send->rnr_retries++;
-			} else if (reason != TBV_SEND_POST_RETRY_NAK &&
-				   send->retries < U8_MAX) {
-				send->retries++;
-			}
-			tbv_send_mark_queued(send, jiffies);
+		res = tbv_send_apply_retry_result_locked(tqp, send, reason, ret,
+							 jiffies,
+							 &completed_sends);
+		if (res == TBV_SEND_RETRY_REARM) {
 			tbv_qp_schedule_send_timeout_locked(tqp, send);
 			need_resched = true;
-		} else if (pending && ret == -ENOMEM) {
-			tbv_send_mark_queued(send, jiffies);
-			send->retrying = false;
-			tbv_qp_schedule_send_timeout_locked(tqp, send);
-			need_resched = true;
-		} else if (pending && ret == -ENOTCONN) {
-			if (send->retries < U8_MAX)
-				send->retries++;
-			tbv_send_mark_queued(send, jiffies);
-			send->retrying = false;
-			tbv_qp_schedule_send_timeout_locked(tqp, send);
-			need_resched = true;
-		} else if (pending && ret) {
-			if (!send->ready) {
-				send->ready = true;
-				send->completion_status = -ETIMEDOUT;
-				send->retrying = false;
-				send->rnr_waiting = false;
-			}
-			tbv_qp_drain_ready_sends_locked(tqp,
-							&completed_sends);
+		} else if (res == TBV_SEND_RETRY_FAIL) {
 			fatal = true;
-		} else {
-			send->retrying = false;
 		}
 		spin_unlock_irqrestore(&tqp->lock, flags);
 

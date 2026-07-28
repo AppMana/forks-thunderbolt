@@ -1050,6 +1050,15 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 					     u32 *completed_out,
 					     u32 *pending_out,
 					     bool *tx_failed_out);
+/*
+ * Drives the timeout work's reap -> post -> apply-result cycle up to @passes
+ * times with every retransmit post rejected by a full path TX queue
+ * (-ENOMEM), and reports the cycles used, the posts attempted and whether the
+ * send ever converged to a completion.
+ */
+int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
+				  u32 *posts_out, bool *failed_out,
+				  u32 *retries_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
