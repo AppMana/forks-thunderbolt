@@ -1698,8 +1698,16 @@ static void tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
 	unsigned long flags;
 
 	spin_lock_irqsave(&tqp->lock, flags);
+	/*
+	 * queued_jiffies is the retransmit clock and stays 0 until every frame
+	 * has been handed to the hardware, so it deliberately does not run
+	 * while a post is still in flight. first_queued_jiffies is the age of
+	 * the WR itself: it starts here, is never reset by a retransmit, and
+	 * is therefore the only timestamp that still advances when the frames
+	 * never drain at all. Absolute ceilings must measure from it.
+	 */
 	send->queued_jiffies = 0;
-	send->first_queued_jiffies = 0;
+	send->first_queued_jiffies = jiffies;
 	send->pending = true;
 	send->retrying = false;
 	send->rnr_waiting = false;
@@ -4359,9 +4367,6 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			}
 		}
 
-		if (!tbv_qp_entry_expired(send->queued_jiffies, now,
-					  send_timeout))
-			continue;
 		if (send->retryable && atomic_read(&send->tx_pending)) {
 			unsigned int mult = READ_ONCE(tbv_tx_stall_timeout_mult);
 			unsigned long stall_timeout = mult ? timeout * mult : 0;
@@ -4376,8 +4381,8 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			 * timeout so the QP can surface the error.
 			 */
 			if (!stall_timeout ||
-			    !tbv_qp_entry_expired(send->queued_jiffies, now,
-						  stall_timeout)) {
+			    !tbv_qp_entry_expired(send->first_queued_jiffies,
+						  now, stall_timeout)) {
 				need_resched = true;
 				continue;
 			}
@@ -4402,6 +4407,10 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			drain_ready = true;
 			continue;
 		}
+
+		if (!tbv_qp_entry_expired(send->queued_jiffies, now,
+					  send_timeout))
+			continue;
 		if (send->retryable && max_retries && send->retrying) {
 			if (!tbv_qp_entry_expired(send->queued_jiffies, now,
 						  timeout)) {
@@ -4539,12 +4548,19 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 	sends[2]->ready = true;
 
 	/*
-	 * Age every entry far past any ceiling so a correct implementation
-	 * converges on the first pass; an implementation that defers on
-	 * tx_pending unconditionally asks for another pass forever.
+	 * Reproduce the field state exactly. queued_jiffies is the retransmit
+	 * clock and is only stamped once every frame has drained, so a send
+	 * whose frames never drain still carries 0 from the initial post --
+	 * and tbv_qp_entry_expired() is false on 0, which silently skips any
+	 * deadline measured from it. Only the WR's own age advances here.
 	 */
-	for (i = 0; i < ARRAY_SIZE(sends); i++)
-		sends[i]->queued_jiffies = jiffies - msecs_to_jiffies(600000);
+	for (i = 0; i < ARRAY_SIZE(sends); i++) {
+		sends[i]->queued_jiffies = 0;
+		sends[i]->first_queued_jiffies = jiffies - msecs_to_jiffies(600000);
+	}
+	/* the ready tail was acked out of order, so its clock did start */
+	sends[1]->queued_jiffies = jiffies - msecs_to_jiffies(600000);
+	sends[2]->queued_jiffies = jiffies - msecs_to_jiffies(600000);
 
 	while (need_resched && used < passes) {
 		now = jiffies;
