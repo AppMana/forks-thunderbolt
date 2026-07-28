@@ -176,6 +176,19 @@ module_param(tbv_retransmit_base_ms, uint, 0644);
 MODULE_PARM_DESC(tbv_retransmit_base_ms,
 		 "First RC retransmit interval in ms; doubles each retry up to the verbs ack_timeout (exponential backoff). 0 = flat verbs-derived interval");
 
+/*
+ * Hard ceiling, as a multiple of the verbs TX timeout, on how long a send may
+ * sit with frames still posting (tx_pending) before the reap fails it anyway.
+ * The reap defers any send with tx_pending set so a retransmit cannot race the
+ * posting path; if the fabric never drains that frame the send becomes immune
+ * to its own timeout, never exhausts, never completes, and the timeout work
+ * re-arms on it forever. The ceiling bounds that wait.
+ */
+static uint tbv_tx_stall_timeout_mult = 16;
+module_param(tbv_tx_stall_timeout_mult, uint, 0644);
+MODULE_PARM_DESC(tbv_tx_stall_timeout_mult,
+		 "Multiple of the TX timeout after which a send stuck with tx_pending is failed with -ETIMEDOUT; 0 disables the ceiling (wait forever)");
+
 static uint apple_tx_max_inflight_wr = 16;
 module_param(apple_tx_max_inflight_wr, uint, 0644);
 MODULE_PARM_DESC(apple_tx_max_inflight_wr,
@@ -4350,7 +4363,43 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 					  send_timeout))
 			continue;
 		if (send->retryable && atomic_read(&send->tx_pending)) {
-			need_resched = true;
+			unsigned int mult = READ_ONCE(tbv_tx_stall_timeout_mult);
+			unsigned long stall_timeout = mult ? timeout * mult : 0;
+
+			/*
+			 * Defer to the posting path while the frame is still
+			 * in flight, but not without end: a frame the fabric
+			 * never drains would otherwise keep this send out of
+			 * the retry and exhaustion paths permanently, so it
+			 * never completes and the walk keeps demanding another
+			 * pass. Past the ceiling, fail it like any other
+			 * timeout so the QP can surface the error.
+			 */
+			if (!stall_timeout ||
+			    !tbv_qp_entry_expired(send->queued_jiffies, now,
+						  stall_timeout)) {
+				need_resched = true;
+				continue;
+			}
+			pr_warn_ratelimited("native TX stalled past ceiling, failing WR: qpn=0x%x dest_qp=0x%x psn=%u opcode=%u tx_pending=%d rail=0x%x route=0x%llx\n",
+					    tqp->base.qp_num,
+					    tqp->attr.dest_qp_num,
+					    send->psn & TBV_PSN_MASK,
+					    send->opcode,
+					    atomic_read(&send->tx_pending),
+					    tqp->rail ? tqp->rail->rail_id : 0xffffffffu,
+					    tqp->rail ? tqp->rail->key.route : 0ULL);
+			atomic64_inc(&tqp->owner->data_wr_retry_exhausted);
+			if (!send->ready) {
+				send->ready = true;
+				send->completion_status = -ETIMEDOUT;
+				send->retrying = false;
+				send->rnr_waiting = false;
+			}
+			if (tx_failed)
+				*tx_failed = true;
+			/* deferred drain -- see the RNR-exhausted branch above */
+			drain_ready = true;
 			continue;
 		}
 		if (send->retryable && max_retries && send->retrying) {
@@ -4431,6 +4480,106 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
  * then runs the reap TX walk. Returns 0 with the completed/pending counts,
  * or -ENOMEM.
  */
+int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
+					     u32 *completed_out,
+					     u32 *pending_out,
+					     bool *tx_failed_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *sends[3] = {};
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct list_head *pos, *tmp;
+	unsigned long timeout = msecs_to_jiffies(100);
+	bool tx_failed = false;
+	bool need_resched = true;
+	unsigned long now;
+	u32 completed = 0;
+	u32 pending = 0;
+	u32 used = 0;
+	u32 i;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!state || !tqp)
+		goto out;
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+
+	for (i = 0; i < ARRAY_SIZE(sends); i++) {
+		struct tbv_send_ctx *send = kzalloc(sizeof(*send), GFP_KERNEL);
+
+		if (!send)
+			goto out;
+		sends[i] = send;
+		INIT_LIST_HEAD(&send->node);
+		INIT_LIST_HEAD(&send->retry_node);
+		spin_lock_init(&send->lock);
+		send->tqp = tqp;
+		send->psn = 41 + i;
+		send->pending = true;
+		send->retryable = true;
+		send->max_retries = 7;
+		list_add_tail(&send->node, &tqp->pending_sends);
+	}
+	/*
+	 * The wedge state observed on the chain: one frame posted and never
+	 * completed (tx stall inflight=1), with out-of-order-acked entries
+	 * ready behind it. tx_pending never clears, so the head can neither
+	 * retry nor exhaust, and the ready tail cannot drain past it.
+	 */
+	atomic_set(&sends[0]->tx_pending, 1);
+	sends[1]->ready = true;
+	sends[2]->ready = true;
+
+	/*
+	 * Age every entry far past any ceiling so a correct implementation
+	 * converges on the first pass; an implementation that defers on
+	 * tx_pending unconditionally asks for another pass forever.
+	 */
+	for (i = 0; i < ARRAY_SIZE(sends); i++)
+		sends[i]->queued_jiffies = jiffies - msecs_to_jiffies(600000);
+
+	while (need_resched && used < passes) {
+		now = jiffies;
+		used++;
+		need_resched = tbv_qp_timeout_reap_tx(tqp, &retry_sends,
+						      &completed_sends,
+						      &timed_out_reads, now,
+						      timeout, &tx_failed);
+		if (!list_empty(&tqp->pending_sends))
+			continue;
+		break;
+	}
+
+	list_for_each(pos, &completed_sends)
+		completed++;
+	list_for_each(pos, &tqp->pending_sends)
+		pending++;
+	list_for_each_safe(pos, tmp, &completed_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &retry_sends)
+		list_del_init(pos);
+
+	*passes_used_out = used;
+	*completed_out = completed;
+	*pending_out = pending;
+	*tx_failed_out = tx_failed;
+	ret = 0;
+out:
+	for (i = 0; i < ARRAY_SIZE(sends); i++)
+		kfree(sends[i]);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+
 int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 					       u32 *pending_out,
 					       bool *tx_failed_out)

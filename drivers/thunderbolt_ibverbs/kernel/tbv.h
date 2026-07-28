@@ -1040,6 +1040,16 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 					       u32 *pending_out,
 					       bool *tx_failed_out);
+/*
+ * Runs the TX walk up to @passes times against a head send whose tx_pending
+ * never clears, with ready out-of-order-acked entries behind it. Reports how
+ * many passes were needed to converge so a walk that can only ever ask for
+ * another pass is visible as exhausting the budget.
+ */
+int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
+					     u32 *completed_out,
+					     u32 *pending_out,
+					     bool *tx_failed_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
