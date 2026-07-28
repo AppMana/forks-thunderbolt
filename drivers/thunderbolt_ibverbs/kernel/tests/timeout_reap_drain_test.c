@@ -3,19 +3,12 @@
  * KUnit: the QP timeout reap's TX walk must survive an exhausted head send
  * with ready out-of-order-acked entries queued behind it.
  *
- * Hardware (appmana-019, pstore 2026-07-23, tbv on 6.17.0-40): a WR retry
- * exhausted warn was followed within 8us by two one-shot UBSAN invalid-bool
- * loads in tbv_qp_timeout_work.cold and 19s later by an NMI hard-lockup
- * panic at the walk's send->ready load, EFLAGS.IF clear. Root cause: the
- * exhausted branches drained the ready prefix of pending_sends mid-walk;
- * out-of-order ACKs leave later entries ready behind a pending head, so the
- * drain could move the list_for_each_entry_safe prefetched cursor onto the
- * on-stack completed list and the walk never reached the pending_sends head
- * sentinel again -- an infinite loop under the irq-off QP lock.
- *
- * This test rebuilds exactly that list state and runs the reap. On the
- * pre-fix code it never returns (RED via the kunit.py timeout); on the fixed
- * code the walk terminates and the whole ready prefix completes.
+ * Out-of-order ACKs leave later entries ready behind a still-pending head,
+ * so the ready-prefix drain triggered by the head exhausting its retry
+ * budget can cover the walk's prefetched list_for_each_entry_safe cursor.
+ * The walk must terminate from this state, complete the whole ready prefix
+ * and leave pending_sends empty. See the fix commit for the failure this
+ * pins.
  *
  * Built into the module on CONFIG_KUNIT; run via tools/run-kunit.sh.
  */

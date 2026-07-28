@@ -4317,11 +4317,10 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			 * completed_sends, and out-of-order ACKs leave later
 			 * entries ready while an earlier one is still pending
 			 * -- so the prefix can include send_tmp, this walk's
-			 * prefetched cursor. The walk would then follow the
-			 * on-stack completed_sends ring and never reach the
-			 * pending_sends head again, spinning forever with IRQs
-			 * off (appmana-019 2026-07-23 hard-lockup panic).
-			 * Defer the drain until the walk is finished.
+			 * prefetched cursor, and the walk would never reach
+			 * the pending_sends head again (an unbounded spin
+			 * under the irq-off lock). Defer the drain until the
+			 * walk is finished.
 			 */
 			drain_ready = true;
 			continue;
@@ -4425,14 +4424,12 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 
 #if IS_ENABLED(CONFIG_KUNIT)
 /*
- * KUnit hook (tests/timeout_reap_drain_test.c). Models the appmana-019
- * 2026-07-23 hard-lockup pstore state: pending_sends holds a head entry that
- * exhausted its retry budget with READY (out-of-order-acked) entries queued
- * behind it, so the ready-prefix drain triggered by the exhausted head covers
- * the walk's prefetched next cursor. The pre-fix reap drained mid-walk, the
- * iterator escaped onto the on-stack completed list and never terminated
- * (hard lockup with IRQs off); the fixed reap defers the drain until the walk
- * is done. Returns 0 with the completed/pending counts, or -ENOMEM.
+ * KUnit hook (tests/timeout_reap_drain_test.c). Builds a pending_sends list
+ * whose head entry exhausted its retry budget with READY
+ * (out-of-order-acked) entries queued behind it, so the ready-prefix drain
+ * triggered by the exhausted head covers the walk's prefetched next cursor,
+ * then runs the reap TX walk. Returns 0 with the completed/pending counts,
+ * or -ENOMEM.
  */
 int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 					       u32 *pending_out,
@@ -4480,8 +4477,7 @@ int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 		send->queued_jiffies = now - msecs_to_jiffies(60000);
 		list_add_tail(&send->node, &tqp->pending_sends);
 	}
-	/* the head exhausted its budget; the entries behind it were ACKed out
-	 * of order and wait ready for the ordered drain */
+	/* head out of retry budget; ready entries wait behind it */
 	sends[0]->retries = 7;
 	sends[1]->ready = true;
 	sends[2]->ready = true;
