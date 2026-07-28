@@ -1068,6 +1068,15 @@ int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
 int tbv_test_reap_rnr_credit_wait(u32 passes, u32 credits, bool age_past_timer,
 				  u32 *passes_used_out, u32 *retries_out,
 				  u32 *credits_left_out, u32 *pending_out);
+/*
+ * Overflows a real CQ that a real live QP posts to, and reports whether the
+ * push failed the QP inline (where the caller may hold rx_lock) or only
+ * recorded the overflow for an unlocked caller to act on.
+ */
+int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
+					 bool *marked_in_push_out,
+					 bool *overflow_noted_out,
+					 bool *marked_after_drain_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the

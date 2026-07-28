@@ -472,6 +472,12 @@ struct tbv_qp {
 	bool early_remote_recv_credit_src_known;
 	bool rx_rnr_active;
 	bool closing;
+	/*
+	 * A CQ this QP posts to overflowed and the QP still has to be failed
+	 * for it. Set from tbv_cq_push(), which runs inside the RX critical
+	 * section; consumed by the timeout work, which holds no QP lock.
+	 */
+	bool cq_overflow_pending;
 	bool timeout_work_armed;
 	/* jiffies expiry of the armed timeout_work; valid while armed */
 	unsigned long timeout_work_expires;
@@ -1487,6 +1493,46 @@ static bool tbv_qp_mark_error(struct tbv_qp *tqp)
 	}
 
 	return changed;
+}
+
+/*
+ * A CQ overflow has to fail the QP, but tbv_cq_push() is reached from inside
+ * the RX critical section (tbv_rx_finish_send(),
+ * tbv_rx_deliver_reorder_msg_locked(), tbv_rx_deliver_reorder_write_locked(),
+ * tbv_rx_finish_write_locked()) which holds tqp->rx_lock, and
+ * tbv_qp_mark_error() -> tbv_qp_flush_error() takes that same mutex. Linux
+ * mutexes are not recursive, so marking there wedges the RX worker forever
+ * while it still holds rx_lock. Record the overflow and kick the QP's timeout
+ * work, which runs holding no QP lock, and mark the error from there.
+ */
+static void tbv_qp_note_cq_overflow(struct tbv_qp *tqp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	tqp->cq_overflow_pending = true;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	tbv_qp_schedule_timeout_now(tqp);
+}
+
+static bool tbv_qp_take_cq_overflow(struct tbv_qp *tqp)
+{
+	unsigned long flags;
+	bool pending;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	pending = tqp->cq_overflow_pending;
+	tqp->cq_overflow_pending = false;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+
+	return pending;
+}
+
+/* Must run with no QP lock and no rx_lock held. */
+static void tbv_qp_mark_error_on_cq_overflow(struct tbv_qp *tqp)
+{
+	if (tbv_qp_take_cq_overflow(tqp))
+		tbv_qp_mark_error(tqp);
 }
 
 static bool tbv_qp_allows_post(struct tbv_qp *tqp)
@@ -5142,6 +5188,12 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 	bool read_resp_dropped = false;
 	bool tx_timed_out = false;
 
+	/*
+	 * Deferred from tbv_cq_push(), which cannot fail the QP itself because
+	 * it runs under tqp->rx_lock. Nothing is held here.
+	 */
+	tbv_qp_mark_error_on_cq_overflow(tqp);
+
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->timeout_work_armed = false;
 	timeout = tbv_qp_tx_timeout_jiffies_locked(tqp);
@@ -7272,12 +7324,108 @@ static int tbv_cq_push(struct tbv_cq *tcq, const struct ib_wc *wc)
 	}
 out:
 	spin_unlock_irqrestore(&tcq->lock, flags);
+	/*
+	 * Record the overflow rather than failing the QP here: this runs
+	 * inside the RX critical section under tqp->rx_lock, and
+	 * tbv_qp_mark_error() -> tbv_qp_flush_error() takes that same
+	 * non-recursive mutex. The timeout work marks it with no lock held.
+	 */
 	if (overflow_qp)
-		tbv_qp_mark_error(overflow_qp);
+		tbv_qp_note_cq_overflow(overflow_qp);
 	if (notify && tcq->base.comp_handler)
 		tcq->base.comp_handler(&tcq->base, tcq->base.cq_context);
 	return ret;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * KUnit hook (tests/cq_overflow_deadlock_test.c). Overflows a real tbv_cq that
+ * a real tbv_qp posts to and reports whether tbv_cq_push() failed the QP
+ * itself or only recorded the overflow for a caller running outside the lock.
+ *
+ * Field-reachable state only. The QP is live (not closing, RTS), which is the
+ * only state in which tbv_qp_mark_error() does anything; the CQ is a plain
+ * one-entry ring, exactly what tbv_create_cq() builds, and overflowed is set
+ * by tbv_cq_push() itself once count reaches cqe. The WC carries wc->qp,
+ * which is what makes tbv_cq_push() able to reach a QP at all -- every push in
+ * the driver sets it.
+ *
+ * qp_timeout_ms is zeroed for the duration so tbv_qp_schedule_timeout_now()
+ * arms nothing: this QP has no workqueue behind it, and the test is about
+ * where the error is marked, not about the arming.
+ *
+ * What this proves: tbv_cq_push() reports the overflow to its caller instead
+ * of failing the QP under whatever lock the caller holds, and a caller that
+ * has dropped its locks still fails the QP. What it does NOT prove: that no
+ * remaining path calls tbv_qp_mark_error() under tqp->rx_lock. A KUnit cannot
+ * deadlock-test a real mutex without hanging the run, so that side stays a
+ * structural review property.
+ */
+int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
+					 bool *marked_in_push_out,
+					 bool *overflow_noted_out,
+					 bool *marked_after_drain_out)
+{
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct tbv_cq *tcq = NULL;
+	struct ib_wc wc = {};
+	uint saved_timeout_ms;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	tcq = kzalloc(sizeof(*tcq), GFP_KERNEL);
+	if (!state || !tqp || !tcq)
+		goto out;
+	tcq->entries = kcalloc(1, sizeof(*tcq->entries), GFP_KERNEL);
+	if (!tcq->entries)
+		goto out;
+	spin_lock_init(&tcq->lock);
+	tcq->owner = state;
+	tcq->cqe = 1;
+
+	spin_lock_init(&tqp->lock);
+	mutex_init(&tqp->rx_lock);
+	init_waitqueue_head(&tqp->credit_wait);
+	init_waitqueue_head(&tqp->apple_tx_wait);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	INIT_LIST_HEAD(&tqp->pending_read_resps);
+	INIT_LIST_HEAD(&tqp->apple_sq);
+	INIT_LIST_HEAD(&tqp->rx_reorder);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	tqp->base.send_cq = &tcq->base;
+
+	saved_timeout_ms = READ_ONCE(qp_timeout_ms);
+	WRITE_ONCE(qp_timeout_ms, 0);
+
+	wc.qp = &tqp->base;
+	wc.status = IB_WC_SUCCESS;
+	wc.port_num = 1;
+	*first_ret_out = tbv_cq_push(tcq, &wc);
+
+	wc.status = IB_WC_WR_FLUSH_ERR;
+	*push_ret_out = tbv_cq_push(tcq, &wc);
+	*marked_in_push_out = tqp->state == IB_QPS_ERR;
+	*overflow_noted_out = tqp->cq_overflow_pending;
+
+	tbv_qp_mark_error_on_cq_overflow(tqp);
+	*marked_after_drain_out = tqp->state == IB_QPS_ERR;
+
+	WRITE_ONCE(qp_timeout_ms, saved_timeout_ms);
+	mutex_destroy(&tqp->rx_lock);
+	ret = 0;
+out:
+	if (tcq)
+		kfree(tcq->entries);
+	kfree(tcq);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
 
 static void tbv_apple_pending_reset(struct tbv_apple_pending_rx *p)
 {
