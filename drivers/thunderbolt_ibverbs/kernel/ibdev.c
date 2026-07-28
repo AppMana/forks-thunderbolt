@@ -4256,6 +4256,7 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 	struct tbv_read_ctx *read, *read_tmp;
 	unsigned long flags;
 	bool need_resched = false;
+	bool drain_ready = false;
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	list_for_each_entry_safe(send, send_tmp, &tqp->pending_sends, node) {
@@ -4310,7 +4311,19 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			}
 			if (tx_failed)
 				*tx_failed = true;
-			tbv_qp_drain_ready_sends_locked(tqp, completed_sends);
+			/*
+			 * Do NOT drain here: tbv_qp_drain_ready_sends_locked()
+			 * moves the whole ready prefix of pending_sends onto
+			 * completed_sends, and out-of-order ACKs leave later
+			 * entries ready while an earlier one is still pending
+			 * -- so the prefix can include send_tmp, this walk's
+			 * prefetched cursor. The walk would then follow the
+			 * on-stack completed_sends ring and never reach the
+			 * pending_sends head again, spinning forever with IRQs
+			 * off (appmana-019 2026-07-23 hard-lockup panic).
+			 * Defer the drain until the walk is finished.
+			 */
+			drain_ready = true;
 			continue;
 		}
 
@@ -4386,8 +4399,11 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 		}
 		if (tx_failed)
 			*tx_failed = true;
-		tbv_qp_drain_ready_sends_locked(tqp, completed_sends);
+		/* deferred drain -- see the RNR-exhausted branch above */
+		drain_ready = true;
 	}
+	if (drain_ready)
+		tbv_qp_drain_ready_sends_locked(tqp, completed_sends);
 	list_for_each_entry_safe(read, read_tmp, &tqp->pending_reads, node) {
 		if (read->ready) {
 			need_resched = true;
