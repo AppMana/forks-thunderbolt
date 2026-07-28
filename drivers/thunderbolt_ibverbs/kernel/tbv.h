@@ -1059,6 +1059,15 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
 				  u32 *posts_out, bool *failed_out,
 				  u32 *retries_out);
+/*
+ * Runs the reap TX walk up to @passes times against a send parked in RNR with
+ * recv_credit_required and infinite rnr_retry, with @credits remote recv
+ * credits available and the virtual clock optionally advanced past the
+ * min_rnr_timer. Reports whether a retransmit was ever issued.
+ */
+int tbv_test_reap_rnr_credit_wait(u32 passes, u32 credits, bool age_past_timer,
+				  u32 *passes_used_out, u32 *retries_out,
+				  u32 *credits_left_out, u32 *pending_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the

@@ -1990,12 +1990,18 @@ static bool tbv_qp_note_rnr_ack(struct tbv_qp *tqp, u32 psn,
 				    tqp->base.qp_num, psn & TBV_PSN_MASK,
 				    send->rnr_retries, send->max_rnr_retries,
 				    tqp->remote_recv_credits, delay);
-		if (tbv_send_rnr_waits_for_recv_credit(send)) {
-			if (tqp->remote_recv_credits)
-				tbv_qp_schedule_timeout_now_locked(tqp);
-		} else {
+		/*
+		 * A credit already posted lets the reap run immediately;
+		 * otherwise arm the RNR timer. Arming it is unconditional even
+		 * when this send waits on a recv credit, because the credit
+		 * frame is unacknowledged and may never arrive -- the timer is
+		 * the only backstop under it.
+		 */
+		if (tbv_send_rnr_waits_for_recv_credit(send) &&
+		    tqp->remote_recv_credits)
+			tbv_qp_schedule_timeout_now_locked(tqp);
+		else
 			tbv_qp_schedule_timeout_delay_locked(tqp, delay, true);
-		}
 		break;
 	}
 	spin_unlock_irqrestore(&tqp->lock, flags);
@@ -4308,16 +4314,23 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			continue;
 		}
 		if (send->rnr_waiting) {
-			bool credit_wait =
-				tbv_send_rnr_waits_for_recv_credit(send);
 			bool credit_ready = send->recv_credit_required &&
 					    tqp->remote_recv_credits;
 			bool timer_expired =
 				tbv_qp_entry_expired(send->queued_jiffies, now,
 						     rnr_timeout);
 
-			if (credit_wait && !credit_ready)
-				continue;
+			/*
+			 * A posted remote recv credit releases the send early,
+			 * but it is an accelerator, not the wait condition:
+			 * verbs rnr_retry means "retransmit min_rnr_timer
+			 * apart", so the timer alone must be able to release
+			 * it. Credits ride unacknowledged single-shot frames
+			 * whose advertised count is incremented before
+			 * transmission, so one lost on the wire leaves the two
+			 * sides permanently asymmetric -- gating solely on
+			 * them makes that loss an unbounded wait.
+			 */
 			if (!credit_ready && !timer_expired) {
 				need_resched = true;
 				continue;
@@ -4981,6 +4994,119 @@ int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
 	*posts_out = posts;
 	*failed_out = !list_empty(&completed_sends);
 	*retries_out = send->retries;
+
+	list_for_each_safe(pos, tmp, &completed_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &retry_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &tqp->pending_sends)
+		list_del_init(pos);
+	ret = 0;
+out:
+	kfree(send);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+
+/*
+ * KUnit hook (tests/rnr_credit_wait_test.c). Runs the reap TX walk against a
+ * send parked in RNR while it waits for a remote recv credit -- the shape NCCL
+ * always produces, because it sets rnr_retry = 7 (infinite) and every
+ * SEND/WRITE_WITH_IMM sets recv_credit_required. Reports how many passes were
+ * needed before a retransmit was issued.
+ *
+ * Field-reachable state only. tbv_qp_note_rnr_ack() is the single writer of
+ * rnr_waiting: it sets rnr_waiting, clears retrying and calls
+ * tbv_send_mark_queued(), so queued_jiffies is non-zero here and the RNR timer
+ * measured from it can actually expire. The frames of an RNR-NAKed send have
+ * all been transmitted and acknowledged as RNR, so tx_pending is 0.
+ * remote_recv_credits is fed by TBV_NATIVE_DATA_OP_RECV_CREDIT frames from the
+ * peer; @credits models whether one arrived.
+ *
+ * The clock is virtual: the walk takes @now explicitly, so a pass can land
+ * past the min_rnr_timer deadline without sleeping.
+ */
+int tbv_test_reap_rnr_credit_wait(u32 passes, u32 credits, bool age_past_timer,
+				  u32 *passes_used_out, u32 *retries_out,
+				  u32 *credits_left_out, u32 *pending_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *send = NULL;
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct list_head *pos, *tmp;
+	unsigned long timeout = msecs_to_jiffies(100);
+	unsigned long rnr_timeout;
+	unsigned long now = jiffies;
+	bool tx_failed = false;
+	u32 pending = 0;
+	u32 retries = 0;
+	u32 used = 0;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!state || !tqp || !send)
+		goto out;
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	/* 640us, a mid-table min_rnr_timer encoding */
+	tqp->attr.min_rnr_timer = 12;
+	tqp->remote_recv_credits = credits;
+	rnr_timeout = tbv_rnr_timer_jiffies(tqp->attr.min_rnr_timer);
+
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	spin_lock_init(&send->lock);
+	refcount_set(&send->refs, 1);
+	send->tqp = tqp;
+	send->psn = 11;
+	send->pending = true;
+	send->retryable = true;
+	send->max_retries = TBV_SEND_MAX_RETRIES;
+	/* verbs rnr_retry = 7, what NCCL asks for */
+	send->max_rnr_retries = TBV_SEND_RNR_RETRIES_INFINITE;
+	send->recv_credit_required = true;
+	send->rnr_waiting = true;
+	send->queued_jiffies = now;
+	send->first_queued_jiffies = now;
+	list_add_tail(&send->node, &tqp->pending_sends);
+
+	while (used < passes && !list_empty(&tqp->pending_sends)) {
+		unsigned long flags;
+
+		used++;
+		if (age_past_timer)
+			now += rnr_timeout * 4;
+		tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+				       &timed_out_reads, now, timeout,
+				       &tx_failed);
+		if (list_empty(&retry_sends))
+			continue;
+		retries++;
+		list_del_init(&send->retry_node);
+		/* stand in for a retransmit post that succeeded */
+		spin_lock_irqsave(&tqp->lock, flags);
+		tbv_send_apply_retry_result_locked(tqp, send,
+						   TBV_SEND_POST_RETRY_RNR, 0,
+						   now, &completed_sends);
+		spin_unlock_irqrestore(&tqp->lock, flags);
+		break;
+	}
+
+	list_for_each(pos, &tqp->pending_sends)
+		pending++;
+	*passes_used_out = used;
+	*retries_out = retries;
+	*credits_left_out = tqp->remote_recv_credits;
+	*pending_out = pending;
 
 	list_for_each_safe(pos, tmp, &completed_sends)
 		list_del_init(pos);
