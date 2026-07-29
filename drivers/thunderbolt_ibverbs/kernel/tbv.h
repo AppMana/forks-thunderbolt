@@ -1260,6 +1260,12 @@ int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
 int tbv_test_verbs_sge_contract(u32 *send_advertised_out,
 				u32 *recv_advertised_out,
 				u32 *recv_accepted_out);
+/*
+ * Report whether the path's bounded data queue can reserve every fragment of
+ * one maximum-sized message advertised by query_port.
+ */
+int tbv_test_max_message_frame_capacity(u32 *required_frames_out,
+					u32 *queue_limit_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
