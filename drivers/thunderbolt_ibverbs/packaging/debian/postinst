@@ -10,7 +10,28 @@ case "$1" in
             if ! dkms status -m "$NAME" -v "$VERSION" 2>/dev/null | grep -q .; then
                 dkms add -m "$NAME" -v "$VERSION"
             fi
-            dkms autoinstall -m "$NAME"/"$VERSION" || true
+            failed=
+            for modules_dir in /lib/modules/*; do
+                [ -d "$modules_dir/build" ] || continue
+                kernelver=${modules_dir##*/}
+                # BUILD_DEPENDS is per-kernel. Old modules trees can remain
+                # after their matching tbfix build was removed; they are not
+                # valid ibverbs targets and must not poison this package.
+                if ! dkms status -m thunderbolt-tbfix -k "$kernelver" 2>/dev/null |
+                        grep -q ': installed'; then
+                    echo "thunderbolt-ibverbs: skipping $kernelver (no installed thunderbolt-tbfix)"
+                    continue
+                fi
+                if dkms status -m "$NAME" -v "$VERSION" -k "$kernelver" 2>/dev/null |
+                        grep -q ': installed'; then
+                    continue
+                fi
+                if ! dkms install -m "$NAME" -v "$VERSION" -k "$kernelver"; then
+                    echo "thunderbolt-ibverbs: failed to install for $kernelver" >&2
+                    failed=1
+                fi
+            done
+            [ -z "$failed" ] || exit 1
         fi
         # Pick up the usb4_rdma netdev naming rule (no-op if udev not running).
         if command -v udevadm >/dev/null 2>&1; then
