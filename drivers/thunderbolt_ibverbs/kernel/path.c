@@ -1696,8 +1696,15 @@ static int tbv_path_alloc_control_packets(struct tbv_path *path)
 
 	path->tx_control_packets = packets;
 	path->tx_control_packet_count = count;
-	path->tx_data_queue_limit = path->cfg.tx_ring_size *
-				    TBV_DATA_QUEUE_MULTIPLIER;
+	/*
+	 * The queue remains bounded, but its bound must cover at least one WR
+	 * of the maximum message size query_port advertises. Otherwise that WR
+	 * can never satisfy tbv_path_reserve_data(): deferring it merely turns
+	 * a synchronous -ENOMEM into an eventual asynchronous timeout.
+	 */
+	path->tx_data_queue_limit =
+		max_t(u32, path->cfg.tx_ring_size * TBV_DATA_QUEUE_MULTIPLIER,
+		      TBV_NATIVE_DATA_MAX_FRAGS);
 	return 0;
 }
 
@@ -1712,6 +1719,29 @@ static void tbv_path_free_control_packets(struct tbv_path *path)
 	path->tx_data_queue_limit = 0;
 	INIT_LIST_HEAD(&path->tx_control_free);
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_max_message_frame_capacity(u32 *required_frames_out,
+					u32 *queue_limit_out)
+{
+	struct tbv_path path = {};
+	int ret;
+
+	if (!required_frames_out || !queue_limit_out)
+		return -EINVAL;
+
+	path.cfg.tx_ring_size = 16;
+	INIT_LIST_HEAD(&path.tx_control_free);
+	ret = tbv_path_alloc_control_packets(&path);
+	if (ret)
+		return ret;
+
+	*required_frames_out = TBV_NATIVE_DATA_MAX_FRAGS;
+	*queue_limit_out = path.tx_data_queue_limit;
+	tbv_path_free_control_packets(&path);
+	return 0;
+}
+#endif
 
 static int tbv_path_alloc_data_packets(struct tbv_path *path)
 {
