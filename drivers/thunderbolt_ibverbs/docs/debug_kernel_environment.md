@@ -153,20 +153,30 @@ cat /proc/cmdline
 
 ## get back to stock
 
-Nothing is required. The one-shot is consumed on the next boot, so a plain reboot
-returns to `6.17.0-40-generic`.
-
-To be explicit about it anyway:
-
 ```bash
-sudo grub-editenv - unset next_entry
+sudo grub-editenv - unset next_entry   # see the caveat below
 sudo systemctl reboot
 ```
 
-To confirm the saved default is still stock at any time:
+Always confirm the environment before and after:
 
 ```bash
-sudo grub-editenv list                 # saved_entry should name 6.17.0-40-generic
+sudo grub-editenv list
+# saved_entry should name 6.17.0-40-generic
+# next_entry present means the NEXT boot goes to the debug kernel
+```
+
+**Caveat, observed on these hosts.** `next_entry` is documented as one-shot and grub
+is supposed to clear it on use, but on both appmana-025 and appmana-023 it survived
+the boot it triggered. Do not assume the one-shot cleared itself — check
+`grub-editenv list` and unset it explicitly. Both hosts were left with `next_entry`
+unset and `saved_entry` pinned to stock, so an unattended panic or watchdog reset
+returns them to `6.17.0-40-generic`.
+
+The consequence is that booting the debug kernel is an explicit act every time:
+
+```bash
+~/build-debug-kernel.sh boot dma && sudo systemctl reboot
 ```
 
 To remove a debug kernel entirely:
