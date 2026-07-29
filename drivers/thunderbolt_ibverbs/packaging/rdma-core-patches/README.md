@@ -6,6 +6,16 @@ fork rdma-core or vendor its internal headers, we ship **three minimal
 patches** that any rdma-core source tree can apply to produce a build that
 includes our provider alongside the upstream ones.
 
+These are build inputs, not patches installed on fleet kernels or on the
+runtime `rdma-core` packages. The normal distro packaging script applies them
+to a temporary, version-matched rdma-core source tree, builds the plugin, and
+puts only these two files in the standalone `usb4-rdma-provider` package:
+
+```
+/etc/libibverbs.d/usb4_rdma.driver
+/usr/lib/<multiarch>/libibverbs/libusb4_rdma-rdmav<PABI>.so
+```
+
 ```
 0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch
    Adds providers/usb4_rdma/ (the provider source files)
@@ -19,7 +29,7 @@ includes our provider alongside the upstream ones.
    builds.
 ```
 
-Both patches are auto-generated from the source in `userspace/usb4_rdma/`
+The patches are auto-generated from the source in `userspace/usb4_rdma/`
 via `git format-patch`, and apply cleanly against upstream rdma-core ≥ v62.
 
 ## How each consumer applies them
@@ -31,7 +41,16 @@ top of `pkgs.rdma-core`.
 
 ### Debian / Ubuntu
 
-For a system rebuild that drops our provider into the distro's rdma-core:
+Build the standalone provider package against the distro's own rdma-core
+source and PABI:
+
+```sh
+OUT_DIR=dist tools/ci/distro-package-rdma.sh ubuntu
+sudo dpkg -i dist/usb4-rdma-provider_*.deb
+```
+
+Rebuilding all of the distro's rdma-core packages with the provider embedded
+is also possible, but is not the fleet deployment path:
 
 ```sh
 apt-get source rdma-core
