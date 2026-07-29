@@ -305,6 +305,11 @@ thunderbolt_ibverbs defines only `tbv_cfgfs_link_op` and `tbv_active_link`, neit
 ring-related. Upstream `drivers/thunderbolt/trace.h` has `tb_tx`/`tb_rx`/`tb_event`,
 but those instrument the *control channel* in `ctl.c`, not the NHI DMA ring
 (https://lore.kernel.org/linux-usb/20240209142609.2288471-1-mika.westerberg@linux.intel.com/).
+
+Confirmed in this fork as well: `drivers/thunderbolt/trace.h` defines the `tb_raw`
+event class plus `tb_tx`, `tb_event` and `tb_rx`, and the only file with
+`CREATE_TRACE_POINTS` is `ctl.c`. `nhi.c` has no tracepoints at all.
+
 So there is nothing to enable; instrumentation has to be added.
 
 **Static `TRACE_EVENT` beats kprobes here, for reasons the docs state directly.**

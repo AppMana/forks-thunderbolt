@@ -143,8 +143,27 @@ build() {
 	make -C "$SRC" O="$O" -j"$JOBS"
 }
 
+# Flavours share one source tree via separate O= objtrees, but /lib/modules/$kv/build
+# then points at an objtree that has only the generated headers. thunderbolt-tbfix's
+# header shim reads $KDIR/include/linux/thunderbolt.h directly and fails on that.
+# Union the source tree into the objtree with symlinks so $KDIR resolves both the
+# generated and the source headers, which is what an in-tree build would look like.
+union_srctree() {
+	local O="$1" p b n=0
+	for p in "$SRC"/* "$SRC"/include/* "$SRC"/arch/x86/include/*; do
+		case "$p" in
+		"$SRC"/include/*) b="include/$(basename "$p")" ;;
+		"$SRC"/arch/x86/include/*) b="arch/x86/include/$(basename "$p")" ;;
+		*) b="$(basename "$p")" ;;
+		esac
+		[ -e "$O/$b" ] || { ln -sfn "$p" "$O/$b"; n=$((n+1)); }
+	done
+	echo "unioned $n source entries into $O"
+}
+
 install_k() {
 	local fl="$1" O="$BASE/build-$1" kv; kv="$(flavour_kver "$fl")"
+	union_srctree "$O"
 	# INSTALL_MOD_STRIP=1 is `strip --strip-debug`: it drops DWARF from the
 	# installed modules but keeps the symbol table, so KCSAN/KASAN/oops
 	# reports still resolve to symbol+offset. Without it a full Ubuntu
