@@ -58,6 +58,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/credit_stall_recovery_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/async_event_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/cq_overflow_deadlock_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/error_completion_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/completion_accounting_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rx_hw_error_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/zcopy_split_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/nak_protocol_test.o

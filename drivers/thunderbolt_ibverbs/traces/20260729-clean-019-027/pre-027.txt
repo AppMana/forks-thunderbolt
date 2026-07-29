@@ -1,0 +1,232 @@
+--- rdma qp
+link usb4_rdma5/1 lqpn 2312 rqpn 2306 type RC state RTS rq-psn 0 sq-psn 0 path-mig-state MIGRATED pdn 6 pid 270937 comm ray::RayWorkerP 
+link usb4_rdma5/1 lqpn 2313 rqpn 77 type RC state ERR rq-psn 0 sq-psn 0 path-mig-state MIGRATED pdn 6 pid 270937 comm ray::RayWorkerP 
+link usb4_rdma5/1 lqpn 2314 rqpn 2307 type RC state RTS rq-psn 0 sq-psn 0 path-mig-state MIGRATED pdn 6 pid 270937 comm ray::RayWorkerP 
+link usb4_rdma5/1 lqpn 2315 rqpn 78 type RC state RTS rq-psn 0 sq-psn 0 path-mig-state MIGRATED pdn 6 pid 270937 comm ray::RayWorkerP 
+link usb4_rdma5/1 lqpn 1 type GSI state RTS sq-psn 0 comm [ib_core] 
+link usb4_rdma15/1 lqpn 1 type GSI state RTS sq-psn 0 comm [ib_core] 
+--- summary
+profile: linux_perf
+native_enabled: 1
+apple_enabled: 0
+rc_supported: 1
+uc_supported: 1
+native_control: source_aware
+native_same_peer_multicable: enabled
+native_legacy_ambiguous_limited: 0
+configured_links: 0
+link_owner: rdma
+tbnet_identity: off
+tbnet_identity_state: 0x0
+tbnet_identity_tbnet: <unset>
+tbnet_identity_gid: <unset>
+tbnet_identity_proxy_ipv4: 0.0.0.0
+tbnet_identity_minimal_e2e: 0
+tbnet_identity_minimal_apple_only: 1
+tbnet_identity_minimal_neighbor_seen: 0
+tbnet_identity_rx_handler: 0
+tbnet_identity_minimal_started: 0
+tbnet_identity_minimal_login_rx: 0
+tbnet_identity_minimal_login_tx: 0
+tbnet_identity_minimal_logout_rx: 0
+tbnet_identity_minimal_logout_tx: 0
+tbnet_identity_minimal_status_rx: 0
+tbnet_identity_minimal_status_tx: 0
+tbnet_identity_minimal_packet_rx: 0
+tbnet_identity_minimal_packet_tx_posted: 0
+tbnet_identity_minimal_packet_tx: 0
+tbnet_identity_minimal_packet_tx_errors: 0
+tbnet_identity_minimal_path_errors: 0
+tbnet_identity_arp_requests: 0
+tbnet_identity_arp_replies: 0
+tbnet_identity_arp_ignored: 0
+tbnet_identity_arp_errors: 0
+tbnet_policy: allow
+native_service_count: 2
+apple_service_registered: 0
+services_registered: 1
+allocate_rings: 1
+start_rings: 1
+negotiate_native: 1
+enable_tunnels: 1
+apple_tunnels_wait_tbnet: 0
+apple_tunnels_pending: 0
+native_data: 1
+apple_data: 0
+native_fragment_striping: 0
+native_home_rail_qp: 0
+register_verbs: 1
+verbs_registered: 1
+verbs_ucontexts: 2
+verbs_pds: 3
+verbs_cqs: 6
+verbs_qps: 6
+verbs_mrs: 22
+verbs_recv_wqes: 1024
+data_wr_send: 12
+data_wr_op_send: 0
+data_wr_op_send_imm: 0
+data_wr_op_write: 8
+data_wr_op_write_imm: 4
+data_wr_op_unsupported: 0
+data_wr_live: 0
+data_wr_no_path: 0
+data_wr_no_capacity: 0
+data_wr_no_recv_credit: 0
+data_wr_copied: 12
+data_wr_zcopy: 0
+data_wr_zcopy_fallback: 0
+data_wr_zcopy_fallback_striping: 0
+data_wr_zcopy_fallback_unsafe_sge: 0
+data_wr_zcopy_fallback_peer: 0
+data_wr_zcopy_fallback_unaligned: 0
+data_wr_zcopy_window_first: 0
+data_wr_zcopy_window_rest: 0
+data_wr_zcopy_full: 0
+data_wr_zcopy_partial: 0
+data_wr_zcopy_retransmit: 0
+data_wr_zcopy_frames: 0
+data_wr_zcopy_page_suspect: 0
+data_wr_zcopy_hdr: 0
+data_wr_zcopy_payload_full: 0
+data_wr_zcopy_payload_tail: 0
+data_wr_zcopy_staged: 0
+data_wr_zcopy_mr_mapped: 0
+data_wr_zcopy_remapped: 0
+data_wr_zcopy_fb_no_mr_mapping: 0
+data_wr_zcopy_fb_device_mismatch: 0
+data_wr_zcopy_fb_dmabuf_or_odp: 0
+data_wr_zcopy_fb_offset_not_found: 0
+data_wr_zcopy_fb_other: 0
+data_wr_copy_error: 0
+data_wr_path_send: 68
+data_wr_path_send_error: 0
+data_wr_retransmit: 56
+data_wr_rnr_retransmit: 0
+data_wr_nak_retransmit: 0
+data_wr_retry_enqueue_error: 0
+data_wr_retry_exhausted: 8
+data_wr_rnr_retry_exhausted: 0
+data_wr_timeout: 8
+apple_sq_queued: 0
+apple_sq_dequeued: 0
+apple_sq_full: 0
+apple_sq_flushed: 0
+data_tx_accepted: 12
+data_tx_posted: 88
+data_tx_completed: 88
+data_tx_canceled: 0
+data_tx_errors: 0
+data_tx_credit_stalls: 0
+data_tx_credit_received: 15
+data_tx_credit_consumed: 68
+data_rx_credit_eligible: 12
+data_rx_completed: 6205
+data_rx_credit_sent: 0
+data_rx_credit_send_error: 0
+data_rx_credit_resynced: 0
+data_tx_credit_resync_recovered: 8589934590
+data_rx_repost_failed: 0
+data_rx_bad_frame: 0
+data_rx_bad_header: 0
+data_rx_crc_error: 0
+data_rx_overrun: 0
+data_rx_crc_error_in_stream: 0
+data_rx_crc_error_standalone: 0
+data_rx_crc_error_maxsize: 0
+data_rx_send: 12
+data_rx_op_send: 0
+data_rx_op_send_imm: 0
+data_rx_op_write: 12
+data_rx_op_write_imm: 0
+data_rx_ack: 16
+data_rx_ack_matched: 4
+data_rx_ack_match_retried: 0
+data_rx_ack_match_max_ms: 1
+data_rx_ack_match_current_max_ms: 1
+data_rx_ack_match_over_10ms: 0
+data_rx_ack_match_over_64ms: 0
+data_rx_ack_miss: 0
+data_rx_late_ack: 0
+data_rx_ack_cumulative: 0
+data_tx_ack_ok: 12
+data_tx_ack_rnr: 0
+data_tx_ack_error: 0
+data_tx_ack_send_error: 0
+data_rx_ack_rnr: 0
+data_rx_duplicate_ack: 0
+data_rx_ack_history_miss: 0
+data_tx_nak: 0
+data_tx_nak_send_error: 0
+data_rx_nak: 0
+data_rx_nak_matched: 0
+data_rx_nak_miss: 0
+data_tx_read_ack_ok: 0
+data_tx_read_ack_retry: 0
+data_tx_read_ack_error: 0
+data_rx_read_ack_ok: 0
+data_rx_read_ack_retry: 0
+data_rx_read_ack_error: 0
+data_read_resp_retransmit: 0
+data_read_resp_drop: 0
+data_rx_read_resp_duplicate: 0
+data_rx_read_resp_gap: 0
+data_rx_read_resp_remote_error: 0
+data_rx_read_resp_bad_header: 0
+data_rx_read_resp_copy_error: 0
+data_rx_read_resp_short: 0
+data_rx_read_req_no_access: 0
+data_rx_read_req_no_mr: 0
+data_rx_read_req_mr_access: 0
+data_rx_read_req_too_large: 0
+data_rx_read_req_bad_iova: 0
+data_rx_read_req_alloc_error: 0
+data_rx_read_req_resp_busy: 0
+data_rx_read_req_resp_error: 0
+data_rx_no_qp: 0
+data_rx_bad_peer: 0
+data_rx_unconnected_qp: 0
+data_rx_qp_error: 0
+data_rx_no_recv: 0
+data_rx_rnr: 0
+data_rx_rnr_suppressed: 0
+data_rx_copy_error: 0
+data_rx_send_len_error: 0
+data_rx_send_prot_error: 0
+data_rx_send_cq_error: 0
+data_rx_send_bad_fragment: 0
+data_rx_send_sequence_error: 0
+data_rx_active_timeout: 0
+data_rx_reorder_buffered: 0
+data_rx_reorder_delivered: 0
+data_rx_reorder_dropped: 0
+data_rx_reorder_timeout: 0
+data_rx_reorder_window: 0
+data_rx_pending_discarded: 0
+apple_rx_sof: 0
+apple_rx_eof3: 0
+apple_rx_eof_other: 0
+apple_rx_sof_while_active: 0
+apple_rx_no_sof_when_idle: 0
+apple_rx_eof_without_active: 0
+apple_rx_len_overrun: 0
+async_qp_events: 2
+async_cq_events: 0
+data_cq_overflow: 0
+--- peers
+peer 1 backend=native rails=1 native_qp_rr_rail_id=1 identity_valid=1 rail_scoped=1 remote_eui64=008c25fffe920100 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x1 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=4 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=0 last_error=0 local_out=8 local_tx=1 local_rx=1 remote_rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+    data_tx_enqueued=68 data_tx_posted=68 data_tx_completed=68 data_tx_credit_stalls=0 data_tx_credit_received=15 data_tx_credit_consumed=68 tx_credits=768/768
+    control_tx_enqueued=20 control_tx_posted=20 control_tx_completed=20 control_tx_queue_max_ms=0
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=6205 data_rx_credit_sent=0 data_rx_credit_eligible=12 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=12 rx_credit_total=12 resynced=0 resync_recovered=8589934590
+    tx_poll enabled=1 calls=10 completed=4
+    rx_supp_poll enabled=0 calls=0 completed=0
+peer 2 backend=native rails=1 native_qp_rr_rail_id=0 identity_valid=1 rail_scoped=1 remote_eui64=007c4dfffe6b0400 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x3 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=2 last_error=0 local_out=8 local_tx=2 local_rx=2 remote_rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+    data_tx_enqueued=0 data_tx_posted=0 data_tx_completed=0 data_tx_credit_stalls=0 data_tx_credit_received=0 data_tx_credit_consumed=0 tx_credits=768/768
+    control_tx_enqueued=0 control_tx_posted=0 control_tx_completed=0 control_tx_queue_max_ms=0
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=0 data_rx_credit_sent=0 data_rx_credit_eligible=0 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=0 rx_credit_total=0 resynced=0 resync_recovered=0
+    tx_poll enabled=1 calls=0 completed=0
+    rx_supp_poll enabled=0 calls=0 completed=0

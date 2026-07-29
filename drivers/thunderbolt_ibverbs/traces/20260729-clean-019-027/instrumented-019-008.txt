@@ -1,0 +1,115 @@
+Attributable two-node capture. appmana-019 carries no DSV4 pod and neither
+path used here had a DSV4 QP bound (native_qp_bind_count=0 on both ends), so
+every counter and every probe hit below belongs to the perftest run.
+
+Probe script: tools/tbv-post-trace.bt (bpftrace on the sending node).
+Client (traced): appmana-019 usb4_rdma15.  Server: appmana-008 usb4_rdma15.
+
+=========================================================================
+control -- single QP, unidirectional, 64 KiB.  019 server / 027 client.
+=========================================================================
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 65536      2000             16.63              16.63              0.031719
+
+Two-node RDMA over usb4_rdma works. 16.63 Gb/s on a 20 Gb/s link. The failure
+is specific to the NCCL-like pattern, not to the transport being dead.
+
+=========================================================================
+run A -- -F -n 4000 -s 262144 -t 32 -q 4 -b
+failure mode: IBV_WC_RETRY_EXC_ERR, and it IS counted
+=========================================================================
+bpftrace:
+  @post_calls: 4500
+  @post_ret[0]: 4500                 every ibv_post_send succeeded
+  @complete_status[0]: 4372          success
+  @complete_status[4294967186]: 32   (int32)-110 = -ETIMEDOUT -> RETRY_EXC_ERR
+  @complete_status[4294967171]: 96   (int32)-125 = -ECANCELED -> WR_FLUSH_ERR
+
+  [397228438800] complete status=-110
+      tbv_send_complete.isra.0+1
+      process_one_work+398            <- tbv_qp_timeout_work, the reap walk
+      worker_thread+739
+  [397228495790] complete status=-125
+      tbv_send_complete.isra.0+1
+      ib_destroy_qp_user+161          <- application teardown, after the fact
+      uverbs_free_qp+54
+  [397230439383] qp_mark_error_event  <- 2 ms AFTER the -110s
+  [397230441758] qp_flush_sends
+
+Ordering settles it: the QP was healthy when the WRs timed out. It went to ERR
+because of them, not before them.
+
+driver counters, same node, same run:
+  data_wr_send: 4500      data_tx_accepted: 4500
+  data_tx_posted: 451786  data_tx_completed: 451786
+  data_wr_retransmit: 2686  data_wr_nak_retransmit: 166
+  data_wr_retry_exhausted: 32   data_wr_timeout: 32     <- match the 32 above
+  data_rx_crc_error: 0    data_rx_reorder_dropped: 0
+
+dmesg, the branch that failed them:
+  native TX stalled past ceiling, failing WR: qpn=0x900 dest_qp=0x90b
+    psn=7618658 opcode=3 tx_pending=65 rail=0x0 route=0x3      (x many)
+  tx stall route=0x3 rail=0x0 inflight=1 posted=451771 completed=451770
+  tx stall route=0x3 rail=0x0 inflight=1 posted=451776 completed=451775
+  tx stall route=0x3 rail=0x0 inflight=1 posted=451781 completed=451780
+
+One frame is posted to the NHI TX ring and never completed -- inflight sticks
+at 1 while posted/completed creep in lockstep behind it. Frames queued behind
+it never drain, tx_pending stays at 65, and the stall ceiling fails the WR
+with -ETIMEDOUT, which the application reads as IBV_WC_RETRY_EXC_ERR.
+
+Then the rail is torn down and re-registered, and its GID changes:
+  unregistered per-rail ib_device peer=2 rail=0
+  peer 2 destroyed backend=native
+  native HELLO route=0x3 rail=0x0 has no matching peer rail
+  peer 4 created backend=native
+  registered native ib_device usb4_rdma15 rail=peer4/0 domain=0
+
+usb4_rdma15 GID before this run  fe80::007c:4dff:fe6b:0200
+usb4_rdma15 GID after this run   fe80::007c:4dff:fe6b:0500
+No reboot in between. Any peer holding the old GID is now addressing nothing.
+
+=========================================================================
+run B -- -F -n 3000 -s 1048576 -t 128 -q 4 -b
+failure mode: ibv_post_send returns -ENOMEM.  No completion error at all.
+=========================================================================
+perftest:
+  Couldn't post send: qp 2 scnt=126
+
+bpftrace:
+  @post_calls: 383
+  @post_ret[0]: 382
+  @post_ret[4294967284]: 1           (int32)-12 = -ENOMEM
+  @post_one_err[4294967284]: 1
+  @post_one_err_stack[
+      tbv_post_send+49
+      ib_uverbs_post_send+1580
+      ib_uverbs_handler_UVERBS_METHOD_INVOKE_WRITE+217
+      ib_uverbs_run_method+778 ]
+  @complete_status[0]: 132
+  @complete_status[4294967171]: 250   all -ECANCELED, from ib_destroy_qp_user
+
+counters: data_wr_no_capacity 0 -> 1, data_wr_timeout unchanged at 32.
+
+The -ENOMEM is tbv_path_reserve_data() refusing the reservation: a 1 MiB WR is
+260 frames, the per-path TX queue holds ~1024, and the QP advertises a send
+queue of 128 WRs. The SQ was nowhere near full (4 outstanding on that QP) --
+the driver is surfacing an internal per-path frame budget as a synchronous
+post_send failure, which RC verbs consumers treat as fatal.
+
+=========================================================================
+run C -- same as B, 019 server / 027 client, earlier
+=========================================================================
+data_rx_crc_error_standalone: 7521 of data_rx_completed 68812  (11% of frames
+  fail the NHI's own CRC check)
+data_rx_reorder_dropped: 402   data_rx_reorder_window: 329
+tx_credits=0/768 on the loaded path, and it stays there
+
+  native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023919
+    kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576   (x10)
+
+Ten fully received 1 MiB writes -- every fragment present, complete=1 --
+thrown away at teardown because one earlier PSN never arrived.
+
+Both hosts wedged hard in this configuration and were recovered only by the
+SP5100 watchdog.

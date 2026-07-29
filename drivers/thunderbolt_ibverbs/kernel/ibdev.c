@@ -4229,6 +4229,26 @@ static bool tbv_send_complete(struct tbv_send_ctx *send, int status)
 		return false;
 
 	/*
+	 * Account the error here, at the one point every delivery path funnels
+	 * through, so a counter can never disagree with the CQ. Counting in
+	 * tbv_qp_timeout_work()'s completed_sends loop instead only ever saw
+	 * the sends the ready-prefix drain managed to move; one the reap walk
+	 * marked ready behind a still-pending earlier entry stays on
+	 * pending_sends and is delivered later by tbv_qp_destroy() /
+	 * tbv_qp_flush_error(), which copy completion_status verbatim and
+	 * counted nothing. That is how the chain reported
+	 * IBV_WC_RETRY_EXC_ERR to the application with data_wr_timeout and
+	 * data_wr_retry_exhausted both reading 0, and the contradiction cost
+	 * more debugging than the failure it hid.
+	 */
+	if (tqp->owner) {
+		if (status == -ETIMEDOUT)
+			atomic64_inc(&tqp->owner->data_wr_timeout);
+		else if (status == -EAGAIN)
+			atomic64_inc(&tqp->owner->data_wr_rnr_retry_exhausted);
+	}
+
+	/*
 	 * Only walk the TX queue / frame array when this send still has frames
 	 * outstanding (queued or inflight). A normal completion drains
 	 * tx_pending to zero first, so the scan would find nothing; skipping it
@@ -4525,6 +4545,53 @@ int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
 
 	*pushed_out = tcq->count;
 	*wc_status_out = tcq->count ? (int)tcq->entries[0].status : -1;
+
+	kfree(send);
+	tbv_test_complete_wc_teardown(state, tqp, tcq);
+	return 0;
+}
+
+int tbv_test_send_complete_accounting(int status, int *wc_status_out,
+				      u64 *timeouts_out, u64 *rnr_out)
+{
+	struct tbv_send_ctx *send;
+	struct tbv_state *state;
+	struct tbv_cq *tcq;
+	struct tbv_qp *tqp;
+	int ret;
+
+	ret = tbv_test_complete_wc_setup(&state, &tqp, &tcq);
+	if (ret)
+		return ret;
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!send) {
+		tbv_test_complete_wc_teardown(state, tqp, tcq);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	spin_lock_init(&send->lock);
+	refcount_set(&send->refs, 1);
+	send->tqp = tqp;
+	send->psn = 7;
+	send->wr_id = 0xf100d;
+	send->wc_opcode = IB_WC_RDMA_WRITE;
+	send->retryable = true;
+	send->max_retries = 7;
+	/*
+	 * The reap walk's own output: ready with the status already stored, and
+	 * still on pending_sends because the ready prefix ahead of it did not
+	 * drain. tbv_qp_destroy() / tbv_qp_flush_error() deliver exactly this
+	 * to the consumer, copying completion_status verbatim.
+	 */
+	send->ready = true;
+	send->completion_status = status;
+
+	tbv_send_complete(send, send->completion_status);
+
+	*wc_status_out = tcq->count ? (int)tcq->entries[0].status : -1;
+	*timeouts_out = atomic64_read(&state->data_wr_timeout);
+	*rnr_out = atomic64_read(&state->data_wr_rnr_retry_exhausted);
 
 	kfree(send);
 	tbv_test_complete_wc_teardown(state, tqp, tcq);
@@ -5711,10 +5778,7 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 
 		list_del_init(&send->node);
 		tbv_cancel_send_ctx_packets(send);
-		if (status == -ETIMEDOUT)
-			atomic64_inc(&tqp->owner->data_wr_timeout);
-		else if (status == -EAGAIN)
-			atomic64_inc(&tqp->owner->data_wr_rnr_retry_exhausted);
+		/* tbv_send_complete() accounts the status for every path */
 		tbv_send_complete(send, status);
 		tbv_send_ctx_put(send);
 	}

@@ -1,0 +1,266 @@
+--- summary
+profile: linux_perf
+native_enabled: 1
+apple_enabled: 0
+rc_supported: 1
+uc_supported: 1
+native_control: source_aware
+native_same_peer_multicable: enabled
+native_legacy_ambiguous_limited: 0
+configured_links: 0
+link_owner: rdma
+tbnet_identity: off
+tbnet_identity_state: 0x0
+tbnet_identity_tbnet: <unset>
+tbnet_identity_gid: <unset>
+tbnet_identity_proxy_ipv4: 0.0.0.0
+tbnet_identity_minimal_e2e: 0
+tbnet_identity_minimal_apple_only: 1
+tbnet_identity_minimal_neighbor_seen: 0
+tbnet_identity_rx_handler: 0
+tbnet_identity_minimal_started: 0
+tbnet_identity_minimal_login_rx: 0
+tbnet_identity_minimal_login_tx: 0
+tbnet_identity_minimal_logout_rx: 0
+tbnet_identity_minimal_logout_tx: 0
+tbnet_identity_minimal_status_rx: 0
+tbnet_identity_minimal_status_tx: 0
+tbnet_identity_minimal_packet_rx: 0
+tbnet_identity_minimal_packet_tx_posted: 0
+tbnet_identity_minimal_packet_tx: 0
+tbnet_identity_minimal_packet_tx_errors: 0
+tbnet_identity_minimal_path_errors: 0
+tbnet_identity_arp_requests: 0
+tbnet_identity_arp_replies: 0
+tbnet_identity_arp_ignored: 0
+tbnet_identity_arp_errors: 0
+tbnet_policy: allow
+native_service_count: 2
+apple_service_registered: 0
+services_registered: 1
+allocate_rings: 1
+start_rings: 1
+negotiate_native: 1
+enable_tunnels: 1
+apple_tunnels_wait_tbnet: 0
+apple_tunnels_pending: 0
+native_data: 1
+apple_data: 0
+native_fragment_striping: 0
+native_home_rail_qp: 0
+register_verbs: 1
+verbs_registered: 1
+verbs_ucontexts: 2
+verbs_pds: 3
+verbs_cqs: 6
+verbs_qps: 6
+verbs_mrs: 22
+verbs_recv_wqes: 1024
+data_wr_send: 2524
+data_wr_op_send: 0
+data_wr_op_send_imm: 0
+data_wr_op_write: 2520
+data_wr_op_write_imm: 4
+data_wr_op_unsupported: 0
+data_wr_live: 0
+data_wr_no_path: 0
+data_wr_no_capacity: 0
+data_wr_no_recv_credit: 0
+data_wr_copied: 2524
+data_wr_zcopy: 0
+data_wr_zcopy_fallback: 0
+data_wr_zcopy_fallback_striping: 0
+data_wr_zcopy_fallback_unsafe_sge: 0
+data_wr_zcopy_fallback_peer: 0
+data_wr_zcopy_fallback_unaligned: 0
+data_wr_zcopy_window_first: 0
+data_wr_zcopy_window_rest: 0
+data_wr_zcopy_full: 0
+data_wr_zcopy_partial: 0
+data_wr_zcopy_retransmit: 0
+data_wr_zcopy_frames: 0
+data_wr_zcopy_page_suspect: 0
+data_wr_zcopy_hdr: 0
+data_wr_zcopy_payload_full: 0
+data_wr_zcopy_payload_tail: 0
+data_wr_zcopy_staged: 0
+data_wr_zcopy_mr_mapped: 0
+data_wr_zcopy_remapped: 0
+data_wr_zcopy_fb_no_mr_mapping: 0
+data_wr_zcopy_fb_device_mismatch: 0
+data_wr_zcopy_fb_dmabuf_or_odp: 0
+data_wr_zcopy_fb_offset_not_found: 0
+data_wr_zcopy_fb_other: 0
+data_wr_copy_error: 0
+data_wr_path_send: 330865
+data_wr_path_send_error: 0
+data_wr_retransmit: 684
+data_wr_rnr_retransmit: 0
+data_wr_nak_retransmit: 4
+data_wr_retry_enqueue_error: 0
+data_wr_retry_exhausted: 8
+data_wr_rnr_retry_exhausted: 0
+data_wr_timeout: 8
+apple_sq_queued: 0
+apple_sq_dequeued: 0
+apple_sq_full: 0
+apple_sq_flushed: 0
+data_tx_accepted: 2524
+data_tx_posted: 270116
+data_tx_completed: 270116
+data_tx_canceled: 0
+data_tx_errors: 0
+data_tx_credit_stalls: 14463
+data_tx_credit_received: 151215
+data_tx_credit_consumed: 268093
+data_rx_credit_eligible: 46637
+data_rx_completed: 68812
+data_rx_credit_sent: 46624
+data_rx_credit_send_error: 0
+data_rx_credit_resynced: 33
+data_tx_credit_resync_recovered: 8589934590
+data_rx_repost_failed: 0
+data_rx_bad_frame: 0
+data_rx_bad_header: 0
+data_rx_crc_error: 7521
+data_rx_overrun: 0
+data_rx_crc_error_in_stream: 0
+data_rx_crc_error_standalone: 7521
+data_rx_crc_error_maxsize: 87
+data_rx_send: 46115
+data_rx_op_send: 0
+data_rx_op_send_imm: 0
+data_rx_op_write: 46115
+data_rx_op_write_imm: 0
+data_rx_ack: 3411
+data_rx_ack_matched: 3051
+data_rx_ack_match_retried: 65
+data_rx_ack_match_max_ms: 312
+data_rx_ack_match_current_max_ms: 190
+data_rx_ack_match_over_10ms: 1047
+data_rx_ack_match_over_64ms: 1017
+data_rx_ack_miss: 0
+data_rx_late_ack: 348
+data_rx_ack_cumulative: 0
+data_tx_ack_ok: 34
+data_tx_ack_rnr: 0
+data_tx_ack_error: 406
+data_tx_ack_send_error: 0
+data_rx_ack_rnr: 0
+data_rx_duplicate_ack: 2
+data_rx_ack_history_miss: 0
+data_tx_nak: 85
+data_tx_nak_send_error: 0
+data_rx_nak: 52
+data_rx_nak_matched: 52
+data_rx_nak_miss: 0
+data_tx_read_ack_ok: 0
+data_tx_read_ack_retry: 0
+data_tx_read_ack_error: 0
+data_rx_read_ack_ok: 0
+data_rx_read_ack_retry: 0
+data_rx_read_ack_error: 0
+data_read_resp_retransmit: 0
+data_read_resp_drop: 0
+data_rx_read_resp_duplicate: 0
+data_rx_read_resp_gap: 0
+data_rx_read_resp_remote_error: 0
+data_rx_read_resp_bad_header: 0
+data_rx_read_resp_copy_error: 0
+data_rx_read_resp_short: 0
+data_rx_read_req_no_access: 0
+data_rx_read_req_no_mr: 0
+data_rx_read_req_mr_access: 0
+data_rx_read_req_too_large: 0
+data_rx_read_req_bad_iova: 0
+data_rx_read_req_alloc_error: 0
+data_rx_read_req_resp_busy: 0
+data_rx_read_req_resp_error: 0
+data_rx_no_qp: 0
+data_rx_bad_peer: 0
+data_rx_unconnected_qp: 0
+data_rx_qp_error: 605
+data_rx_no_recv: 0
+data_rx_rnr: 0
+data_rx_rnr_suppressed: 0
+data_rx_copy_error: 0
+data_rx_send_len_error: 0
+data_rx_send_prot_error: 0
+data_rx_send_cq_error: 0
+data_rx_send_bad_fragment: 0
+data_rx_send_sequence_error: 0
+data_rx_active_timeout: 1
+data_rx_reorder_buffered: 514
+data_rx_reorder_delivered: 3
+data_rx_reorder_dropped: 402
+data_rx_reorder_timeout: 73
+data_rx_reorder_window: 329
+data_rx_pending_discarded: 107
+apple_rx_sof: 0
+apple_rx_eof3: 0
+apple_rx_eof_other: 0
+apple_rx_sof_while_active: 0
+apple_rx_no_sof_when_idle: 0
+apple_rx_eof_without_active: 0
+apple_rx_len_overrun: 0
+async_qp_events: 4
+async_cq_events: 0
+data_cq_overflow: 0
+--- peers
+peer 1 backend=native rails=1 native_qp_rr_rail_id=1 identity_valid=1 rail_scoped=1 remote_eui64=008c25fffe920100 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x1 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=4 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=0 last_error=0 local_out=8 local_tx=1 local_rx=1 remote_rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+    data_tx_enqueued=68 data_tx_posted=68 data_tx_completed=68 data_tx_credit_stalls=0 data_tx_credit_received=15 data_tx_credit_consumed=68 tx_credits=768/768
+    control_tx_enqueued=20 control_tx_posted=20 control_tx_completed=20 control_tx_queue_max_ms=0
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=6272 data_rx_credit_sent=0 data_rx_credit_eligible=12 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=12 rx_credit_total=12 resynced=0 resync_recovered=8589934590
+    tx_poll enabled=1 calls=10 completed=4
+    rx_supp_poll enabled=0 calls=0 completed=0
+peer 2 backend=native rails=1 native_qp_rr_rail_id=1 identity_valid=1 rail_scoped=1 remote_eui64=007c4dfffe6b0400 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x3 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=2 last_error=0 local_out=8 local_tx=2 local_rx=2 remote_rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+    data_tx_enqueued=330797 data_tx_posted=268025 data_tx_completed=268025 data_tx_credit_stalls=14463 data_tx_credit_received=151200 data_tx_credit_consumed=268025 tx_credits=0/768
+    control_tx_enqueued=2003 control_tx_posted=2003 control_tx_completed=2003 control_tx_queue_max_ms=2
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=62540 data_rx_credit_sent=46624 data_rx_credit_eligible=46625 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=1 rx_credit_total=46625 resynced=33 resync_recovered=0
+    tx_poll enabled=1 calls=97 completed=38
+    rx_supp_poll enabled=0 calls=0 completed=0
+--- dmesg
+[ 6915.068434] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503156 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.068616] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503156 ack_status=0 total_age_ms=11 current_age_ms=10 retries=0 rnr_retries=0 reason=1
+[ 6915.124988] first CRC-error frame: size=1792 sof=0 eof=3 flags=0xb rx_raw_pending=0 raw_op=0 raw_done=0 raw_remaining=0
+[ 6915.137707] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503185 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=8 tx_pending=0 acked_prefix=728640 nak=0+0
+[ 6915.142063] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503186 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.146258] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503187 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.148628] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503188 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.149295] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503189 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.150005] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503190 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.157489] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503191 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=18 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.158245] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503192 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=18 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.158921] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x901 psn=3503193 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=18 tx_pending=0 acked_prefix=0 nak=0+0
+[ 6915.208048] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503185 ack_status=0 total_age_ms=135 current_age_ms=1 retries=0 rnr_retries=0 reason=3
+[ 6915.217459] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503186 ack_status=0 total_age_ms=144 current_age_ms=4 retries=1 rnr_retries=0 reason=1
+[ 6915.222737] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503188 ack_status=0 total_age_ms=148 current_age_ms=3 retries=1 rnr_retries=0 reason=1
+[ 6915.224075] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503189 ack_status=0 total_age_ms=149 current_age_ms=3 retries=1 rnr_retries=0 reason=1
+[ 6915.226690] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503190 ack_status=0 total_age_ms=151 current_age_ms=6 retries=1 rnr_retries=0 reason=1
+[ 6915.228455] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503191 ack_status=0 total_age_ms=153 current_age_ms=71 retries=1 rnr_retries=0 reason=1
+[ 6915.230199] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503192 ack_status=0 total_age_ms=153 current_age_ms=71 retries=1 rnr_retries=0 reason=1
+[ 6915.232114] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503193 ack_status=0 total_age_ms=155 current_age_ms=72 retries=1 rnr_retries=0 reason=1
+[ 6915.234221] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x901 psn=3503194 ack_status=0 total_age_ms=156 current_age_ms=74 retries=1 rnr_retries=0 reason=1
+[ 6915.510817] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023919 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.510865] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023920 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511028] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023921 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511073] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023922 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511113] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023923 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511154] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023924 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511195] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023925 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511235] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023926 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511275] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023927 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.511316] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=9023918 psn=9023928 kind=1 complete=1 received=1048576 frags=260/260 bytes=1048576
+[ 6915.971053] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90e src_qp=0x902 psn=15754364 base=0x7e92ecbec000 received=145728 with_imm=0
+[ 6916.014829] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 4 times, consider switching to WQ_UNBOUND
+[ 6916.033865] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 5 times, consider switching to WQ_UNBOUND
+[ 6916.071784] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 7 times, consider switching to WQ_UNBOUND
+[ 6921.647412] tx stall route=0x3 rail=0x0 inflight=1 posted=270002 completed=270001 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 6926.767417] tx stall route=0x3 rail=0x0 inflight=1 posted=270007 completed=270006 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 6933.935421] tx stall route=0x3 rail=0x0 inflight=1 posted=270014 completed=270013 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 6939.055419] tx stall route=0x3 rail=0x0 inflight=1 posted=270019 completed=270018 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 6944.175418] tx stall route=0x3 rail=0x0 inflight=1 posted=270024 completed=270023 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0

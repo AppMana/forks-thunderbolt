@@ -1151,6 +1151,16 @@ int tbv_test_rx_lock_reentry_guard(bool hold_rx_lock, bool *violation_out,
 int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 /*
+ * Completes one send through the flush path -- the send is already marked
+ * ready with @status, which is what the timeout reap leaves behind on an entry
+ * the ready-prefix drain could not move -- and reports both the WC status the
+ * consumer sees and the driver's own error counters. The two must agree: a
+ * counter reading zero while the CQ reports the matching error is the
+ * contradiction that made the fleet failure undiagnosable.
+ */
+int tbv_test_send_complete_accounting(int status, int *wc_status_out,
+				      u64 *timeouts_out, u64 *rnr_out);
+/*
  * Fails a real QP the way the driver does and reports the asynchronous events
  * the consumer's handlers saw. @requester selects the requester-side
  * transition (a send that exhausted its retries) rather than a general fatal
