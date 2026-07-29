@@ -636,6 +636,7 @@ struct tbv_send_ctx {
 	bool pending;
 	bool retryable;
 	bool retrying;
+	bool initial_deferred;
 	bool rnr_waiting;
 	bool recv_credit_required;
 	bool solicited;
@@ -1921,6 +1922,28 @@ static void tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
 	send->retry_reason = TBV_SEND_POST_INITIAL;
 	list_add_tail(&send->node, &tqp->pending_sends);
 	spin_unlock_irqrestore(&tqp->lock, flags);
+}
+
+static bool tbv_send_defer_initial_capacity(struct tbv_qp *tqp,
+					    struct tbv_send_ctx *send,
+					    int post_ret)
+{
+	unsigned long flags;
+	bool deferred = false;
+
+	if (post_ret != -ENOMEM)
+		return false;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (send->pending && !send->completed && !tqp->closing &&
+	    tqp->state != IB_QPS_ERR) {
+		send->initial_deferred = true;
+		send->retrying = false;
+		tbv_send_mark_queued(send, jiffies);
+		deferred = true;
+	}
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	return deferred;
 }
 
 static void tbv_qp_queue_read(struct tbv_qp *tqp, struct tbv_read_ctx *read)
@@ -4738,6 +4761,37 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			need_resched = true;
 			continue;
 		}
+		if (send->initial_deferred) {
+			unsigned int mult = READ_ONCE(tbv_tx_stall_timeout_mult);
+			unsigned long ceiling = mult ? timeout * mult : 0;
+
+			/*
+			 * The SQ accepted this WR, but the path did not yet
+			 * have enough packet slots to frame it. Retry initial
+			 * packetization from the worker; a path shortage is not
+			 * a synchronous verbs SQ-full condition.
+			 */
+			if (ceiling &&
+			    tbv_qp_entry_expired(send->first_queued_jiffies,
+						 now, ceiling)) {
+				send->initial_deferred = false;
+				send->ready = true;
+				send->completion_status = -ETIMEDOUT;
+				drain_ready = true;
+				if (tx_failed)
+					*tx_failed = true;
+				continue;
+			}
+			if (!send->retrying && !tqp->closing &&
+			    tqp->state != IB_QPS_ERR) {
+				send->retrying = true;
+				send->retry_reason = TBV_SEND_POST_INITIAL;
+				tbv_send_ctx_get(send);
+				list_add_tail(&send->retry_node, retry_sends);
+			}
+			need_resched = true;
+			continue;
+		}
 		if (send->rnr_waiting) {
 			bool credit_ready = send->recv_credit_required &&
 					    tqp->remote_recv_credits;
@@ -5274,7 +5328,9 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 		       tqp->state != IB_QPS_ERR;
 
 	if (pending && !ret) {
-		if (reason == TBV_SEND_POST_RETRY_RNR) {
+		if (reason == TBV_SEND_POST_INITIAL) {
+			send->initial_deferred = false;
+		} else if (reason == TBV_SEND_POST_RETRY_RNR) {
 			if (send->rnr_retries < U32_MAX)
 				send->rnr_retries++;
 		} else if (reason != TBV_SEND_POST_RETRY_NAK &&
@@ -5286,6 +5342,12 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 		return TBV_SEND_RETRY_REARM;
 	}
 	if (pending && ret == -ENOMEM) {
+		if (reason == TBV_SEND_POST_INITIAL) {
+			send->initial_deferred = true;
+			send->retrying = false;
+			tbv_send_mark_queued(send, now);
+			return TBV_SEND_RETRY_REARM;
+		}
 		/*
 		 * The local path TX queue is full. It drains only as the peer's
 		 * software credit window advances, so queue-full is a
@@ -7624,6 +7686,12 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	tbv_send_ctx_get(ctx);
 	ret = tbv_native_send_ctx_post_frames(ctx, TBV_SEND_POST_INITIAL);
 	if (ret) {
+		if (tbv_send_defer_initial_capacity(tqp, ctx, ret)) {
+			atomic64_inc(&tqp->owner->data_tx_accepted);
+			tbv_send_ctx_put(ctx);
+			tbv_qp_schedule_timeout_now(tqp);
+			return 0;
+		}
 		if (tbv_qp_unqueue_send(tqp, ctx)) {
 			if (credit_consumed)
 				tbv_qp_return_remote_recv_credit(tqp);
@@ -7652,6 +7720,62 @@ err_put_qp:
 	tbv_qp_put(tqp);
 	return ret;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
+					    bool *pending_out,
+					    bool *deferred_out)
+{
+	struct tbv_state *state;
+	struct tbv_qp *tqp;
+	struct tbv_send_ctx *send;
+	unsigned long flags;
+	bool deferred;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!state || !tqp || !send)
+		goto out;
+
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	tqp->init_attr.cap.max_send_wr = 128;
+
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	send->tqp = tqp;
+	refcount_set(&send->refs, 1);
+	send->sq_counted = true;
+	tqp->sendq_count = 4;
+	tbv_qp_queue_send(tqp, send);
+
+	deferred = tbv_send_defer_initial_capacity(tqp, send, -ENOMEM);
+	if (deferred)
+		ret = 0;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (pending_out)
+		*pending_out = send->pending &&
+			       !list_empty(&tqp->pending_sends);
+	if (deferred_out)
+		*deferred_out = send->initial_deferred;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	if (post_ret_out)
+		*post_ret_out = ret;
+	ret = 0;
+
+	list_del_init(&send->node);
+out:
+	kfree(send);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
 
 static int tbv_post_send(struct ib_qp *qp, const struct ib_send_wr *wr,
 			 const struct ib_send_wr **bad_wr)

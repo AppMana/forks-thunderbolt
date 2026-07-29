@@ -1242,6 +1242,15 @@ int tbv_test_path_cancel_orphans_raw_window(bool *window_open_out,
  */
 int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
 				      u32 *accepted_out, u32 *queued_out);
+/*
+ * Apply an initial -ENOMEM from the path frame reservation to a real pending
+ * send. Reports the synchronous post result and whether the WR remains owned by
+ * the SQ for deferred posting instead of leaking an internal frame budget into
+ * the verbs API.
+ */
+int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
+					    bool *pending_out,
+					    bool *deferred_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
