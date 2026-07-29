@@ -854,6 +854,7 @@ struct tbv_state {
 	atomic64_t data_rx_send_bad_fragment;
 	atomic64_t data_rx_send_sequence_error;
 	atomic64_t data_rx_active_timeout;
+	atomic64_t data_rx_timeout_retry;
 	atomic64_t data_rx_reorder_buffered;
 	atomic64_t data_rx_reorder_delivered;
 	atomic64_t data_rx_reorder_dropped;
@@ -1099,9 +1100,10 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 					       u32 *pending_out,
 					       bool *tx_failed_out);
-int tbv_test_rx_timeout_deadline(unsigned long timeout,
+int tbv_test_rx_timeout_deadline(unsigned long timeout, u8 retry_cnt,
 				 unsigned long *first_delay_out,
-				 u32 *wakeups_out, bool *active_out);
+				 u32 *wakeups_out, u32 *recoveries_out,
+				 bool *active_out);
 
 /*
  * Runs the TX walk up to @passes times against a head send whose tx_pending

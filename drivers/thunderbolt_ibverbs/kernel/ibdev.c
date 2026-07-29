@@ -330,6 +330,7 @@ struct tbv_rx_message {
 	bool active;
 	bool with_imm;
 	bool solicited;
+	u8 timeout_retries;
 };
 
 struct tbv_rx_write {
@@ -344,6 +345,7 @@ struct tbv_rx_write {
 	bool active;
 	bool with_imm;
 	bool solicited;
+	u8 timeout_retries;
 };
 
 struct tbv_rx_reorder_frag {
@@ -378,6 +380,7 @@ struct tbv_rx_reorder_msg {
 	bool complete;
 	bool with_imm;
 	bool solicited;
+	u8 timeout_retries;
 };
 
 struct tbv_apple_pending_rx {
@@ -831,6 +834,9 @@ static int tbv_send_read_status_on_path(struct tbv_qp *tqp,
 static void tbv_rx_queue_rdma_read_req_work(
 	struct tbv_state *state, struct tbv_qp *tqp,
 	const struct tbv_native_data_header *hdr, struct tbv_path *rx_path);
+static void tbv_rx_maybe_send_nak(struct tbv_state *state, struct tbv_qp *tqp,
+				  struct tbv_path *rx_path, u32 requester_qp,
+				  u32 psn, u32 missing_start, u32 missing_len);
 static void tbv_qp_timeout_work(struct work_struct *work);
 static void tbv_release_send_segments(struct tbv_send_segment *segs,
 				      int nsegs);
@@ -1304,25 +1310,6 @@ tbv_qp_tx_timeout_jiffies_locked(const struct tbv_qp *tqp)
 		return tbv_verbs_ack_timeout_jiffies(tqp->attr.timeout);
 
 	return tbv_qp_fallback_timeout_jiffies();
-}
-
-static unsigned long
-tbv_qp_rx_timeout_jiffies_locked(const struct tbv_qp *tqp,
-				 unsigned long tx_timeout)
-{
-	unsigned long rx_timeout;
-	u8 retry_cnt;
-
-	if (!tx_timeout)
-		return 0;
-
-	retry_cnt = tqp->attr.retry_cnt & 0x7;
-
-	if (check_mul_overflow(tx_timeout, (unsigned long)retry_cnt + 1,
-			       &rx_timeout))
-		return MAX_JIFFY_OFFSET;
-
-	return rx_timeout;
 }
 
 static unsigned long
@@ -5254,6 +5241,32 @@ out:
 }
 #endif
 
+/*
+ * Keep the original receive timeout ceiling, but spend it as retry_cnt
+ * immutable intervals instead of one long silent wait followed by QP teardown.
+ * A whole-message NAK is valid for SEND, WRITE and WRITE_IMM; peers without NAK
+ * support still get the same grace intervals for their requester-side timer.
+ * Caller holds rx_lock.
+ */
+static bool tbv_rx_timeout_recover_locked(struct tbv_state *state,
+					  struct tbv_qp *tqp,
+					  u32 requester_qp, u32 psn,
+					  u8 *retries,
+					  unsigned long *started_jiffies,
+					  unsigned long now)
+{
+	u8 budget = tqp->attr.retry_cnt & 0x7;
+
+	if (*retries >= budget)
+		return false;
+
+	tbv_rx_maybe_send_nak(state, tqp, NULL, requester_qp, psn, 0, 0);
+	(*retries)++;
+	*started_jiffies = now;
+	atomic64_inc(&state->data_rx_timeout_retry);
+	return true;
+}
+
 static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 				   unsigned long timeout,
 				   struct tbv_deadline *deadline)
@@ -5278,8 +5291,14 @@ static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 				    tqp->rx_msg.last_rail_id,
 				    tqp->rx_msg.last_route,
 				    tqp->rx_msg.last_path_id);
-		tbv_rx_fail_active_send(state, tqp, NULL, IB_WC_GENERAL_ERR);
-		timed_out = true;
+		if (!tbv_rx_timeout_recover_locked(
+			    state, tqp, tqp->rx_msg.src_qp, tqp->rx_msg.psn,
+			    &tqp->rx_msg.timeout_retries,
+			    &tqp->rx_msg.started_jiffies, now)) {
+			tbv_rx_fail_active_send(state, tqp, NULL,
+						IB_WC_GENERAL_ERR);
+			timed_out = true;
+		}
 	}
 	if (tqp->rx_write.active &&
 	    tbv_qp_entry_expired(tqp->rx_write.started_jiffies, now, timeout)) {
@@ -5290,9 +5309,14 @@ static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 				    tqp->rx_write.remote_addr,
 				    tqp->rx_write.received,
 				    tqp->rx_write.with_imm);
-		tbv_rx_fail_active_write_locked(state, tqp, NULL,
-						    IB_WC_GENERAL_ERR);
-		timed_out = true;
+		if (!tbv_rx_timeout_recover_locked(
+			    state, tqp, tqp->rx_write.src_qp,
+			    tqp->rx_write.psn, &tqp->rx_write.timeout_retries,
+			    &tqp->rx_write.started_jiffies, now)) {
+			tbv_rx_fail_active_write_locked(state, tqp, NULL,
+							IB_WC_GENERAL_ERR);
+			timed_out = true;
+		}
 	}
 
 	for (;;) {
@@ -5319,8 +5343,13 @@ static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 		total_len = msg->total_len;
 		kind = msg->kind;
 		expected = psn == tqp->rx_expected_psn;
-		tbv_rx_drop_reorder_msg_locked(state, tqp, msg);
+		if (tbv_rx_timeout_recover_locked(
+			    state, tqp, src_qp, tqp->rx_expected_psn,
+			    &msg->timeout_retries, &msg->first_jiffies, now))
+			continue;
+
 		atomic64_inc(&state->data_rx_reorder_timeout);
+		tbv_rx_drop_reorder_msg_locked(state, tqp, msg);
 		if (expected)
 			tqp->rx_expected_psn = tbv_psn_next(psn);
 		if (kind == TBV_RX_REORDER_READ_REQ)
@@ -5351,15 +5380,17 @@ static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
-int tbv_test_rx_timeout_deadline(unsigned long timeout,
+int tbv_test_rx_timeout_deadline(unsigned long timeout, u8 retry_cnt,
 				 unsigned long *first_delay_out,
-				 u32 *wakeups_out, bool *active_out)
+				 u32 *wakeups_out, u32 *recoveries_out,
+				 bool *active_out)
 {
 	struct tbv_deadline deadline;
 	struct tbv_state *state;
 	struct tbv_qp *tqp;
 	unsigned long delay;
 	unsigned long now;
+	u32 recoveries = 0;
 	u32 wakeups = 0;
 	int ret = -ENOMEM;
 
@@ -5378,6 +5409,7 @@ int tbv_test_rx_timeout_deadline(unsigned long timeout,
 	tqp->owner = state;
 	tqp->closing = true;
 	tqp->state = IB_QPS_RTS;
+	tqp->attr.retry_cnt = retry_cnt;
 
 	now = jiffies ?: 1;
 	tqp->rx_expected_psn = 37;
@@ -5396,7 +5428,9 @@ int tbv_test_rx_timeout_deadline(unsigned long timeout,
 		*first_delay_out = delay;
 
 	do {
-		if (wakeups == 2) {
+		bool was_active = tqp->rx_write.active;
+
+		if (wakeups == retry_cnt + 2) {
 			ret = -ELOOP;
 			goto destroy;
 		}
@@ -5404,10 +5438,14 @@ int tbv_test_rx_timeout_deadline(unsigned long timeout,
 		now += delay;
 		tbv_deadline_init(&deadline);
 		tbv_qp_timeout_reap_rx(tqp, now, timeout, &deadline);
+		if (was_active && tqp->rx_write.active)
+			recoveries++;
 	} while (tbv_deadline_delay(&deadline, now, &delay));
 
 	if (wakeups_out)
 		*wakeups_out = wakeups;
+	if (recoveries_out)
+		*recoveries_out = recoveries;
 	if (active_out)
 		*active_out = tqp->rx_write.active;
 	ret = 0;
@@ -5930,7 +5968,7 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->timeout_work_armed = false;
 	timeout = tbv_qp_tx_timeout_jiffies_locked(tqp);
-	rx_timeout = tbv_qp_rx_timeout_jiffies_locked(tqp, timeout);
+	rx_timeout = timeout;
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	read_resp_timeout = tbv_read_resp_retry_jiffies(timeout);
 
@@ -8907,6 +8945,8 @@ static void tbv_rx_maybe_send_nak(struct tbv_state *state, struct tbv_qp *tqp,
 
 	if (rx_path && rx_path->rail && rx_path->rail->peer)
 		peer_caps = READ_ONCE(rx_path->rail->peer->remote_caps);
+	else if (tqp->rail && tqp->rail->peer)
+		peer_caps = READ_ONCE(tqp->rail->peer->remote_caps);
 	if (!tbv_rx_nak_should_send(peer_caps, tqp->nak_tx_valid,
 				    tqp->nak_tx_psn, tqp->nak_tx_start,
 				    tqp->nak_tx_jiffies, psn, missing_start,
