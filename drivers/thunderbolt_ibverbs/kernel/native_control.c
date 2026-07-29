@@ -1204,21 +1204,45 @@ void tbv_native_control_identity_refresh_workfn(struct work_struct *work)
 		return;
 	WRITE_ONCE(state->hello_sent_incomplete, false);
 
-	mutex_lock(&state->lock);
-	list_for_each_entry(peer, &state->peers, node) {
+	/*
+	 * The exchange reaches apply_ack() -> apply_remote(), which takes
+	 * state->lock, and it sleeps for up to the HELLO timeout per rail. So
+	 * it must run with the lock dropped: snapshot the negotiated rails
+	 * under the lock holding a reference on each, then exchange without
+	 * it. Rails that go away meanwhile are caught by the removing check.
+	 */
+	while (true) {
 		struct tbv_rail *rail;
+		struct tbv_rail *target = NULL;
+		struct tbv_peer *target_peer = NULL;
 
-		if (peer->backend != TBV_BACKEND_NATIVE)
-			continue;
-		list_for_each_entry(rail, &peer->rails, node) {
-			if (!rail->native_negotiated)
+		mutex_lock(&state->lock);
+		list_for_each_entry(peer, &state->peers, node) {
+			if (peer->backend != TBV_BACKEND_NATIVE)
 				continue;
-			if (!tbv_native_control_exchange_once(state, peer,
-							      rail, 1))
-				refreshed++;
+			list_for_each_entry(rail, &peer->rails, node) {
+				if (!rail->native_negotiated ||
+				    rail->removing ||
+				    rail->identity_refreshed)
+					continue;
+				rail->identity_refreshed = true;
+				refcount_inc(&rail->refcnt);
+				target = rail;
+				target_peer = peer;
+				break;
+			}
+			if (target)
+				break;
 		}
+		mutex_unlock(&state->lock);
+
+		if (!target)
+			break;
+		if (!tbv_native_control_exchange_once(state, target_peer,
+						      target, 1))
+			refreshed++;
+		tbv_rail_put(target);
 	}
-	mutex_unlock(&state->lock);
 
 	pr_info("identity refresh: re-HELLOed %d negotiated rail(s) after roce_netdev address arrival\n",
 		refreshed);

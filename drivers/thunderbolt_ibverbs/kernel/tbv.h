@@ -359,6 +359,12 @@ struct tbv_rail {
 	bool active;
 	bool removing;
 	/*
+	 * Set while the identity refresh work walks the rails so the walk can
+	 * drop state->lock between rails without re-visiting one. The exchange
+	 * sleeps and re-takes state->lock, so it cannot run under the walk.
+	 */
+	bool identity_refreshed;
+	/*
 	 * Registration unwinding marker. Set under state->rail_register_lock
 	 * when ib_register_device() returns nonzero for this rail. While true
 	 * tbv_ibdev_start()'s catchup loop and tbv_ibdev_rail_event() will
