@@ -44,6 +44,7 @@
 #define TBV_IBDEV_MAX_CQ 256
 #define TBV_IBDEV_MAX_CQE 4096
 #define TBV_IBDEV_MAX_SGE 4
+#define TBV_IBDEV_MAX_RECV_SGE 1
 #define TBV_IBDEV_MAX_READ_CTX 128
 #define TBV_IBDEV_QPN_MIN 0x900
 #define TBV_IBDEV_QPN_MAX 0x00ffffff
@@ -3228,7 +3229,7 @@ static int tbv_query_device(struct ib_device *ibdev,
 	attr->max_qp = apple ? 1 : TBV_IBDEV_MAX_QP;
 	attr->max_qp_wr = TBV_IBDEV_MAX_QP_WR;
 	attr->max_send_sge = TBV_IBDEV_MAX_SGE;
-	attr->max_recv_sge = TBV_IBDEV_MAX_SGE;
+	attr->max_recv_sge = TBV_IBDEV_MAX_RECV_SGE;
 	attr->max_sge_rd = TBV_IBDEV_MAX_SGE;
 	attr->max_cq = TBV_IBDEV_MAX_CQ;
 	attr->max_cqe = TBV_IBDEV_MAX_CQE;
@@ -3243,6 +3244,30 @@ static int tbv_query_device(struct ib_device *ibdev,
 	attr->local_ca_ack_delay = 15;
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_verbs_sge_contract(u32 *send_advertised_out,
+				u32 *recv_advertised_out,
+				u32 *recv_accepted_out)
+{
+	struct tbv_ibdev dev = {};
+	struct ib_device_attr attr;
+	int ret;
+
+	if (!send_advertised_out || !recv_advertised_out ||
+	    !recv_accepted_out)
+		return -EINVAL;
+
+	ret = tbv_query_device(&dev.base, &attr, NULL);
+	if (ret)
+		return ret;
+
+	*send_advertised_out = attr.max_send_sge;
+	*recv_advertised_out = attr.max_recv_sge;
+	*recv_accepted_out = TBV_IBDEV_MAX_RECV_SGE;
+	return 0;
+}
+#endif
 
 /*
  * Report the IB port width/speed from what the Thunderbolt controller
@@ -3766,7 +3791,7 @@ static int tbv_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *init_attr,
 	if (init_attr->cap.max_send_wr > TBV_IBDEV_MAX_QP_WR ||
 	    init_attr->cap.max_recv_wr > TBV_IBDEV_MAX_QP_WR ||
 	    init_attr->cap.max_send_sge > TBV_IBDEV_MAX_SGE ||
-	    init_attr->cap.max_recv_sge > TBV_IBDEV_MAX_SGE) {
+	    init_attr->cap.max_recv_sge > TBV_IBDEV_MAX_RECV_SGE) {
 		ret = -EINVAL;
 		goto err_put_rail;
 	}
@@ -7852,7 +7877,7 @@ static int tbv_post_recv(struct ib_qp *qp, const struct ib_recv_wr *wr,
 	for (cur = wr; cur; cur = cur->next) {
 		const struct ib_sge *sge = NULL;
 
-		if (cur->num_sge > 1) {
+		if (cur->num_sge > TBV_IBDEV_MAX_RECV_SGE) {
 			ret = -EINVAL;
 			goto err_bad;
 		}
