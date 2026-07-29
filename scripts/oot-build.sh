@@ -1,79 +1,62 @@
 #!/usr/bin/env bash
-# Stage the patched thunderbolt + thunderbolt_net source as an out-of-tree
-# build tree, build against the running kernel, and (optionally) hot-swap
-# the loaded modules with the freshly-built ones.
+# Build the patched Thunderbolt modules through the same staged source,
+# generated public header, and Makefile used by the DKMS package.
 #
-# Faster iteration loop than DKMS: ~15 s build + rmmod + modprobe.
-# Use this on a single chain node to test driver changes before exporting
-# to the DKMS payload + ansible-deploying to the fleet.
-#
-# Usage:
-#   scripts/oot-build.sh                    # build only
-#   scripts/oot-build.sh --install          # build + install to /lib/modules/.../updates/
-#   scripts/oot-build.sh --swap             # build + install + rmmod + modprobe
-#
-# Sudo prompts on --install / --swap.
+# A live rmmod/modprobe cycle is deliberately not offered: Maple/Titan Ridge
+# ICM firmware can remain running but stop answering after the host driver
+# unloads, and only a board cold-power cycle recovers it. --install writes the
+# modules for the next boot and refreshes depmod; it does not touch live state.
 
 set -euo pipefail
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-OOT="$HOME/src/tb-oot"
 KREL="$(uname -r)"
 KDIR="/lib/modules/$KREL/build"
+OOT="${TBFIX_OOT_DIR:-/tmp/thunderbolt-tbfix-oot-${UID}}"
 
 if [ ! -d "$KDIR" ]; then
-  echo "kernel build dir missing: $KDIR (install linux-headers-$KREL)" >&2
-  exit 1
+	echo "kernel build dir missing: $KDIR (install linux-headers-$KREL)" >&2
+	exit 1
 fi
 
 mode="build"
 case "${1:-}" in
-  --install) mode="install";;
-  --swap)    mode="swap";;
-  --build|"") mode="build";;
-  -h|--help)
-    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
-  *) echo "unknown arg: $1" >&2; exit 1;;
+	--install) mode="install" ;;
+	--build|"") mode="build" ;;
+	--swap)
+		echo "--swap was removed: live ICM module replacement can require a cold power cycle" >&2
+		echo "use --install, then reboot through the normal GRUB drop-in workflow" >&2
+		exit 2
+		;;
+	-h|--help)
+		echo "usage: $0 [--build|--install]"
+		echo "  --build    stage and build with the canonical DKMS workflow"
+		echo "  --install  also install for the next boot and run depmod"
+		exit 0
+		;;
+	*)
+		echo "unknown arg: $1" >&2
+		exit 1
+		;;
 esac
 
-mkdir -p "$OOT/thunderbolt" "$OOT/thunderbolt_net"
-rsync -a --delete "$REPO_ROOT/drivers/thunderbolt/" "$OOT/thunderbolt/"
-rsync -a --delete "$REPO_ROOT/drivers/net/thunderbolt/" "$OOT/thunderbolt_net/"
-
-cat > "$OOT/Makefile" <<MAKEFILE
-KDIR ?= /lib/modules/\$(shell uname -r)/build
-.PHONY: all clean
-all:
-	\$(MAKE) -C \$(KDIR) M=\$(CURDIR)/thunderbolt modules
-	\$(MAKE) -C \$(KDIR) M=\$(CURDIR)/thunderbolt_net modules
-clean:
-	\$(MAKE) -C \$(KDIR) M=\$(CURDIR)/thunderbolt clean
-	\$(MAKE) -C \$(KDIR) M=\$(CURDIR)/thunderbolt_net clean
-MAKEFILE
-
-make -C "$OOT" -j"$(nproc)"
+"$REPO_ROOT/scripts/export-dkms-payload.sh" \
+	--target "$OOT" --worktree
+make -C "$OOT" KDIR="$KDIR" TBFIX_SOURCE_DIR="$OOT" -j"$(nproc)"
 
 if [ "$mode" = "build" ]; then
-  echo "OOT build complete at $OOT"
-  ls -la "$OOT/thunderbolt/thunderbolt.ko" "$OOT/thunderbolt_net/thunderbolt_net.ko"
-  exit 0
+	echo "OOT build complete at $OOT"
+	ls -la \
+		"$OOT/drivers/thunderbolt/thunderbolt.ko" \
+		"$OOT/drivers/net/thunderbolt/thunderbolt_net.ko"
+	exit 0
 fi
 
-sudo install -D -m 0644 "$OOT/thunderbolt/thunderbolt.ko" \
-  "/lib/modules/$KREL/updates/thunderbolt.ko"
-sudo install -D -m 0644 "$OOT/thunderbolt_net/thunderbolt_net.ko" \
-  "/lib/modules/$KREL/updates/thunderbolt_net.ko"
+sudo install -D -m 0644 "$OOT/drivers/thunderbolt/thunderbolt.ko" \
+	"/lib/modules/$KREL/updates/dkms/thunderbolt.ko"
+sudo install -D -m 0644 "$OOT/drivers/net/thunderbolt/thunderbolt_net.ko" \
+	"/lib/modules/$KREL/updates/dkms/thunderbolt_net.ko"
 sudo depmod -a
 
-if [ "$mode" = "install" ]; then
-  echo "Installed to /lib/modules/$KREL/updates/. Reboot or hot-swap manually."
-  exit 0
-fi
-
-echo "=== hot-swap thunderbolt modules ==="
-sudo rmmod thunderbolt_net 2>/dev/null || true
-sudo rmmod thunderbolt 2>/dev/null || true
-sudo modprobe thunderbolt
-sudo modprobe thunderbolt_net
-lsmod | grep -E '^thunderbolt'
-modinfo thunderbolt | head -3
+echo "Installed for $KREL under /lib/modules/$KREL/updates/dkms/."
+echo "Reboot through the normal GRUB drop-in workflow to load it."
