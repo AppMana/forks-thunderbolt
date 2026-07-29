@@ -833,6 +833,9 @@ struct tbv_state {
 	atomic64_t apple_rx_eof_without_active;
 	atomic64_t apple_rx_len_overrun;
 	atomic64_t data_cq_overflow;
+	/* Asynchronous events delivered to the consumer's event handlers. */
+	atomic64_t async_qp_events;
+	atomic64_t async_cq_events;
 	atomic64_t native_legacy_ambiguous_limited;
 	struct xarray verbs_mrs_xa;
 	struct xarray verbs_qps_xa;
@@ -1104,6 +1107,15 @@ int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
  */
 int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
+/*
+ * Fails a real QP the way the driver does and reports the asynchronous events
+ * the consumer's handlers saw. @requester selects the requester-side
+ * transition (a send that exhausted its retries) rather than a general fatal
+ * one, and @overflow_cq additionally overflows the QP's send CQ.
+ */
+int tbv_test_qp_async_events(bool requester, bool overflow_cq,
+			     u32 *qp_events_out, int *qp_event_out,
+			     u32 *cq_events_out, int *cq_event_out);
 /*
  * Enqueues a real data packet on a real path whose peer has stopped returning
  * credits, ages it @age_ms and runs the path TX work with the queue ceiling

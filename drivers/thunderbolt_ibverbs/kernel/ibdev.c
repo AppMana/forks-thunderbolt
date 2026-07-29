@@ -1473,7 +1473,62 @@ static void tbv_qp_schedule_timeout(struct tbv_qp *tqp)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 }
 
-static bool tbv_qp_mark_error(struct tbv_qp *tqp)
+/*
+ * Deliver an asynchronous QP event to the consumer. ib_dispatch_event() is the
+ * DEVICE-scoped API (it walks the device's registered ib_event_handlers); a
+ * per-QP event reaches a userspace consumer's async fd only through the QP's
+ * own event_handler, which ib_uverbs installs at create_qp. NCCL's
+ * ncclIbAsyncThread polls exactly that fd, so without this a QP that dies
+ * silently drops out of the collective instead of failing it.
+ *
+ * Callers must hold neither tqp->lock nor tqp->rx_lock: the handler is
+ * consumer code (ib_uverbs_qp_event_handler queues onto the async file).
+ */
+static void tbv_qp_async_event(struct tbv_qp *tqp, enum ib_event_type type)
+{
+	struct ib_qp *base = &tqp->base;
+	struct ib_event event;
+	unsigned long flags;
+	bool closing;
+
+	/* A QP being destroyed through verbs must not report async errors. */
+	spin_lock_irqsave(&tqp->lock, flags);
+	closing = tqp->closing;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	if (closing || !base->event_handler)
+		return;
+
+	event.event = type;
+	event.device = base->device;
+	event.element.qp = base;
+	base->event_handler(&event, base->qp_context);
+	if (tqp->owner)
+		atomic64_inc(&tqp->owner->async_qp_events);
+}
+
+static void tbv_cq_async_event(struct tbv_cq *tcq, enum ib_event_type type)
+{
+	struct ib_cq *base = &tcq->base;
+	struct ib_event event;
+
+	if (!base->event_handler)
+		return;
+
+	event.event = type;
+	event.device = base->device;
+	event.element.cq = base;
+	base->event_handler(&event, base->cq_context);
+	if (tcq->owner)
+		atomic64_inc(&tcq->owner->async_cq_events);
+}
+
+/*
+ * Fail the QP and tell the consumer why. @type is the async event the
+ * transition reports: IB_EVENT_QP_REQ_ERR for a requester-side failure (a send
+ * that exhausted its retries or timed out), IB_EVENT_QP_FATAL otherwise.
+ */
+static bool tbv_qp_mark_error_event(struct tbv_qp *tqp,
+				    enum ib_event_type type)
 {
 	unsigned long flags;
 	bool changed = false;
@@ -1490,9 +1545,16 @@ static bool tbv_qp_mark_error(struct tbv_qp *tqp)
 		wake_up_all(&tqp->credit_wait);
 		wake_up_all(&tqp->apple_tx_wait);
 		tbv_qp_flush_error(tqp);
+		/* After the flush: the consumer's handler may reap the CQ. */
+		tbv_qp_async_event(tqp, type);
 	}
 
 	return changed;
+}
+
+static bool tbv_qp_mark_error(struct tbv_qp *tqp)
+{
+	return tbv_qp_mark_error_event(tqp, IB_EVENT_QP_FATAL);
 }
 
 /*
@@ -5436,8 +5498,12 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 		tbv_send_ctx_put(send);
 	}
 
+	/*
+	 * A send that exhausted its retries or timed out is a requester-side
+	 * failure, which is what IB_EVENT_QP_REQ_ERR names.
+	 */
 	if (tx_timed_out)
-		tbv_qp_mark_error(tqp);
+		tbv_qp_mark_error_event(tqp, IB_EVENT_QP_REQ_ERR);
 
 	while (!list_empty(&timed_out_reads)) {
 		struct tbv_read_ctx *read =
@@ -7457,12 +7523,15 @@ static bool tbv_qp_pop_recv(struct tbv_qp *tqp, struct tbv_recv_wqe *wqe)
 static int tbv_cq_push(struct tbv_cq *tcq, const struct ib_wc *wc)
 {
 	struct tbv_qp *overflow_qp = NULL;
+	bool first_overflow = false;
 	unsigned long flags;
 	bool notify = false;
 	int ret = 0;
 
 	spin_lock_irqsave(&tcq->lock, flags);
 	if (tcq->overflowed || tcq->count == tcq->cqe) {
+		/* Report the CQ_ERR once, on the transition into overflow. */
+		first_overflow = !tcq->overflowed;
 		tcq->overflowed = true;
 		if (tcq->owner)
 			atomic64_inc(&tcq->owner->data_cq_overflow);
@@ -7492,6 +7561,8 @@ out:
 	 * tbv_qp_mark_error() -> tbv_qp_flush_error() takes that same
 	 * non-recursive mutex. The timeout work marks it with no lock held.
 	 */
+	if (first_overflow)
+		tbv_cq_async_event(tcq, IB_EVENT_CQ_ERR);
 	if (overflow_qp)
 		tbv_qp_note_cq_overflow(overflow_qp);
 	if (notify && tcq->base.comp_handler)
@@ -7578,6 +7649,125 @@ int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
 
 	WRITE_ONCE(qp_timeout_ms, saved_timeout_ms);
 	mutex_destroy(&tqp->rx_lock);
+	ret = 0;
+out:
+	if (tcq)
+		kfree(tcq->entries);
+	kfree(tcq);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_KUNIT)
+struct tbv_test_async_record {
+	u32 qp_events;
+	u32 cq_events;
+	int last_qp_event;
+	int last_cq_event;
+};
+
+static void tbv_test_async_qp_handler(struct ib_event *event, void *ctx)
+{
+	struct tbv_test_async_record *rec = ctx;
+
+	rec->qp_events++;
+	rec->last_qp_event = event->event;
+}
+
+static void tbv_test_async_cq_handler(struct ib_event *event, void *ctx)
+{
+	struct tbv_test_async_record *rec = ctx;
+
+	rec->cq_events++;
+	rec->last_cq_event = event->event;
+}
+
+/*
+ * KUnit hook (tests/async_event_test.c). Fails a real QP through the real
+ * tbv_qp_mark_error_event() and optionally overflows its real send CQ through
+ * the real tbv_cq_push(), with handlers installed exactly where ib_uverbs
+ * installs them (ib_qp.event_handler / ib_cq.event_handler).
+ *
+ * Field-reachable state only, same as tbv_test_cq_overflow_defers_qp_error():
+ * the QP is live and not closing, which is the only state in which the error
+ * transition does anything; the CQ is the one-entry ring tbv_create_cq()
+ * builds and overflowed is set by tbv_cq_push() itself. qp_timeout_ms is
+ * zeroed so nothing is armed on a QP with no workqueue behind it.
+ */
+int tbv_test_qp_async_events(bool requester, bool overflow_cq,
+			     u32 *qp_events_out, int *qp_event_out,
+			     u32 *cq_events_out, int *cq_event_out)
+{
+	struct tbv_test_async_record rec = { .last_qp_event = -1,
+					     .last_cq_event = -1 };
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct tbv_cq *tcq = NULL;
+	struct ib_wc wc = {};
+	uint saved_timeout_ms;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	tcq = kzalloc(sizeof(*tcq), GFP_KERNEL);
+	if (!state || !tqp || !tcq)
+		goto out;
+	tcq->entries = kcalloc(1, sizeof(*tcq->entries), GFP_KERNEL);
+	if (!tcq->entries)
+		goto out;
+	spin_lock_init(&tcq->lock);
+	tcq->owner = state;
+	tcq->cqe = 1;
+	tcq->base.event_handler = tbv_test_async_cq_handler;
+	tcq->base.cq_context = &rec;
+
+	spin_lock_init(&tqp->lock);
+	mutex_init(&tqp->rx_lock);
+	init_waitqueue_head(&tqp->credit_wait);
+	init_waitqueue_head(&tqp->apple_tx_wait);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	INIT_LIST_HEAD(&tqp->pending_read_resps);
+	INIT_LIST_HEAD(&tqp->apple_sq);
+	INIT_LIST_HEAD(&tqp->rx_reorder);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	tqp->base.send_cq = &tcq->base;
+	tqp->base.event_handler = tbv_test_async_qp_handler;
+	tqp->base.qp_context = &rec;
+
+	saved_timeout_ms = READ_ONCE(qp_timeout_ms);
+	WRITE_ONCE(qp_timeout_ms, 0);
+
+	if (overflow_cq) {
+		wc.qp = &tqp->base;
+		wc.status = IB_WC_SUCCESS;
+		wc.port_num = 1;
+		tbv_cq_push(tcq, &wc);
+		wc.status = IB_WC_WR_FLUSH_ERR;
+		tbv_cq_push(tcq, &wc);
+		/* A second overflow must not re-report the same CQ error. */
+		tbv_cq_push(tcq, &wc);
+	}
+
+	tbv_qp_mark_error_event(tqp, requester ? IB_EVENT_QP_REQ_ERR :
+						 IB_EVENT_QP_FATAL);
+	/* An already-failed QP must not report the event again. */
+	tbv_qp_mark_error_event(tqp, IB_EVENT_QP_FATAL);
+
+	WRITE_ONCE(qp_timeout_ms, saved_timeout_ms);
+	mutex_destroy(&tqp->rx_lock);
+
+	if (qp_events_out)
+		*qp_events_out = rec.qp_events;
+	if (qp_event_out)
+		*qp_event_out = rec.last_qp_event;
+	if (cq_events_out)
+		*cq_events_out = rec.cq_events;
+	if (cq_event_out)
+		*cq_event_out = rec.last_cq_event;
 	ret = 0;
 out:
 	if (tcq)
