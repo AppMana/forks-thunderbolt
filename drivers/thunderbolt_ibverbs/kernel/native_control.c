@@ -139,11 +139,34 @@ u32 tbv_host_identity_hash(const u8 uuid[16])
 }
 
 /*
- * Per-rail MAC for the rail's private GID-only netdev: 02:H1:H2:H3:P:R --
- * locally administered + unicast, H = tbv_host_identity_hash (host-unique),
- * P/R = the local peer_id/rail_id. Every rail on a host gets a distinct MAC
- * (distinct P:R), and rails on DIFFERENT hosts get distinct MACs too
- * (distinct H). udev assigns the per-link routable address on top.
+ * Stable 16-bit link identity for the rail's private GID-only netdev.  A
+ * peer_id is allocated from state->next_peer_id each time a service instance
+ * is registered, so it is deliberately absent.  The remote router UUID and
+ * local Thunderbolt route identify a cable across service teardown/reprobe;
+ * rail_id (the symmetric native lane) distinguishes bonded lanes.
+ */
+u16 tbv_rail_link_identity_hash(const u8 remote_uuid[16], u64 route,
+				u32 rail_id)
+{
+	u32 h = tbv_host_identity_hash(remote_uuid);
+	u16 folded;
+
+	h ^= lower_32_bits(route);
+	h ^= upper_32_bits(route);
+	h ^= rail_id * 0x9e3779b1u;
+	h ^= h >> 16;
+	h *= 0x7feb352du;
+	h ^= h >> 15;
+	folded = (u16)(h ^ (h >> 16));
+	return folded ? folded : 1;
+}
+
+/*
+ * Per-rail MAC for the rail's private GID-only netdev:
+ * 02:H1:H2:H3:L1:L2 -- locally administered + unicast, H =
+ * tbv_host_identity_hash (host-unique), L = the stable link hash above.
+ * Every link/lane on a host gets a distinct identity, while service
+ * re-registration of that same link retains it.
  *
  * The host part matters: the pre-0.2.35 derivation used the ib node_guid's
  * low 40 bits, whose only variables were the LOCAL peer_id and rail_id -- so
@@ -151,19 +174,18 @@ u32 tbv_host_identity_hash(const u8 uuid[16])
  * 42:53 on both appmana-002 and appmana-018), hence the same link-local GID
  * and no value a peer could ever resolve a destination GID against. The
  * RAIL_EUI64 HELLO identity matches on the host part only (eui64 >> 16, the
- * upper 48 bits), because P:R are the REMOTE node's private numbering and
- * differ per rail.
+ * upper 48 bits), because the link hash is private to the remote node.
  *
  * Unit-tested: kernel/tests/rail_mac_test.c (run via tools/run-kunit.sh).
  */
-void tbv_rail_netdev_mac(u32 host_hash, u32 peer_id, u32 rail_id, u8 mac[6])
+void tbv_rail_netdev_mac(u32 host_hash, u16 link_hash, u8 mac[6])
 {
 	mac[0] = 0x02;
 	mac[1] = (u8)(host_hash >> 16);
 	mac[2] = (u8)(host_hash >> 8);
 	mac[3] = (u8)host_hash;
-	mac[4] = (u8)peer_id;
-	mac[5] = (u8)rail_id;
+	mac[4] = (u8)(link_hash >> 8);
+	mac[5] = (u8)link_hash;
 }
 
 /*
@@ -172,11 +194,11 @@ void tbv_rail_netdev_mac(u32 host_hash, u32 peer_id, u32 rail_id, u8 mac[6])
  * ib_core builds for that rail's ib_device, and the value a RAIL_EUI64 HELLO
  * advertises. Host scope = eui64 >> 16.
  */
-u64 tbv_rail_identity_eui64(u32 host_hash, u32 peer_id, u32 rail_id)
+u64 tbv_rail_identity_eui64(u32 host_hash, u16 link_hash)
 {
 	u8 mac[6];
 
-	tbv_rail_netdev_mac(host_hash, peer_id, rail_id, mac);
+	tbv_rail_netdev_mac(host_hash, link_hash, mac);
 	return ((u64)(mac[0] ^ 0x02) << 56) | ((u64)mac[1] << 48) |
 	       ((u64)mac[2] << 40) | (0xffULL << 32) | (0xfeULL << 24) |
 	       ((u64)mac[3] << 16) | ((u64)mac[4] << 8) | (u64)mac[5];
@@ -238,7 +260,10 @@ static void tbv_native_control_fill_hello(const struct tbv_state *state,
 	    peer->xd->local_uuid) {
 		hello->roce_eui64 = tbv_rail_identity_eui64(
 			tbv_host_identity_hash(peer->xd->local_uuid->b),
-			peer->peer_id, rail->rail_id);
+			tbv_rail_link_identity_hash(
+				peer->xd->remote_uuid ?
+					peer->xd->remote_uuid->b : NULL,
+				rail->key.route, rail->rail_id));
 		hello->capabilities |= TBV_NATIVE_WIRE_CAP_RAIL_EUI64;
 	}
 }

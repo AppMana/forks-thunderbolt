@@ -454,7 +454,7 @@ struct tbv_peer {
 	 * remote_roce_eui64 is a synthetic RAIL_EUI64 identity (the peer's
 	 * HELLO carried TBV_NATIVE_WIRE_CAP_RAIL_EUI64): match destination
 	 * GIDs on the host part only (eui64 >> 16) -- the low 16 bits are the
-	 * peer's private peer_id/rail_id numbering and differ per rail.
+	 * peer's stable, private physical-link hash and differ per rail.
 	 */
 	bool remote_identity_rail_scoped;
 	/*
@@ -1457,14 +1457,16 @@ enum tbv_identity_verdict tbv_gid_rail_identity_verdict(const u8 gid[16],
 							u64 rail_eui64);
 bool tbv_native_control_local_identity_incomplete(void);
 /*
- * Per-rail netdev MAC / synthetic RoCE identity: 02:H1:H2:H3:P:R from a
- * host-unique 24-bit hash + local peer/rail ids, so rails get distinct GIDs
- * ACROSS hosts too (the node_guid-derived scheme collided fleet-wide). See
- * kernel/native_control.c + tests/rail_mac_test.c.
+ * Per-rail netdev MAC / synthetic RoCE identity.  The upper 24 bits identify
+ * the local host; the lower 16 identify the physical link from stable remote
+ * UUID/route/lane inputs.  Transient peer_id allocation must never enter the
+ * identity or a service re-register changes the GID without a reboot.
  */
 u32 tbv_host_identity_hash(const u8 uuid[16]);
-void tbv_rail_netdev_mac(u32 host_hash, u32 peer_id, u32 rail_id, u8 mac[6]);
-u64 tbv_rail_identity_eui64(u32 host_hash, u32 peer_id, u32 rail_id);
+u16 tbv_rail_link_identity_hash(const u8 remote_uuid[16], u64 route,
+				u32 rail_id);
+void tbv_rail_netdev_mac(u32 host_hash, u16 link_hash, u8 mac[6]);
+u64 tbv_rail_identity_eui64(u32 host_hash, u16 link_hash);
 void tbv_native_control_identity_refresh_workfn(struct work_struct *work);
 int tbv_native_control_identity_notifier_register(struct tbv_state *state);
 void tbv_native_control_identity_notifier_unregister(void);
