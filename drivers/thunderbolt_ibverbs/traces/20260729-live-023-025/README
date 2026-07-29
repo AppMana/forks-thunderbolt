@@ -1,0 +1,42 @@
+Live two-node wedge, appmana-023 route=0x1 <-> appmana-025 route=0x3, read
+straight off the running fleet module (srcversion in each file, matching the
+.ko on disk). Both ends were wedged and stayed wedged for hours, so this is a
+stable state and not a snapshot of something in motion.
+
+appmana-023, the sending end that is really stuck:
+  data_tx_posted=53843 data_tx_completed=53811   (32 data frames outstanding)
+  control_tx_posted=9488 control_tx_completed=8240  (and control keeps rising)
+  tx_poll enabled=1 calls=31156 completed=107
+  tx stall ... inflight=1269 posted=63320 completed=62051  (completed FROZEN)
+
+Two things here at once, on one host, in the same dmesg:
+  route=0x3  inflight=1 posted=11834 completed=11833   -- and five seconds
+             later posted=11839 completed=11838. Both counters advance, so
+             nothing is stranded. This is the detector artifact: only the
+             supplemental poll used to stamp progress, and the interrupt path
+             reaps nearly everything.
+  route=0x1  inflight climbing past 1269, completed frozen at 62051. This one
+             is a real stall, and note inflight exceeds the 1024 descriptor
+             ring: the driver keeps handing control frames to a ring that
+             stopped completing, and tb_ring_tx() returns 0 for every one of
+             them because they land on the core's ring->queue with no
+             descriptor. Data is fully gated off behind them
+             (data_tx_enqueued=126307 vs posted=53843).
+
+appmana-025, the other end, wedged with no ring involvement at all:
+  data_tx_posted=29084 data_tx_completed=29084   (ring idle, nothing owed)
+  data_tx_enqueued=95353                          (66269 packets never posted)
+  tx_credits=768/768                              (window wide open)
+  data_tx_errors=0                                (no post ever failed)
+
+Every gate in tbv_path_schedule_tx() is open in that state except one: the
+unframed raw-stream window. Held open by an owner with nothing left to send,
+it refuses the queue head forever. See
+tests/tx_ring_progress_test.c::tbv_tx_progress_cancel_closes_raw_window for
+the cancel that orphans it.
+
+Still open after this: why 023's ring stops completing at the hardware level.
+The poll reads the descriptor at tail directly and does not see
+RING_DESC_COMPLETED, so this is the NHI tx engine not draining for that hop,
+not a lost or mis-handled descriptor. Settling it needs the ring's prod/cons
+registers and the peer's rx ring occupancy at the moment it stops.

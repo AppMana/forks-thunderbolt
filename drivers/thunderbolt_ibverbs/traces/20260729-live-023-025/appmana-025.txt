@@ -1,0 +1,12 @@
+### node=appmana-025 tag=live-wedge
+846944D5F8A5383D383CDFF
+  rail=0x0 route=0x3 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=0 last_error=0 local_out=8 local_tx=2 local_rx=2 remote_rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+    data_tx_enqueued=95353 data_tx_posted=29084 data_tx_completed=29084 data_tx_credit_stalls=2437 data_tx_credit_received=13542 data_tx_credit_consumed=29084 tx_credits=768/768
+    control_tx_enqueued=2273 control_tx_posted=2273 control_tx_completed=2273 control_tx_queue_max_ms=29
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=41493 data_rx_credit_sent=30880 data_rx_credit_eligible=30897 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=17 rx_credit_total=30897 resynced=0 resync_recovered=3294
+    tx_poll enabled=1 calls=6 completed=2
+    rx_supp_poll enabled=0 calls=0 completed=0
+--- summary
+data_tx_canceled: 0
+data_tx_errors: 0

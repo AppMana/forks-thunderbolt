@@ -1,0 +1,18 @@
+### node=appmana-023 tag=live-wedge
+846944D5F8A5383D383CDFF
+  rail=0x0 route=0x1 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=2 last_error=0 local_out=8 local_tx=3 local_rx=3 remote_rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+    data_tx_enqueued=126307 data_tx_posted=53843 data_tx_completed=53811 data_tx_credit_stalls=6904 data_tx_credit_received=20882 data_tx_credit_consumed=53843 tx_credits=768/768
+    control_tx_enqueued=9744 control_tx_posted=9744 control_tx_completed=8240 control_tx_queue_max_ms=4
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=26830 data_rx_credit_sent=23904 data_rx_credit_eligible=23904 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=0 rx_credit_total=23904 resynced=8519 resync_recovered=0
+    tx_poll enabled=1 calls=36278 completed=107
+    rx_supp_poll enabled=0 calls=0 completed=0
+--- dmesg
+[424211.940786] tx stall route=0x1 rail=0x0 inflight=1515 posted=63566 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424216.979878] tx stall route=0x1 rail=0x0 inflight=1520 posted=63571 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424219.128854] tx stall route=0x3 rail=0x0 inflight=1 posted=12089 completed=12088 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424222.012865] tx stall route=0x1 rail=0x0 inflight=1525 posted=63576 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424224.248894] tx stall route=0x3 rail=0x0 inflight=1 posted=12094 completed=12093 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424227.050911] tx stall route=0x1 rail=0x0 inflight=1529 posted=63580 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424229.369938] tx stall route=0x3 rail=0x0 inflight=1 posted=12099 completed=12098 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[424232.096951] tx stall route=0x1 rail=0x0 inflight=1534 posted=63585 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0

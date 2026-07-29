@@ -99,10 +99,39 @@ static void tbv_tx_progress_expired_frame_completes_once(struct kunit *test)
 			    inflight);
 }
 
+/*
+ * The other half of the same wedge, seen live on appmana-025 route=0x3:
+ * tx_credits=768/768, nothing inflight, data_tx_posted equal to
+ * data_tx_completed, and 66269 packets queued that the path will never post.
+ * Every gate in tbv_path_schedule_tx() but one is open in that state; the one
+ * that is shut is the unframed window, held open by an owner whose remaining
+ * packets a (done, done_ctx) cancel took away.
+ */
+static void tbv_tx_progress_cancel_closes_raw_window(struct kunit *test)
+{
+	bool window_open = true;
+	u32 done_calls = 0;
+	u32 queued = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_path_cancel_orphans_raw_window(&window_open,
+								&queued,
+								&done_calls),
+			0);
+
+	KUNIT_EXPECT_EQ_MSG(test, done_calls, 1U,
+			    "the cancelled owner must be completed");
+	KUNIT_EXPECT_EQ_MSG(test, queued, 1U,
+			    "the other owner's packet must still be queued and sendable");
+	KUNIT_EXPECT_FALSE_MSG(test, window_open,
+			       "the unframed window is still open on an owner with nothing left to send, so tbv_path_schedule_tx() refuses the queue head forever");
+}
+
 static struct kunit_case tbv_tx_ring_progress_cases[] = {
 	KUNIT_CASE(tbv_tx_progress_poll_reaps_nothing),
 	KUNIT_CASE(tbv_tx_progress_interrupt_completion_counts),
 	KUNIT_CASE(tbv_tx_progress_expired_frame_completes_once),
+	KUNIT_CASE(tbv_tx_progress_cancel_closes_raw_window),
 	{}
 };
 

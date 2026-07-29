@@ -3192,6 +3192,7 @@ static void tbv_path_cancel_data_match(struct tbv_path *path,
 	struct tbv_path_cancel_done *done_list;
 	LIST_HEAD(cancel);
 	unsigned long flags;
+	void *stream_owner;
 	u32 i;
 	u32 done_count = 0;
 	u32 done_max;
@@ -3206,25 +3207,38 @@ static void tbv_path_cancel_data_match(struct tbv_path *path,
 		return;
 
 	spin_lock_irqsave(&path->tx_lock, flags);
-	if (owner_ctx && path->tx_raw_stream_active &&
-	    path->tx_raw_stream_owner == owner_ctx) {
-		path->tx_raw_stream_active = false;
-		path->tx_raw_stream_owner = NULL;
-		path->tx_raw_stream_end_seen = false;
-		path->tx_raw_stream_window_open = false;
-		path->tx_raw_stream_inflight = 0;
+	stream_owner = path->tx_raw_stream_active ? path->tx_raw_stream_owner :
+						    NULL;
+	if (owner_ctx && stream_owner == owner_ctx)
 		raw_stream_canceled = true;
-	}
 	list_for_each_entry_safe(packet, tmp, &path->tx_data_queue, node) {
 		if (!tbv_path_packet_matches(packet, done, done_ctx,
 					     owner_ctx))
 			continue;
+		/*
+		 * Cancelling by (done, done_ctx) takes packets out of an open
+		 * unframed window without ever naming its owner, and the
+		 * window closes only when its own end packet is dequeued. Lose
+		 * that packet and tbv_path_schedule_tx() blocks on the gate
+		 * forever: the head of the queue belongs to somebody else, so
+		 * nothing is posted, so no completion ever closes the window.
+		 * A cancelled member of the open window closes it.
+		 */
+		if (stream_owner && packet->owner_ctx == stream_owner)
+			raw_stream_canceled = true;
 		list_del_init(&packet->node);
 		packet->queued = false;
 			if (path->tx_data_queued)
 				path->tx_data_queued--;
 			packet->owner_ctx = NULL;
 			list_add_tail(&packet->node, &cancel);
+	}
+	if (raw_stream_canceled) {
+		path->tx_raw_stream_active = false;
+		path->tx_raw_stream_owner = NULL;
+		path->tx_raw_stream_end_seen = false;
+		path->tx_raw_stream_window_open = false;
+		path->tx_raw_stream_inflight = 0;
 	}
 
 	for (i = 0; i < path->tx_frame_count; i++) {
@@ -4007,6 +4021,89 @@ out:
 	kfree(dma);
 	kfree(ring);
 	kfree(frames);
+	kfree(path);
+	return ret;
+}
+
+/*
+ * Scenario hook for tests/tx_ring_progress_test.c -- an unframed window whose
+ * remaining packets are cancelled out from under it.
+ *
+ * A read response is queued as a raw stream owned by its read context, and
+ * tbv_cancel_read_ctx_packets() cancels it by (done, done_ctx) with no
+ * owner_ctx. The window is opened by the header's dequeue and closed only by
+ * the end packet's dequeue, so a cancel that takes the rest of the window
+ * leaves it open with an owner that has nothing left to send.
+ *
+ * Builds that state on a real path: one queued packet owned by @A, one owned
+ * by @B behind it, and the window open on @A exactly as posting @A's header
+ * leaves it. Cancels @A's packets by done_ctx, then reports whether the window
+ * is still open and how many packets are still queued -- with the window open
+ * on an owner that has no queued packet, tbv_path_schedule_tx() refuses the
+ * queue head forever and the path never sends again.
+ */
+int tbv_test_path_cancel_orphans_raw_window(bool *window_open_out,
+					    u32 *queued_out,
+					    u32 *done_calls_out)
+{
+	struct tbv_test_queue_timeout_ctx ctx_a = {};
+	struct tbv_test_queue_timeout_ctx ctx_b = {};
+	struct tbv_path_config cfg;
+	struct tbv_path *path;
+	u8 payload[64] = {};
+	unsigned long flags;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	path->tx_data_queue_limit = 8;
+	/*
+	 * No credits, so nothing leaves the queue: the window state below is
+	 * built by hand, which is what a posted header leaves behind anyway.
+	 */
+	path->tx_remote_data_credit_max = 4;
+	path->tx_remote_data_credits = 0;
+
+	ret = tbv_path_send(path, payload, sizeof(payload), 0,
+			    tbv_test_queue_timeout_done, &ctx_a);
+	if (ret)
+		goto out;
+	ret = tbv_path_send(path, payload, sizeof(payload), 0,
+			    tbv_test_queue_timeout_done, &ctx_b);
+	if (ret)
+		goto out;
+
+	/* The state tbv_path_count_raw_stream_locked() leaves on a header. */
+	spin_lock_irqsave(&path->tx_lock, flags);
+	path->tx_raw_stream_active = true;
+	path->tx_raw_stream_owner = &ctx_a;
+	path->tx_raw_stream_window_open = true;
+	path->tx_raw_stream_end_seen = false;
+	path->tx_raw_stream_inflight = 1;
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	tbv_path_cancel_data_done_ctx(path, tbv_test_queue_timeout_done,
+				      &ctx_a);
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	if (window_open_out)
+		*window_open_out = path->tx_raw_stream_window_open;
+	if (queued_out)
+		*queued_out = path->tx_data_queued;
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+	if (done_calls_out)
+		*done_calls_out = ctx_a.done_calls;
+	ret = 0;
+
+out:
+	path->state = TBV_PATH_STOPPED;
+	cancel_delayed_work_sync(&path->tx_poll_work);
+	tbv_path_flush_tx_queue(path, -ECANCELED);
 	kfree(path);
 	return ret;
 }

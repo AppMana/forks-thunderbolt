@@ -1227,6 +1227,14 @@ int tbv_test_path_tx_interrupt_progress(u32 passes, u32 stall_ms,
 int tbv_test_path_tx_expired_frame_completes(u32 timeout_ms, int *inflight_out,
 					     u32 *done_calls_out,
 					     int *status_out);
+/*
+ * An open unframed window whose remaining packets are cancelled by
+ * (done, done_ctx) without naming the owner, as a read context teardown does.
+ * Reports whether the window is left open with nothing able to close it.
+ */
+int tbv_test_path_cancel_orphans_raw_window(bool *window_open_out,
+					    u32 *queued_out,
+					    u32 *done_calls_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
