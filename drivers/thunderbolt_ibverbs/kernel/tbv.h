@@ -238,6 +238,22 @@ struct tbv_path {
 	struct list_head tx_control_queue;
 	struct list_head tx_data_queue;
 	struct list_head tx_zcopy_inflight;
+	/*
+	 * Copied frames handed to the ring. A frame leaves tx_free on post and
+	 * only returns from the completion callback, so a ring that never
+	 * completes leaves it on no list at all and nothing can time it out or
+	 * run its done callback. Track it here for the whole time it is in the
+	 * ring so a dead ring is recoverable.
+	 */
+	struct list_head tx_frame_inflight;
+	/*
+	 * Set when the ring is found to have taken frames and never completed
+	 * them, cleared by a real completion. The inflight count alone cannot
+	 * express this: releasing the stranded frames drops it to zero, which
+	 * would otherwise make a dead ring look idle and let fresh QPs bind to
+	 * it.
+	 */
+	bool tx_ring_stalled;
 	struct delayed_work tx_poll_work;
 	struct delayed_work rx_supp_poll_work;
 	struct delayed_work credit_sync_work;

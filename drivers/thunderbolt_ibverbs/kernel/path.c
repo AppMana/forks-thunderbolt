@@ -199,6 +199,10 @@ bool tbv_path_tx_stalled(const struct tbv_path *path)
 
 	if (!tx_stall_skip_ms)
 		return false;
+	/* A ring that took frames and never completed them stays excluded
+	 * until it completes something, even with nothing left inflight. */
+	if (READ_ONCE(path->tx_ring_stalled))
+		return true;
 	if (atomic_read(&path->tx_inflight) <= 0)
 		return false;
 	progress = READ_ONCE(path->tx_last_progress_jiffies);
@@ -215,6 +219,8 @@ struct tbv_data_frame {
 	tbv_path_tx_done_fn done;
 	void *done_ctx;
 	bool tx;
+	/* When this frame was handed to the ring, for the stall ceiling. */
+	unsigned long posted_jiffies;
 };
 
 struct tbv_tx_packet {
@@ -926,6 +932,7 @@ void tbv_path_init(struct tbv_path *path,
 	INIT_LIST_HEAD(&path->tx_control_queue);
 	INIT_LIST_HEAD(&path->tx_data_queue);
 	INIT_LIST_HEAD(&path->tx_zcopy_inflight);
+	INIT_LIST_HEAD(&path->tx_frame_inflight);
 	INIT_DELAYED_WORK(&path->tx_poll_work, tbv_path_tx_poll_work);
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
@@ -950,6 +957,7 @@ void tbv_path_reset(struct tbv_path *path)
 	INIT_LIST_HEAD(&path->tx_control_queue);
 	INIT_LIST_HEAD(&path->tx_data_queue);
 	INIT_LIST_HEAD(&path->tx_zcopy_inflight);
+	INIT_LIST_HEAD(&path->tx_frame_inflight);
 	INIT_DELAYED_WORK(&path->tx_poll_work, tbv_path_tx_poll_work);
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
@@ -983,6 +991,9 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	f->frame.flags = 0;
 	f->frame.sof = 0;
 	f->frame.eof = 0;
+	f->posted_jiffies = 0;
+	path->tx_ring_stalled = false;
+	list_del_init(&f->free_node);
 	list_add_tail(&f->free_node, &path->tx_free);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
@@ -1026,6 +1037,73 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
  * a packet the credit gate never admits has no other way out. Reports the
  * remaining queue depth so the caller can decide to re-arm.
  */
+/*
+ * Release copied frames the ring accepted but never completed.
+ *
+ * tbv_path_expire_tx_data_queue() only sees packets still waiting for credits
+ * on tx_data_queue. A packet handed to the ring has already left that queue,
+ * and a copied packet is not on tx_zcopy_inflight either, so a ring that stops
+ * completing strands it with nothing to run its done callback -- the owning WR
+ * never drains tx_pending and every later WR on the rail queues behind it.
+ *
+ * Measure from posted_jiffies, which the post stamps and nothing resets. Do
+ * not key this off tx_last_progress_jiffies: the poll's own stall warning
+ * back-dates that field, so a warned path would never look stalled here.
+ */
+static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
+{
+	unsigned long timeout = msecs_to_jiffies(READ_ONCE(tx_queue_timeout_ms));
+	struct tbv_data_frame *f;
+	struct tbv_data_frame *tmp;
+	struct tbv_tx_packet *packet;
+	unsigned long flags;
+	LIST_HEAD(stranded);
+	u32 count = 0;
+
+	if (!timeout)
+		return 0;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	list_for_each_entry_safe(f, tmp, &path->tx_frame_inflight, free_node) {
+		if (!f->posted_jiffies ||
+		    !time_after(jiffies, f->posted_jiffies + timeout))
+			continue;
+		list_move_tail(&f->free_node, &stranded);
+		count++;
+	}
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	while (!list_empty(&stranded)) {
+		f = list_first_entry(&stranded, struct tbv_data_frame,
+				     free_node);
+		spin_lock_irqsave(&path->tx_lock, flags);
+		list_del_init(&f->free_node);
+		packet = f->packet;
+		f->packet = NULL;
+		f->done = NULL;
+		f->done_ctx = NULL;
+		f->posted_jiffies = 0;
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+		/*
+		 * The frame itself is NOT returned to tx_free: the ring still
+		 * owns its buffer and may complete it later. Only the packet is
+		 * released, so the owning WR can fail instead of hanging.
+		 */
+		atomic_dec(&path->tx_inflight);
+		if (packet)
+			tbv_path_tx_packet_release(packet, -ETIMEDOUT);
+	}
+
+	if (count) {
+		WRITE_ONCE(path->tx_ring_stalled, true);
+		pr_warn_ratelimited("tx ring stalled route=0x%llx rail=0x%x: released %u frame(s) the ring never completed\n",
+				    path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
+				    path->rail ? path->rail->rail_id : 0xffffffff,
+				    count);
+	}
+	return count;
+}
+
 static u32 tbv_path_expire_tx_data_queue(struct tbv_path *path, u32 *queued_out)
 {
 	unsigned long timeout = msecs_to_jiffies(READ_ONCE(tx_queue_timeout_ms));
@@ -1103,6 +1181,12 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 	 * still drain when the path is being torn down.
 	 */
 	if (tbv_path_expire_tx_data_queue(path, &queued))
+		tbv_path_schedule_tx(path);
+	/*
+	 * Also release frames the ring took and never completed; those are
+	 * invisible to the queue expiry above because they already left it.
+	 */
+	if (tbv_path_expire_tx_ring_frames(path))
 		tbv_path_schedule_tx(path);
 
 	if (!ring) {
@@ -2464,6 +2548,13 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 				atomic64_inc(&path->control_tx_posted);
 			else
 				atomic64_inc(&path->data_tx_posted);
+			if (f) {
+				spin_lock_irqsave(&path->tx_lock, flags);
+				f->posted_jiffies = jiffies;
+				list_add_tail(&f->free_node,
+					      &path->tx_frame_inflight);
+				spin_unlock_irqrestore(&path->tx_lock, flags);
+			}
 			tbv_path_queue_tx_poll(path, 0);
 			tbv_path_queue_rx_supp_poll(
 				path,
@@ -3513,6 +3604,19 @@ int tbv_test_path_tx_ring_stall(u32 passes, u32 stall_ms, u32 timeout_ms,
 	}
 	atomic_inc(&path->tx_inflight);
 	atomic64_inc(&path->data_tx_posted);
+	/*
+	 * A posted copied frame is tracked on tx_frame_inflight with the time
+	 * it was handed to the ring; that is the only handle on it once it
+	 * leaves the queue, so the posted state is not faithful without it.
+	 */
+	spin_lock_irqsave(&path->tx_lock, flags);
+	frame->packet = packet;
+	frame->done = packet->done;
+	frame->done_ctx = packet->done_ctx;
+	frame->posted_jiffies = jiffies;
+	list_del_init(&frame->free_node);
+	list_add_tail(&frame->free_node, &path->tx_frame_inflight);
+	spin_unlock_irqrestore(&path->tx_lock, flags);
 
 	saved_timeout_ms = tx_queue_timeout_ms;
 	saved_poll_ms = tx_poll_delay_ms;
@@ -3530,6 +3634,11 @@ int tbv_test_path_tx_ring_stall(u32 passes, u32 stall_ms, u32 timeout_ms,
 		WRITE_ONCE(path->tx_last_progress_jiffies,
 			   READ_ONCE(path->tx_last_progress_jiffies) -
 				   msecs_to_jiffies(stall_ms));
+		/* The frame ages by the same interval; the ring is dead. */
+		spin_lock_irqsave(&path->tx_lock, flags);
+		if (!list_empty(&path->tx_frame_inflight))
+			frame->posted_jiffies -= msecs_to_jiffies(stall_ms);
+		spin_unlock_irqrestore(&path->tx_lock, flags);
 		tbv_path_tx_poll_work(&path->tx_poll_work.work);
 		if (ctx.done_calls)
 			break;
