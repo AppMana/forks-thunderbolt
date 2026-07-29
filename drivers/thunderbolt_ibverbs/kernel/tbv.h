@@ -1099,6 +1099,10 @@ struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 int tbv_test_reap_tx_exhausted_head_ready_tail(u32 *completed_out,
 					       u32 *pending_out,
 					       bool *tx_failed_out);
+int tbv_test_rx_timeout_deadline(unsigned long timeout,
+				 unsigned long *first_delay_out,
+				 u32 *wakeups_out, bool *active_out);
+
 /*
  * Runs the TX walk up to @passes times against a head send whose tx_pending
  * never clears, with ready out-of-order-acked entries behind it. Reports how
