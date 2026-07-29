@@ -1235,6 +1235,13 @@ int tbv_test_path_tx_expired_frame_completes(u32 timeout_ms, int *inflight_out,
 int tbv_test_path_cancel_orphans_raw_window(bool *window_open_out,
 					    u32 *queued_out,
 					    u32 *done_calls_out);
+/*
+ * Stop TX progress, fill the preallocated control-packet pool, then attempt
+ * @extra more control enqueues. Reports whether control traffic can allocate
+ * beyond the path-owned pool while a dead ring leaves the queue undrained.
+ */
+int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
+				      u32 *accepted_out, u32 *queued_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the

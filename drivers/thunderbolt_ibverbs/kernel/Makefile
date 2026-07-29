@@ -70,6 +70,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/qp_first_connect_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/link_owner_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/tx_ring_stall_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/tx_ring_progress_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/control_queue_bound_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
