@@ -218,6 +218,56 @@ lspci -vvv -s <nhi-bdf> | grep -A12 'Advanced Error'
 grep data_rx_crc_error /sys/kernel/debug/thunderbolt_ibverbs/summary
 ```
 
+### Reading the NHI ring registers directly (`no rebuild`)
+
+`tools/nhi-ring-regs.py` mmaps BAR0 of the NHI PCI function and prints the
+hardware's own producer/consumer indices and ring options per hop. The driver's
+`ring->head`/`ring->tail` are software shadows; this is the only view of what the
+*controller* thinks, and it is what distinguishes "hardware has not completed the
+descriptor" from "software has not noticed".
+
+```bash
+# the NHI function is the one bound to the thunderbolt driver
+ls -l /sys/bus/pci/drivers/thunderbolt/ | grep 0000:
+sudo python3 tools/nhi-ring-regs.py 0000:06:00.0 3 1     # bdf then hop ids
+```
+
+Read the hop ids out of `peers` first — `local_tx=` / `local_rx=` name them.
+
+Worked example, a genuinely stuck TX ring (appmana-025, 2026-07-29):
+
+```
+== hop 3
+  TX prod/cons raw=0x027b0000 driver_head=635 nhi_tail=0 outstanding=635
+  TX options=0x80000000 [ENABLE]
+```
+
+Ring enabled, descriptor base and count correct, driver published 635 descriptors,
+NHI consumer index still 0 — the controller consumed nothing. On the far end of the
+same link the RX ring showed `driver_head=1023 nhi_tail=0`, i.e. 1023 free
+descriptors armed and nothing arriving, which rules out receiver backpressure. Note
+also that `options=0x80000000` is `ENABLE` alone, so `RING_FLAG_E2E_FLOW_CONTROL`
+was **not** active and E2E is not the answer for that failure.
+
+Interpreting the packed register at `+0x08` is the fiddly part and the script
+handles it: TX puts the driver head in bits 31:16 and the NHI tail in bits 15:0,
+while RX is the other way round. Getting that backwards makes a healthy ring look
+wedged.
+
+### `CONFIG_DMA_API_DEBUG` result on this bug — negative
+
+Ran on `6.17.13-tbdma` on appmana-025/023 with `dma_debug_entries=262144` and
+`all_errors=1`. The wedge reproduced in 2 s and `error_count` stayed **0** on both
+hosts, with 13,630 entries in use at peak so nothing was dropped. KFENCE,
+`DEBUG_LIST` and PCIe AER were also clean.
+
+That eliminates the missing/incorrect `dma_sync_single_for_device` hypothesis for
+this failure. Worth knowing before anyone spends another kernel build on it. Build
+instructions and the full config are in
+[debug_kernel_environment.md](debug_kernel_environment.md); the reasoning and the
+remaining hypotheses are in
+[dma_ring_stall_debug_methodology.md](dma_ring_stall_debug_methodology.md).
+
 The NHI ring producer/consumer registers for the stuck hop, plus the peer's RX
 ring occupancy, are what distinguish "TX engine backpressured by the wire
 because the receiver is not draining" from "TX engine stopped locally". That

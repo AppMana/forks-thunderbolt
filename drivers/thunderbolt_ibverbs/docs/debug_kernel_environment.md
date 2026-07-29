@@ -178,26 +178,69 @@ sudo rm -rf /boot/vmlinuz-6.17.13-tbdma /boot/initrd.img-6.17.13-tbdma \
 sudo update-grub
 ```
 
+## cmdline drift found on both hosts
+
+Worth knowing because it silently degrades any measurement taken after the next
+reboot. `/etc/default/grub` on both hosts had been reset to
+`GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"` on 2026-07-24, dropping the fleet's
+Thunderbolt tuning. The running kernels still had the full set only because they
+had booted *before* that change:
+
+```
+nmi_watchdog=1 hugepagesz=2M hugepages=1024 pcie_ports=native
+pci=assign-busses,hpbussize=0x33,realloc,hpmmiosize=128M,hpmmioprefsize=16G
+pcie_aspm=off
+```
+
+`playbook_worker.yaml` (lines 450 and 510-511) is the owner of these and will
+restore them on its next run, so this was pre-existing drift, not caused by this
+work. It was restored by hand on both hosts so the debug kernel reproduces the
+fleet's actual PCI/Thunderbolt resource layout — without it the comparison to
+production is not sound. Verify with `cat /proc/cmdline` after any reboot.
+
+Note also that `/etc/default/grub.d/90-iommu-off.cfg` adds `amd_iommu=off`, so the
+IOMMU is disabled on these hosts. Any IOMMU hypothesis is moot here, and the absence
+of `AMD-Vi` events in dmesg is because the IOMMU is off, not because it is healthy.
+
 ## node lifecycle — mandatory
 
-Never reboot these hosts by hand. Both are cluster members and the cardinal rule in
-`appmana/docs/cluster.md` applies. Every reboot in this workflow goes:
+Both hosts were taken out of service through the sanctioned flow:
 
 ```bash
 ./appmana-management/src/appmana_management/scripts/graceful-drain.sh appmana-025
-#   ... grub-reboot, reboot, verify ...
 ./appmana-management/src/appmana_management/scripts/graceful-uncordon.sh appmana-025
 ```
 
-Sequentially, never both hosts in parallel.
+Run sequentially, never both in parallel.
+
+**They are currently dedicated debug hosts and are deliberately left cordoned**
+(`Ready,SchedulingDisabled`) with zero workloads. Do not uncordon them as a courtesy
+— that is the owner's call. While they are in this state you may reboot, wedge or
+panic them freely; nothing else is using the rails, and the DSV4 inference workload
+is scaled to 0 via GitOps so the whole chain is uncontended.
+
+If they are ever returned to general service, drain/uncordon through those scripts
+as normal, and note that the `nvidia` DKMS module does not build against the debug
+kernel, so a host serving GPU work must be booted back onto stock first.
 
 ## watchdog
 
 Both hosts run an armed SP5100 watchdog at `RuntimeWatchdogSec=120`
 (`/etc/systemd/system.conf.d/10-watchdog.conf`).
 
+**The build itself trips it too, which is not obvious.** appmana-023 was hard-reset
+by the SP5100 during `make -j32`:
+
+```
+x86/amd: Previous system reset reason [0x02000800]: hardware watchdog timer expired
+```
+
+A `-j32` kernel build on a 32-core node starves systemd past the 120 s deadline. So
+disable the watchdog **before building**, not just before running a slow kernel, or
+pass `JOBS=16`. appmana-025 survived the same build; do not rely on that.
+
 A KCSAN or KASAN kernel is slow enough to trip that spuriously. Before running either
-of those flavours, on **both** hosts:
+of those flavours, or any build, on **both** hosts:
 
 ```bash
 sudo mkdir -p /etc/systemd/system.conf.d
@@ -215,14 +258,44 @@ grep -r RuntimeWatchdogSec /etc/systemd/system.conf.d/    # expect 120
 
 The `dma` flavour is not slow enough to need this.
 
-## dkms
+## dkms — build tbfix BEFORE ibverbs
 
-Both out-of-tree modules must be rebuilt against the debug kernel:
+Both out-of-tree modules must be rebuilt against the debug kernel, **and the order
+matters**:
 
 ```bash
-sudo dkms autoinstall -k 6.17.13-tbdma
-dkms status | grep 6.17.13-tbdma       # expect thunderbolt-tbfix and thunderbolt-ibverbs
+sudo dkms install thunderbolt-tbfix/2.13    -k 6.17.13-tbdma   # FIRST
+sudo dkms install thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma   # SECOND
+dkms status | grep 6.17.13-tbdma
 ```
+
+`dkms autoinstall` builds alphabetically, so it does ibverbs first and produces a
+module that fails to load:
+
+```
+thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll
+thunderbolt_ibverbs: Unknown symbol tb_ring_poll (err -22)
+thunderbolt_ibverbs: Unknown symbol tb_xdomain_disable_paths (err -22)
+```
+
+`thunderbolt_ibverbs` links against symbols exported by tbfix's replacement
+`thunderbolt.ko`. Built before tbfix has been installed, it records the CRCs of the
+*in-tree* `thunderbolt.ko` and then refuses to load against tbfix's. The symptom is
+no `usb4_rdma*` rails and only two thunderbolt modules loaded. The fix is to
+uninstall, unbuild and reinstall ibverbs after tbfix:
+
+```bash
+sudo dkms uninstall thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma
+sudo dkms unbuild   thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma
+sudo dkms install   thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma
+sudo modprobe thunderbolt_ibverbs
+```
+
+`nvidia` fails to build against this kernel and that is expected and harmless here —
+these hosts are drained, and the GPU driver is not involved in the RDMA path. It is
+why `make install` exits non-zero via `/etc/kernel/postinst.d/dkms`; the kernel
+itself is installed correctly by that point, so just run the remaining steps
+(`update-initramfs`, `set_cmdline`, `pin-stock`) by hand.
 
 `thunderbolt-tbfix` supplies the forked `drivers/thunderbolt` (including the `nhi.c`
 under investigation) and `thunderbolt-ibverbs` supplies the RDMA driver. Both must be

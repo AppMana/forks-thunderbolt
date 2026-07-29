@@ -652,6 +652,147 @@ is narrower than it first appears. It exists to:
 It is not expected to print a report that names the bug. Expect it to eliminate
 hypotheses, and expect P0a and P2 to be what actually identifies the mechanism.
 
+## what the debug kernel actually showed
+
+Run on appmana-025 and appmana-023, both on `6.17.13-tbdma`, with
+`dma_debug_entries=262144` and `/sys/kernel/debug/dma-api/all_errors` set to 1.
+Reproducer: `TBV_QPS=32 TBV_SIZE=262144 tbv-hang-repro.sh appmana-025 appmana-023`.
+
+**The bug still reproduces under the debug kernel, in 2 s** — faster than the 13 s
+it took on the stock kernel. That is the first useful result: `DMA_API_DEBUG` and
+`KFENCE` do not perturb the timing enough to hide it, so this flavour is a valid
+platform for the rest of the work.
+
+### DMA API — clean, hypothesis eliminated
+
+```
+=== dma-api error_count ===
+0
+=== dma-api min_free_entries / nr_total ===
+248514
+262144
+[    0.316975] DMA-API: preallocated 262144 debug entries
+[    0.316978] DMA-API: debugging enabled by kernel config
+```
+
+Zero errors on both hosts, with `all_errors=1` so it was not merely reporting the
+first one. 13,630 entries were in use at peak on appmana-025, so the pool was
+nowhere near exhaustion and nothing was silently dropped.
+
+**This eliminates the "buffer never synced to the device" hypothesis.** No missing
+`dma_sync_single_for_device`, no wrong-direction sync, no double map, no
+use-after-unmap, on either the copied or the control path.
+
+### KFENCE, DEBUG_LIST, KASAN-class — clean
+
+```
+[    0.136065] kfence: initialized - using 8388608 bytes for 1023 objects
+```
+
+No KFENCE reports, no `list_add`/`list_del` corruption warnings, no `BUG:`, no
+`WARNING:`, no call traces on either host. Nothing supports the memory corruption
+hypothesis.
+
+### PCIe AER — clean
+
+```
+[    0.499277] pcieport 0000:00:01.1: AER: enabled with IRQ 27
+[    0.499452] pcieport 0000:00:02.1: AER: enabled with IRQ 28
+```
+
+Zero correctable, nonfatal and fatal counts across every PCI device on both hosts.
+No PCIe-level problem between the CPU and the NHI.
+
+### the NHI registers settle the open question
+
+The driver's head/tail are software shadows. The hardware's own view lives only in
+the NHI BAR0 registers, so `tools/nhi-ring-regs.py` was written to read them
+directly. At the wedge:
+
+**appmana-025, hop 3 — the stuck TX ring**
+
+```
+TX desc_phys=0x00000002868dc000 count_reg=0x00000400
+TX prod/cons raw=0x027b0000 driver_head=635 nhi_tail=0 outstanding=635
+TX options=0x80000000 [ENABLE]
+```
+
+The ring is enabled, the descriptor base and the 1024-entry count are correctly
+programmed, the driver has published head=635 — and **the NHI consumer index is
+still 0. The hardware has not consumed a single descriptor.**
+
+**appmana-023, hop 3 — the far end of that same link**
+
+```
+RX prod/cons raw=0x000003ff driver_head=1023 nhi_tail=0 outstanding=1023
+RX options=0x80000000 [ENABLE]
+TX prod/cons raw=0x00410041 driver_head=65 nhi_tail=65 outstanding=0
+```
+
+The receiver has **1023 free RX descriptors posted and armed**, and has received
+nothing. Its own TX ring is perfectly healthy — `driver_head == nhi_tail == 65`,
+nothing outstanding.
+
+**Conclusion: the TX engine is stopped locally on appmana-025. It is not
+backpressured by the wire.** The receiver has an entirely empty, fully-armed RX
+ring, so there is nothing for it to backpressure with. And `RING_FLAG_E2E_FLOW_CONTROL`
+is clear on every ring on both hosts (`options=0x80000000` is `ENABLE` alone), so
+no hardware end-to-end flow control is even active. This also means enabling
+`RING_FLAG_E2E` would not address this failure.
+
+The driver-level counters agree:
+
+```
+appmana-025  data_tx_enqueued=65520 data_tx_posted=32 data_tx_completed=0
+             control_tx_enqueued=543 control_tx_posted=543 control_tx_completed=0
+             tx_poll enabled=1 calls=1333 completed=0
+             data_rx_completed=9598 data_rx_credit_sent=9536
+appmana-023  data_tx_posted=17473 data_tx_completed=17473  tx_credits=0/768
+             data_tx_credit_stalls=2709 data_tx_credit_received=0
+             data_rx_completed=0
+```
+
+Note `control_tx_posted=543 control_tx_completed=0`. **The ring stopped completing
+control frames too, not just data.** The whole hop is dead, not one traffic class.
+And 1333 polls read `ring->descriptors[tail].flags` directly and never saw
+`RING_DESC_COMPLETED`.
+
+The rest is a self-reinforcing deadlock, not independent bugs: appmana-025 is
+correctly generating credits for appmana-023 (`data_rx_credit_sent=9536`), but
+those credits have to go out over the dead TX ring, so appmana-023 sees
+`data_tx_credit_received=0`, starves at `tx_credits=0/768`, and stops. Every other
+symptom is downstream of the one stuck TX ring.
+
+### the detail that does not fit, stated honestly
+
+`nhi_tail=0` is not "advanced then stopped". It is **never advanced at all**. Taken
+with `control_tx_completed=0` after 543 control frames, this instance looks like a
+TX hop that never consumed anything from the moment the ring was started — a setup
+or fabric-programming problem — rather than a ring that ran for ~450k frames and
+then lost one descriptor.
+
+That is a different shape from the archived `posted=451771 completed=451770`
+signature. Either there are two distinct failures, or the 451k case is this same
+failure caught after a path re-establish reset the registers. Deciding that is the
+next question, and the cheap way to settle it is to sample
+`tools/nhi-ring-regs.py` on a loop during a run and watch whether `nhi_tail` ever
+moves before it wedges.
+
+### what this means for the tool priorities above
+
+- P3 (`DMA_API_DEBUG`) is **done and negative**. Do not spend more time on it.
+- P5 (KASAN) is now very hard to justify — KFENCE and DEBUG_LIST were clean and the
+  failure is in the hardware's consumer index, not in memory contents.
+- P8 (hardware) is partially settled: PCIe AER is clean, but the TB link CRC
+  counters still need the before/after diff, and the NHI TX engine refusing to
+  consume an enabled, correctly-programmed ring is itself a hardware-adjacent
+  finding.
+- P0b (the missing `dma_wmb()`) is **not** disproven and remains worth fixing on its
+  own merits, but it cannot explain `nhi_tail=0` — a barrier bug would corrupt a
+  descriptor, not stop the engine from consuming any descriptor ever.
+- P4 (KCSAN) remains the best use of a further debug kernel, for the frame lifecycle
+  question.
+
 ## references
 
 Kernel documentation, read from the v6.17 tree:
