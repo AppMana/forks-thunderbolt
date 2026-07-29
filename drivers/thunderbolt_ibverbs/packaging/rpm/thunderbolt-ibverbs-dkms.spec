@@ -13,6 +13,7 @@ BuildArch:      noarch
 BuildRequires:  coreutils
 Requires:       dkms >= 2.1.0
 Requires:       kmod
+Requires:       thunderbolt-tbfix-dkms
 Requires(post): dkms
 Requires(preun): dkms
 
