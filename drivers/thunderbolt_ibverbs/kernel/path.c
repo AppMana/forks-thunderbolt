@@ -2117,7 +2117,6 @@ static int tbv_path_enqueue_control(struct tbv_path *path, const void *data,
 {
 	struct tbv_tx_packet *packet;
 	unsigned long flags;
-	bool pooled = true;
 
 	if (len > TBV_CONTROL_FRAME_SIZE)
 		return -EMSGSIZE;
@@ -2129,20 +2128,7 @@ static int tbv_path_enqueue_control(struct tbv_path *path, const void *data,
 	}
 	if (list_empty(&path->tx_control_free)) {
 		spin_unlock_irqrestore(&path->tx_lock, flags);
-		packet = kzalloc(sizeof(*packet), GFP_ATOMIC);
-		if (!packet)
-			return -ENOMEM;
-		INIT_LIST_HEAD(&packet->node);
-		packet->path = path;
-		packet->buf = packet->control_buf;
-		packet->control = true;
-		pooled = false;
-		spin_lock_irqsave(&path->tx_lock, flags);
-		if (path->state != TBV_PATH_TUNNEL_ENABLED) {
-			spin_unlock_irqrestore(&path->tx_lock, flags);
-			kfree(packet);
-			return -ENOTCONN;
-		}
+		return -ENOMEM;
 	} else {
 		packet = list_first_entry(&path->tx_control_free,
 					  struct tbv_tx_packet, node);
@@ -2155,7 +2141,7 @@ static int tbv_path_enqueue_control(struct tbv_path *path, const void *data,
 	packet->owner_ctx = done_ctx;
 	packet->sof = TBV_DATA_PDF_FRAME_START;
 	packet->eof = TBV_DATA_PDF_FRAME_END;
-	packet->pooled = pooled;
+	packet->pooled = true;
 	packet->queued_jiffies = jiffies;
 	packet->queued = true;
 	memcpy(packet->buf, data, len);
@@ -4104,6 +4090,64 @@ out:
 	path->state = TBV_PATH_STOPPED;
 	cancel_delayed_work_sync(&path->tx_poll_work);
 	tbv_path_flush_tx_queue(path, -ECANCELED);
+	kfree(path);
+	return ret;
+}
+
+int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
+				      u32 *accepted_out, u32 *queued_out)
+{
+	struct tbv_path_config cfg;
+	struct tbv_path *path;
+	u8 payload[32] = {};
+	u32 capacity;
+	u32 accepted = 0;
+	u32 attempts;
+	u32 i;
+	int ret = 0;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	ret = tbv_path_alloc_control_packets(path);
+	if (ret)
+		goto out;
+
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	capacity = path->tx_control_packet_count;
+	attempts = capacity + extra;
+
+	/*
+	 * No TX frames or ring are installed, so schedule_tx cannot dequeue a
+	 * control packet. This is the producible state left by a ring that has
+	 * stopped completing while RX continues to generate ACKs and credits.
+	 */
+	for (i = 0; i < attempts; i++) {
+		ret = tbv_path_enqueue_control(path, payload, sizeof(payload),
+					       NULL, NULL);
+		if (ret == -ENOMEM) {
+			ret = 0;
+			break;
+		}
+		if (ret)
+			goto out;
+		accepted++;
+	}
+
+	if (capacity_out)
+		*capacity_out = capacity;
+	if (accepted_out)
+		*accepted_out = accepted;
+	if (queued_out)
+		*queued_out = path->tx_control_queued;
+
+out:
+	path->state = TBV_PATH_STOPPED;
+	tbv_path_flush_tx_queue(path, -ECANCELED);
+	tbv_path_free_control_packets(path);
 	kfree(path);
 	return ret;
 }
