@@ -5,7 +5,13 @@
 KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 PWD := $(shell pwd)
-TBFIX_SYMVERS ?= $(shell ls -1 /usr/src/thunderbolt-tbfix-*/Module.symvers 2>/dev/null | sort -V | tail -1)
+# DKMS keeps the installed core's Module.symvers per kernel. Prefer that exact
+# KVER-scoped table: /usr/src has only one mutable copy per source version, so
+# a build for another installed kernel can silently replace its CRCs.
+TBFIX_SYMVERS ?= $(shell ls -1 /var/lib/dkms/thunderbolt-tbfix/*/$(KVER)/*/module/Module.symvers 2>/dev/null | sort -V | tail -1)
+ifeq ($(TBFIX_SYMVERS),)
+TBFIX_SYMVERS := $(shell ls -1 /usr/src/thunderbolt-tbfix-*/Module.symvers 2>/dev/null | sort -V | tail -1)
+endif
 
 # thunderbolt_ibverbs references our PATCHED core's exports (tb_ring_*,
 # tb_xdomain_*). Without the tbfix core Module.symvers, MODVERSIONS records the
@@ -16,12 +22,8 @@ TBFIX_SYMVERS ?= $(shell ls -1 /usr/src/thunderbolt-tbfix-*/Module.symvers 2>/de
 # is a package Depends and its POST_INSTALL writes the symvers to
 # /usr/src/thunderbolt-tbfix-<ver>/Module.symvers before ibverbs builds.
 #
-# NOTE (cross-kernel): that symvers file is a single per-source-version file, so
-# if tbfix has not (re)built for THIS kernel yet, it can carry another kernel's
-# CRCs. Order is enforced at the package layer (Depends) and, on a kernel
-# update, both DKMS packages autoinstall for the new kernel; tbfix must build
-# first. Verified matching on the fleet today; the new-kernel autoinstall
-# ordering wants a hardware-validated roll to confirm.
+# The /usr/src fallback supports non-DKMS/local builds. Packaged builds have a
+# BUILD_DEPENDS edge on thunderbolt-tbfix and therefore use the per-kernel path.
 ifneq ($(TBFIX_SYMVERS),)
 EXTRA_SYMBOLS := KBUILD_EXTRA_SYMBOLS=$(TBFIX_SYMVERS)
 endif
