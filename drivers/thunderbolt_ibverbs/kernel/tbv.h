@@ -1093,6 +1093,13 @@ int tbv_test_reap_rnr_credit_wait(u32 passes, u32 credits, bool age_past_timer,
 				  u32 *passes_used_out, u32 *retries_out,
 				  u32 *credits_left_out, u32 *pending_out);
 /*
+ * Drives the RNR retransmit cycle against a peer that never posts a receive,
+ * with the absolute ceiling set to @ceiling (0 = strict infinite contract).
+ * Reports the retries charged, whether the send gave up, and its status.
+ */
+int tbv_test_rnr_retry_ceiling(u32 ceiling, u32 passes, u32 *retries_out,
+			       bool *failed_out, int *status_out);
+/*
  * Overflows a real CQ that a real live QP posts to, and reports whether the
  * push failed the QP inline (where the caller may hold rx_lock) or only
  * recorded the overflow for an unlocked caller to act on.

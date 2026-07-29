@@ -194,6 +194,23 @@ module_param(tbv_tx_stall_timeout_mult, uint, 0644);
 MODULE_PARM_DESC(tbv_tx_stall_timeout_mult,
 		 "Multiple of the TX timeout after which a send stuck with tx_pending is failed with -ETIMEDOUT; 0 disables the ceiling (wait forever)");
 
+/*
+ * Absolute ceiling on RNR retransmits for a send whose verbs rnr_retry is 7.
+ * The verbs contract says 7 means retry indefinitely, and a peer that is
+ * simply slow to post receives depends on that. But indefinitely also covers a
+ * peer that will NEVER post one -- a wedged or exited process on the far side
+ * -- and then the WR is held for the life of the QP with no completion and no
+ * event. The ceiling is deliberately far above any legitimate RNR wait
+ * (100000 retries at a mid-table min_rnr_timer is over a minute of retrying)
+ * so it only fires where the strict contract has stopped being useful. 0
+ * restores the strict contract exactly. Finite rnr_retry values are unaffected
+ * -- their own budget is smaller.
+ */
+static uint rnr_retry_ceiling = 100000;
+module_param(rnr_retry_ceiling, uint, 0644);
+MODULE_PARM_DESC(rnr_retry_ceiling,
+		 "Absolute cap on RNR retransmits when verbs rnr_retry is 7 (infinite); 0 keeps the strict infinite contract");
+
 static uint apple_tx_max_inflight_wr = 16;
 module_param(apple_tx_max_inflight_wr, uint, 0644);
 MODULE_PARM_DESC(apple_tx_max_inflight_wr,
@@ -589,7 +606,12 @@ struct tbv_send_ctx {
 	atomic_t tx_pending;
 	u8 retries;
 	u8 max_retries;
-	u8 rnr_retries;
+	/*
+	 * u32 because the infinite-rnr_retry ceiling counts far past what a u8
+	 * can hold; max_rnr_retries stays the verbs-derived u8 with the
+	 * INFINITE sentinel.
+	 */
+	u32 rnr_retries;
 	u8 max_rnr_retries;
 	enum tbv_send_post_reason retry_reason;
 	/*
@@ -1696,16 +1718,25 @@ static bool tbv_send_rnr_retries_infinite(const struct tbv_send_ctx *send)
 	return send->max_rnr_retries == TBV_SEND_RNR_RETRIES_INFINITE;
 }
 
+/*
+ * An infinite rnr_retry is still bounded by rnr_retry_ceiling so a peer that
+ * never posts a receive cannot hold the WR forever; 0 means the strict verbs
+ * contract.
+ */
 static bool tbv_send_rnr_retry_allowed(const struct tbv_send_ctx *send)
 {
-	return tbv_send_rnr_retries_infinite(send) ||
-	       send->rnr_retries < send->max_rnr_retries;
+	uint ceiling;
+
+	if (tbv_send_rnr_retries_infinite(send)) {
+		ceiling = READ_ONCE(rnr_retry_ceiling);
+		return !ceiling || send->rnr_retries < ceiling;
+	}
+	return send->rnr_retries < send->max_rnr_retries;
 }
 
 static bool tbv_send_rnr_retry_exhausted(const struct tbv_send_ctx *send)
 {
-	return !tbv_send_rnr_retries_infinite(send) &&
-	       send->rnr_retries >= send->max_rnr_retries;
+	return !tbv_send_rnr_retry_allowed(send);
 }
 
 static bool tbv_send_rnr_waits_for_recv_credit(const struct tbv_send_ctx *send)
@@ -5120,7 +5151,7 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 
 	if (pending && !ret) {
 		if (reason == TBV_SEND_POST_RETRY_RNR) {
-			if (send->rnr_retries < U8_MAX)
+			if (send->rnr_retries < U32_MAX)
 				send->rnr_retries++;
 		} else if (reason != TBV_SEND_POST_RETRY_NAK &&
 			   send->retries < U8_MAX) {
@@ -5393,6 +5424,139 @@ out:
 }
 #endif
 
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * The RNR path re-arms the QP's timeout work off the min_rnr_timer, which is
+ * nonzero whatever qp_timeout_ms says. This QP has no workqueue behind it and
+ * the test drives the reap itself, so the work is pointed at a no-op and
+ * cancelled before the QP is freed.
+ */
+static void tbv_test_noop_work(struct work_struct *work)
+{
+}
+
+/*
+ * KUnit hook (tests/rnr_credit_wait_test.c). Drives the full RNR retransmit
+ * cycle -- reap -> retransmit posted -> peer RNR-NAKs it again -- against a
+ * peer that never posts a receive, with the absolute ceiling set to @ceiling.
+ * Reports the RNR retries charged and whether the send ever gave up.
+ *
+ * Field-reachable state only, as in tbv_test_reap_rnr_credit_wait():
+ * tbv_qp_note_rnr_ack() is the single writer of rnr_waiting and stamps
+ * queued_jiffies as it sets it, which is why the RNR timer can expire here;
+ * the frames of an RNR-NAKed send are all transmitted and acknowledged so
+ * tx_pending is 0; remote_recv_credits stays 0 because the peer posted
+ * nothing. The retransmit result is applied through the real
+ * tbv_send_apply_retry_result_locked() so the retry is charged exactly where
+ * the driver charges it, and the peer's answer through the real
+ * tbv_qp_note_rnr_ack().
+ *
+ * The clock is virtual: the reap takes @now explicitly.
+ */
+int tbv_test_rnr_retry_ceiling(u32 ceiling, u32 passes, u32 *retries_out,
+			       bool *failed_out, int *status_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *send = NULL;
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	struct list_head *pos, *tmp;
+	unsigned long timeout = msecs_to_jiffies(100);
+	unsigned long rnr_timeout;
+	unsigned long now = jiffies;
+	uint saved_ceiling;
+	uint saved_timeout_ms;
+	bool tx_failed = false;
+	bool failed = false;
+	u32 used = 0;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	if (!state || !tqp || !send)
+		goto out;
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	INIT_DELAYED_WORK(&tqp->timeout_work, tbv_test_noop_work);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+	tqp->attr.min_rnr_timer = 12;
+	tqp->remote_recv_credits = 0;
+	saved_timeout_ms = READ_ONCE(qp_timeout_ms);
+	WRITE_ONCE(qp_timeout_ms, 0);
+	rnr_timeout = tbv_rnr_timer_jiffies(tqp->attr.min_rnr_timer);
+
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	spin_lock_init(&send->lock);
+	refcount_set(&send->refs, 1);
+	send->tqp = tqp;
+	send->psn = 11;
+	send->pending = true;
+	send->retryable = true;
+	send->max_retries = TBV_SEND_MAX_RETRIES;
+	/* verbs rnr_retry = 7, what NCCL asks for */
+	send->max_rnr_retries = TBV_SEND_RNR_RETRIES_INFINITE;
+	send->recv_credit_required = true;
+	send->rnr_waiting = true;
+	send->queued_jiffies = now;
+	send->first_queued_jiffies = now;
+	list_add_tail(&send->node, &tqp->pending_sends);
+
+	saved_ceiling = READ_ONCE(rnr_retry_ceiling);
+	WRITE_ONCE(rnr_retry_ceiling, ceiling);
+
+	while (used < passes && !list_empty(&tqp->pending_sends)) {
+		unsigned long flags;
+
+		used++;
+		now += rnr_timeout * 4;
+		tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+				       &timed_out_reads, now, timeout,
+				       &tx_failed);
+		if (list_empty(&retry_sends))
+			continue;
+		list_del_init(&send->retry_node);
+		/* stand in for a retransmit post that succeeded */
+		spin_lock_irqsave(&tqp->lock, flags);
+		tbv_send_apply_retry_result_locked(tqp, send,
+						   TBV_SEND_POST_RETRY_RNR, 0,
+						   now, &completed_sends);
+		spin_unlock_irqrestore(&tqp->lock, flags);
+		/* the peer still has no receive posted, so it RNR-NAKs again */
+		tbv_qp_note_rnr_ack(tqp, send->psn, &completed_sends, NULL);
+	}
+
+	WRITE_ONCE(rnr_retry_ceiling, saved_ceiling);
+	WRITE_ONCE(qp_timeout_ms, saved_timeout_ms);
+	cancel_delayed_work_sync(&tqp->timeout_work);
+
+	failed = list_empty(&tqp->pending_sends);
+	if (retries_out)
+		*retries_out = send->rnr_retries;
+	if (failed_out)
+		*failed_out = failed;
+	if (status_out)
+		*status_out = failed ? send->completion_status : 0;
+
+	list_for_each_safe(pos, tmp, &completed_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &retry_sends)
+		list_del_init(pos);
+	list_for_each_safe(pos, tmp, &tqp->pending_sends)
+		list_del_init(pos);
+	ret = 0;
+out:
+	kfree(send);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
 static void tbv_qp_timeout_work(struct work_struct *work)
 {
 	struct tbv_qp *tqp =
