@@ -279,8 +279,8 @@ sudo dkms install thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma   # SECOND
 dkms status | grep 6.17.13-tbdma
 ```
 
-`dkms autoinstall` builds alphabetically, so it does ibverbs first and produces a
-module that fails to load:
+Historical sources lacked a DKMS dependency edge, so `dkms autoinstall` built
+alphabetically, did ibverbs first, and produced a module that failed to load:
 
 ```
 thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll
@@ -291,8 +291,10 @@ thunderbolt_ibverbs: Unknown symbol tb_xdomain_disable_paths (err -22)
 `thunderbolt_ibverbs` links against symbols exported by tbfix's replacement
 `thunderbolt.ko`. Built before tbfix has been installed, it records the CRCs of the
 *in-tree* `thunderbolt.ko` and then refuses to load against tbfix's. The symptom is
-no `usb4_rdma*` rails and only two thunderbolt modules loaded. The fix is to
-uninstall, unbuild and reinstall ibverbs after tbfix:
+no `usb4_rdma*` rails and only two thunderbolt modules loaded. Current source
+declares `BUILD_DEPENDS[0]="thunderbolt-tbfix"` so autoinstall orders the
+modules. To recover an older already-registered source tree, uninstall, unbuild
+and reinstall ibverbs after tbfix:
 
 ```bash
 sudo dkms uninstall thunderbolt-ibverbs/0.2.42 -k 6.17.13-tbdma
