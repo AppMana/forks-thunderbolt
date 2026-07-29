@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * usb4_rdma userspace verbs provider — Tier 1 skeleton.
+ * usb4_rdma userspace verbs provider.
  *
- * Tracks the kernel-side ibdev.c: most data-plane verbs return
- * the kernel's -ENOSYS straight to the application. Just enough
- * here for `ibv_devinfo` to find and open the device, and for
- * `ibv_alloc_pd`/`ibv_dealloc_pd` to round-trip through the
- * generic uverbs ioctl machinery.
+ * The provider delegates the implemented data-plane verbs to rdma-core's
+ * generic uverbs command helpers; kernel/ibdev.c owns the transport behavior.
  *
  * Matching: prefer the fixed module node GUIDs, with the kernel device names
  * as a fallback. We do not have an upstream RDMA_DRIVER_USB4_RDMA enum value

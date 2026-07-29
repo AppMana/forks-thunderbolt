@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test the rdma-core patches on a clean distro container.
 #
-# Pulls upstream rdma-core v62.0 source, applies our two patches, runs
+# Pulls upstream rdma-core v62.0 source, applies our patch series, runs
 # the distro-native rdma-core CMake build, verifies that
 # `libusb4_rdma-rdmav*.so` and the `usb4_rdma.driver` config are produced.
 # Does not install or load anything — just confirms patches apply and
@@ -60,8 +60,9 @@ $DOCKER run --rm \
         cd /tmp
         git clone --depth=1 --branch "$RDMA_CORE_TAG" https://github.com/linux-rdma/rdma-core
         cd rdma-core
-        patch -p1 < /work/patches/0001-*.patch
-        patch -p1 < /work/patches/0002-*.patch
+        for patch_file in /work/patches/*.patch; do
+            patch -p1 < "$patch_file"
+        done
 
         mkdir build && cd build
         cmake -GNinja -DNO_PYVERBS=1 ..

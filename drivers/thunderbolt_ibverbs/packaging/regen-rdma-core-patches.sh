@@ -2,7 +2,7 @@
 # Regenerate the rdma-core patches that ship our libibverbs provider.
 #
 # Pulls a clean rdma-core source tarball (the version nixpkgs is pinned
-# to), checks in our provider's source files, and writes two numbered
+# to), checks in our provider's source files, and writes three numbered
 # patches into ./packaging/rdma-core-patches/ that any rdma-core build
 # can apply. Run this after touching userspace/usb4_rdma/ files.
 
@@ -11,12 +11,12 @@ set -euo pipefail
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$REPO_ROOT/packaging/rdma-core-patches"
 
-# Pull the rdma-core source via Nix; matches whatever pkgs.rdma-core uses.
-RDMA_SRC=$(nix eval --raw "$REPO_ROOT"'#legacyPackages.x86_64-linux.linux_thunderbolt'.outPath 2>/dev/null \
-            || nix-build "<nixpkgs>" -A rdma-core.src --no-out-link)
+# Pull the exact rdma-core source selected by this flake.
+RDMA_SRC=$(nix eval --raw \
+    "$REPO_ROOT#packages.x86_64-linux.rdma-core-usb4.src.outPath")
 if [ ! -d "$RDMA_SRC" ]; then
-    # The .src can be either a directory (github fetcher) or a tarball.
-    RDMA_SRC=$(nix-build '<nixpkgs>' -A rdma-core.src --no-out-link)
+    echo "rdma-core source is not a directory: $RDMA_SRC" >&2
+    exit 1
 fi
 echo "Using rdma-core source: $RDMA_SRC"
 

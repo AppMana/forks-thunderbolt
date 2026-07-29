@@ -2,7 +2,7 @@
 
 The userspace `usb4_rdma` provider is an out-of-tree libibverbs provider that
 plugs into rdma-core via the standard `providers/` mechanism. Rather than
-fork rdma-core or vendor its internal headers, we ship **two minimal
+fork rdma-core or vendor its internal headers, we ship **three minimal
 patches** that any rdma-core source tree can apply to produce a build that
 includes our provider alongside the upstream ones.
 
@@ -13,6 +13,10 @@ includes our provider alongside the upstream ones.
 0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch
    Adds `add_subdirectory(providers/usb4_rdma)` to the top-level
    CMakeLists.txt so the provider is built and installed.
+
+0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch
+   Declares the provider's exported registration symbol for static-provider
+   builds.
 ```
 
 Both patches are auto-generated from the source in `userspace/usb4_rdma/`
@@ -22,8 +26,8 @@ via `git format-patch`, and apply cleanly against upstream rdma-core ≥ v62.
 
 ### Nix (this repo)
 
-Already wired up — `rdma-core-usb4` in `flake.nix` uses
-`patches = [./packaging/rdma-core-patches/*.patch]` on top of `pkgs.rdma-core`.
+Already wired up — `rdma-core-usb4` in `flake.nix` applies all three files on
+top of `pkgs.rdma-core`.
 
 ### Debian / Ubuntu
 
@@ -48,11 +52,13 @@ source=(
   "git+https://github.com/linux-rdma/rdma-core.git#tag=v62.0"
   "0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch"
   "0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch"
+  "0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch"
 )
 prepare() {
   cd "$srcdir/rdma-core"
   patch -p1 < ../0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch
   patch -p1 < ../0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch
+  patch -p1 < ../0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch
 }
 ```
 
@@ -63,6 +69,7 @@ Add to `rdma-core.spec`:
 ```spec
 Patch1000: 0001-providers-usb4_rdma-add-USB4-soft-RDMA-provider.patch
 Patch1001: 0002-CMakeLists.txt-build-the-usb4_rdma-provider.patch
+Patch1002: 0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch
 ...
 %prep
 %autosetup -n rdma-core-%{version} -p1

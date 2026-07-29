@@ -10,11 +10,11 @@ devices.
 Source: https://github.com/hellas-ai/thunderbolt-ibverbs
 ---
  providers/usb4_rdma/CMakeLists.txt   |  14 +
- providers/usb4_rdma/usb4_rdma.c      | 370 +++++++++++++++++++++++++++
+ providers/usb4_rdma/usb4_rdma.c      | 366 +++++++++++++++++++++++++++
  providers/usb4_rdma/usb4_rdma.driver |   1 +
  providers/usb4_rdma/usb4_rdma.h      |  26 ++
  providers/usb4_rdma/usb4_rdma_abi.h  |  15 ++
- 5 files changed, 426 insertions(+)
+ 5 files changed, 422 insertions(+)
  create mode 100644 providers/usb4_rdma/CMakeLists.txt
  create mode 100644 providers/usb4_rdma/usb4_rdma.c
  create mode 100644 providers/usb4_rdma/usb4_rdma.driver
@@ -46,16 +46,13 @@ new file mode 100644
 index 0000000..9c34ff8
 --- /dev/null
 +++ b/providers/usb4_rdma/usb4_rdma.c
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,366 @@
 +// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 +/*
-+ * usb4_rdma userspace verbs provider — Tier 1 skeleton.
++ * usb4_rdma userspace verbs provider.
 + *
-+ * Tracks the kernel-side ibdev.c: most data-plane verbs return
-+ * the kernel's -ENOSYS straight to the application. Just enough
-+ * here for `ibv_devinfo` to find and open the device, and for
-+ * `ibv_alloc_pd`/`ibv_dealloc_pd` to round-trip through the
-+ * generic uverbs ioctl machinery.
++ * The provider delegates the implemented data-plane verbs to rdma-core's
++ * generic uverbs command helpers; kernel/ibdev.c owns the transport behavior.
 + *
 + * Matching: prefer the fixed module node GUIDs, with the kernel device names
 + * as a fallback. We do not have an upstream RDMA_DRIVER_USB4_RDMA enum value
@@ -479,4 +476,3 @@ index 0000000..5fd8c2f
 +#endif /* USB4_RDMA_ABI_H */
 -- 
 2.53.0
-
