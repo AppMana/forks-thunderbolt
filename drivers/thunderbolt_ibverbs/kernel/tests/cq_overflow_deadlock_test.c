@@ -16,11 +16,13 @@
  * of failing the QP under whatever lock that caller holds, and a caller that
  * has dropped its locks still fails the QP, so no overflow is lost.
  *
- * WHAT THIS DOES NOT PROVE: that no remaining code path calls
- * tbv_qp_mark_error() while holding tqp->rx_lock. A KUnit cannot deadlock-test
- * a real mutex without hanging the whole run, so the lock ordering itself
- * stays a structural review property; this pins the one push site that
- * violated it.
+ * The lock ordering itself used to be only a structural review property,
+ * because a KUnit cannot deadlock-test a real mutex without hanging the run.
+ * It is now enforced in code: rx_lock ownership is tracked on every
+ * acquisition and the paths that reach tbv_qp_flush_error() refuse to run
+ * while the calling task holds it. tbv_rx_lock_reentry_guard_declines below
+ * exercises that guard against the real lock, which is safe precisely because
+ * the guard means the re-entry no longer blocks.
  *
  * Built into the module on CONFIG_KUNIT; run via tools/run-kunit.sh.
  */
@@ -62,8 +64,41 @@ static void tbv_cq_overflow_does_not_mark_qp_inline(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, marked_after_drain);
 }
 
+/*
+ * A caller that holds rx_lock must be refused, not blocked, and a caller that
+ * does not must be unaffected. Without the guard the first half of this is a
+ * deadlock rather than a failed expectation, which is why the deadlock could
+ * only ever be argued structurally before.
+ */
+static void tbv_rx_lock_reentry_guard_declines(struct kunit *test)
+{
+	bool violation = false;
+	bool marked = false;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_rx_lock_reentry_guard(true, &violation,
+						       &marked),
+			0);
+	KUNIT_EXPECT_TRUE_MSG(test, violation,
+			      "guard did not see rx_lock held by the calling task");
+	KUNIT_EXPECT_FALSE_MSG(test, marked,
+			       "QP error path ran under rx_lock instead of declining");
+
+	violation = true;
+	marked = false;
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_rx_lock_reentry_guard(false, &violation,
+						       &marked),
+			0);
+	KUNIT_EXPECT_FALSE_MSG(test, violation,
+			       "guard reported a violation with rx_lock free");
+	KUNIT_EXPECT_TRUE_MSG(test, marked,
+			      "QP error path declined with rx_lock free");
+}
+
 static struct kunit_case tbv_cq_overflow_deadlock_cases[] = {
 	KUNIT_CASE(tbv_cq_overflow_does_not_mark_qp_inline),
+	KUNIT_CASE(tbv_rx_lock_reentry_guard_declines),
 	{}
 };
 

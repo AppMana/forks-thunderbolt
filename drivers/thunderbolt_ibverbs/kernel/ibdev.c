@@ -428,6 +428,15 @@ struct tbv_qp {
 	struct tbv_rail *rail;
 	spinlock_t lock;
 	struct mutex rx_lock;
+	/*
+	 * Task currently holding rx_lock, or NULL. rx_lock is a plain
+	 * non-recursive mutex reached from the RX critical section, and a path
+	 * that re-enters it from inside that section wedges the RX worker
+	 * forever while still holding it. lockdep would catch that, but the
+	 * fleet kernels are built without it, so the ownership is tracked
+	 * unconditionally and the paths that must not hold it check.
+	 */
+	struct task_struct *rx_lock_owner;
 	wait_queue_head_t credit_wait;
 	wait_queue_head_t apple_tx_wait;
 	wait_queue_head_t refs_wait;
@@ -750,6 +759,45 @@ static void tbv_rx_fail_active_write_locked(struct tbv_state *state,
 						struct tbv_path *rx_path,
 						enum ib_wc_status status);
 static void tbv_qp_flush_error(struct tbv_qp *tqp);
+
+static void tbv_qp_rx_lock(struct tbv_qp *tqp)
+{
+	mutex_lock(&tqp->rx_lock);
+	WRITE_ONCE(tqp->rx_lock_owner, current);
+}
+
+static void tbv_qp_rx_unlock(struct tbv_qp *tqp)
+{
+	WRITE_ONCE(tqp->rx_lock_owner, NULL);
+	mutex_unlock(&tqp->rx_lock);
+}
+
+static bool tbv_qp_rx_lock_held(const struct tbv_qp *tqp)
+{
+	return READ_ONCE(tqp->rx_lock_owner) == current;
+}
+
+/*
+ * Guard for the paths that must not run under rx_lock because they reach
+ * tbv_qp_flush_error(), which takes it. The deadlock this prevents was real
+ * (tbv_cq_push() from inside the RX critical section) and was fixed by
+ * deferring the mark to the timeout work; that fix is otherwise only a
+ * structural property of the call graph, which the next caller cannot see.
+ * Returns whether the contract was violated so a caller can decline instead of
+ * deadlocking. WARNs rather than only asserting because the shipped kernels
+ * are built without lockdep.
+ */
+static bool tbv_qp_rx_lock_guard_warn = true;
+
+static bool tbv_qp_rx_lock_must_not_be_held(struct tbv_qp *tqp)
+{
+	lockdep_assert_not_held(&tqp->rx_lock);
+	if (!tbv_qp_rx_lock_held(tqp))
+		return false;
+	/* Only the diagnostic is suppressible; the guard always applies. */
+	WARN_ON_ONCE(READ_ONCE(tbv_qp_rx_lock_guard_warn));
+	return true;
+}
 static void tbv_rx_drop_reorder_msg_locked(struct tbv_state *state,
 					   struct tbv_qp *tqp,
 					   struct tbv_rx_reorder_msg *msg);
@@ -1555,6 +1603,13 @@ static bool tbv_qp_mark_error_event(struct tbv_qp *tqp,
 	unsigned long flags;
 	bool changed = false;
 
+	/*
+	 * Reaches tbv_qp_flush_error(), which takes rx_lock. A caller inside
+	 * the RX critical section must defer instead (tbv_qp_note_cq_overflow).
+	 */
+	if (tbv_qp_rx_lock_must_not_be_held(tqp))
+		return false;
+
 	spin_lock_irqsave(&tqp->lock, flags);
 	if (!tqp->closing && tqp->state != IB_QPS_ERR) {
 		tqp->state = IB_QPS_ERR;
@@ -1612,9 +1667,11 @@ static bool tbv_qp_take_cq_overflow(struct tbv_qp *tqp)
 	return pending;
 }
 
-/* Must run with no QP lock and no rx_lock held. */
+/* Must run with no QP lock and no rx_lock held; the guard enforces it. */
 static void tbv_qp_mark_error_on_cq_overflow(struct tbv_qp *tqp)
 {
+	if (tbv_qp_rx_lock_must_not_be_held(tqp))
+		return;
 	if (tbv_qp_take_cq_overflow(tqp))
 		tbv_qp_mark_error(tqp);
 }
@@ -5003,7 +5060,7 @@ static bool tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 	bool need_resched;
 	bool timed_out = false;
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	if (tqp->rx_msg.active &&
 	    tbv_qp_entry_expired(tqp->rx_msg.started_jiffies, now, timeout)) {
 		atomic64_inc(&state->data_rx_active_timeout);
@@ -5078,7 +5135,7 @@ static bool tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 
 	need_resched = tqp->rx_msg.active || tqp->rx_write.active ||
 		       !list_empty(&tqp->rx_reorder);
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 
 	if (timed_out)
 		tbv_qp_mark_error(tqp);
@@ -7646,11 +7703,11 @@ static int tbv_post_recv(struct ib_qp *qp, const struct ib_recv_wr *wr,
 	if (posted)
 		tbv_qp_advertise_recv_credits(tqp);
 	if (posted) {
-		mutex_lock(&tqp->rx_lock);
+		tbv_qp_rx_lock(tqp);
 		if (tbv_qp_uses_apple_transport(tqp))
 			tbv_apple_rx_drain_pending_locked(tqp->owner, tqp);
 		tbv_rx_drain_reorder_locked(tqp->owner, tqp, NULL);
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 	}
 	return 0;
 
@@ -7943,6 +8000,75 @@ out:
 }
 #endif
 
+#if IS_ENABLED(CONFIG_KUNIT)
+/*
+ * KUnit hook (tests/cq_overflow_deadlock_test.c). Exercises the rx_lock
+ * re-entry guard directly: with the lock held by this task the guard must
+ * report the violation and the error path must decline rather than block on a
+ * non-recursive mutex it already owns; without it the guard must stay quiet
+ * and the QP must fail normally.
+ *
+ * Real lock, real wrappers, real tbv_qp_mark_error(). The QP is live and not
+ * closing, which is the only state in which the error transition does
+ * anything. WARN_ON_ONCE inside the guard is suppressed for the run because a
+ * KUnit that deliberately violates the contract must not taint the kernel.
+ */
+int tbv_test_rx_lock_reentry_guard(bool hold_rx_lock, bool *violation_out,
+				   bool *marked_out)
+{
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	uint saved_timeout_ms;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!state || !tqp)
+		goto out;
+
+	spin_lock_init(&tqp->lock);
+	mutex_init(&tqp->rx_lock);
+	init_waitqueue_head(&tqp->credit_wait);
+	init_waitqueue_head(&tqp->apple_tx_wait);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	INIT_LIST_HEAD(&tqp->pending_read_resps);
+	INIT_LIST_HEAD(&tqp->apple_sq);
+	INIT_LIST_HEAD(&tqp->rx_reorder);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+
+	saved_timeout_ms = READ_ONCE(qp_timeout_ms);
+	WRITE_ONCE(qp_timeout_ms, 0);
+
+	if (hold_rx_lock)
+		tbv_qp_rx_lock(tqp);
+
+	WRITE_ONCE(tbv_qp_rx_lock_guard_warn, false);
+	if (violation_out)
+		*violation_out = tbv_qp_rx_lock_must_not_be_held(tqp);
+	/*
+	 * The real transition either way. Held: the guard must decline and
+	 * return, not block on a mutex this task already owns. Not held: the
+	 * QP must fail normally.
+	 */
+	if (marked_out)
+		*marked_out = tbv_qp_mark_error(tqp);
+	WRITE_ONCE(tbv_qp_rx_lock_guard_warn, true);
+
+	if (hold_rx_lock)
+		tbv_qp_rx_unlock(tqp);
+
+	WRITE_ONCE(qp_timeout_ms, saved_timeout_ms);
+	mutex_destroy(&tqp->rx_lock);
+	ret = 0;
+out:
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
+
 static void tbv_apple_pending_reset(struct tbv_apple_pending_rx *p)
 {
 	p->delivered = 0;
@@ -8220,7 +8346,7 @@ void tbv_ibdev_rx_apple_frame(struct tbv_state *state,
 		return;
 	}
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	if (tqp->apple_pending_ready_count)
 		tbv_apple_rx_drain_pending_locked(state, tqp);
 	if (sof && tqp->apple_pending_active >= 0)
@@ -8228,7 +8354,7 @@ void tbv_ibdev_rx_apple_frame(struct tbv_state *state,
 	if (tqp->apple_pending_active < 0 && !sof && !raw_rx) {
 		atomic64_inc(&state->apple_rx_no_sof_when_idle);
 		atomic64_inc(&state->data_rx_bad_frame);
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 		tbv_qp_put(tqp);
 		return;
 	}
@@ -8237,7 +8363,7 @@ void tbv_ibdev_rx_apple_frame(struct tbv_state *state,
 	if (!pending) {
 		atomic64_inc(&state->data_rx_no_recv);
 		atomic64_inc(&state->data_rx_reorder_dropped);
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 		tbv_qp_put(tqp);
 		return;
 	}
@@ -8262,7 +8388,7 @@ void tbv_ibdev_rx_apple_frame(struct tbv_state *state,
 	} else if (!pending->active) {
 		atomic64_inc(&state->apple_rx_eof_without_active);
 	}
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 	tbv_qp_put(tqp);
 }
 
@@ -9725,6 +9851,10 @@ static void tbv_qp_flush_error(struct tbv_qp *tqp)
 {
 	LIST_HEAD(flush);
 
+	/* Takes rx_lock below; a caller already holding it would wedge here. */
+	if (tbv_qp_rx_lock_must_not_be_held(tqp))
+		return;
+
 	wake_up_all(&tqp->credit_wait);
 	wake_up_all(&tqp->apple_tx_wait);
 	tbv_qp_flush_apple_sq(tqp);
@@ -9761,12 +9891,12 @@ static void tbv_qp_flush_error(struct tbv_qp *tqp)
 		tbv_read_resp_ctx_put(ctx);
 	}
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	tbv_rx_fail_active_send(tqp->owner, tqp, NULL, IB_WC_WR_FLUSH_ERR);
 	tbv_rx_fail_active_write_locked(tqp->owner, tqp, NULL,
 					    IB_WC_WR_FLUSH_ERR);
 	tbv_qp_flush_reorder(tqp);
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 
 	tbv_qp_flush_recv_wqes(tqp);
 }
@@ -10416,13 +10546,13 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 	copy_offset = offset;
 	copy_len = hdr->length;
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	if (tbv_rx_rnr_matches_locked(tqp, hdr->src_qp, psn)) {
 		if (!tbv_rx_rnr_is_first_retry_locked(tqp, hdr->src_qp, psn,
 						      hdr->remote_addr,
 						      hdr->frag_offset)) {
 			atomic64_inc(&state->data_rx_rnr_suppressed);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		tbv_rx_clear_rnr_locked(tqp, hdr->src_qp, psn);
@@ -10435,7 +10565,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 
 		if (!tbv_rx_fragment_shape(total_len, offset, hdr->length,
 					   last, &frag_idx, &frag_count)) {
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			tbv_rx_send_error_ack(state, tqp, rx_path, hdr, psn,
 					      "bad fragment shape", false);
 			return;
@@ -10446,7 +10576,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			tbv_rx_reack_duplicate_locked(state, tqp, rx_path,
 						      hdr->src_qp,
 						      hdr->dest_qp, psn);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		if (delta > 0 ||
@@ -10454,7 +10584,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			tbv_rx_buffer_fragment_locked(state, tqp, rx_path, hdr,
 						      psn, total_len, offset,
 						      last, payload);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -10466,7 +10596,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			    msg->frag_count != frag_count) {
 				tbv_rx_fail_active_send(state, tqp, rx_path,
 							IB_WC_LOC_PROT_ERR);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				tbv_rx_send_error_ack(state, tqp, rx_path, hdr,
 						      psn, "active mismatch",
 						      true);
@@ -10485,7 +10615,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 						     hdr->src_qp,
 						     hdr->dest_qp, psn,
 						     TBV_NATIVE_SEND_ACK_RNR);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 
@@ -10521,7 +10651,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			tbv_rx_finish_send(state, tqp, rx_path);
 			tbv_rx_drain_reorder_locked(state, tqp, rx_path);
 		}
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 		return;
 	}
 
@@ -10539,7 +10669,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 							      hdr->src_qp,
 							      hdr->dest_qp,
 							      psn);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			if (tbv_psn_delta(psn, tqp->rx_expected_psn) > 0) {
@@ -10548,7 +10678,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 							      psn, total_len,
 							      offset, last,
 							      payload);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			if (msg->src_qp == hdr->src_qp && msg->psn == psn &&
@@ -10559,7 +10689,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 				u32 duplicate = msg->received - offset;
 
 				if (duplicate >= hdr->length) {
-					mutex_unlock(&tqp->rx_lock);
+					tbv_qp_rx_unlock(tqp);
 					return;
 				}
 				copy_payload = (const u8 *)payload + duplicate;
@@ -10579,12 +10709,12 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
 						      psn, msg->received,
 						      offset - msg->received);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			} else {
 				tbv_rx_fail_active_send(state, tqp, rx_path,
 							IB_WC_LOC_PROT_ERR);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				tbv_rx_send_error_ack(state, tqp, rx_path, hdr,
 						      psn, "active mismatch",
 						      true);
@@ -10596,11 +10726,11 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		tbv_rx_buffer_fragment_locked(state, tqp, rx_path, hdr, psn,
 					      total_len, offset, last,
 					      payload);
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 		return;
 	} else {
 		if (offset) {
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			tbv_rx_send_error_ack(state, tqp, rx_path, hdr, psn,
 					      "idle nonzero offset", true);
 			return;
@@ -10616,7 +10746,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			tbv_send_ack_on_path(tqp, rx_path, hdr->src_qp,
 					     hdr->dest_qp, psn,
 					     TBV_NATIVE_SEND_ACK_RNR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -10644,7 +10774,7 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		tbv_rx_finish_send(state, tqp, rx_path);
 		tbv_rx_drain_reorder_locked(state, tqp, rx_path);
 	}
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 }
 
 static int tbv_rx_finish_write_locked(struct tbv_state *state,
@@ -10860,13 +10990,13 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		return;
 	}
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	if (tbv_rx_rnr_matches_locked(tqp, hdr->src_qp, psn)) {
 		if (!tbv_rx_rnr_is_first_retry_locked(tqp, hdr->src_qp, psn,
 						      hdr->remote_addr,
 						      hdr->frag_offset)) {
 			atomic64_inc(&state->data_rx_rnr_suppressed);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		tbv_rx_clear_rnr_locked(tqp, hdr->src_qp, psn);
@@ -10874,7 +11004,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 
 	if (tbv_rx_reack_duplicate_locked(state, tqp, rx_path, hdr->src_qp,
 					  hdr->dest_qp, psn)) {
-		mutex_unlock(&tqp->rx_lock);
+		tbv_qp_rx_unlock(tqp);
 		return;
 	}
 
@@ -10894,7 +11024,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 							      hdr->src_qp,
 							      hdr->dest_qp,
 							      psn);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			if (delta > 0) {
@@ -10903,7 +11033,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 						state, tqp, rx_path, hdr, psn,
 						total_len, offset, last, with_imm,
 						payload);
-					mutex_unlock(&tqp->rx_lock);
+					tbv_qp_rx_unlock(tqp);
 					return;
 				}
 				/* WRITE_IMM ahead of PSN: unbufferable, see
@@ -10912,13 +11042,13 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
 						      tqp->rx_expected_psn, 0,
 						      0);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			atomic64_inc(&state->data_rx_send_sequence_error);
 			tbv_rx_fail_active_write_locked(state, tqp, rx_path,
 							IB_WC_LOC_PROT_ERR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -10926,7 +11056,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			u32 duplicate = wrx->received - offset;
 
 			if (duplicate >= hdr->length) {
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			copy_payload = (const u8 *)payload + duplicate;
@@ -10949,7 +11079,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 					state, tqp, rx_path, hdr, psn,
 					total_len, offset, last, with_imm,
 					payload);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 	} else {
@@ -10958,7 +11088,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				tbv_rx_buffer_write_fragment_locked(
 					state, tqp, rx_path, hdr, psn, total_len,
 					offset, last, with_imm, payload);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			/* WRITE_IMM ahead of PSN: NAK the missing message,
@@ -10968,14 +11098,14 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
 						      tqp->rx_expected_psn, 0,
 						      0);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		if (!with_imm && tbv_rx_reorder_find(tqp, psn)) {
 			tbv_rx_buffer_write_fragment_locked(
 				state, tqp, rx_path, hdr, psn, total_len, offset,
 				last, with_imm, payload);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		if (offset) {
@@ -10986,7 +11116,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 				tbv_rx_buffer_write_fragment_locked(
 					state, tqp, rx_path, hdr, psn,
 					total_len, offset, last, with_imm, payload);
-				mutex_unlock(&tqp->rx_lock);
+				tbv_qp_rx_unlock(tqp);
 				return;
 			}
 			/*
@@ -10995,7 +11125,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			 * deliver it in order (the ACK_ERROR this used to
 			 * send killed the whole WR for a single lost frame).
 			 */
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 		if (with_imm && !tbv_qp_pop_recv(tqp, &wrx->imm_wqe)) {
@@ -11009,7 +11139,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			tbv_send_ack_on_path(tqp, rx_path, hdr->src_qp,
 					     hdr->dest_qp, psn,
 					     TBV_NATIVE_SEND_ACK_RNR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -11031,7 +11161,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			atomic64_inc(&state->data_rx_copy_error);
 			tbv_rx_fail_active_write_locked(
 				state, tqp, rx_path, IB_WC_LOC_PROT_ERR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -11040,7 +11170,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			atomic64_inc(&state->data_rx_copy_error);
 			tbv_rx_fail_active_write_locked(
 				state, tqp, rx_path, IB_WC_LOC_PROT_ERR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -11049,7 +11179,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			tbv_mr_put(mr);
 			tbv_rx_fail_active_write_locked(
 				state, tqp, rx_path, IB_WC_LOC_PROT_ERR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -11059,7 +11189,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 			atomic64_inc(&state->data_rx_copy_error);
 			tbv_rx_fail_active_write_locked(
 				state, tqp, rx_path, IB_WC_LOC_PROT_ERR);
-			mutex_unlock(&tqp->rx_lock);
+			tbv_qp_rx_unlock(tqp);
 			return;
 		}
 
@@ -11071,7 +11201,7 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		tbv_rx_finish_write_locked(state, tqp, rx_path,
 					       IB_WC_SUCCESS);
 	}
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 }
 
 static struct tbv_read_resp_ctx *
@@ -11370,7 +11500,7 @@ static void tbv_rx_handle_rdma_read_req(struct tbv_state *state,
 		return;
 	}
 
-	mutex_lock(&tqp->rx_lock);
+	tbv_qp_rx_lock(tqp);
 	delta = tbv_psn_delta(psn, tqp->rx_expected_psn);
 	if (delta < 0) {
 		tbv_rx_buffer_read_req_locked(state, tqp, rx_path, hdr, psn);
@@ -11382,7 +11512,7 @@ static void tbv_rx_handle_rdma_read_req(struct tbv_state *state,
 		tbv_rx_drain_reorder_locked(state, tqp, rx_path);
 		queue = true;
 	}
-	mutex_unlock(&tqp->rx_lock);
+	tbv_qp_rx_unlock(tqp);
 
 	if (queue)
 		tbv_rx_queue_rdma_read_req_work(state, tqp, hdr, rx_path);

@@ -1109,6 +1109,13 @@ int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
 					 bool *overflow_noted_out,
 					 bool *marked_after_drain_out);
 /*
+ * Exercises the rx_lock re-entry guard. With the lock held the guard must
+ * report the violation and the QP error path must decline instead of blocking
+ * on a mutex this task already owns; without it the QP must fail normally.
+ */
+int tbv_test_rx_lock_reentry_guard(bool hold_rx_lock, bool *violation_out,
+				   bool *marked_out);
+/*
  * Complete one send / one RDMA READ WR with @signaled and @status and report
  * how many WCs reached the send CQ and the status of the first.
  */
