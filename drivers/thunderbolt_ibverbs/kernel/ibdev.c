@@ -6924,7 +6924,10 @@ out_unlock_paths:
 	mutex_unlock(&tqp->owner->lock);
 	if (ret) {
 		tbv_release_path_refs(paths, path_count);
-		atomic64_inc(&tqp->owner->data_wr_no_path);
+		if (ret == -ENOMEM || ret == -EBUSY || ret == -EAGAIN)
+			atomic64_inc(&tqp->owner->data_wr_no_capacity);
+		else
+			atomic64_inc(&tqp->owner->data_wr_no_path);
 		return ret;
 	}
 

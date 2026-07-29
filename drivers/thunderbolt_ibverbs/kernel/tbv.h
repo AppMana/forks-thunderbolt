@@ -670,6 +670,13 @@ struct tbv_state {
 	atomic64_t data_wr_op_unsupported;
 	atomic64_t data_wr_live;
 	atomic64_t data_wr_no_path;
+	/*
+	 * Transient path capacity shortage, distinct from having no path at
+	 * all. Conflating the two reports a congested but healthy rail as a
+	 * topology failure and sends anyone reading the counters after a stall
+	 * looking for a missing peer.
+	 */
+	atomic64_t data_wr_no_capacity;
 	atomic64_t data_wr_no_recv_credit;
 	atomic64_t data_wr_copied;
 	atomic64_t data_wr_zcopy;

@@ -143,6 +143,8 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_wr_live));
 	seq_printf(s, "data_wr_no_path: %lld\n",
 		   atomic64_read(&state->data_wr_no_path));
+	seq_printf(s, "data_wr_no_capacity: %lld\n",
+		   atomic64_read(&state->data_wr_no_capacity));
 	seq_printf(s, "data_wr_no_recv_credit: %lld\n",
 		   atomic64_read(&state->data_wr_no_recv_credit));
 	seq_printf(s, "data_wr_copied: %lld\n",
