@@ -51,6 +51,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/retransmit_backoff_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/credit_pingpong_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_timeout_arming_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/timeout_reap_drain_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rx_timeout_deadline_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/tx_stall_livelock_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/retry_enomem_bound_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rnr_credit_wait_test.o

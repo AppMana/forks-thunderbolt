@@ -1460,6 +1460,43 @@ static unsigned long tbv_read_resp_retry_jiffies(unsigned long qp_timeout)
 	return min(retry, qp_timeout);
 }
 
+struct tbv_deadline {
+	unsigned long at;
+	bool valid;
+};
+
+static void tbv_deadline_init(struct tbv_deadline *deadline)
+{
+	deadline->at = 0;
+	deadline->valid = false;
+}
+
+static void tbv_deadline_add(struct tbv_deadline *deadline, unsigned long at)
+{
+	if (!deadline->valid || time_before(at, deadline->at)) {
+		deadline->at = at;
+		deadline->valid = true;
+	}
+}
+
+static void tbv_deadline_add_from(struct tbv_deadline *deadline,
+				  unsigned long anchor, unsigned long budget)
+{
+	if (anchor && budget)
+		tbv_deadline_add(deadline, anchor + budget);
+}
+
+static bool tbv_deadline_delay(const struct tbv_deadline *deadline,
+			       unsigned long now, unsigned long *delay_out)
+{
+	if (!deadline->valid)
+		return false;
+
+	*delay_out = time_after(deadline->at, now) ?
+		     deadline->at - now : 1;
+	return true;
+}
+
 static bool tbv_qp_entry_expired(unsigned long queued, unsigned long now,
 				 unsigned long timeout)
 {
@@ -1542,6 +1579,21 @@ static void tbv_qp_schedule_timeout(struct tbv_qp *tqp)
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	tbv_qp_schedule_timeout_locked(tqp);
+	spin_unlock_irqrestore(&tqp->lock, flags);
+}
+
+static void tbv_qp_schedule_timeout_deadline(struct tbv_qp *tqp,
+					     const struct tbv_deadline *d)
+{
+	unsigned long delay;
+	unsigned long flags;
+
+	if (!d->valid)
+		return;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	if (tbv_deadline_delay(d, jiffies, &delay))
+		tbv_qp_schedule_timeout_delay_locked(tqp, delay, false);
 	spin_unlock_irqrestore(&tqp->lock, flags);
 }
 
@@ -5202,11 +5254,12 @@ out:
 }
 #endif
 
-static bool tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
-				   unsigned long timeout)
+static void tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
+				   unsigned long timeout,
+				   struct tbv_deadline *deadline)
 {
 	struct tbv_state *state = tqp->owner;
-	bool need_resched;
+	struct tbv_rx_reorder_msg *pending;
 	bool timed_out = false;
 
 	tbv_qp_rx_lock(tqp);
@@ -5282,15 +5335,91 @@ static bool tbv_qp_timeout_reap_rx(struct tbv_qp *tqp, unsigned long now,
 			tbv_rx_drain_reorder_locked(state, tqp, NULL);
 	}
 
-	need_resched = tqp->rx_msg.active || tqp->rx_write.active ||
-		       !list_empty(&tqp->rx_reorder);
+	if (tqp->rx_msg.active)
+		tbv_deadline_add_from(deadline, tqp->rx_msg.started_jiffies,
+				      timeout);
+	if (tqp->rx_write.active)
+		tbv_deadline_add_from(deadline, tqp->rx_write.started_jiffies,
+				      timeout);
+	list_for_each_entry(pending, &tqp->rx_reorder, node)
+		tbv_deadline_add_from(deadline, pending->first_jiffies,
+				      timeout);
 	tbv_qp_rx_unlock(tqp);
 
 	if (timed_out)
 		tbv_qp_mark_error(tqp);
-
-	return need_resched;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_rx_timeout_deadline(unsigned long timeout,
+				 unsigned long *first_delay_out,
+				 u32 *wakeups_out, bool *active_out)
+{
+	struct tbv_deadline deadline;
+	struct tbv_state *state;
+	struct tbv_qp *tqp;
+	unsigned long delay;
+	unsigned long now;
+	u32 wakeups = 0;
+	int ret = -ENOMEM;
+
+	if (!timeout || timeout > MAX_JIFFY_OFFSET)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!state || !tqp)
+		goto out;
+
+	mutex_init(&state->lock);
+	spin_lock_init(&tqp->lock);
+	mutex_init(&tqp->rx_lock);
+	INIT_LIST_HEAD(&tqp->rx_reorder);
+	tqp->owner = state;
+	tqp->closing = true;
+	tqp->state = IB_QPS_RTS;
+
+	now = jiffies ?: 1;
+	tqp->rx_expected_psn = 37;
+	tqp->rx_write.active = true;
+	tqp->rx_write.psn = 37;
+	tqp->rx_write.src_qp = 11;
+	tqp->rx_write.started_jiffies = now;
+
+	tbv_deadline_init(&deadline);
+	tbv_qp_timeout_reap_rx(tqp, now, timeout, &deadline);
+	if (!tbv_deadline_delay(&deadline, now, &delay)) {
+		ret = -EINVAL;
+		goto destroy;
+	}
+	if (first_delay_out)
+		*first_delay_out = delay;
+
+	do {
+		if (wakeups == 2) {
+			ret = -ELOOP;
+			goto destroy;
+		}
+		wakeups++;
+		now += delay;
+		tbv_deadline_init(&deadline);
+		tbv_qp_timeout_reap_rx(tqp, now, timeout, &deadline);
+	} while (tbv_deadline_delay(&deadline, now, &delay));
+
+	if (wakeups_out)
+		*wakeups_out = wakeups;
+	if (active_out)
+		*active_out = tqp->rx_write.active;
+	ret = 0;
+destroy:
+	mutex_destroy(&tqp->rx_lock);
+	mutex_destroy(&state->lock);
+out:
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+#endif
 
 static bool tbv_qp_timeout_reap_read_resps(struct tbv_qp *tqp,
 					   struct list_head *retry,
@@ -5781,6 +5910,7 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 	LIST_HEAD(timed_out_reads);
 	LIST_HEAD(retry_read_resps);
 	LIST_HEAD(drop_read_resps);
+	struct tbv_deadline rx_deadline;
 	unsigned long timeout;
 	unsigned long rx_timeout;
 	unsigned long read_resp_timeout;
@@ -5795,6 +5925,7 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 	 * it runs under tqp->rx_lock. Nothing is held here.
 	 */
 	tbv_qp_mark_error_on_cq_overflow(tqp);
+	tbv_deadline_init(&rx_deadline);
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	tqp->timeout_work_armed = false;
@@ -5959,9 +6090,10 @@ static void tbv_qp_timeout_work(struct work_struct *work)
 	if (read_resp_dropped)
 		tbv_qp_mark_error(tqp);
 
-	need_resched |= tbv_qp_timeout_reap_rx(tqp, now, rx_timeout);
+	tbv_qp_timeout_reap_rx(tqp, now, rx_timeout, &rx_deadline);
 	if (need_resched)
 		tbv_qp_schedule_timeout(tqp);
+	tbv_qp_schedule_timeout_deadline(tqp, &rx_deadline);
 }
 
 static void tbv_release_send_segments(struct tbv_send_segment *segs, int nsegs)
