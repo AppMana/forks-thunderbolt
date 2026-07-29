@@ -10,11 +10,11 @@ devices.
 Source: https://github.com/hellas-ai/thunderbolt-ibverbs
 ---
  providers/usb4_rdma/CMakeLists.txt   |  14 +
- providers/usb4_rdma/usb4_rdma.c      | 366 +++++++++++++++++++++++++++
+ providers/usb4_rdma/usb4_rdma.c      | 367 +++++++++++++++++++++++++++
  providers/usb4_rdma/usb4_rdma.driver |   1 +
  providers/usb4_rdma/usb4_rdma.h      |  26 ++
  providers/usb4_rdma/usb4_rdma_abi.h  |  15 ++
- 5 files changed, 422 insertions(+)
+ 5 files changed, 423 insertions(+)
  create mode 100644 providers/usb4_rdma/CMakeLists.txt
  create mode 100644 providers/usb4_rdma/usb4_rdma.c
  create mode 100644 providers/usb4_rdma/usb4_rdma.driver
@@ -43,10 +43,10 @@ index 0000000..c45c710
 +)
 diff --git a/providers/usb4_rdma/usb4_rdma.c b/providers/usb4_rdma/usb4_rdma.c
 new file mode 100644
-index 0000000..9c34ff8
+index 0000000..fd11495
 --- /dev/null
 +++ b/providers/usb4_rdma/usb4_rdma.c
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,367 @@
 +// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 +/*
 + * usb4_rdma userspace verbs provider.

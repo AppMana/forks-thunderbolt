@@ -143,6 +143,15 @@ build_provider() {
 		( cd "$src" && patch --silent -p1 < "$p" )
 	done
 
+	# The patch series is a distributable snapshot of the canonical provider
+	# sources. Refuse to package if it has drifted; otherwise a syntactically
+	# valid stale patch can quietly build a useless provider.
+	if ! diff -ru "$repo_root/userspace/usb4_rdma" \
+			"$src/providers/usb4_rdma"; then
+		printf 'error: rdma-core provider patch is stale; run packaging/regen-rdma-core-patches.sh\n' >&2
+		exit 1
+	fi
+
 	rm -rf "$build"
 	mkdir "$build"
 	# NO_MAN_PAGES because Ubuntu's apt-get source tree ships a pandoc cache
@@ -153,6 +162,11 @@ build_provider() {
 	local so
 	so="$(find "$build/lib" -maxdepth 1 -name 'libusb4_rdma-rdmav*.so' -print -quit)"
 	[[ -n "$so" ]] || { printf 'error: provider .so not produced\n' >&2; exit 1; }
+	if ! nm "$so" | awk '$3 == "verbs_provider_usb4_rdma" { found = 1 }
+			END { exit !found }'; then
+		printf 'error: provider registration symbol missing from %s\n' "$so" >&2
+		exit 1
+	fi
 
 	# CMake embeds the build dir as RUNPATH so libibverbs can run from the
 	# build tree without installing. For packaging we want a clean .so with no

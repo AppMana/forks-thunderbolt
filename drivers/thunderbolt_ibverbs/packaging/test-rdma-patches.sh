@@ -71,6 +71,9 @@ $DOCKER run --rm \
         echo ""
         echo "=== Verify our provider was built ==="
         ls -l lib/libusb4_rdma-rdmav*.so
+        nm lib/libusb4_rdma-rdmav*.so |
+            awk '\''$3 == "verbs_provider_usb4_rdma" { found = 1 }
+                END { exit !found }'\''
         ls -l etc/libibverbs.d/usb4_rdma.driver
         cat etc/libibverbs.d/usb4_rdma.driver
 
