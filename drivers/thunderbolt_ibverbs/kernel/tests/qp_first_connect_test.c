@@ -96,7 +96,9 @@ static void fc_hello(struct fc_peer *stored, const u8 sender_uuid[16],
 	if (TBV_HELLO_RAIL_IDENTITY) {
 		stored->hello_eui64 = tbv_rail_identity_eui64(
 			tbv_host_identity_hash(sender_uuid),
-			sender_peer_id, sender_rail_id);
+			tbv_rail_link_identity_hash(sender_uuid,
+						   sender_peer_id,
+						   sender_rail_id));
 		stored->rail_scoped = true;
 	}
 	/* apply_remote: identity valid iff anything was advertised */
@@ -108,8 +110,9 @@ static void fc_hello(struct fc_peer *stored, const u8 sender_uuid[16],
 static void fc_gid(u8 gid[16], const u8 host_uuid[16], u32 peer_id,
 		   u32 rail_id)
 {
-	u64 eui64 = tbv_rail_identity_eui64(tbv_host_identity_hash(host_uuid),
-					    peer_id, rail_id);
+	u64 eui64 = tbv_rail_identity_eui64(
+		tbv_host_identity_hash(host_uuid),
+		tbv_rail_link_identity_hash(host_uuid, peer_id, rail_id));
 	int i;
 
 	memset(gid, 0, 16);
@@ -192,7 +195,7 @@ static void tbv_first_connect_send_reaches_dgid_peer(struct kunit *test)
 /*
  * NCCL may hand out a GID from ANY of the destination node's ib_devices, not
  * just the one on the shared link: the dgid's low 16 identity bits then carry
- * a peer_id/rail_id we never saw. Host-part matching must still resolve it.
+ * a physical-link hash we never saw. Host-part matching must still resolve it.
  * (On 002 this is literally the repro's other direction: rank1's GID came
  * from 018's usb4_rdma15, the X-facing device.)
  */
@@ -201,9 +204,9 @@ static void tbv_first_connect_resolves_cross_device_gid(struct kunit *test)
 	struct fc_peer peers[1];
 	u8 dgid[16];
 
-	/* 018's HELLO to 002 rode its 002-facing rail (peer 1, rail 0)... */
+	/* 018's HELLO to 002 rode its 002-facing link... */
 	fc_hello(&peers[0], fc_uuid_018, 1, 0);
-	/* ...but the dgid names 018's X-facing rail (peer 2, rail 0) */
+	/* ...but the dgid names 018's X-facing link. */
 	fc_gid(dgid, fc_uuid_018, 2, 0);
 
 	KUNIT_EXPECT_EQ(test, 0,
@@ -223,7 +226,7 @@ static void tbv_first_connect_same_numbering_not_ambiguous(struct kunit *test)
 	u8 dgid[16];
 
 	fc_hello(&peers[0], fc_uuid_002, 1, 0);
-	fc_hello(&peers[1], fc_uuid_x, 1, 0);	/* same P:R as 002's */
+	fc_hello(&peers[1], fc_uuid_x, 1, 0);	/* same link tag as 002's */
 	fc_gid(dgid, fc_uuid_x, 1, 0);
 
 	KUNIT_EXPECT_EQ(test, 1, fc_resolve(peers, 2, dgid));

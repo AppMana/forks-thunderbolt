@@ -2593,8 +2593,8 @@ static struct tbv_peer *tbv_peer_for_dgid_locked(struct tbv_state *state,
 			continue;
 		/*
 		 * A RAIL_EUI64 identity is synthetic and matched on its host
-		 * part only (its low 16 bits are the peer's private
-		 * peer_id/rail_id numbering, different per rail); a pinned
+		 * part only (its low 16 bits are the peer's private stable
+		 * physical-link hash, different per rail); a pinned
 		 * roce_netdev identity keeps the exact match.
 		 */
 		if (peer->remote_identity_rail_scoped)
@@ -2858,8 +2858,8 @@ enum tbv_identity_verdict tbv_gid_identity_verdict(const u8 gid[16],
  * Classify a dgid against a synthetic RAIL_EUI64 identity
  * (TBV_NATIVE_WIRE_CAP_RAIL_EUI64): compare interface-ids on the HOST part
  * only, eui64 >> 16 -- 00:H1:H2:ff:fe:H3 from the rail netdev MAC
- * 02:H1:H2:H3:P:R. The low 16 bits (P:R) are the ADVERTISING node's private
- * peer_id/rail_id numbering: they differ across its rails and mean nothing
+ * 02:H1:H2:H3:L1:L2. The low 16 bits are the ADVERTISING node's private
+ * stable physical-link hash: they differ across its rails and mean nothing
  * here, so host-part matching is what lets a dgid resolve to the peer no
  * matter which of its ib_devices NCCL took the GID from. A v4-mapped dgid
  * carries no EUI and abstains; an empty identity abstains.
@@ -3489,7 +3489,7 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 		return -ENOMEM;
 
 	/*
-	 * 02:H1:H2:H3:P:R -- host-hash + local peer/rail ids. MUST be the
+	 * 02:H1:H2:H3:L1:L2 -- host hash + stable link hash. MUST be the
 	 * exact derivation tbv_native_control_fill_hello() advertises as the
 	 * RAIL_EUI64 identity: the GIDs ib_core builds from this MAC are what
 	 * peers resolve against that identity at modify_qp(RTR).
@@ -3497,9 +3497,12 @@ static int tbv_ibdev_attach_netdev(struct tbv_ibdev *dev)
 	tbv_rail_netdev_mac(tbv_host_identity_hash(
 				    xd && xd->local_uuid ? xd->local_uuid->b :
 							   NULL),
-			    (dev->rail && dev->rail->peer) ?
-				    dev->rail->peer->peer_id : 0,
-			    dev->rail ? dev->rail->rail_id : 0, mac);
+			    tbv_rail_link_identity_hash(
+				    xd && xd->remote_uuid ?
+					    xd->remote_uuid->b : NULL,
+				    dev->rail ? dev->rail->key.route : 0,
+				    dev->rail ? dev->rail->rail_id : 0),
+			    mac);
 	eth_hw_addr_set(ndev, mac);
 
 	/*
