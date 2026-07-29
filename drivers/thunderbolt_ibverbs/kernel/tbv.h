@@ -418,6 +418,14 @@ struct tbv_rail {
 	 * reconnect_userspace.c scenario 2 / tbv_test_native_rehello_changed_hops.
 	 */
 	bool native_tunnel_rehop;
+	/*
+	 * Set by the TX progress watchdog when an enabled native tunnel has
+	 * stopped completing descriptors. The native control worker tears the
+	 * existing ICM path down and runs the normal HELLO/tunnel/READY sequence
+	 * again; keeping the operation on that worker preserves the XDomain
+	 * transaction and sleeping-context rules.
+	 */
+	bool native_tunnel_recover;
 	bool native_work_stop;
 };
 
@@ -1051,6 +1059,7 @@ void tbv_native_control_init_rail(struct tbv_rail *rail,
 void tbv_native_control_queue_rail(struct tbv_state *state,
 				   struct tbv_rail *rail);
 void tbv_native_control_cancel_rail(struct tbv_rail *rail);
+void tbv_native_control_recover_stalled_rail(struct tbv_rail *rail);
 int tbv_native_control_exchange(struct tbv_state *state, struct tbv_peer *peer,
 				struct tbv_rail *rail);
 /* link_owner.c: runtime usb4_rdma <-> thunderbolt_net data-path handoff */
@@ -1233,6 +1242,17 @@ int tbv_test_path_tx_interrupt_progress(u32 passes, u32 stall_ms,
 int tbv_test_path_tx_expired_frame_completes(u32 timeout_ms, int *inflight_out,
 					     u32 *done_calls_out,
 					     int *status_out);
+/*
+ * Applies the native stalled-tunnel recovery gate twice to one synthetic
+ * rail. Reports whether the first request was accepted, whether the duplicate
+ * was coalesced, and the final request latch.
+ */
+int tbv_test_native_stall_recovery_request(enum tbv_backend_type backend,
+					    enum tbv_path_state path_state,
+					    bool removing,
+					    bool *first_out,
+					    bool *second_out,
+					    bool *latched_out);
 /*
  * An open unframed window whose remaining packets are cancelled by
  * (done, done_ctx) without naming the owner, as a read context teardown does.

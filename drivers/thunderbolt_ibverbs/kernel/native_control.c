@@ -354,6 +354,7 @@ void tbv_native_control_queue_rail(struct tbv_state *state,
 	rail->native_attempts = 0;
 	rail->native_tunnel_attempts = 0;
 	rail->native_last_error = 0;
+	rail->native_tunnel_recover = false;
 	tb_xdomain_handshake_reset(&rail->native_hs);
 	schedule_delayed_work(&rail->native_work,
 			      msecs_to_jiffies(TBV_NATIVE_HELLO_INITIAL_DELAY_MS));
@@ -373,6 +374,72 @@ void tbv_native_control_cancel_rail(struct tbv_rail *rail)
 	cancel_delayed_work_sync(&rail->native_work);
 	rail->native_work_state = NULL;
 }
+
+static bool
+tbv_native_control_mark_stall_recovery(struct tbv_rail *rail)
+{
+	if (!rail || !rail->peer ||
+	    rail->peer->backend != TBV_BACKEND_NATIVE ||
+	    rail->removing || rail->native_tunnel_recover ||
+	    rail->path.state != TBV_PATH_TUNNEL_ENABLED)
+		return false;
+
+	rail->native_tunnel_recover = true;
+	return true;
+}
+
+void tbv_native_control_recover_stalled_rail(struct tbv_rail *rail)
+{
+	struct tbv_state *state;
+	bool queue = false;
+
+	if (!rail || !rail->peer ||
+	    rail->peer->backend != TBV_BACKEND_NATIVE)
+		return;
+
+	state = READ_ONCE(rail->native_work_state);
+	if (!state || READ_ONCE(rail->native_work_stop))
+		return;
+
+	mutex_lock(&state->lock);
+	if (!READ_ONCE(rail->native_work_stop))
+		queue = tbv_native_control_mark_stall_recovery(rail);
+	mutex_unlock(&state->lock);
+
+	if (queue)
+		mod_delayed_work(system_wq, &rail->native_work, 0);
+}
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_native_stall_recovery_request(enum tbv_backend_type backend,
+					    enum tbv_path_state path_state,
+					    bool removing,
+					    bool *first_out,
+					    bool *second_out,
+					    bool *latched_out)
+{
+	struct tbv_peer peer = {
+		.backend = backend,
+	};
+	struct tbv_rail rail = {
+		.peer = &peer,
+		.removing = removing,
+	};
+
+	rail.path.state = path_state;
+	if (first_out)
+		*first_out = tbv_native_control_mark_stall_recovery(&rail);
+	else
+		tbv_native_control_mark_stall_recovery(&rail);
+	if (second_out)
+		*second_out = tbv_native_control_mark_stall_recovery(&rail);
+	else
+		tbv_native_control_mark_stall_recovery(&rail);
+	if (latched_out)
+		*latched_out = rail.native_tunnel_recover;
+	return 0;
+}
+#endif
 
 static int tbv_native_control_snapshot(struct tbv_state *state,
 				       const struct tb_xdomain *source_xd,
@@ -976,6 +1043,37 @@ static void tbv_native_control_work(struct work_struct *work)
 	if (rail->path.state != TBV_PATH_RING_STARTED &&
 	    rail->path.state != TBV_PATH_TUNNEL_ENABLED)
 		return;
+
+	/*
+	 * A native TX ring that posts but never completes is an ICM path which
+	 * was acknowledged yet is no longer forwarding. Disconnect it through
+	 * the same serialized path used for peer re-hop, then invalidate the
+	 * latched negotiation so this pass runs the ordinary HELLO, tunnel and
+	 * READY sequence from the beginning. The TX poll stamps a fresh progress
+	 * deadline when enable_tunnel succeeds, which is also the retry cooldown.
+	 */
+	if (READ_ONCE(rail->native_tunnel_recover) &&
+	    rail->path.state == TBV_PATH_TUNNEL_ENABLED) {
+		mutex_lock(&peer->control_lock);
+		ret = tbv_path_disable_tunnel(&rail->path, peer->xd);
+		mutex_unlock(&peer->control_lock);
+		rail->native_last_error = ret;
+		if (ret) {
+			retry = true;
+			goto out;
+		}
+
+		mutex_lock(&state->lock);
+		rail->native_tunnel_recover = false;
+		rail->native_tunnel_rehop = false;
+		rail->native_negotiated = false;
+		rail->native_attempts = 0;
+		rail->native_tunnel_attempts = 0;
+		tb_xdomain_handshake_reset(&rail->native_hs);
+		mutex_unlock(&state->lock);
+		pr_warn("recovering stalled native tunnel route=0x%llx rail=0x%x through fresh HELLO/READY\n",
+			rail->key.route, rail->rail_id);
+	}
 
 	if (state->negotiate_native && !rail->native_negotiated) {
 		/*

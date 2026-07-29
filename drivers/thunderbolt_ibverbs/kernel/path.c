@@ -1200,6 +1200,7 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 					     struct tbv_path, tx_poll_work);
 	struct tb_ring *ring = READ_ONCE(path->tx_ring);
 	struct ring_frame *frame;
+	bool stalled;
 	u64 completed = 0;
 	u32 queued = 0;
 	static DEFINE_RATELIMIT_STATE(stall_rs, HZ, 1);
@@ -1237,25 +1238,45 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 	 */
 	if (completed) {
 		atomic64_add(completed, &path->tx_poll_completed);
-	} else if (tx_stall_warn_ms && atomic_read(&path->tx_inflight) > 0 &&
-		 time_after(jiffies, READ_ONCE(path->tx_last_progress_jiffies) +
-			    msecs_to_jiffies(tx_stall_warn_ms)) &&
-		 time_after(jiffies,
-			    READ_ONCE(path->tx_last_stall_warn_jiffies) +
-			    msecs_to_jiffies(tx_stall_warn_ms)) &&
-		 __ratelimit(&stall_rs)) {
-		pr_warn("tx stall route=0x%llx rail=0x%x inflight=%d posted=%lld completed=%lld tx_hop=%d rx_hop=%d out_hop=%d remote_out_hop=%d tx_flags=0x%x rx_flags=0x%x e2e=%u\n",
-			path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
-			path->rail ? path->rail->rail_id : 0xffffffff,
-			atomic_read(&path->tx_inflight),
-			atomic64_read(&path->data_tx_posted) +
-				atomic64_read(&path->control_tx_posted),
-			atomic64_read(&path->data_tx_completed) +
-				atomic64_read(&path->control_tx_completed),
-			path->local_tx_hop, path->local_rx_hop,
-			path->local_transmit_path, path->remote_transmit_path,
-			path->cfg.tx_flags, path->cfg.rx_flags, path->cfg.e2e);
-		WRITE_ONCE(path->tx_last_stall_warn_jiffies, jiffies);
+	} else {
+		stalled = tx_stall_warn_ms &&
+			  atomic_read(&path->tx_inflight) > 0 &&
+			  time_after(jiffies,
+				     READ_ONCE(path->tx_last_progress_jiffies) +
+				     msecs_to_jiffies(tx_stall_warn_ms));
+		if (stalled) {
+			/*
+			 * The warning used to be the end of the path-level
+			 * response: the rail stayed data-ready and kept feeding
+			 * an ICM tunnel that no longer consumed descriptors. Ask
+			 * the existing native negotiation worker to disconnect
+			 * and re-establish it. The helper coalesces repeated polls.
+			 */
+			tbv_native_control_recover_stalled_rail(path->rail);
+
+			if (time_after(jiffies,
+				       READ_ONCE(path->tx_last_stall_warn_jiffies) +
+				       msecs_to_jiffies(tx_stall_warn_ms)) &&
+			    __ratelimit(&stall_rs)) {
+				pr_warn("tx stall route=0x%llx rail=0x%x inflight=%d posted=%lld completed=%lld tx_hop=%d rx_hop=%d out_hop=%d remote_out_hop=%d tx_flags=0x%x rx_flags=0x%x e2e=%u\n",
+					path->rail && path->rail->peer ?
+						path->rail->peer->xd->route : 0,
+					path->rail ? path->rail->rail_id :
+						0xffffffff,
+					atomic_read(&path->tx_inflight),
+					atomic64_read(&path->data_tx_posted) +
+						atomic64_read(&path->control_tx_posted),
+					atomic64_read(&path->data_tx_completed) +
+						atomic64_read(&path->control_tx_completed),
+					path->local_tx_hop, path->local_rx_hop,
+					path->local_transmit_path,
+					path->remote_transmit_path,
+					path->cfg.tx_flags, path->cfg.rx_flags,
+					path->cfg.e2e);
+				WRITE_ONCE(path->tx_last_stall_warn_jiffies,
+					   jiffies);
+			}
+		}
 	}
 
 	if (atomic_read(&path->tx_inflight) > 0 || completed)
@@ -1996,6 +2017,7 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 	if (!in_hop_allocated)
 		path->remote_transmit_path = remote_transmit_path;
 	path->state = TBV_PATH_TUNNEL_ENABLED;
+	WRITE_ONCE(path->tx_ring_stalled, false);
 	WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
 	pr_info("enabled tunnel route=0x%llx rail=0x%x out_hop=%d remote_out_hop=%d tx_hop=%d rx_hop=%d tx_flags=0x%x rx_flags=0x%x e2e=%u\n",
 		path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
@@ -2019,14 +2041,19 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
  */
 int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd)
 {
+	int ret;
+
 	if (path->state != TBV_PATH_TUNNEL_ENABLED)
 		return -EINVAL;
 
-	if (destroy_disable_paths)
-		tb_xdomain_disable_paths(xd, path->local_transmit_path,
-					 path->local_tx_hop,
-					 path->remote_transmit_path,
-					 path->local_rx_hop);
+	if (destroy_disable_paths) {
+		ret = tb_xdomain_disable_paths(xd, path->local_transmit_path,
+					      path->local_tx_hop,
+					      path->remote_transmit_path,
+					      path->local_rx_hop);
+		if (ret)
+			return ret;
+	}
 	if (path->remote_transmit_path >= 0) {
 		tb_xdomain_release_in_hopid(xd, path->remote_transmit_path);
 		path->remote_transmit_path = -1;

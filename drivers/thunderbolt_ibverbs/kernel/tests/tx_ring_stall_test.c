@@ -160,12 +160,65 @@ static void tbv_tx_ring_stall_ceiling_is_disablable(struct kunit *test)
 			    "timeout_ms=0 must keep the wait-forever contract");
 }
 
+static void tbv_tx_ring_stall_requests_one_native_recovery(struct kunit *test)
+{
+	bool latched = false;
+	bool second = true;
+	bool first = false;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_native_stall_recovery_request(
+				TBV_BACKEND_NATIVE, TBV_PATH_TUNNEL_ENABLED,
+				false, &first, &second, &latched),
+			0);
+	KUNIT_EXPECT_TRUE(test, first);
+	KUNIT_EXPECT_FALSE_MSG(test, second,
+			       "repeated TX polls must coalesce while recovery is pending");
+	KUNIT_EXPECT_TRUE(test, latched);
+}
+
+static void tbv_tx_ring_stall_ignores_ineligible_paths(struct kunit *test)
+{
+	bool latched = true;
+	bool first = true;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_native_stall_recovery_request(
+				TBV_BACKEND_APPLE, TBV_PATH_TUNNEL_ENABLED,
+				false, &first, NULL, &latched),
+			0);
+	KUNIT_EXPECT_FALSE(test, first);
+	KUNIT_EXPECT_FALSE(test, latched);
+
+	first = true;
+	latched = true;
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_native_stall_recovery_request(
+				TBV_BACKEND_NATIVE, TBV_PATH_RING_STARTED,
+				false, &first, NULL, &latched),
+			0);
+	KUNIT_EXPECT_FALSE(test, first);
+	KUNIT_EXPECT_FALSE(test, latched);
+
+	first = true;
+	latched = true;
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_native_stall_recovery_request(
+				TBV_BACKEND_NATIVE, TBV_PATH_TUNNEL_ENABLED,
+				true, &first, NULL, &latched),
+			0);
+	KUNIT_EXPECT_FALSE(test, first);
+	KUNIT_EXPECT_FALSE(test, latched);
+}
+
 static struct kunit_case tbv_tx_ring_stall_cases[] = {
 	KUNIT_CASE(tbv_tx_ring_stall_poll_makes_no_progress),
 	KUNIT_CASE(tbv_tx_ring_stall_completes_the_owner),
 	KUNIT_CASE(tbv_tx_ring_stall_is_bounded_by_the_ceiling),
 	KUNIT_CASE(tbv_tx_ring_stall_is_visible_to_the_health_gate),
 	KUNIT_CASE(tbv_tx_ring_stall_ceiling_is_disablable),
+	KUNIT_CASE(tbv_tx_ring_stall_requests_one_native_recovery),
+	KUNIT_CASE(tbv_tx_ring_stall_ignores_ineligible_paths),
 	{}
 };
 
