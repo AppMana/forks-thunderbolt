@@ -89,6 +89,15 @@ enum tbv_native_wire_cap {
 	TBV_NATIVE_WIRE_CAP_SPLIT_DATA = 1u << 3,
 	TBV_NATIVE_WIRE_CAP_NAK = 1u << 4,
 	TBV_NATIVE_WIRE_CAP_RAIL_EUI64 = 1u << 5,
+	/*
+	 * Peer understands TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC, the absolute
+	 * re-advertisement of the data credits this side has returned. Without
+	 * it the peer only ever hears the deltas in PATH_CREDIT, so a single
+	 * dropped credit frame shortens its window permanently. Receive support
+	 * is unconditional; the sender gates emission on this bit because an
+	 * older peer rejects the opcode as a bad header.
+	 */
+	TBV_NATIVE_WIRE_CAP_CREDIT_SYNC = 1u << 6,
 };
 
 enum tbv_native_wire_path_flag {

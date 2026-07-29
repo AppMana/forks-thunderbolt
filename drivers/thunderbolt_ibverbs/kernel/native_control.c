@@ -36,11 +36,14 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 	if (peer->nr_rails > 1)
 		caps |= TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
 	/*
-	 * Receive-side support for both is unconditional in this module:
-	 * split-base raw streams and inbound NAKs need no per-node state.
-	 * The peer gates its own TX on these bits.
+	 * Receive-side support for all three is unconditional in this module:
+	 * split-base raw streams, inbound NAKs and inbound absolute credit
+	 * resyncs need no per-node state. The peer gates its own TX on these
+	 * bits, which matters for the resync because an older peer rejects the
+	 * opcode as a bad header.
 	 */
-	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK;
+	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK |
+		TBV_NATIVE_WIRE_CAP_CREDIT_SYNC;
 
 	return caps;
 }

@@ -166,6 +166,21 @@ MODULE_PARM_DESC(tx_queue_timeout_ms,
 #define TBV_TX_QUEUE_WATCHDOG_TICK_MS 1000U
 
 /*
+ * Interval at which a path re-advertises the ABSOLUTE count of data credits it
+ * has returned (TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC). PATH_CREDIT carries a
+ * delta on an unacknowledged single-shot control frame, so one frame the NHI
+ * drops shortens the peer's window for the life of the path; a cumulative
+ * count lets the peer recompute the shortfall from any single later frame, so
+ * the window heals within one interval instead of never. Emitted only to peers
+ * that advertised TBV_NATIVE_WIRE_CAP_CREDIT_SYNC. 0 disables the resync and
+ * leaves the delta-only behaviour.
+ */
+static uint credit_resync_ms = 1000;
+module_param(credit_resync_ms, uint, 0644);
+MODULE_PARM_DESC(credit_resync_ms,
+		 "Interval in ms at which a native path re-advertises its absolute returned-credit count; 0 disables");
+
+/*
  * Skip a rail for new native QP binding when its TX ring has frames in
  * flight but has made no completion progress for this many ms. On the
  * single-cable TB3/TB4 daisy chain one of the two advertised native lanes
@@ -359,6 +374,7 @@ static void tbv_path_tx_packet_release(struct tbv_tx_packet *packet, int status)
 static void tbv_path_schedule_tx(struct tbv_path *path);
 static void tbv_path_tx_poll_work(struct work_struct *work);
 static void tbv_path_rx_supp_poll_work(struct work_struct *work);
+static void tbv_path_credit_sync_work(struct work_struct *work);
 
 static bool tbv_path_progress_poll_enabled(const struct tbv_path *path)
 {
@@ -472,6 +488,14 @@ void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size)
 	path->tx_remote_data_credit_max = credits;
 	path->tx_remote_data_credits = credits;
 	path->rx_data_credit_pending = 0;
+	/*
+	 * Both cumulative counters restart with the window. The peer's counter
+	 * restarts independently, so the next resync only adopts its baseline
+	 * (the window is already full here and owes nothing).
+	 */
+	path->rx_data_credit_returned_total = 0;
+	path->tx_remote_credit_returned_seen = 0;
+	path->tx_credit_sync_primed = false;
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
 	tbv_path_schedule_tx(path);
@@ -500,6 +524,12 @@ void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits)
 			new = old + credits;
 		path->tx_remote_data_credits = new;
 		accepted = new - old;
+		/*
+		 * Track the peer's count, not what was accepted: the clamp
+		 * discards credits the window cannot hold, and a later resync
+		 * must not re-grant them.
+		 */
+		path->tx_remote_credit_returned_seen += credits;
 	}
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
@@ -541,6 +571,59 @@ void tbv_path_refund_remote_data_credits(struct tbv_path *path, u32 frames)
 	tbv_path_schedule_tx(path);
 }
 
+/*
+ * Apply a peer's absolute returned-credit count. The delta against what has
+ * already been applied here is exactly the credits lost with a dropped
+ * PATH_CREDIT frame, so this heals the window without the peer knowing which
+ * frame was lost. Granting goes through the normal add path, which clamps at
+ * the window maximum: a duplicated or stale resync can therefore never let the
+ * sender exceed the peer's ring depth. The first resync after a capacity
+ * change only adopts the baseline, since the two counters restart apart.
+ */
+void tbv_path_sync_remote_rx_credits(struct tbv_path *path, u32 total)
+{
+	struct tbv_state *state;
+	unsigned long flags;
+	u32 delta = 0;
+
+	if (!path)
+		return;
+
+	state = tbv_path_state(path);
+	spin_lock_irqsave(&path->tx_lock, flags);
+	if (!path->tx_remote_data_credit_max) {
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+		return;
+	}
+	if (!path->tx_credit_sync_primed) {
+		path->tx_credit_sync_primed = true;
+		path->tx_remote_credit_returned_seen = total;
+	} else {
+		delta = tbv_native_data_resync_delta(
+			path->tx_remote_credit_returned_seen, total);
+	}
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	if (!delta)
+		return;
+
+	if (state)
+		atomic64_add(delta, &state->data_tx_credit_resync_recovered);
+	atomic64_add(delta, &path->data_tx_credit_resync_recovered);
+	tbv_path_add_remote_rx_credits(path, delta);
+}
+
+static bool tbv_path_credit_sync_supported(const struct tbv_path *path)
+{
+	if (!path->rail || !path->rail->peer)
+		return false;
+	if (path->rail->peer->backend != TBV_BACKEND_NATIVE)
+		return false;
+
+	return !!(READ_ONCE(path->rail->peer->remote_caps) &
+		  TBV_NATIVE_WIRE_CAP_CREDIT_SYNC);
+}
+
 static int tbv_path_send_rx_credit(struct tbv_path *path, u32 credits)
 {
 	struct tbv_native_data_header hdr = {};
@@ -555,6 +638,70 @@ static int tbv_path_send_rx_credit(struct tbv_path *path, u32 credits)
 		return len;
 
 	return tbv_path_send(path, frame, len, TBV_PATH_SEND_CONTROL, NULL, NULL);
+}
+
+static int tbv_path_send_rx_credit_sync(struct tbv_path *path, u32 total)
+{
+	struct tbv_native_data_header hdr = {};
+	u8 frame[TBV_NATIVE_DATA_HDR_SIZE];
+	int len;
+
+	hdr.opcode = TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC;
+	hdr.frag_offset = total;
+
+	len = tbv_native_data_build_header(frame, sizeof(frame), &hdr);
+	if (len < 0)
+		return len;
+
+	return tbv_path_send(path, frame, len, TBV_PATH_SEND_CONTROL, NULL, NULL);
+}
+
+static void tbv_path_arm_credit_sync(struct tbv_path *path)
+{
+	u32 ms = READ_ONCE(credit_resync_ms);
+
+	if (!ms || path->state != TBV_PATH_TUNNEL_ENABLED)
+		return;
+	if (!tbv_path_credit_sync_supported(path))
+		return;
+
+	tbv_path_queue_delayed_work(path, &path->credit_sync_work,
+				    msecs_to_jiffies(ms));
+}
+
+/*
+ * Periodic absolute re-advertisement. It runs on its own timer rather than on
+ * the TX poller because the side that OWES credits may have no TX traffic of
+ * its own, and the peer's window is exactly what stalls when it hears nothing.
+ * The count is monotone, so a resync that is itself dropped costs only one
+ * interval.
+ */
+static void tbv_path_credit_sync_work(struct work_struct *work)
+{
+	struct tbv_path *path = container_of(to_delayed_work(work),
+					     struct tbv_path, credit_sync_work);
+	struct tbv_state *state = tbv_path_state(path);
+	unsigned long flags;
+	u32 total;
+	int ret;
+
+	if (path->state != TBV_PATH_TUNNEL_ENABLED)
+		return;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	total = path->rx_data_credit_returned_total;
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	if (total && tbv_path_credit_sync_supported(path)) {
+		ret = tbv_path_send_rx_credit_sync(path, total);
+		if (!ret) {
+			if (state)
+				atomic64_inc(&state->data_rx_credit_resynced);
+			atomic64_inc(&path->data_rx_credit_resynced);
+		}
+	}
+
+	tbv_path_arm_credit_sync(path);
 }
 
 static void tbv_path_return_rx_data_credit(struct tbv_path *path, u32 credits)
@@ -573,6 +720,12 @@ static void tbv_path_return_rx_data_credit(struct tbv_path *path, u32 credits)
 	threshold = tbv_native_data_credit_return_threshold(
 		tbv_path_data_credit_window(path->cfg.rx_ring_size));
 	spin_lock_irqsave(&path->tx_lock, flags);
+	/*
+	 * Counts eligibility, not transmission: the peer must be told about a
+	 * credit whose PATH_CREDIT frame is lost, and that is the whole point
+	 * of the cumulative count. Wraps freely (the peer works in deltas).
+	 */
+	path->rx_data_credit_returned_total += credits;
 	pending = path->rx_data_credit_pending;
 	if (credits > U32_MAX - pending)
 		pending = U32_MAX;
@@ -776,6 +929,7 @@ void tbv_path_init(struct tbv_path *path,
 	INIT_DELAYED_WORK(&path->tx_poll_work, tbv_path_tx_poll_work);
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
+	INIT_DELAYED_WORK(&path->credit_sync_work, tbv_path_credit_sync_work);
 	atomic_set(&path->tx_inflight, 0);
 	path->local_transmit_path = -1;
 	path->local_tx_hop = -1;
@@ -799,6 +953,7 @@ void tbv_path_reset(struct tbv_path *path)
 	INIT_DELAYED_WORK(&path->tx_poll_work, tbv_path_tx_poll_work);
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
+	INIT_DELAYED_WORK(&path->credit_sync_work, tbv_path_credit_sync_work);
 	atomic_set(&path->tx_inflight, 0);
 	path->local_transmit_path = -1;
 	path->local_tx_hop = -1;
@@ -1131,6 +1286,8 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	u32 len = tbv_frame_len(frame);
 	u32 return_rx_credits = 0;
 	u32 add_remote_credits = 0;
+	u32 sync_remote_credits = 0;
+	bool have_sync_remote_credits = false;
 	bool was_raw_payload;
 
 	if (canceled)
@@ -1230,6 +1387,15 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 				else
 					atomic64_inc(&state->data_rx_bad_header);
 			} else if (!ret &&
+				   hdr.opcode ==
+					   TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC) {
+				if (tbv_native_data_valid_path_credit_sync(&hdr)) {
+					sync_remote_credits = hdr.frag_offset;
+					have_sync_remote_credits = true;
+				} else {
+					atomic64_inc(&state->data_rx_bad_header);
+				}
+			} else if (!ret &&
 				   (hdr.flags & TBV_NATIVE_DATA_F_RAW_STREAM)) {
 				if (len != TBV_NATIVE_DATA_HDR_SIZE ||
 				    !hdr.length ||
@@ -1275,6 +1441,9 @@ repost:
 			if (add_remote_credits)
 				tbv_path_add_remote_rx_credits(path,
 							       add_remote_credits);
+			if (have_sync_remote_credits)
+				tbv_path_sync_remote_rx_credits(
+					path, sync_remote_credits);
 		}
 	}
 }
@@ -1682,6 +1851,7 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 		path->local_transmit_path, remote_transmit_path,
 		path->local_tx_hop, path->local_rx_hop,
 		path->cfg.tx_flags, path->cfg.rx_flags, path->cfg.e2e);
+	tbv_path_arm_credit_sync(path);
 	tbv_path_schedule_tx(path);
 	return 0;
 }
@@ -3051,6 +3221,7 @@ void tbv_path_fence(struct tbv_path *path)
 	/* No new poll-driven completions after the rings are down. */
 	cancel_delayed_work_sync(&path->tx_poll_work);
 	cancel_delayed_work_sync(&path->rx_supp_poll_work);
+	cancel_delayed_work_sync(&path->credit_sync_work);
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -3089,6 +3260,60 @@ static void tbv_test_queue_timeout_done(void *ctx, int status)
  *  - tx_ring stays NULL: no frame ever reaches a ring in a credit stall, and
  *    the gate returns before any tb_ring_tx().
  */
+/*
+ * Scenario hook for tests/credit_stall_recovery_test.c.
+ *
+ * Field provenance:
+ *  - tbv_path_set_remote_rx_capacity() is the real HELLO-time seeding, so the
+ *    window starts full and the resync baseline starts unprimed exactly as on
+ *    a live path.
+ *  - tx_remote_data_credits = 0 is what tbv_path_schedule_tx() leaves after
+ *    charging one credit per frame for a full window.
+ *  - the surviving PATH_CREDIT delta goes through the real
+ *    tbv_path_add_remote_rx_credits(), which is the only thing a peer's credit
+ *    frame does, and the resync through the real
+ *    tbv_path_sync_remote_rx_credits().
+ *  - no rail, no ring: neither credit path touches either.
+ */
+int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
+				u32 *credits_out, u32 *max_out)
+{
+	struct tbv_path_config cfg;
+	struct tbv_path *path;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	tbv_path_set_remote_rx_capacity(path, cfg.rx_ring_size);
+	if (total > path->tx_remote_data_credit_max ||
+	    lost > total) {
+		kfree(path);
+		return -EINVAL;
+	}
+
+	/* Steady state: the peer has resynced its baseline at least once. */
+	tbv_path_sync_remote_rx_credits(path, 0);
+
+	/* The sender charged the whole window down and is now gated. */
+	path->tx_remote_data_credits = 0;
+
+	/* The peer returned @total but the frame carrying @lost was dropped. */
+	if (total - lost)
+		tbv_path_add_remote_rx_credits(path, total - lost);
+	if (deliver_sync)
+		tbv_path_sync_remote_rx_credits(path, total);
+
+	if (credits_out)
+		*credits_out = path->tx_remote_data_credits;
+	if (max_out)
+		*max_out = path->tx_remote_data_credit_max;
+	kfree(path);
+	return 0;
+}
+
 int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
 				       u32 *queued_out, u32 *stalls_out,
 				       u32 *done_calls_out, int *status_out)
@@ -3194,6 +3419,7 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 	}
 	cancel_delayed_work_sync(&path->tx_poll_work);
 	cancel_delayed_work_sync(&path->rx_supp_poll_work);
+	cancel_delayed_work_sync(&path->credit_sync_work);
 
 	if (tunnel_enabled) {
 		if (destroy_disable_paths) {

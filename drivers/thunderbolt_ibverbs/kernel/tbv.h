@@ -217,6 +217,20 @@ struct tbv_path {
 	u32 tx_remote_data_credits;
 	u32 tx_remote_data_credit_max;
 	u32 rx_data_credit_pending;
+	/*
+	 * Absolute credit resync state (TBV_NATIVE_WIRE_CAP_CREDIT_SYNC).
+	 * rx_data_credit_returned_total counts every credit this side has
+	 * become eligible to return since the capacity was negotiated and is
+	 * what PATH_CREDIT_SYNC advertises; tx_remote_credit_returned_seen is
+	 * the peer's count as already applied here, so their difference is the
+	 * shortfall left by a dropped PATH_CREDIT frame. tx_credit_sync_primed
+	 * is false until the first resync after a capacity change adopts the
+	 * peer's baseline, because the two counters are independent of each
+	 * other across a re-HELLO.
+	 */
+	u32 rx_data_credit_returned_total;
+	u32 tx_remote_credit_returned_seen;
+	bool tx_credit_sync_primed;
 	spinlock_t tx_lock;
 	struct list_head tx_free;
 	struct list_head tx_control_free;
@@ -226,6 +240,7 @@ struct tbv_path {
 	struct list_head tx_zcopy_inflight;
 	struct delayed_work tx_poll_work;
 	struct delayed_work rx_supp_poll_work;
+	struct delayed_work credit_sync_work;
 	unsigned long tx_last_progress_jiffies;
 	atomic_t tx_inflight;
 	atomic64_t data_tx_enqueued;
@@ -250,6 +265,9 @@ struct tbv_path {
 	atomic64_t data_rx_completed;
 	atomic64_t data_rx_credit_sent;
 	atomic64_t data_rx_credit_send_error;
+	/* Absolute resyncs sent by this side / credits they recovered here. */
+	atomic64_t data_rx_credit_resynced;
+	atomic64_t data_tx_credit_resync_recovered;
 	atomic64_t data_rx_repost_failed;
 	atomic64_t tx_poll_calls;
 	atomic64_t tx_poll_completed;
@@ -719,6 +737,9 @@ struct tbv_state {
 	atomic64_t data_rx_completed;
 	atomic64_t data_rx_credit_sent;
 	atomic64_t data_rx_credit_send_error;
+	/* Absolute credit resyncs sent / credits they recovered. */
+	atomic64_t data_rx_credit_resynced;
+	atomic64_t data_tx_credit_resync_recovered;
 	atomic64_t data_rx_repost_failed;
 	atomic64_t data_rx_bad_frame;
 	atomic64_t data_rx_bad_header;
@@ -1092,6 +1113,14 @@ int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
 int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
 				       u32 *queued_out, u32 *stalls_out,
 				       u32 *done_calls_out, int *status_out);
+/*
+ * Replays a lost PATH_CREDIT frame on a real path. The peer returns @total
+ * credits cumulatively but the delta frame carrying @lost of them is dropped;
+ * when @deliver_sync the peer's next absolute resync arrives. Reports the
+ * sender's resulting window.
+ */
+int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
+				u32 *credits_out, u32 *max_out);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 #endif
@@ -1347,6 +1376,12 @@ int tbv_path_disable_tunnel(struct tbv_path *path, struct tb_xdomain *xd);
 void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size);
 void tbv_path_add_remote_rx_credits(struct tbv_path *path, u32 credits);
 void tbv_path_refund_remote_data_credits(struct tbv_path *path, u32 frames);
+/*
+ * Apply a peer's absolute returned-credit count (PATH_CREDIT_SYNC). Recovers
+ * the window from a dropped PATH_CREDIT delta; the grant is clamped at the
+ * window maximum so a stale or duplicated resync cannot over-credit.
+ */
+void tbv_path_sync_remote_rx_credits(struct tbv_path *path, u32 total);
 int tbv_path_reserve_data(struct tbv_path *path, u32 frames);
 void tbv_path_release_data_reservation(struct tbv_path *path, u32 frames);
 int tbv_path_send(struct tbv_path *path, const void *data, u32 len,

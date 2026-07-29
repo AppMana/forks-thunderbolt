@@ -38,7 +38,18 @@ enum tbv_native_data_op {
 	 * later timeout retransmit.
 	 */
 	TBV_NATIVE_DATA_OP_NAK = 12,
-	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_NAK,
+	/*
+	 * Absolute re-advertisement of the data credits the sender has returned
+	 * on this path since the last capacity negotiation (requires
+	 * TBV_NATIVE_WIRE_CAP_CREDIT_SYNC from the peer's HELLO). frag_offset
+	 * carries that cumulative count, wrapping; every other field is
+	 * reserved zero. PATH_CREDIT carries a delta and is unacknowledged, so
+	 * one dropped credit frame is a permanent shortfall in the peer's
+	 * window; the cumulative count lets the peer recompute the exact
+	 * shortfall from any single later frame.
+	 */
+	TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC = 13,
+	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC,
 };
 
 enum tbv_native_data_flag {
@@ -286,6 +297,41 @@ static inline int tbv_native_data_split_window(tbv_wire_u32 total_len,
 	*len = idx == count - 1 ? total_len - *offset :
 				  TBV_NATIVE_DATA_SPLIT_UNIT;
 	return 0;
+}
+
+/*
+ * PATH_CREDIT_SYNC header validation. Only frag_offset carries information (the
+ * cumulative returned-credit count, which is legally zero before the path has
+ * returned anything); every other field must be zero so they stay available for
+ * later extension.
+ */
+static inline bool
+tbv_native_data_valid_path_credit_sync(const struct tbv_native_data_header *hdr)
+{
+	return hdr->opcode == TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC &&
+	       !hdr->flags &&
+	       !hdr->dest_qp &&
+	       !hdr->src_qp &&
+	       !hdr->psn &&
+	       !hdr->length &&
+	       !hdr->imm_data &&
+	       !hdr->remote_addr &&
+	       !hdr->rkey;
+}
+
+/*
+ * Credits to grant on an absolute resync. @seen is the cumulative count the
+ * receiver has already applied, @total the count the peer reports. The
+ * difference is exactly what was lost with a dropped PATH_CREDIT frame; it is
+ * computed modulo 2^32 so the counter may wrap freely. The caller still clamps
+ * the grant at the window maximum, which is what keeps a stale or duplicated
+ * resync from ever letting the sender exceed the peer's ring depth (the same
+ * property the retransmit refund relies on).
+ */
+static inline tbv_wire_u32
+tbv_native_data_resync_delta(tbv_wire_u32 seen, tbv_wire_u32 total)
+{
+	return total - seen;
 }
 
 /*

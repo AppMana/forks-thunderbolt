@@ -247,6 +247,10 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_rx_credit_sent));
 	seq_printf(s, "data_rx_credit_send_error: %lld\n",
 		   atomic64_read(&state->data_rx_credit_send_error));
+	seq_printf(s, "data_rx_credit_resynced: %lld\n",
+		   atomic64_read(&state->data_rx_credit_resynced));
+	seq_printf(s, "data_tx_credit_resync_recovered: %lld\n",
+		   atomic64_read(&state->data_tx_credit_resync_recovered));
 	seq_printf(s, "data_rx_repost_failed: %lld\n",
 		   atomic64_read(&state->data_rx_repost_failed));
 	seq_printf(s, "data_rx_bad_frame: %lld\n",
@@ -497,13 +501,16 @@ static int tbv_debugfs_peers_show(struct seq_file *s, void *unused)
 				   rail->path.cfg.sof_mask,
 				   rail->path.cfg.eof_mask);
 				seq_printf(s,
-					   "    data_rx_completed=%lld data_rx_credit_sent=%lld data_rx_credit_eligible=%lld data_rx_credit_send_error=%lld data_rx_repost_failed=%lld rx_credit_pending=%u\n",
+					   "    data_rx_completed=%lld data_rx_credit_sent=%lld data_rx_credit_eligible=%lld data_rx_credit_send_error=%lld data_rx_repost_failed=%lld rx_credit_pending=%u rx_credit_total=%u resynced=%lld resync_recovered=%lld\n",
 					   atomic64_read(&rail->path.data_rx_completed),
 					   atomic64_read(&rail->path.data_rx_credit_sent),
 					   atomic64_read(&rail->path.data_rx_credit_eligible),
 					   atomic64_read(&rail->path.data_rx_credit_send_error),
 					   atomic64_read(&rail->path.data_rx_repost_failed),
-					   rail->path.rx_data_credit_pending);
+					   rail->path.rx_data_credit_pending,
+					   rail->path.rx_data_credit_returned_total,
+					   atomic64_read(&rail->path.data_rx_credit_resynced),
+					   atomic64_read(&rail->path.data_tx_credit_resync_recovered));
 				seq_printf(s,
 					   "    tx_poll enabled=%u calls=%lld completed=%lld\n",
 					   rail->path.tx_poll_enabled,
