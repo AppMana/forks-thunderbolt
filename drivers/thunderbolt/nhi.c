@@ -261,12 +261,30 @@ static void ring_write_descriptors(struct tb_ring *ring)
 		descriptor = &ring->descriptors[ring->head];
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
-		descriptor->flags = RING_DESC_POSTED | RING_DESC_INTERRUPT;
+		/*
+		 * length, eof, sof and flags are bitfields packed into ONE
+		 * 32-bit word, so every assignment here is a read-modify-write
+		 * of the same word the device is reading. Writing flags first
+		 * publishes RING_DESC_POSTED while length/eof/sof are still
+		 * zero, and the device is then free to consume a descriptor
+		 * that claims to be ready and describes a zero-length frame
+		 * with no framing. Fill the payload fields first and publish
+		 * POSTED last.
+		 */
 		if (ring->is_tx) {
 			descriptor->length = frame->size;
 			descriptor->eof = frame->eof;
 			descriptor->sof = frame->sof;
 		}
+		dma_wmb();
+		descriptor->flags = RING_DESC_POSTED | RING_DESC_INTERRUPT;
+		/*
+		 * The descriptor must be visible in coherent memory before the
+		 * doorbell tells the device to look at it; the doorbell is an
+		 * MMIO write to a different address space and is not otherwise
+		 * ordered against these stores.
+		 */
+		wmb();
 		ring->head = (ring->head + 1) % ring->size;
 		if (ring->is_tx)
 			ring_iowrite_prod(ring, ring->head);
@@ -306,6 +324,12 @@ static void ring_work(struct work_struct *work)
 		if (!(ring->descriptors[ring->tail].flags
 				& RING_DESC_COMPLETED))
 			break;
+		/*
+		 * Pairs with the dma_wmb() in ring_write_descriptors(). The
+		 * payload fields share a word with the flags, so they must not
+		 * be loaded before the COMPLETED test that makes them valid.
+		 */
+		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_move_tail(&frame->list, &done);
@@ -372,6 +396,8 @@ struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 		goto unlock;
 
 	if (ring->descriptors[ring->tail].flags & RING_DESC_COMPLETED) {
+		/* see ring_work(): the payload is only valid after this test */
+		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_del_init(&frame->list);
