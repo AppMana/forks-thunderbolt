@@ -258,6 +258,12 @@ struct tbv_path {
 	struct delayed_work rx_supp_poll_work;
 	struct delayed_work credit_sync_work;
 	unsigned long tx_last_progress_jiffies;
+	/*
+	 * Repetition bound for the stall warning only. Kept apart from
+	 * tx_last_progress_jiffies so warning about a stall never counts as
+	 * progress for the rail health gate.
+	 */
+	unsigned long tx_last_stall_warn_jiffies;
 	atomic_t tx_inflight;
 	atomic64_t data_tx_enqueued;
 	atomic64_t data_tx_posted;
@@ -1203,6 +1209,24 @@ int tbv_test_path_tx_ring_stall(u32 passes, u32 stall_ms, u32 timeout_ms,
 				u32 *done_calls_out, int *status_out,
 				u64 *poll_calls_out, u64 *poll_completed_out,
 				bool *tx_stalled_out);
+/*
+ * Two frames posted and one completed by the NHI interrupt path, then @passes
+ * of the real TX poll with the last-progress stamp aged by @stall_ms. Reports
+ * whether the rail health gate reads this ring as stalled -- the field's
+ * "inflight=1 posted=N completed=N-1" warning, where completed keeps moving.
+ */
+int tbv_test_path_tx_interrupt_progress(u32 passes, u32 stall_ms,
+					bool *tx_stalled_out,
+					u64 *poll_completed_out,
+					u32 *inflight_out);
+/*
+ * One frame released by the ring-frame ceiling at @timeout_ms and then
+ * completed late by the ring, which owned its buffer all along. Reports the
+ * signed tx_inflight the pair leaves behind.
+ */
+int tbv_test_path_tx_expired_frame_completes(u32 timeout_ms, int *inflight_out,
+					     u32 *done_calls_out,
+					     int *status_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the

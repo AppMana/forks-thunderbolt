@@ -221,6 +221,13 @@ struct tbv_data_frame {
 	bool tx;
 	/* When this frame was handed to the ring, for the stall ceiling. */
 	unsigned long posted_jiffies;
+	/*
+	 * Set when tbv_path_expire_tx_ring_frames() gave up on this frame and
+	 * already accounted its inflight slot. The ring still owns the buffer
+	 * and may complete it later; that late completion must not decrement
+	 * tx_inflight a second time.
+	 */
+	bool released;
 };
 
 struct tbv_tx_packet {
@@ -978,10 +985,22 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	struct tbv_tx_packet *packet;
 	struct tbv_state *state = tbv_path_state(path);
 	unsigned long flags;
+	bool released;
 
 	dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
 				TBV_DATA_FRAME_SIZE, DMA_TO_DEVICE);
+	/*
+	 * Ring progress, stamped where the ring hands the frame back and not
+	 * where the driver happens to reap it. The TX ring is interrupt-driven
+	 * (ring_work) and the supplemental poll only sees the small tail that
+	 * quiesces between interrupts, so stamping this in the poll made a
+	 * perfectly healthy ring look stalled to tbv_path_tx_stalled() and to
+	 * the poll's own warning.
+	 */
+	WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
 	spin_lock_irqsave(&path->tx_lock, flags);
+	released = f->released;
+	f->released = false;
 	packet = f->packet;
 	f->packet = NULL;
 	f->done = NULL;
@@ -1022,7 +1041,15 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 					   canceled ? -ECANCELED : 0);
 	}
 
-	atomic_dec(&path->tx_inflight);
+	/*
+	 * A frame the ceiling already released has had its inflight slot given
+	 * back. Decrementing again drives tx_inflight negative, and
+	 * tbv_path_schedule_tx() reads that counter into a u32 -- one stray
+	 * decrement leaves the staged-frame gate computing zero available
+	 * frames forever, so the path never posts a copied data frame again.
+	 */
+	if (!released)
+		atomic_dec(&path->tx_inflight);
 	tbv_path_schedule_tx(path);
 }
 
@@ -1047,8 +1074,9 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
  * never drains tx_pending and every later WR on the rail queues behind it.
  *
  * Measure from posted_jiffies, which the post stamps and nothing resets. Do
- * not key this off tx_last_progress_jiffies: the poll's own stall warning
- * back-dates that field, so a warned path would never look stalled here.
+ * not key this off tx_last_progress_jiffies: that is a per-path stamp of the
+ * last completion of ANY frame, so a path completing other frames around one
+ * stuck descriptor would never look stalled here.
  */
 static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
 {
@@ -1083,6 +1111,7 @@ static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
 		f->done = NULL;
 		f->done_ctx = NULL;
 		f->posted_jiffies = 0;
+		f->released = true;
 		spin_unlock_irqrestore(&path->tx_lock, flags);
 		/*
 		 * The frame itself is NOT returned to tx_free: the ring still
@@ -1201,11 +1230,18 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 			frame->callback(ring, frame, false);
 		completed++;
 	}
+	/*
+	 * Do not stamp progress here. The completion callbacks do it, whichever
+	 * context reaps them, so a poll that finds nothing because the
+	 * interrupt path already drained the ring no longer looks like a stall.
+	 */
 	if (completed) {
 		atomic64_add(completed, &path->tx_poll_completed);
-		WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
 	} else if (tx_stall_warn_ms && atomic_read(&path->tx_inflight) > 0 &&
 		 time_after(jiffies, READ_ONCE(path->tx_last_progress_jiffies) +
+			    msecs_to_jiffies(tx_stall_warn_ms)) &&
+		 time_after(jiffies,
+			    READ_ONCE(path->tx_last_stall_warn_jiffies) +
 			    msecs_to_jiffies(tx_stall_warn_ms)) &&
 		 __ratelimit(&stall_rs)) {
 		pr_warn("tx stall route=0x%llx rail=0x%x inflight=%d posted=%lld completed=%lld tx_hop=%d rx_hop=%d out_hop=%d remote_out_hop=%d tx_flags=0x%x rx_flags=0x%x e2e=%u\n",
@@ -1219,7 +1255,7 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 			path->local_tx_hop, path->local_rx_hop,
 			path->local_transmit_path, path->remote_transmit_path,
 			path->cfg.tx_flags, path->cfg.rx_flags, path->cfg.e2e);
-		WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
+		WRITE_ONCE(path->tx_last_stall_warn_jiffies, jiffies);
 	}
 
 	if (atomic_read(&path->tx_inflight) > 0 || completed)
@@ -1338,6 +1374,8 @@ static void tbv_path_zcopy_tx_complete(struct tb_ring *ring,
 	struct tbv_state *state = tbv_path_state(path);
 	unsigned long flags;
 
+	/* Ring progress; see tbv_path_tx_complete(). */
+	WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
 	spin_lock_irqsave(&path->tx_lock, flags);
 	if (packet->inflight) {
 		list_del_init(&packet->node);
@@ -2391,7 +2429,12 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		}
 		if (needs_staging && !from_control_queue) {
 			u32 reserve = tbv_path_tx_control_frame_reserve(path);
-			u32 inflight = atomic_read(&path->tx_inflight);
+			/*
+			 * Clamp: a negative counter read into a u32 becomes
+			 * ~4 billion, which makes available 0 and refuses every
+			 * staged frame for the life of the path.
+			 */
+			u32 inflight = max(atomic_read(&path->tx_inflight), 0);
 			u32 available = path->tx_frame_count > inflight ?
 					path->tx_frame_count - inflight : 0;
 
@@ -3680,6 +3723,290 @@ out:
 	}
 	kfree(ring);
 	kfree(frame);
+	kfree(path);
+	return ret;
+}
+
+/*
+ * Shared setup for the two interrupt-completion hooks below: a tunnel-enabled
+ * native path with @frames staging frames, a running TX ring, and @frames
+ * copied packets taken to exactly the state tbv_path_schedule_tx() leaves
+ * behind after tb_ring_tx() -- off tx_data_queue, on tx_frame_inflight,
+ * counted in tx_inflight, referenced only by their ring frame.
+ *
+ * The credit window is held closed so the enqueue stops at the queue and this
+ * hook, not real hardware, decides when a packet becomes posted; the captured
+ * nodes all had a healthy window (tx_credits at max) alongside the failure.
+ */
+/*
+ * tb_ring_dma_device() dereferences ring->nhi->pdev->dev and the completion
+ * path dma_syncs against it, so a ring under test needs that chain to exist.
+ * The frames carry no mapping (dma 0), which on a zeroed device is a no-op.
+ */
+struct tbv_test_ring_dma {
+	struct tb_nhi nhi;
+	struct pci_dev pdev;
+};
+
+static int tbv_test_path_post_frames(struct tbv_path *path,
+				     struct tb_ring *ring,
+				     struct tbv_test_ring_dma *dma,
+				     struct tbv_data_frame *frames, u32 count,
+				     struct tbv_tx_packet **packets,
+				     struct tbv_test_queue_timeout_ctx *ctx)
+{
+	struct tbv_path_config cfg;
+	u8 payload[64] = {};
+	unsigned long flags;
+	u32 i;
+	int ret;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	path->tx_data_queue_limit = 8;
+	path->tx_remote_data_credit_max = 4;
+	path->tx_remote_data_credits = 0;
+
+	spin_lock_init(&ring->lock);
+	INIT_LIST_HEAD(&ring->queue);
+	INIT_LIST_HEAD(&ring->in_flight);
+	ring->is_tx = true;
+	ring->size = 4;
+	ring->running = true;
+	dma->nhi.pdev = &dma->pdev;
+	ring->nhi = &dma->nhi;
+	path->tx_ring = ring;
+	path->tx_poll_enabled = true;
+
+	path->tx_frames = frames;
+	path->tx_frame_count = count;
+	for (i = 0; i < count; i++) {
+		frames[i].path = path;
+		frames[i].tx = true;
+		INIT_LIST_HEAD(&frames[i].frame.list);
+		INIT_LIST_HEAD(&frames[i].free_node);
+		list_add_tail(&frames[i].free_node, &path->tx_free);
+	}
+
+	for (i = 0; i < count; i++) {
+		struct tbv_tx_packet *packet;
+
+		ret = tbv_path_send(path, payload, sizeof(payload), 0,
+				    tbv_test_queue_timeout_done, ctx);
+		if (ret)
+			return ret;
+
+		spin_lock_irqsave(&path->tx_lock, flags);
+		packet = list_first_entry_or_null(&path->tx_data_queue,
+						  struct tbv_tx_packet, node);
+		if (packet) {
+			list_del_init(&packet->node);
+			packet->queued = false;
+			packet->queued_jiffies = 0;
+			if (path->tx_data_queued)
+				path->tx_data_queued--;
+		}
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+		if (!packet)
+			return -ENODATA;
+
+		atomic_inc(&path->tx_inflight);
+		atomic64_inc(&path->data_tx_posted);
+		spin_lock_irqsave(&path->tx_lock, flags);
+		frames[i].packet = packet;
+		frames[i].done = packet->done;
+		frames[i].done_ctx = packet->done_ctx;
+		/* The callback the ring will invoke, as the post installs it. */
+		frames[i].frame.callback = tbv_path_tx_complete;
+		frames[i].posted_jiffies = jiffies;
+		list_del_init(&frames[i].free_node);
+		list_add_tail(&frames[i].free_node, &path->tx_frame_inflight);
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+		packets[i] = packet;
+	}
+	return 0;
+}
+
+static void tbv_test_path_teardown(struct tbv_path *path,
+				   struct tbv_tx_packet **packets, u32 count)
+{
+	u32 i;
+
+	path->state = TBV_PATH_STOPPED;
+	path->tx_ring = NULL;
+	path->tx_poll_enabled = false;
+	cancel_delayed_work_sync(&path->tx_poll_work);
+	tbv_path_flush_tx_queue(path, -ECANCELED);
+	for (i = 0; i < count; i++)
+		if (packets[i])
+			tbv_path_tx_packet_release(packets[i], -ECANCELED);
+}
+
+/*
+ * Scenario hook for tests/tx_ring_progress_test.c -- the field's "tx stall
+ * route=... inflight=1 posted=N completed=N-1" line, reproduced.
+ *
+ * Field provenance, from traces/baseline-025-023/hang-appmana-023.txt: that
+ * warning repeats every 5.1 s on two healthy paths at once, and between two
+ * consecutive lines BOTH posted and completed advance by 5. A frame that never
+ * completes cannot let completed advance, so the ring was never stalled. The
+ * shape is two frames posted and one already completed by the NHI interrupt
+ * path (ring_work), which is what drains ~99.5% of completions on this
+ * hardware -- the supplemental poll sees only the tail.
+ *
+ * Posts two frames, delivers one completion the way ring_work does (straight
+ * into frame->callback from a context the driver's poll never runs in), then
+ * runs the real poll @passes times with the last-progress stamp aged by
+ * @stall_ms per pass. Reports whether the path reads as stalled to the rail
+ * health gate, which is what decides if a new QP may bind this rail at all.
+ */
+int tbv_test_path_tx_interrupt_progress(u32 passes, u32 stall_ms,
+					bool *tx_stalled_out,
+					u64 *poll_completed_out,
+					u32 *inflight_out)
+{
+	struct tbv_test_queue_timeout_ctx ctx = {};
+	struct tbv_tx_packet *packets[2] = {};
+	struct tbv_test_ring_dma *dma = NULL;
+	struct tbv_data_frame *frames = NULL;
+	struct tb_ring *ring = NULL;
+	struct tbv_path *path = NULL;
+	uint saved_poll_ms;
+	uint saved_timeout_ms;
+	u32 pass;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	frames = kcalloc(2, sizeof(*frames), GFP_KERNEL);
+	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
+	if (!path || !frames || !ring || !dma) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = tbv_test_path_post_frames(path, ring, dma, frames, 2, packets,
+					&ctx);
+	if (ret)
+		goto out;
+
+	saved_poll_ms = tx_poll_delay_ms;
+	saved_timeout_ms = tx_queue_timeout_ms;
+	tx_poll_delay_ms = tx_poll_delay_ms ?: 1;
+	/* No ceiling: this path is healthy and nothing here may be expired. */
+	tx_queue_timeout_ms = 0;
+
+	/*
+	 * Age the path first, then complete: this is a path that has been busy
+	 * for longer than the health gate's window with every completion taken
+	 * by the interrupt handler.
+	 */
+	WRITE_ONCE(path->tx_last_progress_jiffies,
+		   READ_ONCE(path->tx_last_progress_jiffies) -
+			   msecs_to_jiffies(stall_ms));
+	frames[0].frame.callback(ring, &frames[0].frame, false);
+	packets[0] = NULL;
+
+	for (pass = 0; pass < passes; pass++)
+		tbv_path_tx_poll_work(&path->tx_poll_work.work);
+
+	tx_poll_delay_ms = saved_poll_ms;
+	tx_queue_timeout_ms = saved_timeout_ms;
+
+	if (tx_stalled_out)
+		*tx_stalled_out = tbv_path_tx_stalled(path);
+	if (poll_completed_out)
+		*poll_completed_out = atomic64_read(&path->tx_poll_completed);
+	if (inflight_out)
+		*inflight_out = (u32)max(atomic_read(&path->tx_inflight), 0);
+	ret = 0;
+
+out:
+	if (path)
+		tbv_test_path_teardown(path, packets, 2);
+	kfree(dma);
+	kfree(ring);
+	kfree(frames);
+	kfree(path);
+	return ret;
+}
+
+/*
+ * Scenario hook for tests/tx_ring_progress_test.c -- what the ring-frame
+ * ceiling leaves behind when the ring recovers.
+ *
+ * tbv_path_expire_tx_ring_frames() deliberately does not return the frame to
+ * tx_free, because the ring still owns the buffer and may complete it later.
+ * That later completion is a real event: ring_work delivers every posted
+ * descriptor eventually, canceled at worst. Both paths account the same
+ * inflight slot, so the counter has to survive the pair.
+ *
+ * Posts one frame, ages it past @timeout_ms so the poll's ceiling releases it,
+ * then delivers the ring completion. Reports the signed tx_inflight: below
+ * zero, tbv_path_schedule_tx() reads it into a u32 and refuses every staged
+ * data frame for the life of the path.
+ */
+int tbv_test_path_tx_expired_frame_completes(u32 timeout_ms, int *inflight_out,
+					     u32 *done_calls_out,
+					     int *status_out)
+{
+	struct tbv_test_queue_timeout_ctx ctx = {};
+	struct tbv_tx_packet *packets[1] = {};
+	struct tbv_test_ring_dma *dma = NULL;
+	struct tbv_data_frame *frames = NULL;
+	struct tb_ring *ring = NULL;
+	struct tbv_path *path = NULL;
+	uint saved_timeout_ms;
+	uint saved_poll_ms;
+	unsigned long flags;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	frames = kcalloc(1, sizeof(*frames), GFP_KERNEL);
+	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
+	if (!path || !frames || !ring || !dma) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = tbv_test_path_post_frames(path, ring, dma, frames, 1, packets,
+					&ctx);
+	if (ret)
+		goto out;
+
+	saved_timeout_ms = tx_queue_timeout_ms;
+	saved_poll_ms = tx_poll_delay_ms;
+	tx_queue_timeout_ms = timeout_ms;
+	tx_poll_delay_ms = tx_poll_delay_ms ?: 1;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	frames[0].posted_jiffies -= msecs_to_jiffies(timeout_ms * 2);
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+	tbv_path_tx_poll_work(&path->tx_poll_work.work);
+
+	/* The ring completes the frame it still owned. */
+	frames[0].frame.callback(ring, &frames[0].frame, false);
+	packets[0] = NULL;
+
+	tx_queue_timeout_ms = saved_timeout_ms;
+	tx_poll_delay_ms = saved_poll_ms;
+
+	if (inflight_out)
+		*inflight_out = atomic_read(&path->tx_inflight);
+	if (done_calls_out)
+		*done_calls_out = ctx.done_calls;
+	if (status_out)
+		*status_out = ctx.last_status;
+	ret = 0;
+
+out:
+	if (path)
+		tbv_test_path_teardown(path, packets, 1);
+	kfree(dma);
+	kfree(ring);
+	kfree(frames);
 	kfree(path);
 	return ret;
 }
