@@ -1,0 +1,147 @@
+#!/usr/bin/env bpftrace
+/*
+ * Ordered, replayable record of every verb a real workload issues against
+ * thunderbolt_ibverbs, plus the driver-internal decisions each one triggers.
+ *
+ * The module has no BTF (DKMS builds do not carry CONFIG_DEBUG_INFO_BTF_MODULES)
+ * so the driver's own structs -- tbv_qp, tbv_path, tbv_send_ctx -- cannot be
+ * dereferenced here. ib_qp and ib_qp_attr do come from vmlinux BTF and are read
+ * by name. The work-request structs do not survive usefully: vmlinux BTF has no
+ * ib_rdma_wr at all and bpftrace resolves ib_recv_wr to a fieldless forward, so
+ * those are read at fixed offsets, verified with pahole against the running
+ * kernel's own BTF:
+ *   ib_send_wr  next 0, wr_id 8, sg_list 16, num_sge 24, opcode 28,
+ *               send_flags 32, ex.imm_data 36                (size 40)
+ *   ib_recv_wr  next 0, wr_id 8, sg_list 16, num_sge 24      (size 32)
+ *   ib_rdma_wr  wr 0 (an ib_send_wr), remote_addr 40, rkey 48
+ *   ib_sge      addr 0, length 8, lkey 12
+ * That is enough for the verb sequence itself, which is what a KUnit replay
+ * needs; the matching path credit and queue state is read out of debugfs
+ * (summary, peers) by tbv-hang-repro.sh at the same instants.
+ *
+ * Each record is one line, seq-numbered so the two ends of a run can be merged:
+ *   <seq> <ts_ns> <cpu> <comm/pid> <event> k=v ...
+ * tbv-trace-to-kunit.py consumes exactly this format.
+ *
+ * Errors are the point of the exercise, so the return probes matter as much as
+ * the entry probes: tbv_post_send_one is where a WR is rejected outright and
+ * tbv_path_reserve_data is where the software credit window refuses admission.
+ *
+ * Usage: sudo bpftrace tbv-verb-trace.bt [-o out.txt]     (runs until SIGINT)
+ */
+
+BEGIN { @seq = 0; printf("# tbv-verb-trace v1\n"); }
+
+/* ---- QP state machine -------------------------------------------------- */
+kprobe:tbv_modify_qp
+{
+	$qp = (struct ib_qp *)arg0;
+	$a = (struct ib_qp_attr *)arg1;
+	@seq++;
+	printf("%llu %llu %d %s/%d modify_qp qpn=%u mask=0x%x state=%d path_mtu=%d dest_qp=%u rq_psn=%u sq_psn=%u timeout=%u retry_cnt=%u rnr_retry=%u min_rnr=%u max_rd_atomic=%u port=%u\n",
+	       @seq, nsecs, cpu, comm, pid,
+	       $qp->qp_num, arg2, $a->qp_state, $a->path_mtu,
+	       $a->dest_qp_num, $a->rq_psn, $a->sq_psn, $a->timeout,
+	       $a->retry_cnt, $a->rnr_retry, $a->min_rnr_timer,
+	       $a->max_rd_atomic, $a->port_num);
+}
+
+/* ---- send WRs ---------------------------------------------------------- */
+/*
+ * ib_send_wr is the first member of ib_rdma_wr, so the same pointer reads the
+ * RDMA addressing for WRITE/WRITE_WITH_IMM/READ and is simply ignored for SEND.
+ */
+kprobe:tbv_post_send_one
+{
+	$wr_id  = *(uint64 *)(arg1 + 8);
+	$sgl    = *(uint64 *)(arg1 + 16);
+	$num_sge = *(int32 *)(arg1 + 24);
+	$opcode = *(int32 *)(arg1 + 28);
+	$flags  = *(int32 *)(arg1 + 32);
+	$imm    = *(uint32 *)(arg1 + 36);
+	$len    = $num_sge > 0 ? *(uint32 *)($sgl + 8) : 0;
+	@seq++;
+	@one[tid] = @seq;
+	printf("%llu %llu %d %s/%d post_send_one op=%d wr_id=%llu flags=0x%x num_sge=%d len0=%u imm=0x%x remote_addr=0x%llx rkey=0x%x\n",
+	       @seq, nsecs, cpu, comm, pid,
+	       $opcode, $wr_id, $flags, $num_sge, $len, $imm,
+	       *(uint64 *)(arg1 + 40), *(uint32 *)(arg1 + 48));
+}
+
+kretprobe:tbv_post_send_one /@one[tid]/
+{
+	if (retval != 0) {
+		printf("%llu %llu %d %s/%d post_send_one_ret for=%llu ret=%d\n",
+		       @seq, nsecs, cpu, comm, pid, @one[tid], retval);
+	}
+	delete(@one[tid]);
+}
+
+kprobe:tbv_post_send
+{
+	$qp = (struct ib_qp *)arg0;
+	@sqpn[tid] = $qp->qp_num;
+	@seq++;
+	printf("%llu %llu %d %s/%d post_send qpn=%u\n",
+	       @seq, nsecs, cpu, comm, pid, $qp->qp_num);
+}
+
+kretprobe:tbv_post_send /@sqpn[tid]/
+{
+	if (retval != 0) {
+		@seq++;
+		printf("%llu %llu %d %s/%d post_send_ret qpn=%u ret=%d\n",
+		       @seq, nsecs, cpu, comm, pid, @sqpn[tid], retval);
+	}
+	delete(@sqpn[tid]);
+}
+
+/* ---- recv WRs ---------------------------------------------------------- */
+kprobe:tbv_post_recv
+{
+	$qp = (struct ib_qp *)arg0;
+	$wr_id = *(uint64 *)(arg1 + 8);
+	$sgl = *(uint64 *)(arg1 + 16);
+	$num_sge = *(int32 *)(arg1 + 24);
+	$len = $num_sge > 0 ? *(uint32 *)($sgl + 8) : 0;
+	@seq++;
+	printf("%llu %llu %d %s/%d post_recv qpn=%u wr_id=%llu num_sge=%d len0=%u\n",
+	       @seq, nsecs, cpu, comm, pid,
+	       $qp->qp_num, $wr_id, $num_sge, $len);
+}
+
+/* ---- admission control: where a WR is refused --------------------------- */
+kretprobe:tbv_path_reserve_data
+{
+	if (retval != 0) {
+		@seq++;
+		@reserve_fail = count();
+		printf("%llu %llu %d %s/%d reserve_data_fail ret=%d\n",
+		       @seq, nsecs, cpu, comm, pid, retval);
+	}
+}
+
+/*
+ * The credit gate. A schedule_tx pass that admits nothing is the stall: the
+ * packets are queued, the window is empty and only a peer PATH_CREDIT frame can
+ * move it. Counted rather than printed per-call because it runs hot.
+ */
+kprobe:tbv_path_schedule_tx { @sched = count(); }
+kprobe:tbv_path_kick_tx     { @kick = count(); }
+
+/* ---- completions -------------------------------------------------------- */
+kprobe:tbv_send_complete.isra.0
+{
+	@seq++;
+	printf("%llu %llu %d %s/%d send_complete ctx=%p status=%d\n",
+	       @seq, nsecs, cpu, comm, pid, arg0, (int32)arg1);
+}
+
+kprobe:tbv_send_tx_done
+{
+	@seq++;
+	printf("%llu %llu %d %s/%d send_tx_done ctx=%p status=%d\n",
+	       @seq, nsecs, cpu, comm, pid, arg0, (int32)arg1);
+}
+
+END { clear(@one); clear(@sqpn); }

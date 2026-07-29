@@ -1,0 +1,123 @@
+chain order=10.2.0.57,10.2.0.50 host=10.2.0.57 rank=0 world_size=2 master=10.2.0.57:29511 iface=enp110s0
+[2026-07-29T03:58:34.540 rank=0] torch=2.7.0a0+7c8ec84dab.nv25.03 nccl=2.25.1 device=NVIDIA GeForce RTX 3090
+[2026-07-29T03:58:34.816 rank=0] process group up
+appmana-019:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+appmana-019:1:1 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+appmana-019:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set by environment to enp110s0
+appmana-019:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to enp110s0
+appmana-019:1:119 [0] NCCL INFO Socket handshake magic 0x564ab9f2fc4b9d6c (built-in default)
+appmana-019:1:1 [0] NCCL INFO cudaDriverVersion 13030
+appmana-019:1:1 [0] NCCL INFO NCCL version 2.30.7+cuda12.8
+appmana-019:1:1 [0] NCCL INFO NCCL git version HEAD railroute-dsv4-30.5toks-2026-07-13
+appmana-019:1:1 [0] NCCL INFO Comm config Blocking set to 1
+appmana-019:1:1 [0] NCCL INFO Comm config Traffic class set to 0
+appmana-019:1:1 [0] NCCL INFO NCCL_NET_PLUGIN set by environment to none
+appmana-019:1:1 [0] NCCL INFO NCCL_IB_DISABLE set by environment to 0.
+appmana-019:1:1 [0] NCCL INFO dlvsym failed on mlx5dv_get_data_direct_sysfs_path - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_get_data_direct_sysfs_path, version MLX5_1.25 version MLX5_1.25
+appmana-019:1:1 [0] NCCL INFO dlvsym failed on mlx5dv_reg_dmabuf_mr - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_reg_dmabuf_mr, version MLX5_1.25 version MLX5_1.25
+appmana-019:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set by environment to enp110s0
+appmana-019:1:1 [0] NCCL INFO NCCL_IB_HCA set to usb4_rdma,rxe_lan
+
+[2026-07-29 03:58:35] appmana-019:1:1 [0] transport/net_ib/init.cc:67 (ncclIbGetPciPath) NCCL WARN Could not find real path of rxe_lan (/sys/class/infiniband/rxe_lan/device)
+appmana-019:1:1 [0] NCCL INFO NET/IB: [0] rxe_lan:uverbs1:1/RoCE provider=None speed=10000 context=0x159dd700 pciPath=(null) ar=0 oooRqSize=0
+appmana-019:1:1 [0] NCCL INFO NET/IB: [1] usb4_rdma5:uverbs0:1/RoCE provider=None speed=25000 context=0x159dde90 pciPath=/sys/devices/pci0000:00/0000:00:02.1/0000:02:00.0/0000:03:00.0/0000:04:00.0/0000:05:00.0/0000:06:00.0 ar=0 oooRqSize=0
+appmana-019:1:1 [0] NCCL INFO NET/IB: [2] usb4_rdma15:uverbs2:1/RoCE provider=None speed=25000 context=0x159de690 pciPath=/sys/devices/pci0000:00/0000:00:02.1/0000:02:00.0/0000:03:00.0/0000:04:00.0/0000:05:00.0/0000:06:00.0 ar=0 oooRqSize=0
+appmana-019:1:1 [0] NCCL INFO NCCL_IB_MERGE_NICS set by environment to 0.
+appmana-019:1:1 [0] NCCL INFO NET/IB : Made virtual device [0] name=usb4_rdma5 speed=25000 ndevs=1 rail=-1 plane=-1
+appmana-019:1:1 [0] NCCL INFO NET/IB : Made virtual device [1] name=usb4_rdma15 speed=25000 ndevs=1 rail=-1 plane=-1
+appmana-019:1:1 [0] NCCL INFO NET/IB : Made virtual device [2] name=rxe_lan speed=10000 ndevs=1 rail=-1 plane=-1
+appmana-019:1:1 [0] NCCL INFO NET/IB : Using [0]usb4_rdma5:1/RoCE [1]usb4_rdma15:1/RoCE [2]rxe_lan:1/RoCE [RO]; OOB enp110s0:10.2.0.57<0>
+appmana-019:1:1 [0] NCCL INFO Initialized NET plugin IB
+appmana-019:1:1 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-019:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+appmana-019:1:1 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+appmana-019:1:1 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+appmana-019:1:1 [0] NCCL INFO Unable to use GIN: Peermem is not supported, nor DMA-BUF.
+appmana-019:1:1 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-019:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+appmana-019:1:1 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+appmana-019:1:1 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+appmana-019:1:1 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-019:1:1 [0] NCCL INFO Using network IB
+appmana-019:1:1 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+appmana-019:1:1 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x1159b050 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0xfe93f9efa47532b8 - Init START
+appmana-019:1:1 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+appmana-019:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma5'
+appmana-019:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 1 'usb4_rdma15'
+appmana-019:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 2 'rxe_lan'
+appmana-019:1:1 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-019:1:1 [0] NCCL INFO Rank 0: 3 Net devices
+appmana-019:1:1 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-019:1:1 [0] NCCL INFO Local Net device counts across ranks: min 1 max 3
+appmana-019:1:1 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-019:1:1 [0] NCCL INFO Rank 1 has 1 local Net devices (max 3).
+appmana-019:1:1 [0] NCCL INFO Detected mixed local Net device counts across ranks (min 1, max 3). Ignoring due to NCCL_IGNORE_NET_MISMATCH.
+appmana-019:1:1 [0] NCCL INFO comm 0x1159b050 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-019:1:1 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-019:1:1 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-019:1:1 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-019:1:1 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-019:1:1 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-019:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+appmana-019:1:1 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+appmana-019:1:1 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-019:1:124 [0] NCCL INFO [Proxy Service] Device 0 CPU core 27
+appmana-019:1:125 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 22
+appmana-019:1:124 [0] NCCL INFO proxy listening socket at 10.2.0.57<54597>
+appmana-019:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+appmana-019:1:1 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+appmana-019:1:1 [0] NCCL INFO NCCL_PROTO set by environment to Simple
+appmana-019:1:1 [0] NCCL INFO NCCL_ALGO set by environment to Ring
+appmana-019:1:1 [0] NCCL INFO Enabled NCCL Func/Proto/Algo Matrix:
+     Function |       LL     LL128    Simple   |          Tree           Ring  CollNetDirect   CollNetChain           NVLS       NVLSTree            PAT  
+    Broadcast |        0         0         1   |             0              1              0              0              0              0              0  
+       Reduce |        0         0         1   |             0              1              0              0              0              0              0  
+    AllGather |        0         0         1   |             0              1              0              0              0              0              0  
+ReduceScatter |        0         0         1   |             0              1              0              0              0              0              0  
+    AllReduce |        0         0         1   |             0              1              0              0              0              0              0  
+
+appmana-019:1:1 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-019:1:1 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-019:1:1 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-019:1:1 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-019:1:1 [0] NCCL INFO ncclCommInitRankConfig comm 0x1159b050 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0xfe93f9efa47532b8 - Init COMPLETE
+appmana-019:1:1 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.14 (kernels 0.11, alloc 0.00, bootstrap 0.02, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+appmana-019:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 0 -> netDev 2 (netId 0x2) graph=1
+appmana-019:1:126 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 29
+appmana-019:1:1 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/2
+appmana-019:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 1 -> netDev 2 (netId 0x2) graph=1
+appmana-019:1:1 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/2
+appmana-019:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 0 -> netDev 2 (netId 0x2) graph=1
+appmana-019:1:1 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/2
+appmana-019:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 1 -> netDev 2 (netId 0x2) graph=1
+appmana-019:1:1 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/2
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x735ecc00e000)
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=1 devName=usb4_rdma15 ndevs=3 nmdevs=3 qp_num=2328 pkey=0 pd=0x735ecc00b7e0 oooRq=0
+appmana-019:1:124 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-019:1:124 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 1 IbDev 1 Port 1 qp_num 2328 mtu 5 GID 1 (6D3E760F6E7046FD/100000000000000) ctsFifoRkey=0x87 ctsFifoLkey=0x87
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x735ecc052000)
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=1 devName=usb4_rdma15 ndevs=3 nmdevs=3 qp_num=2329 pkey=0 pd=0x735ecc00b7e0 oooRq=0
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x735ecc097000)
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=1 devName=usb4_rdma15 ndevs=3 nmdevs=3 qp_num=2330 pkey=0 pd=0x735ecc00b7e0 oooRq=0
+appmana-019:1:124 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-019:1:124 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 1 IbDev 1 Port 1 qp_num 2330 mtu 5 GID 1 (6D3E760F6E7046FD/100000000000000) ctsFifoRkey=0x92 ctsFifoLkey=0x92
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x735ecc0db000)
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NET/IB: rail routing: peer GID on a rail /64 -> dev 1 (usb4_rdma15), overriding default dev 2
+appmana-019:1:124 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-019:1:124 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=1 devName=usb4_rdma15 ndevs=3 nmdevs=3 qp_num=2331 pkey=0 pd=0x735ecc00b7e0 oooRq=0
+appmana-019:1:1 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+[rank0]:[E729 03:58:38.327884598 ProcessGroupNCCL.cpp:1703] [PG ID 0 PG GUID 0(default_pg) Rank 0] Observed flight recorder dump signal from another rank via TCPStore.
+[rank0]:[E729 03:58:38.328018027 ProcessGroupNCCL.cpp:1764] [PG ID 0 PG GUID 0(default_pg) Rank 0] Received a dump signal due to a collective timeout from  rank 1 and we will try our best to dump the debug info. Last enqueued NCCL work: 1, last completed NCCL work: -1.This is most likely caused by incorrect usages of collectives, e.g., wrong sizes used across ranks, the order of collectives is not same for all ranks or the scheduled collective, for some reason, didn't run. Additionally, this can be caused by GIL deadlock or other reasons such as network errors or bugs in the communications library (e.g. NCCL), etc. 
+[rank0]:[E729 03:58:38.328107027 ProcessGroupNCCL.cpp:1554] [PG ID 0 PG GUID 0(default_pg) Rank 0] ProcessGroupNCCL preparing to dump debug info. Include stack trace: 1

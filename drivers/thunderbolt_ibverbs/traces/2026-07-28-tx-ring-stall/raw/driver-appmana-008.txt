@@ -1,0 +1,427 @@
+### uptime
+up 4 hours, 23 minutes
+### ibv_devices
+    device          	   node GUID
+    ------          	----------------
+    usb4_rdma15     	0200544258524253
+### summary
+profile: linux_perf
+native_enabled: 1
+apple_enabled: 0
+rc_supported: 1
+uc_supported: 1
+native_control: source_aware
+native_same_peer_multicable: enabled
+native_legacy_ambiguous_limited: 0
+configured_links: 0
+link_owner: rdma
+tbnet_identity: off
+tbnet_identity_state: 0x0
+tbnet_identity_tbnet: <unset>
+tbnet_identity_gid: <unset>
+tbnet_identity_proxy_ipv4: 0.0.0.0
+tbnet_identity_minimal_e2e: 0
+tbnet_identity_minimal_apple_only: 1
+tbnet_identity_minimal_neighbor_seen: 0
+tbnet_identity_rx_handler: 0
+tbnet_identity_minimal_started: 0
+tbnet_identity_minimal_login_rx: 0
+tbnet_identity_minimal_login_tx: 0
+tbnet_identity_minimal_logout_rx: 0
+tbnet_identity_minimal_logout_tx: 0
+tbnet_identity_minimal_status_rx: 0
+tbnet_identity_minimal_status_tx: 0
+tbnet_identity_minimal_packet_rx: 0
+tbnet_identity_minimal_packet_tx_posted: 0
+tbnet_identity_minimal_packet_tx: 0
+tbnet_identity_minimal_packet_tx_errors: 0
+tbnet_identity_minimal_path_errors: 0
+tbnet_identity_arp_requests: 0
+tbnet_identity_arp_replies: 0
+tbnet_identity_arp_ignored: 0
+tbnet_identity_arp_errors: 0
+tbnet_policy: allow
+native_service_count: 2
+apple_service_registered: 0
+services_registered: 1
+allocate_rings: 1
+start_rings: 1
+negotiate_native: 1
+enable_tunnels: 1
+apple_tunnels_wait_tbnet: 0
+apple_tunnels_pending: 0
+native_data: 1
+apple_data: 0
+native_fragment_striping: 0
+native_home_rail_qp: 0
+register_verbs: 1
+verbs_registered: 1
+verbs_ucontexts: 0
+verbs_pds: 1
+verbs_cqs: 1
+verbs_qps: 1
+verbs_mrs: 0
+verbs_recv_wqes: 512
+data_wr_send: 48
+data_wr_op_send: 0
+data_wr_op_send_imm: 0
+data_wr_op_write: 48
+data_wr_op_write_imm: 0
+data_wr_op_unsupported: 0
+data_wr_live: 0
+data_wr_no_path: 0
+data_wr_no_recv_credit: 0
+data_wr_copied: 48
+data_wr_zcopy: 0
+data_wr_zcopy_fallback: 0
+data_wr_zcopy_fallback_striping: 0
+data_wr_zcopy_fallback_unsafe_sge: 0
+data_wr_zcopy_fallback_peer: 0
+data_wr_zcopy_fallback_unaligned: 0
+data_wr_zcopy_window_first: 0
+data_wr_zcopy_window_rest: 0
+data_wr_zcopy_full: 0
+data_wr_zcopy_partial: 0
+data_wr_zcopy_retransmit: 0
+data_wr_zcopy_frames: 0
+data_wr_zcopy_page_suspect: 0
+data_wr_zcopy_hdr: 0
+data_wr_zcopy_payload_full: 0
+data_wr_zcopy_payload_tail: 0
+data_wr_zcopy_staged: 0
+data_wr_zcopy_mr_mapped: 0
+data_wr_zcopy_remapped: 0
+data_wr_zcopy_fb_no_mr_mapping: 0
+data_wr_zcopy_fb_device_mismatch: 0
+data_wr_zcopy_fb_dmabuf_or_odp: 0
+data_wr_zcopy_fb_offset_not_found: 0
+data_wr_zcopy_fb_other: 0
+data_wr_copy_error: 0
+data_wr_path_send: 384
+data_wr_path_send_error: 0
+data_wr_retransmit: 336
+data_wr_rnr_retransmit: 0
+data_wr_nak_retransmit: 0
+data_wr_retry_enqueue_error: 0
+data_wr_retry_exhausted: 48
+data_wr_rnr_retry_exhausted: 0
+data_wr_timeout: 48
+apple_sq_queued: 0
+apple_sq_dequeued: 0
+apple_sq_full: 0
+apple_sq_flushed: 0
+data_tx_accepted: 48
+data_tx_posted: 432
+data_tx_completed: 432
+data_tx_canceled: 0
+data_tx_errors: 0
+data_tx_credit_stalls: 0
+data_tx_credit_received: 0
+data_tx_credit_consumed: 384
+data_rx_credit_eligible: 0
+data_rx_completed: 0
+data_rx_credit_sent: 0
+data_rx_credit_send_error: 0
+data_rx_repost_failed: 0
+data_rx_bad_frame: 0
+data_rx_bad_header: 0
+data_rx_crc_error: 0
+data_rx_overrun: 0
+data_rx_crc_error_in_stream: 0
+data_rx_crc_error_standalone: 0
+data_rx_crc_error_maxsize: 0
+data_rx_send: 0
+data_rx_op_send: 0
+data_rx_op_send_imm: 0
+data_rx_op_write: 0
+data_rx_op_write_imm: 0
+data_rx_ack: 0
+data_rx_ack_matched: 0
+data_rx_ack_match_retried: 0
+data_rx_ack_match_max_ms: 0
+data_rx_ack_match_current_max_ms: 0
+data_rx_ack_match_over_10ms: 0
+data_rx_ack_match_over_64ms: 0
+data_rx_ack_miss: 0
+data_rx_late_ack: 0
+data_rx_ack_cumulative: 0
+data_tx_ack_ok: 0
+data_tx_ack_rnr: 0
+data_tx_ack_error: 0
+data_tx_ack_send_error: 0
+data_rx_ack_rnr: 0
+data_rx_duplicate_ack: 0
+data_rx_ack_history_miss: 0
+data_tx_nak: 0
+data_tx_nak_send_error: 0
+data_rx_nak: 0
+data_rx_nak_matched: 0
+data_rx_nak_miss: 0
+data_tx_read_ack_ok: 0
+data_tx_read_ack_retry: 0
+data_tx_read_ack_error: 0
+data_rx_read_ack_ok: 0
+data_rx_read_ack_retry: 0
+data_rx_read_ack_error: 0
+data_read_resp_retransmit: 0
+data_read_resp_drop: 0
+data_rx_read_resp_duplicate: 0
+data_rx_read_resp_gap: 0
+data_rx_read_resp_remote_error: 0
+data_rx_read_resp_bad_header: 0
+data_rx_read_resp_copy_error: 0
+data_rx_read_resp_short: 0
+data_rx_read_req_no_access: 0
+data_rx_read_req_no_mr: 0
+data_rx_read_req_mr_access: 0
+data_rx_read_req_too_large: 0
+data_rx_read_req_bad_iova: 0
+data_rx_read_req_alloc_error: 0
+data_rx_read_req_resp_busy: 0
+data_rx_read_req_resp_error: 0
+data_rx_no_qp: 0
+data_rx_bad_peer: 0
+data_rx_unconnected_qp: 0
+data_rx_qp_error: 0
+data_rx_no_recv: 0
+data_rx_rnr: 0
+data_rx_rnr_suppressed: 0
+data_rx_copy_error: 0
+data_rx_send_len_error: 0
+data_rx_send_prot_error: 0
+data_rx_send_cq_error: 0
+data_rx_send_bad_fragment: 0
+data_rx_send_sequence_error: 0
+data_rx_active_timeout: 0
+data_rx_reorder_buffered: 0
+data_rx_reorder_delivered: 0
+data_rx_reorder_dropped: 0
+data_rx_reorder_timeout: 0
+data_rx_reorder_window: 0
+data_rx_pending_discarded: 0
+apple_rx_sof: 0
+apple_rx_eof3: 0
+apple_rx_eof_other: 0
+apple_rx_sof_while_active: 0
+apple_rx_no_sof_when_idle: 0
+apple_rx_eof_without_active: 0
+apple_rx_len_overrun: 0
+data_cq_overflow: 0
+### peers
+peer 1 backend=native rails=1 native_qp_rr_rail_id=0 identity_valid=1 rail_scoped=1 remote_eui64=004e72fffe920300 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x1 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=0 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=0 remote_ready=0 attempts=8 last_error=-110 local_out=9 local_tx=3 local_rx=3 remote_rail=0x0 remote_out=9 remote_tx=3 remote_rx=3
+    data_tx_enqueued=0 data_tx_posted=0 data_tx_completed=0 data_tx_credit_stalls=0 data_tx_credit_received=0 data_tx_credit_consumed=0 tx_credits=768/768
+    control_tx_enqueued=0 control_tx_posted=0 control_tx_completed=0 control_tx_queue_max_ms=0
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=0 data_rx_credit_sent=0 data_rx_credit_eligible=0 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=0
+    tx_poll enabled=1 calls=0 completed=0
+    rx_supp_poll enabled=0 calls=0 completed=0
+peer 2 backend=native rails=1 native_qp_rr_rail_id=1 identity_valid=1 rail_scoped=1 remote_eui64=007c4dfffe6b0200 remote_ipv4=0.0.0.0
+  rail=0x0 route=0x3 local=0 remote=0 path=1 link_speed=20Gb/s link_width=0x1 active=1 data_ready=1 native_qp_bind_count=0 state=tunnel_enabled negotiated=1 ready_sent=1 remote_ready=1 attempts=0 last_error=0 local_out=9 local_tx=4 local_rx=4 remote_rail=0x0 remote_out=9 remote_tx=4 remote_rx=4
+    data_tx_enqueued=384 data_tx_posted=384 data_tx_completed=384 data_tx_credit_stalls=0 data_tx_credit_received=0 data_tx_credit_consumed=384 tx_credits=720/768
+    control_tx_enqueued=48 control_tx_posted=48 control_tx_completed=48 control_tx_queue_max_ms=0
+    path_cfg tx_flags=0x2 rx_flags=0x2 e2e=0 wire_flags=0x1 tx_ring=1024 rx_ring=1024 sof_mask=0x2 eof_mask=0xc
+    data_rx_completed=0 data_rx_credit_sent=0 data_rx_credit_eligible=0 data_rx_credit_send_error=0 data_rx_repost_failed=0 rx_credit_pending=0
+    tx_poll enabled=1 calls=169 completed=94
+    rx_supp_poll enabled=0 calls=0 completed=0
+### dmesg
+[15217.138326] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=0 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.138333] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=1 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.138337] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=2 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.138340] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=3 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.159309] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=0 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.159315] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=1 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.159318] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=2 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.159322] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=3 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.201311] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=0 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=42 tx_pending=0 acked_prefix=0 nak=0+0
+[15217.201319] thunderbolt_ibverbs: native retransmit qpn=0x946 dest_qp=0x915 psn=1 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=42 tx_pending=0 acked_prefix=0 nak=0+0
+[15219.989331] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x946 dest_qp=0x915 psn=0 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15219.989335] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x946 dest_qp=0x915 psn=1 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15219.989337] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x946 dest_qp=0x915 psn=2 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15219.989339] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x946 dest_qp=0x915 psn=3 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15221.085373] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15221.085393] thunderbolt_ibverbs: advertised 2 native services
+[15221.085396] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15233.245447] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15233.245463] thunderbolt_ibverbs: advertised 2 native services
+[15233.245464] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15245.406526] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15245.406541] thunderbolt_ibverbs: advertised 2 native services
+[15245.406543] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15257.566617] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15257.566635] thunderbolt_ibverbs: advertised 2 native services
+[15257.566636] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15269.725710] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15269.725726] thunderbolt_ibverbs: advertised 2 native services
+[15269.725728] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15281.885801] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15281.885818] thunderbolt_ibverbs: advertised 2 native services
+[15281.885819] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15294.045898] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15294.045915] thunderbolt_ibverbs: advertised 2 native services
+[15294.045916] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15306.206981] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15306.206998] thunderbolt_ibverbs: advertised 2 native services
+[15306.207000] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15318.366062] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15318.366081] thunderbolt_ibverbs: advertised 2 native services
+[15318.366083] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15330.527150] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15330.527167] thunderbolt_ibverbs: advertised 2 native services
+[15330.527168] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15342.688243] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15342.688260] thunderbolt_ibverbs: advertised 2 native services
+[15342.688261] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15354.847332] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15354.847348] thunderbolt_ibverbs: advertised 2 native services
+[15354.847349] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15367.006432] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15367.006449] thunderbolt_ibverbs: advertised 2 native services
+[15367.006451] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15379.166514] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15379.166532] thunderbolt_ibverbs: advertised 2 native services
+[15379.166534] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15391.326623] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15391.326639] thunderbolt_ibverbs: advertised 2 native services
+[15391.326641] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15403.486708] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15403.486723] thunderbolt_ibverbs: advertised 2 native services
+[15403.486725] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15415.648783] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15415.648800] thunderbolt_ibverbs: advertised 2 native services
+[15415.648802] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15427.806914] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15427.806934] thunderbolt_ibverbs: advertised 2 native services
+[15427.806936] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15439.967975] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15439.967995] thunderbolt_ibverbs: advertised 2 native services
+[15439.967996] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15452.128061] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15452.128083] thunderbolt_ibverbs: advertised 2 native services
+[15452.128085] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15464.288149] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15464.288167] thunderbolt_ibverbs: advertised 2 native services
+[15464.288168] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15476.447312] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15476.447333] thunderbolt_ibverbs: advertised 2 native services
+[15476.447335] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15488.607344] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15488.607363] thunderbolt_ibverbs: advertised 2 native services
+[15488.607364] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15500.767432] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15500.767452] thunderbolt_ibverbs: advertised 2 native services
+[15500.767454] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15512.927522] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15512.927539] thunderbolt_ibverbs: advertised 2 native services
+[15512.927541] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15525.087649] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15525.087670] thunderbolt_ibverbs: advertised 2 native services
+[15525.087672] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15537.249697] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15537.249713] thunderbolt_ibverbs: advertised 2 native services
+[15537.249715] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15549.408798] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15549.408815] thunderbolt_ibverbs: advertised 2 native services
+[15549.408816] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15561.568922] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15561.568942] thunderbolt_ibverbs: advertised 2 native services
+[15561.568944] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15573.728985] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15573.729003] thunderbolt_ibverbs: advertised 2 native services
+[15573.729005] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15585.888078] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15585.888095] thunderbolt_ibverbs: advertised 2 native services
+[15585.888096] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15598.048163] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15598.048183] thunderbolt_ibverbs: advertised 2 native services
+[15598.048185] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15610.208260] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15610.208279] thunderbolt_ibverbs: advertised 2 native services
+[15610.208280] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15622.368385] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15622.368402] thunderbolt_ibverbs: advertised 2 native services
+[15622.368404] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15626.465889] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x948 dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15626.471898] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x949 dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15626.477713] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94a dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15626.483064] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94b dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15626.505378] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=0 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.505390] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=1 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.505393] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=2 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.505396] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=3 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.526363] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=0 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.526369] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=1 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.526373] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=2 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.526376] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=3 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.568370] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=0 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=42 tx_pending=0 acked_prefix=0 nak=0+0
+[15626.568383] thunderbolt_ibverbs: native retransmit qpn=0x948 dest_qp=0x918 psn=1 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=42 tx_pending=0 acked_prefix=0 nak=0+0
+[15629.361383] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x948 dest_qp=0x918 psn=0 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15629.361388] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x948 dest_qp=0x918 psn=1 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15629.361390] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x948 dest_qp=0x918 psn=2 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15629.361392] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x948 dest_qp=0x918 psn=3 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15634.528442] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15634.528459] thunderbolt_ibverbs: advertised 2 native services
+[15634.528461] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15646.688633] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15646.688654] thunderbolt_ibverbs: advertised 2 native services
+[15646.688656] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15658.848789] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15658.848809] thunderbolt_ibverbs: advertised 2 native services
+[15658.848811] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15671.009715] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15671.009735] thunderbolt_ibverbs: advertised 2 native services
+[15671.009737] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15683.168811] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15683.168828] thunderbolt_ibverbs: advertised 2 native services
+[15683.168829] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15695.328901] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15695.328921] thunderbolt_ibverbs: advertised 2 native services
+[15695.328924] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15707.490017] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15707.490036] thunderbolt_ibverbs: advertised 2 native services
+[15707.490038] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15719.649091] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15719.649113] thunderbolt_ibverbs: advertised 2 native services
+[15719.649115] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15726.644493] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94c dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15726.650835] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94d dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15726.656972] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94e dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15726.662775] thunderbolt_ibverbs: native QP dgid resolved by local rail ULA /64: qpn=0x94f dgid=fd46706e0f763e6d0000000000000001 peer=2
+[15726.685148] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=0 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.685159] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=1 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.685167] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=2 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.685172] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=3 opcode=3 total=64 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.706139] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=0 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.706148] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=1 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.706152] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=2 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.706156] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=3 opcode=3 total=64 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.747147] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=0 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=41 tx_pending=0 acked_prefix=0 nak=0+0
+[15726.747166] thunderbolt_ibverbs: native retransmit qpn=0x94c dest_qp=0x91c psn=1 opcode=3 total=64 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=41 tx_pending=0 acked_prefix=0 nak=0+0
+[15729.537169] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x94c dest_qp=0x91c psn=0 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15729.537175] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x94c dest_qp=0x91c psn=1 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15729.537178] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x94c dest_qp=0x91c psn=2 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15729.537180] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x94c dest_qp=0x91c psn=3 opcode=3 retries=7 rail=0x0 route=0x3 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[15731.810179] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15731.810196] thunderbolt_ibverbs: advertised 2 native services
+[15731.810197] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15743.969392] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15743.969415] thunderbolt_ibverbs: advertised 2 native services
+[15743.969417] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15756.129448] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15756.129468] thunderbolt_ibverbs: advertised 2 native services
+[15756.129471] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15768.289454] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15768.289472] thunderbolt_ibverbs: advertised 2 native services
+[15768.289473] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15780.449556] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15780.449575] thunderbolt_ibverbs: advertised 2 native services
+[15780.449577] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15792.609667] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15792.609689] thunderbolt_ibverbs: advertised 2 native services
+[15792.609691] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15804.769735] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15804.769752] thunderbolt_ibverbs: advertised 2 native services
+[15804.769754] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[15816.930846] thunderbolt_ibverbs: native READY route=0x1 rail=0x0 unanswered after 10 attempts (-110); re-announcing services and retrying
+[15816.930868] thunderbolt_ibverbs: advertised 2 native services
+[15816.930870] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)

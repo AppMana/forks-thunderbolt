@@ -1155,6 +1155,21 @@ int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 				u32 *credits_out, u32 *max_out);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
+/*
+ * Replays the captured appmana-019 TX ring stall on a real path: a running TX
+ * ring that never completes a posted frame, with the packet already handed off
+ * the queue the way tbv_path_schedule_tx() leaves it. Runs the real TX poll
+ * work up to @passes times, each pass aging the last-progress stamp by
+ * @stall_ms, against a queue ceiling of @timeout_ms. Reports the poll's own
+ * calls/completions (the captured rail read calls=282365 completed=0), whether
+ * the path reads as stalled, and whether the packet's owner was ever completed
+ * -- that completion being the only thing that drains the owning WR.
+ */
+int tbv_test_path_tx_ring_stall(u32 passes, u32 stall_ms, u32 timeout_ms,
+				u32 *passes_used_out, u32 *inflight_out,
+				u32 *done_calls_out, int *status_out,
+				u64 *poll_calls_out, u64 *poll_completed_out,
+				bool *tx_stalled_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the

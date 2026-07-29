@@ -3383,6 +3383,197 @@ out:
 	kfree(path);
 	return ret;
 }
+
+/*
+ * Scenario hook for tests/tx_ring_stall_test.c -- replay of a captured field
+ * hang, not a hand-invented state. See
+ * drivers/thunderbolt_ibverbs/traces/2026-07-28-tx-ring-stall/ for the capture
+ * this is built from.
+ *
+ * Field provenance (every field below is a state the driver itself produces on
+ * the wire, taken from the appmana-019/appmana-008 capture):
+ *  - tx_ring non-NULL, running, with an outstanding uncompleted descriptor is
+ *    "frames were posted and the NHI never completed them". The observed rail
+ *    read `tx_poll enabled=1 calls=282365 completed=0` with
+ *    `data_tx_posted=2 data_tx_completed=0`, so the poll ran a quarter of a
+ *    million times against a ring that returned nothing. tb_ring_poll() is the
+ *    real core function; a running ring whose tail descriptor lacks
+ *    RING_DESC_COMPLETED is exactly what it sees on that hardware.
+ *  - tx_inflight = 1 is what tbv_path_schedule_tx() leaves after handing a
+ *    frame to tb_ring_tx(); only a ring completion or an error unwind lowers it.
+ *  - the packet is off tx_data_queue with queued = false because
+ *    tbv_path_schedule_tx() dequeues before posting. A COPIED packet (the
+ *    fleet's mode -- every capture shows data_wr_zcopy = 0 and
+ *    data_wr_copied > 0) is then referenced only by the ring frame: it is on
+ *    neither tx_data_queue nor tx_zcopy_inflight, so neither the queue ceiling
+ *    nor tbv_path_flush_tx_queue() can reach it.
+ *  - tx_last_progress_jiffies back-dated by @stall_ms is "no completion for
+ *    that long", which is the only clock tbv_path_tx_stalled() and the poll's
+ *    own stall warning consult.
+ *
+ * Runs the real tbv_path_tx_poll_work() @passes times and reports whether the
+ * packet's owner was ever completed. Its done callback is the only thing that
+ * drains the owning WR's tx_pending, so a run where done_calls stays 0 is the
+ * hang: the poll re-arms forever and the WR can never finish.
+ */
+int tbv_test_path_tx_ring_stall(u32 passes, u32 stall_ms, u32 timeout_ms,
+				u32 *passes_used_out, u32 *inflight_out,
+				u32 *done_calls_out, int *status_out,
+				u64 *poll_calls_out, u64 *poll_completed_out,
+				bool *tx_stalled_out)
+{
+	struct tbv_test_queue_timeout_ctx ctx = {};
+	struct tbv_data_frame *frame = NULL;
+	struct tbv_tx_packet *packet = NULL;
+	struct tb_ring *ring = NULL;
+	struct tbv_path_config cfg;
+	struct tbv_path *path = NULL;
+	uint saved_timeout_ms;
+	uint saved_poll_ms;
+	u8 payload[64] = {};
+	unsigned long flags;
+	u32 pass = 0;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
+	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	if (!path || !frame || !ring) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	path->tx_data_queue_limit = 8;
+
+	/*
+	 * The credit gate holds the packet at enqueue only so that this hook,
+	 * not real hardware, decides when it becomes "posted": tbv_path_send()
+	 * would otherwise run all the way into tb_ring_tx(). The posted state
+	 * is then built by hand below, exactly as tbv_path_schedule_tx() leaves
+	 * it. Credits are irrelevant to what is under test -- the captured node
+	 * had a healthy window (tx_credits at max) and a dead ring.
+	 */
+	path->tx_remote_data_credit_max = 4;
+	path->tx_remote_data_credits = 0;
+
+	frame->path = path;
+	frame->tx = true;
+	INIT_LIST_HEAD(&frame->frame.list);
+	INIT_LIST_HEAD(&frame->free_node);
+	list_add_tail(&frame->free_node, &path->tx_free);
+	path->tx_frames = frame;
+	path->tx_frame_count = 1;
+
+	/*
+	 * A running TX ring that yields no completion. tb_ring_poll() is the
+	 * real core function; head == tail makes it return NULL on every pass
+	 * without touching the core-private descriptor ring, which is the
+	 * captured calls>0 / completed=0 exactly as the driver sees it -- the
+	 * driver cannot tell an empty ring from one whose descriptors the
+	 * hardware never completes, and neither can this test.
+	 */
+	spin_lock_init(&ring->lock);
+	INIT_LIST_HEAD(&ring->queue);
+	INIT_LIST_HEAD(&ring->in_flight);
+	ring->is_tx = true;
+	ring->size = 4;
+	ring->head = 0;
+	ring->tail = 0;
+	ring->running = true;
+	path->tx_ring = ring;
+	path->tx_poll_enabled = true;
+
+	ret = tbv_path_send(path, payload, sizeof(payload), 0,
+			    tbv_test_queue_timeout_done, &ctx);
+	if (ret)
+		goto out;
+
+	/*
+	 * Take the packet the way tbv_path_schedule_tx() does just before
+	 * tb_ring_tx(): off the queue, no longer queued, counted inflight. From
+	 * here only a ring completion refers to it.
+	 */
+	spin_lock_irqsave(&path->tx_lock, flags);
+	packet = list_first_entry_or_null(&path->tx_data_queue,
+					  struct tbv_tx_packet, node);
+	if (packet) {
+		list_del_init(&packet->node);
+		packet->queued = false;
+		packet->queued_jiffies = 0;
+		if (path->tx_data_queued)
+			path->tx_data_queued--;
+	}
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+	if (!packet) {
+		ret = -ENODATA;
+		goto out;
+	}
+	atomic_inc(&path->tx_inflight);
+	atomic64_inc(&path->data_tx_posted);
+
+	saved_timeout_ms = tx_queue_timeout_ms;
+	saved_poll_ms = tx_poll_delay_ms;
+	tx_queue_timeout_ms = timeout_ms;
+	/* 0 would make the poll a no-op re-arm; keep the real cadence. */
+	tx_poll_delay_ms = tx_poll_delay_ms ?: 1;
+
+	for (pass = 1; pass <= passes; pass++) {
+		/*
+		 * Each pass is one poll interval with no completion, so the
+		 * age of the last progress grows by @stall_ms. The poll work
+		 * itself may reset this stamp; that reset is part of what is
+		 * under test.
+		 */
+		WRITE_ONCE(path->tx_last_progress_jiffies,
+			   READ_ONCE(path->tx_last_progress_jiffies) -
+				   msecs_to_jiffies(stall_ms));
+		tbv_path_tx_poll_work(&path->tx_poll_work.work);
+		if (ctx.done_calls)
+			break;
+	}
+
+	tx_queue_timeout_ms = saved_timeout_ms;
+	tx_poll_delay_ms = saved_poll_ms;
+
+	if (passes_used_out)
+		*passes_used_out = min(pass, passes);
+	if (inflight_out)
+		*inflight_out = (u32)max(atomic_read(&path->tx_inflight), 0);
+	if (done_calls_out)
+		*done_calls_out = ctx.done_calls;
+	if (status_out)
+		*status_out = ctx.last_status;
+	if (poll_calls_out)
+		*poll_calls_out = atomic64_read(&path->tx_poll_calls);
+	if (poll_completed_out)
+		*poll_completed_out = atomic64_read(&path->tx_poll_completed);
+	if (tx_stalled_out)
+		*tx_stalled_out = tbv_path_tx_stalled(path);
+	ret = 0;
+
+out:
+	if (path) {
+		path->state = TBV_PATH_STOPPED;
+		path->tx_ring = NULL;
+		path->tx_poll_enabled = false;
+		cancel_delayed_work_sync(&path->tx_poll_work);
+		tbv_path_flush_tx_queue(path, -ECANCELED);
+		/*
+		 * The leak the test is about: a posted copied packet is on no
+		 * list, so the flush above cannot see it. Free it here so the
+		 * KUnit run itself stays clean.
+		 */
+		if (packet && !ctx.done_calls)
+			tbv_path_tx_packet_release(packet, -ECANCELED);
+	}
+	kfree(ring);
+	kfree(frame);
+	kfree(path);
+	return ret;
+}
 #endif
 
 void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)

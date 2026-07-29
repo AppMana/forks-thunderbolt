@@ -1,0 +1,176 @@
+chain order=10.2.0.57,10.2.0.50 host=10.2.0.50 rank=1 world_size=2 master=10.2.0.57:29511 iface=eno1
+[2026-07-29T03:58:34.459 rank=1] torch=2.7.0a0+7c8ec84dab.nv25.03 nccl=2.25.1 device=NVIDIA GeForce RTX 3090
+[2026-07-29T03:58:34.810 rank=1] process group up
+appmana-008:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+appmana-008:1:1 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+appmana-008:1:1 [0] NCCL INFO cudaDriverVersion 13030
+appmana-008:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set by environment to eno1
+appmana-008:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set to eno1
+appmana-008:1:1 [0] NCCL INFO NCCL version 2.30.7+cuda12.8
+appmana-008:1:1 [0] NCCL INFO NCCL git version HEAD railroute-dsv4-30.5toks-2026-07-13
+appmana-008:1:1 [0] NCCL INFO Comm config Blocking set to 1
+appmana-008:1:1 [0] NCCL INFO Comm config Traffic class set to 0
+appmana-008:1:1 [0] NCCL INFO NCCL_NET_PLUGIN set by environment to none
+appmana-008:1:1 [0] NCCL INFO NCCL_IB_DISABLE set by environment to 0.
+appmana-008:1:1 [0] NCCL INFO dlvsym failed on mlx5dv_get_data_direct_sysfs_path - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_get_data_direct_sysfs_path, version MLX5_1.25 version MLX5_1.25
+appmana-008:1:1 [0] NCCL INFO dlvsym failed on mlx5dv_reg_dmabuf_mr - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_reg_dmabuf_mr, version MLX5_1.25 version MLX5_1.25
+appmana-008:1:1 [0] NCCL INFO NCCL_SOCKET_IFNAME set by environment to eno1
+appmana-008:1:1 [0] NCCL INFO NCCL_IB_HCA set to usb4_rdma,rxe_lan
+appmana-008:1:1 [0] NCCL INFO NET/IB: [0] usb4_rdma15:uverbs0:1/RoCE provider=None speed=25000 context=0x28804150 pciPath=/sys/devices/pci0000:00/0000:00:02.1/0000:02:00.0/0000:03:00.0/0000:04:00.0/0000:05:00.0/0000:06:00.0 ar=0 oooRqSize=0
+appmana-008:1:1 [0] NCCL INFO NCCL_IB_MERGE_NICS set by environment to 0.
+appmana-008:1:1 [0] NCCL INFO NET/IB : Made virtual device [0] name=usb4_rdma15 speed=25000 ndevs=1 rail=-1 plane=-1
+appmana-008:1:1 [0] NCCL INFO NET/IB : Using [0]usb4_rdma15:1/RoCE [RO]; OOB eno1:10.2.0.50<0>
+appmana-008:1:1 [0] NCCL INFO Initialized NET plugin IB
+appmana-008:1:1 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-008:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+appmana-008:1:1 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+appmana-008:1:1 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+appmana-008:1:1 [0] NCCL INFO Unable to use GIN: Peermem is not supported, nor DMA-BUF.
+appmana-008:1:1 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-008:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+appmana-008:1:1 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+appmana-008:1:1 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+appmana-008:1:1 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-008:1:1 [0] NCCL INFO Using network IB
+appmana-008:1:1 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+appmana-008:1:1 [0] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x243c2da0 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0xfe93f9efa47532b8 - Init START
+appmana-008:1:1 [0] NCCL INFO Socket handshake magic 0x564ab9f2fc4b9d6c (built-in default)
+appmana-008:1:1 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+appmana-008:1:1 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma15'
+appmana-008:1:1 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-008:1:1 [0] NCCL INFO Rank 1: 1 Net devices
+appmana-008:1:1 [0] NCCL INFO Rank 1: 0 CollNet devices
+appmana-008:1:1 [0] NCCL INFO comm 0x243c2da0 rank 1 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-008:1:1 [0] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1
+appmana-008:1:1 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-008:1:1 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-008:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+appmana-008:1:1 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+appmana-008:1:1 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-008:1:121 [0] NCCL INFO [Proxy Service] Device 0 CPU core 30
+appmana-008:1:122 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 7
+appmana-008:1:121 [0] NCCL INFO proxy listening socket at 10.2.0.50<32877>
+appmana-008:1:1 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+appmana-008:1:1 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+appmana-008:1:1 [0] NCCL INFO NCCL_PROTO set by environment to Simple
+appmana-008:1:1 [0] NCCL INFO NCCL_ALGO set by environment to Ring
+appmana-008:1:1 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-008:1:1 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-008:1:1 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-008:1:1 [0] NCCL INFO ncclCommInitRankConfig comm 0x243c2da0 rank 1 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0xfe93f9efa47532b8 - Init COMPLETE
+appmana-008:1:1 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.14 (kernels 0.11, alloc 0.00, bootstrap 0.02, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+appmana-008:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 1 peer 1 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-008:1:123 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 24
+appmana-008:1:1 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [receive] via NET/IB/0
+appmana-008:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 1 peer 1 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-008:1:1 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [receive] via NET/IB/0
+appmana-008:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 1 peer 0 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-008:1:1 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [send] via NET/IB/0
+appmana-008:1:1 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 1 peer 0 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-008:1:1 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [send] via NET/IB/0
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x70ac0c00e000)
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x70ac0c052000)
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x70ac0c09a000)
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x70ac0c0de000)
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-008:1:121 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma15 ndevs=1 nmdevs=1 qp_num=2376 pkey=0 pd=0x70ac0c00d390 oooRq=0
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma15 ndevs=1 nmdevs=1 qp_num=2377 pkey=0 pd=0x70ac0c00d390 oooRq=0
+appmana-008:1:121 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-008:1:121 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 2377 mtu 5 GID 1 (6D3E760F6E7046FD/200000000000000) ctsFifoRkey=0x191 ctsFifoLkey=0x191
+appmana-008:1:121 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma15 ndevs=1 nmdevs=1 qp_num=2378 pkey=0 pd=0x70ac0c00d390 oooRq=0
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma15 ndevs=1 nmdevs=1 qp_num=2379 pkey=0 pd=0x70ac0c00d390 oooRq=0
+appmana-008:1:121 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-008:1:121 [0] NCCL INFO NCCL_IB_ADDR_FAMILY set by environment to AF_INET6
+appmana-008:1:121 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 2379 mtu 5 GID 1 (6D3E760F6E7046FD/200000000000000) ctsFifoRkey=0x19c ctsFifoLkey=0x19c
+appmana-008:1:1 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+
+[2026-07-29 03:58:38] appmana-008:1:123 [0] transport/net_ib/p2p.cc:854 (ncclIbTest) NCCL WARN NET/IB: Got CQE with error (devIndex=0, req=0x70ac0c052028, comm=0x70ac0c052000 (recv), wr_id=0, qp_num=2376)
+
+[2026-07-29 03:58:38] appmana-008:1:123 [0] transport/net_ib/p2p.cc:688 (ncclIbLogCompletionWithError) NCCL WARN NET/IB: Got completion from peer 10.2.0.57<35322> with status=IBV_WC_RETRY_EXC_ERR(12) opcode=IBV_WC_RDMA_WRITE(1) vendor_err=0  localGid fd46:706e:f76:3e6d::2 remoteGidsfd46:706e:f76:3e6d::1 hca usb4_rdma15
+appmana-008:1:123 [0] NCCL INFO HINT: In many cases this error occurs when the NCCL_IB_TIMEOUT is set too short.
+appmana-008:1:123 [0] NCCL INFO HINT: Default value is 20, which is ~30 seconds before error.
+appmana-008:1:123 [0] NCCL INFO HINT: To confirm, try increasing the value of NCCL_IB_TIMEOUT and see if the error persists.
+appmana-008:1:123 [0] NCCL INFO HINT: See https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-ib-timeout for more information.
+appmana-008:1:123 [0] NCCL INFO transport/net.cc:1620 (recvProxyProgress) -> 6
+appmana-008:1:123 [0] NCCL INFO proxy.cc:983 (ncclProxyProgress) -> 6 [Progress Thread]
+[rank1]:[E729 03:58:38.247268801 ProcessGroupNCCL.cpp:556] [Rank 1] Collective WorkNCCL(SeqNum=1, OpType=ALLREDUCE, NumelIn=1024, NumelOut=1024, Timeout(ms)=600000) raised the following async exception: NCCL error: remote process exited or there was a network error, NCCL version 2.30.7
+ncclRemoteError: A call failed possibly due to a network error or a remote process exiting prematurely.
+Last error:
+NET/IB: Got completion from peer 10.2.0.57<35322> with status=IBV_WC_RETRY_EXC_ERR(12) opcode=IBV_WC_RDMA_WRITE(1) vendor_err=0  localGid fd46:706e:f76:3e6d::2 remoteGidsfd46:706e:f76:3e6d::1 hca usb4_rdma15
+Exception raised from checkForNCCLErrorsInternal at /opt/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2492 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x70ad2e16f368 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xcc036e (0x70ad2ef4c36e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #2: c10d::ProcessGroupNCCL::checkForNCCLErrorsInternal(std::shared_ptr<c10d::NCCLComm>&) + 0x262 (0x70ad2ef6f7d2 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #3: c10d::ProcessGroupNCCL::WorkNCCL::checkAndSetException() + 0x73 (0x70ad2ef79b33 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: c10d::ProcessGroupNCCL::watchdogHandler() + 0x708 (0x70ad2ef7b8d8 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::ncclCommWatchdog() + 0x14d (0x70ad2ef7ccbd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xecdb4 (0x70ad9674cdb4 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #7: <unknown function> + 0x9caa4 (0x70ad9697caa4 in /lib/x86_64-linux-gnu/libc.so.6)
+frame #8: <unknown function> + 0x129c3c (0x70ad96a09c3c in /lib/x86_64-linux-gnu/libc.so.6)
+
+[rank1]:[E729 03:58:38.248072195 ProcessGroupNCCL.cpp:2289] [PG ID 0 PG GUID 0(default_pg) Rank 1]  failure detected by watchdog at work sequence id: 1 PG status: last enqueued work: 1, last completed work: -1
+[rank1]:[E729 03:58:38.248075825 ProcessGroupNCCL.cpp:671] Stack trace of the failed collective not found, potentially because FlightRecorder is disabled. You can enable it by setting TORCH_NCCL_TRACE_BUFFER_SIZE to a non-zero value.
+[rank1]:[E729 03:58:38.248102155 ProcessGroupNCCL.cpp:2124] [PG ID 0 PG GUID 0(default_pg) Rank 1] First PG on this rank to signal dumping.
+[rank1]:[E729 03:58:38.045852047 ProcessGroupNCCL.cpp:1764] [PG ID 0 PG GUID 0(default_pg) Rank 1] Received a dump signal due to a collective timeout from this local rank and we will try our best to dump the debug info. Last enqueued NCCL work: 1, last completed NCCL work: -1.This is most likely caused by incorrect usages of collectives, e.g., wrong sizes used across ranks, the order of collectives is not same for all ranks or the scheduled collective, for some reason, didn't run. Additionally, this can be caused by GIL deadlock or other reasons such as network errors or bugs in the communications library (e.g. NCCL), etc. 
+[rank1]:[E729 03:58:38.045957156 ProcessGroupNCCL.cpp:1554] [PG ID 0 PG GUID 0(default_pg) Rank 1] ProcessGroupNCCL preparing to dump debug info. Include stack trace: 1
+[rank1]:[E729 03:58:38.067511612 ProcessGroupNCCL.cpp:685] [Rank 1] Some NCCL operations have failed or timed out. Due to the asynchronous nature of CUDA kernels, subsequent GPU operations might run on corrupted/incomplete data.
+[rank1]:[E729 03:58:38.067521492 ProcessGroupNCCL.cpp:699] [Rank 1] To avoid data inconsistency, we are taking the entire process down.
+[rank1]:[E729 03:58:38.067553272 ProcessGroupNCCL.cpp:1917] [PG ID 0 PG GUID 0(default_pg) Rank 1] Process group watchdog thread terminated with exception: NCCL error: remote process exited or there was a network error, NCCL version 2.30.7
+ncclRemoteError: A call failed possibly due to a network error or a remote process exiting prematurely.
+Last error:
+NET/IB: Got completion from peer 10.2.0.57<35322> with status=IBV_WC_RETRY_EXC_ERR(12) opcode=IBV_WC_RDMA_WRITE(1) vendor_err=0  localGid fd46:706e:f76:3e6d::2 remoteGidsfd46:706e:f76:3e6d::1 hca usb4_rdma15
+Exception raised from checkForNCCLErrorsInternal at /opt/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2492 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x70ad2e16f368 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xcc036e (0x70ad2ef4c36e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #2: c10d::ProcessGroupNCCL::checkForNCCLErrorsInternal(std::shared_ptr<c10d::NCCLComm>&) + 0x262 (0x70ad2ef6f7d2 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #3: c10d::ProcessGroupNCCL::WorkNCCL::checkAndSetException() + 0x73 (0x70ad2ef79b33 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: c10d::ProcessGroupNCCL::watchdogHandler() + 0x708 (0x70ad2ef7b8d8 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::ncclCommWatchdog() + 0x14d (0x70ad2ef7ccbd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xecdb4 (0x70ad9674cdb4 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #7: <unknown function> + 0x9caa4 (0x70ad9697caa4 in /lib/x86_64-linux-gnu/libc.so.6)
+frame #8: <unknown function> + 0x129c3c (0x70ad96a09c3c in /lib/x86_64-linux-gnu/libc.so.6)
+
+terminate called after throwing an instance of 'c10::DistBackendError'
+  what():  [PG ID 0 PG GUID 0(default_pg) Rank 1] Process group watchdog thread terminated with exception: NCCL error: remote process exited or there was a network error, NCCL version 2.30.7
+ncclRemoteError: A call failed possibly due to a network error or a remote process exiting prematurely.
+Last error:
+NET/IB: Got completion from peer 10.2.0.57<35322> with status=IBV_WC_RETRY_EXC_ERR(12) opcode=IBV_WC_RDMA_WRITE(1) vendor_err=0  localGid fd46:706e:f76:3e6d::2 remoteGidsfd46:706e:f76:3e6d::1 hca usb4_rdma15
+Exception raised from checkForNCCLErrorsInternal at /opt/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2492 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x70ad2e16f368 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xcc036e (0x70ad2ef4c36e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #2: c10d::ProcessGroupNCCL::checkForNCCLErrorsInternal(std::shared_ptr<c10d::NCCLComm>&) + 0x262 (0x70ad2ef6f7d2 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #3: c10d::ProcessGroupNCCL::WorkNCCL::checkAndSetException() + 0x73 (0x70ad2ef79b33 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: c10d::ProcessGroupNCCL::watchdogHandler() + 0x708 (0x70ad2ef7b8d8 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: c10d::ProcessGroupNCCL::ncclCommWatchdog() + 0x14d (0x70ad2ef7ccbd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0xecdb4 (0x70ad9674cdb4 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #7: <unknown function> + 0x9caa4 (0x70ad9697caa4 in /lib/x86_64-linux-gnu/libc.so.6)
+frame #8: <unknown function> + 0x129c3c (0x70ad96a09c3c in /lib/x86_64-linux-gnu/libc.so.6)
+
+Exception raised from ncclCommWatchdog at /opt/pytorch/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:1923 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x70ad2e16f368 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0xcc036e (0x70ad2ef4c36e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #2: <unknown function> + 0x91669b (0x70ad2eba269b in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #3: <unknown function> + 0xecdb4 (0x70ad9674cdb4 in /lib/x86_64-linux-gnu/libstdc++.so.6)
+frame #4: <unknown function> + 0x9caa4 (0x70ad9697caa4 in /lib/x86_64-linux-gnu/libc.so.6)
+frame #5: <unknown function> + 0x129c3c (0x70ad96a09c3c in /lib/x86_64-linux-gnu/libc.so.6)
+
+[appmana-008:1    :0:114] Caught signal 11 (Segmentation fault: Sent by the kernel at address (nil))
+==== backtrace (tid:    114) ====
+ 0  /opt/hpcx/ucx/lib/libucs.so.0(ucs_handle_error+0x2e4) [0x70ad8b108654]
+ 1  /opt/hpcx/ucx/lib/libucs.so.0(+0x3684c) [0x70ad8b10884c]
+ 2  /opt/hpcx/ucx/lib/libucs.so.0(+0x36a88) [0x70ad8b108a88]
+ 3  /lib/x86_64-linux-gnu/libc.so.6(+0x45330) [0x70ad96925330]
+ 4  /lib/x86_64-linux-gnu/libc.so.6(abort+0x182) [0x70ad969089a2]
+ 5  /lib/x86_64-linux-gnu/libstdc++.so.6(+0xa5ff5) [0x70ad96705ff5]
+ 6  /lib/x86_64-linux-gnu/libstdc++.so.6(+0xbb0da) [0x70ad9671b0da]
+ 7  /lib/x86_64-linux-gnu/libstdc++.so.6(_ZSt10unexpectedv+0) [0x70ad96705a55]
+ 8  /lib/x86_64-linux-gnu/libstdc++.so.6(+0xbb0c1) [0x70ad9671b0c1]
+ 9  /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so(+0x916729) [0x70ad2eba2729]
+10  /lib/x86_64-linux-gnu/libstdc++.so.6(+0xecdb4) [0x70ad9674cdb4]
+11  /lib/x86_64-linux-gnu/libc.so.6(+0x9caa4) [0x70ad9697caa4]
+12  /lib/x86_64-linux-gnu/libc.so.6(+0x129c3c) [0x70ad96a09c3c]
+=================================
