@@ -21,7 +21,11 @@ set -euo pipefail
 
 BASE="${BASE:-$HOME/kbuild}"
 SRC="$BASE/src"
-STOCK="$(uname -r)"
+# The helper is often run while a debug kernel is active. `uname -r` would
+# then pin that debug kernel as the saved fallback. Select the newest packaged
+# generic kernel unless the caller explicitly supplies STOCK.
+STOCK="${STOCK:-$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*-generic' \
+	-printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -1)}"
 UPSTREAM_VER=6.17.13
 DSC_VER='6.17.0-40.40~24.04.1'
 JOBS="${JOBS:-$(nproc)}"
@@ -190,9 +194,21 @@ install_k() {
 # filtering to one would hide the other. Add it by hand if noise is a problem.
 set_cmdline() {
 	local want='dma_debug_entries=262144'
-	grep -q "$want" /etc/default/grub && return 0
-	sudo sed -i "s|^\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"|\1 $want\"|" /etc/default/grub
-	grep '^GRUB_CMDLINE_LINUX_DEFAULT' /etc/default/grub
+	local effective
+
+	effective="$(sh -c '. /etc/default/grub
+		for f in /etc/default/grub.d/*.cfg; do
+			[ -e "$f" ] && . "$f"
+		done
+		printf "%s %s\n" "$GRUB_CMDLINE_LINUX_DEFAULT" "$GRUB_CMDLINE_LINUX"')"
+	case " $effective " in
+	*" $want "*) ;;
+	*)
+		echo "$want is missing from the composed GRUB drop-ins" >&2
+		echo "declare it as host_kernel_cmdline in appmana-management inventory.yaml" >&2
+		exit 1
+		;;
+	esac
 }
 
 # Pin the SAVED grub default to the stock kernel by its generated menu id, so
@@ -208,8 +224,10 @@ debug_entry_id() {
 }
 
 pin_stock() {
-	sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-	grep -q '^GRUB_DEFAULT=saved' /etc/default/grub || echo 'GRUB_DEFAULT=saved' | sudo tee -a /etc/default/grub >/dev/null
+	printf '%s\n' \
+		'# Managed by build-debug-kernel.sh; the debug kernel is never the persistent default.' \
+		'GRUB_DEFAULT=saved' |
+		sudo tee /etc/default/grub.d/05-debug-kernel-default.cfg >/dev/null
 	sudo update-grub
 	sudo grub-set-default "$(stock_entry_id)"
 	echo "saved default is now: $(sudo grub-editenv list | grep saved_entry || true)"

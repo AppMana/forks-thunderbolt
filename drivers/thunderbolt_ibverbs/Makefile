@@ -60,10 +60,10 @@ dkms-add:
 	dkms add .
 
 dkms-build:
-	dkms build thunderbolt-ibverbs/0.1.0 -k $(KVER)
+	dkms build thunderbolt-ibverbs/$(TBV_PKG_VERSION) -k $(KVER)
 
 dkms-install:
-	dkms install thunderbolt-ibverbs/0.1.0 -k $(KVER)
+	dkms install thunderbolt-ibverbs/$(TBV_PKG_VERSION) -k $(KVER)
 
 dkms-remove:
-	dkms remove thunderbolt-ibverbs/0.1.0 --all
+	dkms remove thunderbolt-ibverbs/$(TBV_PKG_VERSION) --all

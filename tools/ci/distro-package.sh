@@ -52,6 +52,12 @@ stage_source() {
 	local stage="$1"
 	install -d -m 0755 "$stage"
 	install -m 0644 "$repo_root/dkms/dkms.conf" "$stage/dkms.conf"
+	# TBFIX_VERSION is part of the public interface of this script. Keep the
+	# DKMS identity in sync with the Debian package metadata when it is used;
+	# otherwise dpkg installs /usr/src/thunderbolt-tbfix-$version while DKMS
+	# looks for the PACKAGE_VERSION copied verbatim from the source tree.
+	sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$version\"/" \
+		"$stage/dkms.conf"
 	install -m 0644 "$repo_root/dkms/Makefile" "$stage/Makefile"
 	# Build-time header shim (self-contained <linux/thunderbolt.h>) lives at the
 	# package top and must be executable in the staged /usr/src tree.

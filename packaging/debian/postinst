@@ -10,7 +10,24 @@ case "$1" in
             if ! dkms status -m "$NAME" -v "$VERSION" 2>/dev/null | grep -q .; then
                 dkms add -m "$NAME" -v "$VERSION"
             fi
-            dkms autoinstall -m "$NAME"/"$VERSION" || true
+            # An upgrade removes the previous DKMS version from every kernel
+            # before this script runs. `dkms autoinstall` may rebuild only the
+            # running kernel, leaving a saved fallback boot without tbfix.
+            # Build every installed kernel that has a usable build tree.
+            failed=
+            for modules_dir in /lib/modules/*; do
+                [ -d "$modules_dir/build" ] || continue
+                kernelver=${modules_dir##*/}
+                if dkms status -m "$NAME" -v "$VERSION" -k "$kernelver" 2>/dev/null |
+                        grep -q ': installed'; then
+                    continue
+                fi
+                if ! dkms install -m "$NAME" -v "$VERSION" -k "$kernelver"; then
+                    echo "thunderbolt-tbfix: failed to install for $kernelver" >&2
+                    failed=1
+                fi
+            done
+            [ -z "$failed" ] || exit 1
         fi
         # thunderbolt/thunderbolt_net are pulled into the initramfs (early boot).
         # dkms.conf REMAKE_INITRD=yes already refreshes it for the built kernel;
