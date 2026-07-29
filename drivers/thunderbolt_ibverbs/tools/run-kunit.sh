@@ -7,17 +7,32 @@
 # Usage:
 #   drivers/thunderbolt_ibverbs/tools/run-kunit.sh [kunit.py filter args...]
 #   KUNIT_TREE=/path/to/linux  drivers/thunderbolt_ibverbs/tools/run-kunit.sh
+#   KUNIT_LOCKDEP=1            drivers/thunderbolt_ibverbs/tools/run-kunit.sh
 #
 # Examples:
 #   ... run-kunit.sh                       # all suites
 #   ... run-kunit.sh 'tbv_rail_mac'        # just the per-rail MAC suite
 #   ... run-kunit.sh 'thunderbolt_ibverbs*'
+#
+# KUNIT_LOCKDEP=1 turns on the kernel's own locking validator (lockdep) for the
+# run and uses a separate build dir so the fast default build is not clobbered.
+# lockdep builds the lock dependency graph at runtime and splats on recursive
+# acquisition, inverted (ABBA) ordering, irq-safe/irq-unsafe inversion and
+# sleeping in atomic context. It only observes orderings the tests actually
+# exercise, so a clean run is evidence about the exercised paths only. Any splat
+# lands in the kunit.py output; grep the run for "WARNING", "BUG:",
+# "possible recursive locking", "lock-inversion" or "INFO: possible".
 set -euo pipefail
 
 REPO="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 TREE="${KUNIT_TREE:-$HOME/Documents/linux-kunit}"
 KVER="${KUNIT_KVER:-v6.17}"
-BUILD="$TREE/.kunit-tbv"
+LOCKDEP="${KUNIT_LOCKDEP:-0}"
+if [[ "$LOCKDEP" == 1 ]]; then
+	BUILD="$TREE/.kunit-tbv-lockdep"
+else
+	BUILD="$TREE/.kunit-tbv"
+fi
 
 if [[ ! -e "$TREE/tools/testing/kunit/kunit.py" ]]; then
 	echo ">> cloning $KVER into $TREE (shallow)"
@@ -92,6 +107,24 @@ CONFIG_INFINIBAND_USER_ACCESS=y
 CONFIG_CONFIGFS_FS=y
 CONFIG_THUNDERBOLT_IBVERBS=y
 CFG
+
+if [[ "$LOCKDEP" == 1 ]]; then
+	cat >> "$BUILD/.kunitconfig" <<'CFG'
+CONFIG_DEBUG_KERNEL=y
+CONFIG_LOCKDEP=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_LOCK_ALLOC=y
+CONFIG_DEBUG_SPINLOCK=y
+CONFIG_DEBUG_MUTEXES=y
+CONFIG_DEBUG_RT_MUTEXES=y
+CONFIG_DEBUG_RWSEMS=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+CONFIG_DEBUG_LOCKDEP=y
+CONFIG_LOCK_STAT=y
+CONFIG_STACKTRACE=y
+CFG
+	echo ">> lockdep enabled (build dir $BUILD)"
+fi
 
 echo ">> running kunit.py (x86_64 qemu)"
 exec "$TREE/tools/testing/kunit/kunit.py" run \

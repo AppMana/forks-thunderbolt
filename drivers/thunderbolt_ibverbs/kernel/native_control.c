@@ -402,6 +402,14 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 	struct tbv_peer *peer;
 	int ret = -ENOENT;
 
+	/*
+	 * Takes state->lock itself so no caller may already hold it.
+	 * tbv_native_control_identity_refresh_workfn() does, reaching here as
+	 * exchange_once() -> apply_ack() -> apply_remote(), and self-deadlocks
+	 * on the HELLO_ACK success path. On a PROVE_LOCKING kernel this names
+	 * the offender instead of wedging the work item on the global lock.
+	 */
+	lockdep_assert_not_held(&state->lock);
 	mutex_lock(&state->lock);
 	list_for_each_entry(peer, &state->peers, node) {
 		struct tbv_rail *rail;
@@ -770,7 +778,13 @@ static int tbv_native_control_exchange_once(struct tbv_state *state,
 	 * rail/op fields in the match key, so concurrent native requests over
 	 * the same XDomain can steal each other's responses.  Keep one native
 	 * control transaction in flight per peer/XDomain.
+	 *
+	 * Lock order is peer->control_lock outside state->lock, established by
+	 * apply_ack() below and by ready_once() -> mark_remote_ready() ->
+	 * rail_register_lock -> state->lock. Entering with state->lock held
+	 * inverts that and also re-enters it in apply_remote().
 	 */
+	lockdep_assert_not_held(&state->lock);
 	mutex_lock(&peer->control_lock);
 
 	tbv_native_control_fill_hello(state, peer, rail, &local);
