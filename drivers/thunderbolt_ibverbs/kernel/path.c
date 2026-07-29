@@ -149,6 +149,23 @@ MODULE_PARM_DESC(tx_stall_warn_ms,
 		 "Warn when a native/apple TX ring has inflight frames but no completions for this many ms; 0 disables");
 
 /*
+ * Ceiling on how long a data packet may wait on tx_data_queue before it is
+ * failed to its owner. Every data packet is gated on the software credit
+ * window, which only advances on peer PATH_CREDIT frames; a peer that stops
+ * returning credits leaves the queue with no other exit, and the packet's done
+ * callback -- the only thing that drains the owning WR's tx_pending -- never
+ * runs. Must exceed the QP retransmit budget so a healthy retransmit is never
+ * cut short. 0 disables the ceiling (wait for credits forever).
+ */
+static uint tx_queue_timeout_ms = 30000;
+module_param(tx_queue_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(tx_queue_timeout_ms,
+		 "Fail a data packet that has waited this many ms on the path TX queue (credit stall); 0 waits forever");
+
+/* Watchdog cadence for the queue ceiling; the ceiling itself is the deadline. */
+#define TBV_TX_QUEUE_WATCHDOG_TICK_MS 1000U
+
+/*
  * Skip a rail for new native QP binding when its TX ring has frames in
  * flight but has made no completion progress for this many ms. On the
  * single-cable TB3/TB4 daisy chain one of the two advertised native lanes
@@ -373,6 +390,26 @@ static void tbv_path_queue_tx_poll(struct tbv_path *path, unsigned long delay)
 		return;
 
 	tbv_path_queue_delayed_work(path, &path->tx_poll_work, delay);
+}
+
+/*
+ * Arm the TX delayed work for the queue ceiling. Independent of
+ * tx_poll_delay_ms: that parameter tunes the supplemental COMPLETION poller
+ * (0 = rely on interrupts) and disabling it must not disable the ceiling,
+ * which is the only exit a credit-stalled packet has. queue_delayed_work is a
+ * no-op while the work is already pending, so a tick already armed for
+ * completion polling serves both.
+ */
+static void tbv_path_arm_queue_watchdog(struct tbv_path *path)
+{
+	u32 ms = READ_ONCE(tx_queue_timeout_ms);
+
+	if (!ms || !path->tx_poll_enabled || !path->tx_ring)
+		return;
+
+	tbv_path_queue_delayed_work(path, &path->tx_poll_work,
+				    msecs_to_jiffies(min(ms,
+					TBV_TX_QUEUE_WATCHDOG_TICK_MS)));
 }
 
 static void tbv_path_queue_rx_supp_poll(struct tbv_path *path,
@@ -823,6 +860,78 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	tbv_path_schedule_tx(path);
 }
 
+/*
+ * Fail data packets that have waited on tx_data_queue past tx_queue_timeout_ms.
+ *
+ * The queue is FIFO by enqueue time (every enqueue is list_add_tail; the
+ * -ENOMEM requeue puts back the packet it just took off the head), so the head
+ * is the oldest and the scan stops at the first entry still inside the
+ * ceiling. Releasing with -ETIMEDOUT runs the packet's done callback, which is
+ * what drains the owning WR's tx_pending and lets the QP surface the failure;
+ * a packet the credit gate never admits has no other way out. Reports the
+ * remaining queue depth so the caller can decide to re-arm.
+ */
+static u32 tbv_path_expire_tx_data_queue(struct tbv_path *path, u32 *queued_out)
+{
+	unsigned long timeout = msecs_to_jiffies(READ_ONCE(tx_queue_timeout_ms));
+	struct tbv_tx_packet *packet;
+	struct tbv_tx_packet *tmp;
+	unsigned long flags;
+	LIST_HEAD(expired);
+	u32 count = 0;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	if (timeout) {
+		list_for_each_entry_safe(packet, tmp, &path->tx_data_queue,
+					 node) {
+			if (!packet->queued_jiffies ||
+			    !time_after(jiffies,
+					packet->queued_jiffies + timeout))
+				break;
+			list_del_init(&packet->node);
+			packet->queued = false;
+			if (path->tx_data_queued)
+				path->tx_data_queued--;
+			/*
+			 * The rest of an unframed window can never be posted
+			 * now, so the window must not stay open or every later
+			 * packet on this path is blocked behind it.
+			 */
+			if (path->tx_raw_stream_active &&
+			    path->tx_raw_stream_owner == packet->owner_ctx) {
+				path->tx_raw_stream_active = false;
+				path->tx_raw_stream_owner = NULL;
+				path->tx_raw_stream_end_seen = false;
+				path->tx_raw_stream_window_open = false;
+				path->tx_raw_stream_inflight = 0;
+			}
+			list_add_tail(&packet->node, &expired);
+			count++;
+		}
+	}
+	if (queued_out)
+		*queued_out = path->tx_data_queued;
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	if (count)
+		pr_warn_ratelimited("tx queue timeout route=0x%llx rail=0x%x failed=%u queued=%u credits=%u/%u stalls=%lld\n",
+				    path->rail && path->rail->peer ?
+					    path->rail->peer->xd->route : 0,
+				    path->rail ? path->rail->rail_id : 0xffffffff,
+				    count, path->tx_data_queued,
+				    path->tx_remote_data_credits,
+				    path->tx_remote_data_credit_max,
+				    atomic64_read(&path->data_tx_credit_stalls));
+
+	while (!list_empty(&expired)) {
+		packet = list_first_entry(&expired, struct tbv_tx_packet, node);
+		list_del_init(&packet->node);
+		tbv_path_tx_packet_release(packet, -ETIMEDOUT);
+	}
+
+	return count;
+}
+
 static void tbv_path_tx_poll_work(struct work_struct *work)
 {
 	struct tbv_path *path = container_of(to_delayed_work(work),
@@ -830,10 +939,22 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 	struct tb_ring *ring = READ_ONCE(path->tx_ring);
 	struct ring_frame *frame;
 	u64 completed = 0;
+	u32 queued = 0;
 	static DEFINE_RATELIMIT_STATE(stall_rs, HZ, 1);
 
-	if (!ring)
+	/*
+	 * Before the ring poll and not gated on the ring: a credit-stalled
+	 * queue holds packets that never reached the ring at all, and it must
+	 * still drain when the path is being torn down.
+	 */
+	if (tbv_path_expire_tx_data_queue(path, &queued))
+		tbv_path_schedule_tx(path);
+
+	if (!ring) {
+		if (queued)
+			tbv_path_arm_queue_watchdog(path);
 		return;
+	}
 
 	atomic64_inc(&path->tx_poll_calls);
 	while ((frame = tb_ring_poll(ring))) {
@@ -865,6 +986,13 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 	if (atomic_read(&path->tx_inflight) > 0 || completed)
 		tbv_path_queue_tx_poll(path,
 				       msecs_to_jiffies(READ_ONCE(tx_poll_delay_ms)));
+	/*
+	 * A queue that is stalled with nothing inflight generates neither
+	 * completions nor interrupts, so this is the only thing that keeps the
+	 * ceiling ticking.
+	 */
+	if (queued)
+		tbv_path_arm_queue_watchdog(path);
 }
 
 static void tbv_path_rx_supp_poll_work(struct work_struct *work)
@@ -1767,12 +1895,19 @@ static int tbv_path_enqueue_data(struct tbv_path *path,
 	}
 
 	packet->start_credit_group_frames = 1;
+	/*
+	 * Enqueue time is the ceiling's reference point (tbv_path_expire_tx_
+	 * data_queue). Only the release path clears it, so it measures the
+	 * whole wait including a requeue after a failed post.
+	 */
+	packet->queued_jiffies = jiffies;
 	packet->queued = true;
 	list_add_tail(&packet->node, &path->tx_data_queue);
 	path->tx_data_queued++;
 	atomic64_inc(&path->data_tx_enqueued);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
+	tbv_path_arm_queue_watchdog(path);
 	if (!defer_schedule)
 		tbv_path_schedule_tx(path);
 	return 0;
@@ -1805,6 +1940,7 @@ static int tbv_path_enqueue_data_list(struct tbv_path *path,
 
 	list_for_each_entry(packet, packets, node) {
 		packet->start_credit_group_frames = first ? count : 0;
+		packet->queued_jiffies = jiffies;
 		packet->queued = true;
 		path->tx_data_queued++;
 		atomic64_inc(&path->data_tx_enqueued);
@@ -1813,6 +1949,7 @@ static int tbv_path_enqueue_data_list(struct tbv_path *path,
 	list_splice_tail_init(packets, &path->tx_data_queue);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
+	tbv_path_arm_queue_watchdog(path);
 	if (!defer_schedule)
 		tbv_path_schedule_tx(path);
 	return 0;
@@ -1842,6 +1979,7 @@ static int tbv_path_enqueue_reserved_data_list(struct tbv_path *path,
 	path->tx_data_reserved -= count;
 	list_for_each_entry(packet, packets, node) {
 		packet->start_credit_group_frames = first ? count : 0;
+		packet->queued_jiffies = jiffies;
 		packet->queued = true;
 		path->tx_data_queued++;
 		atomic64_inc(&path->data_tx_enqueued);
@@ -1850,6 +1988,7 @@ static int tbv_path_enqueue_reserved_data_list(struct tbv_path *path,
 	list_splice_tail_init(packets, &path->tx_data_queue);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
+	tbv_path_arm_queue_watchdog(path);
 	if (!defer_schedule)
 		tbv_path_schedule_tx(path);
 	return 0;
@@ -2024,6 +2163,13 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 				atomic64_inc(&path->data_tx_credit_stalls);
 				path->tx_scheduling = false;
 				spin_unlock_irqrestore(&path->tx_lock, flags);
+				/*
+				 * Credits only return on peer PATH_CREDIT
+				 * frames; if none come this branch is the last
+				 * code that ever runs for these packets, so the
+				 * ceiling has to be ticking from here.
+				 */
+				tbv_path_arm_queue_watchdog(path);
 				return;
 			}
 			path->tx_remote_data_credits--;
@@ -2906,6 +3052,113 @@ void tbv_path_fence(struct tbv_path *path)
 	cancel_delayed_work_sync(&path->tx_poll_work);
 	cancel_delayed_work_sync(&path->rx_supp_poll_work);
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+struct tbv_test_queue_timeout_ctx {
+	u32 done_calls;
+	int last_status;
+};
+
+static void tbv_test_queue_timeout_done(void *ctx, int status)
+{
+	struct tbv_test_queue_timeout_ctx *c = ctx;
+
+	c->done_calls++;
+	c->last_status = status;
+}
+
+/*
+ * Scenario hook for tests/credit_stall_recovery_test.c. Builds a real
+ * tbv_path whose peer has stopped returning data credits, enqueues real data
+ * packets through the real tbv_path_send() path, ages them, and runs the real
+ * TX work.
+ *
+ * Field provenance (only states the driver can actually produce):
+ *  - tx_remote_data_credits = 0 with a nonzero max is what
+ *    tbv_path_schedule_tx() leaves behind after charging the window down while
+ *    no PATH_CREDIT frame comes back; only tbv_path_add_remote_rx_credits(),
+ *    tbv_path_refund_remote_data_credits() and
+ *    tbv_path_set_remote_rx_capacity() raise it again, and all three need the
+ *    peer.
+ *  - one frame on tx_free with tx_frame_count = 1 mirrors
+ *    tbv_path_alloc_frames(): the packet must clear the staging-frame checks so
+ *    the CREDIT gate is what stops it, which data_tx_credit_stalls confirms.
+ *  - packet->queued_jiffies is stamped by the enqueue paths and cleared only by
+ *    tbv_path_tx_packet_release(), so back-dating it is exactly "this packet
+ *    has been queued that long".
+ *  - tx_ring stays NULL: no frame ever reaches a ring in a credit stall, and
+ *    the gate returns before any tb_ring_tx().
+ */
+int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
+				       u32 *queued_out, u32 *stalls_out,
+				       u32 *done_calls_out, int *status_out)
+{
+	struct tbv_test_queue_timeout_ctx ctx = {};
+	struct tbv_data_frame *frame = NULL;
+	struct tbv_path_config cfg;
+	struct tbv_tx_packet *packet;
+	struct tbv_path *path = NULL;
+	uint saved_timeout_ms;
+	u8 payload[64] = {};
+	unsigned long flags;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	frame = kzalloc(sizeof(*frame), GFP_KERNEL);
+	if (!path || !frame) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	path->tx_data_queue_limit = 8;
+	path->tx_remote_data_credit_max = 4;
+	path->tx_remote_data_credits = 0;
+	frame->path = path;
+	frame->tx = true;
+	INIT_LIST_HEAD(&frame->frame.list);
+	INIT_LIST_HEAD(&frame->free_node);
+	list_add_tail(&frame->free_node, &path->tx_free);
+	path->tx_frames = frame;
+	path->tx_frame_count = 1;
+
+	ret = tbv_path_send(path, payload, sizeof(payload), 0,
+			    tbv_test_queue_timeout_done, &ctx);
+	if (ret)
+		goto out;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	list_for_each_entry(packet, &path->tx_data_queue, node)
+		packet->queued_jiffies = jiffies - msecs_to_jiffies(age_ms);
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	saved_timeout_ms = tx_queue_timeout_ms;
+	tx_queue_timeout_ms = timeout_ms;
+	tbv_path_tx_poll_work(&path->tx_poll_work.work);
+	tx_queue_timeout_ms = saved_timeout_ms;
+
+	if (queued_out)
+		*queued_out = path->tx_data_queued;
+	if (stalls_out)
+		*stalls_out = atomic64_read(&path->data_tx_credit_stalls);
+	if (done_calls_out)
+		*done_calls_out = ctx.done_calls;
+	if (status_out)
+		*status_out = ctx.last_status;
+	ret = 0;
+
+out:
+	if (path) {
+		path->state = TBV_PATH_STOPPED;
+		tbv_path_flush_tx_queue(path, -ECANCELED);
+	}
+	kfree(frame);
+	kfree(path);
+	return ret;
+}
+#endif
 
 void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 {

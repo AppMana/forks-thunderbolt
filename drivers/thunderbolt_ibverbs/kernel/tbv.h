@@ -1083,6 +1083,15 @@ int tbv_test_cq_overflow_defers_qp_error(int *first_ret_out, int *push_ret_out,
  */
 int tbv_test_send_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
+/*
+ * Enqueues a real data packet on a real path whose peer has stopped returning
+ * credits, ages it @age_ms and runs the path TX work with the queue ceiling
+ * set to @timeout_ms. Reports the remaining queue depth, the credit-gate stall
+ * count, and how the packet's owner was completed.
+ */
+int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
+				       u32 *queued_out, u32 *stalls_out,
+				       u32 *done_calls_out, int *status_out);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 #endif

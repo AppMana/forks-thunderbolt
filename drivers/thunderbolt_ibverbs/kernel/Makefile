@@ -54,6 +54,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/timeout_reap_drain_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/tx_stall_livelock_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/retry_enomem_bound_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rnr_credit_wait_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/credit_stall_recovery_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/cq_overflow_deadlock_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/error_completion_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/rx_hw_error_test.o
