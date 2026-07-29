@@ -1251,6 +1251,15 @@ int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
 int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
 					    bool *pending_out,
 					    bool *deferred_out);
+/*
+ * Report the SGE limits exposed by query_device and the largest receive SGE
+ * count post_recv can actually consume.  These must agree: advertising four
+ * receive SGEs and rejecting the second one at post time violates the verbs
+ * capability contract.
+ */
+int tbv_test_verbs_sge_contract(u32 *send_advertised_out,
+				u32 *recv_advertised_out,
+				u32 *recv_accepted_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
