@@ -188,14 +188,6 @@ struct tbv_path_config {
 	bool e2e;
 };
 
-struct tbv_path_owned_frame {
-	struct list_head node;
-	void *data;
-	u32 len;
-	u8 sof;
-	u8 eof;
-};
-
 struct tbv_path {
 	enum tbv_path_state state;
 	struct tbv_path_config cfg;
@@ -1227,6 +1219,8 @@ int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 				u32 *credits_out, u32 *max_out);
 int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
 			      u32 remote_caps, u32 *credits_out, u32 *max_out);
+int tbv_test_path_inline_prepare(u32 len, u32 *fill_calls_out,
+				 bool *inline_out, bool *data_match_out);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 /*
@@ -1588,18 +1582,11 @@ int tbv_path_send_owned(struct tbv_path *path, void *data, u32 len,
 int tbv_path_send_marked_owned(struct tbv_path *path, void *data, u32 len,
 			       u8 sof, u8 eof, unsigned int flags,
 			       tbv_path_tx_done_fn done, void *done_ctx);
-int tbv_path_send_owned_list_reserved(struct tbv_path *path,
-				      struct list_head *frames,
-				      unsigned int flags,
-				      tbv_path_tx_done_fn done,
-				      void *done_ctx);
-int tbv_path_prepare_owned_list(struct tbv_path *path,
-				struct list_head *frames,
-				struct list_head *packets,
-				u32 *packet_count,
-				unsigned int flags,
-				tbv_path_tx_done_fn done,
-				void *done_ctx);
+int tbv_path_prepare_filled(struct tbv_path *path,
+			    struct list_head *packets, u32 len,
+			    u8 sof, u8 eof, tbv_path_tx_fill_fn fill,
+			    void *fill_ctx, tbv_path_tx_done_fn done,
+			    void *done_ctx);
 int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
 				       struct list_head *packets,
 				       u32 packet_count,

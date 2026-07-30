@@ -7,6 +7,7 @@
  * software PATH_CREDIT window remains only for mixed-version/non-E2E paths.
  */
 #include <kunit/test.h>
+#include "../../proto/native_data.h"
 #include "../../proto/native_wire.h"
 #include "../tbv.h"
 
@@ -81,12 +82,30 @@ static void tbv_non_e2e_local_keeps_software_credits(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, credits, max);
 }
 
+static void tbv_copied_packet_owns_inline_payload(struct kunit *test)
+{
+	u32 fill_calls = 0;
+	bool inline_buf = false;
+	bool data_match = false;
+	int ret;
+
+	ret = tbv_test_path_inline_prepare(TBV_NATIVE_DATA_FRAME_SIZE,
+					   &fill_calls, &inline_buf,
+					   &data_match);
+
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, fill_calls, 1u);
+	KUNIT_EXPECT_TRUE(test, inline_buf);
+	KUNIT_EXPECT_TRUE(test, data_match);
+}
+
 static struct kunit_case tbv_path_config_cases[] = {
 	KUNIT_CASE(tbv_native_path_enables_hardware_e2e),
 	KUNIT_CASE(tbv_e2e_peers_bypass_software_credits),
 	KUNIT_CASE(tbv_old_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_local_keeps_software_credits),
+	KUNIT_CASE(tbv_copied_packet_owns_inline_payload),
 	{}
 };
 

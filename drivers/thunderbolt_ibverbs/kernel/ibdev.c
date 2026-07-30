@@ -3284,24 +3284,6 @@ static void tbv_release_path_reservations(struct tbv_path **paths,
 	}
 }
 
-static void tbv_release_owned_frame_lists(struct list_head *lists, u32 count)
-{
-	u32 i;
-
-	for (i = 0; i < count; i++) {
-		while (!list_empty(&lists[i])) {
-			struct tbv_path_owned_frame *frame =
-				list_first_entry(&lists[i],
-						 struct tbv_path_owned_frame,
-						 node);
-
-			list_del_init(&frame->node);
-			kfree(frame->data);
-			kfree(frame);
-		}
-	}
-}
-
 static void tbv_release_prepared_packet_lists(struct list_head *lists,
 					      u32 count, int status)
 {
@@ -7055,6 +7037,32 @@ static void tbv_send_ctx_build_native_header(struct tbv_send_ctx *ctx,
 	}
 }
 
+struct tbv_native_copy_frame {
+	struct tbv_send_ctx *send;
+	struct tbv_native_data_header header;
+	u32 offset;
+	u32 payload_len;
+};
+
+static int tbv_native_copy_frame_fill(void *fill_ctx, void *dst, u32 len)
+{
+	struct tbv_native_copy_frame *fill = fill_ctx;
+	int ret;
+
+	if (len != TBV_NATIVE_DATA_HDR_SIZE + fill->payload_len)
+		return -EINVAL;
+
+	ret = tbv_copy_send_range(fill->send->segs, fill->send->nsegs,
+				  fill->offset,
+				  (u8 *)dst + TBV_NATIVE_DATA_HDR_SIZE,
+				  fill->payload_len);
+	if (ret)
+		return ret;
+
+	ret = tbv_native_data_build_header(dst, len, &fill->header);
+	return ret < 0 ? ret : 0;
+}
+
 /*
  * Post the ctx as per-fragment split raw streams: every 4096-byte window of
  * the message is one bounded stream (48-byte header frame + <= 2 raw page
@@ -7171,10 +7179,8 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 	struct tbv_native_data_header hdr = {};
 	struct tbv_path *path = NULL;
 	struct tbv_path *paths[TBV_NATIVE_MAX_LANES] = {};
-	struct list_head frame_lists[TBV_NATIVE_MAX_LANES];
 	struct list_head packet_lists[TBV_NATIVE_MAX_LANES];
 	u32 reservations[TBV_NATIVE_MAX_LANES] = {};
-	u32 frame_counts[TBV_NATIVE_MAX_LANES] = {};
 	u32 packet_counts[TBV_NATIVE_MAX_LANES] = {};
 	u32 nfrags = ctx->total_len ?
 		     DIV_ROUND_UP(ctx->total_len,
@@ -7191,10 +7197,8 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 	bool sent_any = false;
 	int ret = 0;
 
-	for (list_idx = 0; list_idx < ARRAY_SIZE(frame_lists); list_idx++) {
-		INIT_LIST_HEAD(&frame_lists[list_idx]);
+	for (list_idx = 0; list_idx < ARRAY_SIZE(packet_lists); list_idx++)
 		INIT_LIST_HEAD(&packet_lists[list_idx]);
-	}
 
 	if (reason != TBV_SEND_POST_INITIAL) {
 		unsigned long age_ms = ctx->queued_jiffies ?
@@ -7462,8 +7466,11 @@ out_unlock_paths:
 		u32 path_idx = fragment_striping ?
 			       (ctx->psn + frag_idx) % path_count : 0;
 		u32 packet_len = TBV_NATIVE_DATA_HDR_SIZE + payload_len;
-		struct tbv_path_owned_frame *owned;
-		u8 *frame;
+		struct tbv_native_copy_frame fill = {
+			.send = ctx,
+			.offset = offset,
+			.payload_len = payload_len,
+		};
 
 		if (!tbv_send_frag_needed(offset, payload_len, retry_start,
 					  retry_end)) {
@@ -7472,42 +7479,19 @@ out_unlock_paths:
 			continue;
 		}
 
-		frame = kmalloc(packet_len, GFP_KERNEL);
-		if (!frame) {
-			ret = -ENOMEM;
-			goto err_release_paths;
-		}
-
-		ret = tbv_copy_send_range(ctx->segs, ctx->nsegs, offset,
-					  frame + TBV_NATIVE_DATA_HDR_SIZE,
-					  payload_len);
-		if (ret) {
-			kfree(frame);
-			atomic64_inc(&tqp->owner->data_wr_copy_error);
-			goto err_release_paths;
-		}
-
 		tbv_send_ctx_build_native_header(ctx, offset, payload_len,
-						 last, &hdr);
-		ret = tbv_native_data_build_header(frame, packet_len, &hdr);
-		if (ret < 0) {
-			kfree(frame);
+						 last, &fill.header);
+		ret = tbv_path_prepare_filled(
+			paths[path_idx], &packet_lists[path_idx], packet_len,
+			TBV_DATA_PDF_FRAME_START, TBV_DATA_PDF_FRAME_END,
+			tbv_native_copy_frame_fill, &fill,
+			tbv_send_tx_done, ctx);
+		if (ret) {
+			if (ret == -EFAULT)
+				atomic64_inc(&tqp->owner->data_wr_copy_error);
 			goto err_release_paths;
 		}
-
-		owned = kzalloc(sizeof(*owned), GFP_KERNEL);
-		if (!owned) {
-			kfree(frame);
-			ret = -ENOMEM;
-			goto err_release_paths;
-		}
-		INIT_LIST_HEAD(&owned->node);
-		owned->data = frame;
-		owned->len = packet_len;
-		owned->sof = TBV_DATA_PDF_FRAME_START;
-		owned->eof = TBV_DATA_PDF_FRAME_END;
-		list_add_tail(&owned->node, &frame_lists[path_idx]);
-		frame_counts[path_idx]++;
+		packet_counts[path_idx]++;
 
 		offset += payload_len;
 		frag_idx++;
@@ -7519,17 +7503,6 @@ out_unlock_paths:
 		u32 refs = 0;
 
 		for (list_idx = 0; list_idx < path_count; list_idx++) {
-			if (!frame_counts[list_idx])
-				continue;
-			ret = tbv_path_prepare_owned_list(
-				paths[list_idx], &frame_lists[list_idx],
-				&packet_lists[list_idx],
-				&packet_counts[list_idx],
-				TBV_PATH_SEND_DEFER, tbv_send_tx_done, ctx);
-			if (ret) {
-				atomic64_inc(&tqp->owner->data_wr_path_send_error);
-				goto err_release_paths;
-			}
 			total_frames += packet_counts[list_idx];
 		}
 
@@ -7602,7 +7575,6 @@ out_unlock_paths:
 	return 0;
 
 err_release_paths:
-	tbv_release_owned_frame_lists(frame_lists, ARRAY_SIZE(frame_lists));
 	tbv_release_prepared_packet_lists(packet_lists, ARRAY_SIZE(packet_lists),
 					  ret);
 	tbv_release_path_reservations(paths, reservations, path_count);

@@ -296,6 +296,7 @@ struct tbv_tx_packet {
 	bool inflight;
 	bool zcopy;
 	bool unmap_dma;
+	bool inline_buf;
 	bool raw_stream_start;
 	bool raw_stream_end;
 	bool raw_stream_counted;
@@ -408,7 +409,8 @@ static void tbv_path_tx_packet_release(struct tbv_tx_packet *packet, int status)
 	}
 
 	if (!packet->control) {
-		kfree(packet->buf);
+		if (!packet->inline_buf)
+			kfree(packet->buf);
 		kfree(packet);
 		return;
 	}
@@ -2178,6 +2180,36 @@ tbv_path_alloc_data_packet_owned(struct tbv_path *path, u8 *buf, u32 len,
 	return packet;
 }
 
+/*
+ * Keep copied frame bytes in the packet allocation itself. The native framed
+ * path used to allocate a payload, an ownership wrapper and then a packet for
+ * every fragment. The wrapper carried no state after preparation and the
+ * separate payload forced a second allocation solely so packet release could
+ * free it. One allocation has the same immutable-until-completion lifetime.
+ */
+static struct tbv_tx_packet *
+tbv_path_alloc_inline_data_packet(struct tbv_path *path, u32 len,
+				  tbv_path_tx_done_fn done, void *done_ctx)
+{
+	struct tbv_tx_packet *packet;
+
+	packet = kzalloc(sizeof(*packet) + len, GFP_KERNEL);
+	if (!packet)
+		return NULL;
+
+	INIT_LIST_HEAD(&packet->node);
+	packet->path = path;
+	packet->buf = (u8 *)(packet + 1);
+	packet->len = len;
+	packet->done = done;
+	packet->done_ctx = done_ctx;
+	packet->owner_ctx = done_ctx;
+	packet->sof = TBV_DATA_PDF_FRAME_START;
+	packet->eof = TBV_DATA_PDF_FRAME_END;
+	packet->inline_buf = true;
+	return packet;
+}
+
 static struct tbv_tx_packet *
 tbv_path_alloc_data_packet(struct tbv_path *path, const void *data, u32 len,
 			   tbv_path_tx_done_fn done, void *done_ctx)
@@ -2894,7 +2926,6 @@ int tbv_path_send_marked_fill(struct tbv_path *path, u32 len,
 			      tbv_path_tx_done_fn done, void *done_ctx)
 {
 	struct tbv_tx_packet *packet;
-	u8 *buf;
 	int ret;
 
 	if (!fill)
@@ -2914,19 +2945,16 @@ int tbv_path_send_marked_fill(struct tbv_path *path, u32 len,
 			return ret;
 		}
 	} else {
-		buf = kmalloc(len, GFP_KERNEL);
-		if (!buf)
+		packet = tbv_path_alloc_inline_data_packet(path, len, done,
+							  done_ctx);
+		if (!packet)
 			return -ENOMEM;
-		ret = fill(fill_ctx, buf, len);
+		ret = fill(fill_ctx, packet->buf, len);
 		if (ret) {
-			kfree(buf);
+			packet->done = NULL;
+			packet->done_ctx = NULL;
+			tbv_path_tx_packet_release(packet, ret);
 			return ret;
-		}
-		packet = tbv_path_alloc_data_packet_owned(path, buf, len,
-							  done, done_ctx);
-		if (!packet) {
-			kfree(buf);
-			return -ENOMEM;
 		}
 	}
 
@@ -2996,79 +3024,33 @@ static void tbv_path_cancel_record_done(struct tbv_path_cancel_done *done,
 	packet->owner_ctx = NULL;
 }
 
-static void tbv_path_release_owned_frame_list(struct list_head *frames)
+int tbv_path_prepare_filled(struct tbv_path *path,
+			    struct list_head *packets, u32 len,
+			    u8 sof, u8 eof, tbv_path_tx_fill_fn fill,
+			    void *fill_ctx, tbv_path_tx_done_fn done,
+			    void *done_ctx)
 {
-	while (!list_empty(frames)) {
-		struct tbv_path_owned_frame *frame =
-			list_first_entry(frames, struct tbv_path_owned_frame,
-					 node);
-
-		list_del_init(&frame->node);
-		kfree(frame->data);
-		kfree(frame);
-	}
-}
-
-int tbv_path_prepare_owned_list(struct tbv_path *path,
-				struct list_head *frames,
-				struct list_head *packets,
-				u32 *packet_count_out,
-				unsigned int send_flags,
-				tbv_path_tx_done_fn done,
-				void *done_ctx)
-{
-	struct tbv_path_owned_frame *owned;
 	struct tbv_tx_packet *packet;
-	LIST_HEAD(prepared);
-	u32 packet_count = 0;
 	int ret;
 
-	if (!path || !frames || !packets || !packet_count_out)
+	if (!path || !packets || !fill || !len ||
+	    len > TBV_DATA_FRAME_SIZE)
 		return -EINVAL;
-	*packet_count_out = 0;
-	if (send_flags & ~(TBV_PATH_SEND_DEFER)) {
-		tbv_path_release_owned_frame_list(frames);
-		return -EINVAL;
+
+	packet = tbv_path_alloc_inline_data_packet(path, len, done, done_ctx);
+	if (!packet)
+		return -ENOMEM;
+	ret = fill(fill_ctx, packet->buf, len);
+	if (ret) {
+		packet->done = NULL;
+		packet->done_ctx = NULL;
+		tbv_path_tx_packet_release(packet, ret);
+		return ret;
 	}
-
-	while (!list_empty(frames)) {
-		owned = list_first_entry(frames, struct tbv_path_owned_frame,
-					 node);
-		list_del_init(&owned->node);
-
-		if (!owned->data || !owned->len ||
-		    owned->len > TBV_DATA_FRAME_SIZE) {
-			kfree(owned->data);
-			kfree(owned);
-			ret = -EINVAL;
-			goto err_release;
-		}
-
-		packet = tbv_path_alloc_data_packet_owned(path, owned->data,
-							  owned->len, done,
-							  done_ctx);
-		if (!packet) {
-			kfree(owned->data);
-			kfree(owned);
-			ret = -ENOMEM;
-			goto err_release;
-		}
-		owned->data = NULL;
-		packet->sof = owned->sof;
-		packet->eof = owned->eof;
-		list_add_tail(&packet->node, &prepared);
-		packet_count++;
-		kfree(owned);
-	}
-
-	list_splice_tail_init(&prepared, packets);
-	*packet_count_out = packet_count;
+	packet->sof = sof;
+	packet->eof = eof;
+	list_add_tail(&packet->node, packets);
 	return 0;
-
-err_release:
-	tbv_path_release_packet_list_silent(&prepared, ret);
-	tbv_path_release_owned_frame_list(frames);
-	return ret;
 }
 
 int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
@@ -3090,26 +3072,6 @@ int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
 	if (ret)
 		tbv_path_release_packet_list_silent(packets, ret);
 	return ret;
-}
-
-int tbv_path_send_owned_list_reserved(struct tbv_path *path,
-				      struct list_head *frames,
-				      unsigned int send_flags,
-				      tbv_path_tx_done_fn done,
-				      void *done_ctx)
-{
-	LIST_HEAD(packets);
-	u32 packet_count;
-	int ret;
-
-	ret = tbv_path_prepare_owned_list(path, frames, &packets,
-					  &packet_count, send_flags, done,
-					  done_ctx);
-	if (ret)
-		return ret;
-
-	return tbv_path_enqueue_prepared_reserved(path, &packets,
-						  packet_count, send_flags);
 }
 
 int tbv_path_send_page_stream(struct tbv_path *path,
@@ -3644,6 +3606,59 @@ int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
 	if (max_out)
 		*max_out = path->tx_remote_data_credit_max;
 	kfree(path);
+	return 0;
+}
+
+struct tbv_test_inline_fill_ctx {
+	u32 calls;
+	u8 value;
+};
+
+static int tbv_test_inline_fill(void *ctx, void *dst, u32 len)
+{
+	struct tbv_test_inline_fill_ctx *fill = ctx;
+
+	fill->calls++;
+	memset(dst, fill->value, len);
+	return 0;
+}
+
+int tbv_test_path_inline_prepare(u32 len, u32 *fill_calls_out,
+				 bool *inline_out, bool *data_match_out)
+{
+	struct tbv_test_inline_fill_ctx fill = {
+		.value = 0xa5,
+	};
+	struct tbv_tx_packet *packet;
+	struct tbv_path path = {};
+	LIST_HEAD(packets);
+	bool matches = true;
+	u32 i;
+	int ret;
+
+	ret = tbv_path_prepare_filled(
+		&path, &packets, len, TBV_DATA_PDF_FRAME_START,
+		TBV_DATA_PDF_FRAME_END, tbv_test_inline_fill, &fill, NULL,
+		NULL);
+	if (ret)
+		return ret;
+
+	packet = list_first_entry(&packets, struct tbv_tx_packet, node);
+	for (i = 0; i < len; i++) {
+		if (packet->buf[i] != fill.value) {
+			matches = false;
+			break;
+		}
+	}
+	if (fill_calls_out)
+		*fill_calls_out = fill.calls;
+	if (inline_out)
+		*inline_out = packet->inline_buf &&
+			      packet->buf == (u8 *)(packet + 1);
+	if (data_match_out)
+		*data_match_out = matches;
+
+	tbv_path_release_packet_list_silent(&packets, -ECANCELED);
 	return 0;
 }
 
