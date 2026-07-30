@@ -3209,7 +3209,10 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
 static void tb_test_xdomain_stale_identity_recovery(struct kunit *test)
 {
 	struct ident_peer peer = { .true_uuid = 0x66518780u, .answers = true };
-	struct ident_xd xd = { .cached_uuid = 0xffffffffu };
+	struct ident_xd xd = {
+		.cached_uuid = 0xffffffffu,
+		.cached_properties = true,
+	};
 
 	/* Corrupt cached identity against a healthy peer: must recover via
 	 * UUID re-verification + CM replacement of the unplugged XDomain. */
@@ -3235,8 +3238,41 @@ static void tb_test_xdomain_stale_identity_recovery(struct kunit *test)
 	 */
 	memset(&xd, 0, sizeof(xd));
 	xd.cached_uuid = 0x11111111u;
+	xd.cached_properties = true;
 	peer.true_uuid = 0x22222222u;
 	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 32, /*cm_reconciles=*/true));
+}
+
+static void tb_test_xdomain_silent_stale_identity_recovery(struct kunit *test)
+{
+	struct ident_peer peer = {
+		.true_uuid = 0x5bdf8780u,
+		.answers = false,
+	};
+	struct ident_xd xd = {
+		.cached_uuid = 0xffffffffu,
+		.cached_properties = true,
+	};
+
+	/*
+	 * Live 025<->023 failure: the old, already-enumerated XDomain had a
+	 * half-read UUID and the rebooted peer answered neither property nor UUID
+	 * requests. A mismatch response never arrives, so UUID revalidation alone
+	 * cannot condemn it. After both bounded read budgets fail, the stale
+	 * object must be replaced despite the physical lane remaining up.
+	 */
+	ident_tick(&xd, &peer); /* exhausted PROPERTIES -> UUID */
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+	ident_tick(&xd, &peer); /* exhausted UUID -> condemn stale object */
+	KUNIT_EXPECT_TRUE(test, xd.unplugged);
+
+	/* Replacement is not terminal: the fresh object recovers when peer boots. */
+	ident_cm_replace(&xd, &peer);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+	KUNIT_EXPECT_FALSE(test, xd.enumerated);
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					 /*cm_reconciles=*/true));
 }
 
 static struct kunit_case tb_test_cases[] = {
@@ -3245,6 +3281,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),
 	KUNIT_CASE(tb_test_xdomain_late_second_link),
 	KUNIT_CASE(tb_test_xdomain_stale_identity_recovery),
+	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),

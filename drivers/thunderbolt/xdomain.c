@@ -1257,6 +1257,16 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	return 0;
 }
 
+static bool tb_xdomain_had_remote_properties(struct tb_xdomain *xd)
+{
+	bool had_properties;
+
+	mutex_lock(&xd->lock);
+	had_properties = xd->remote_properties;
+	mutex_unlock(&xd->lock);
+	return had_properties;
+}
+
 static int tb_xdomain_get_link_status(struct tb_xdomain *xd)
 {
 	struct tb *tb = xd->tb;
@@ -1611,10 +1621,31 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			 * (the co-reset strand, f876653), so keep re-verifying
 			 * instead of stopping the handshake.
 			 */
-			if (xd->is_unplugged || ret == -ENOMEM)
+			if (xd->is_unplugged || ret == -ENOMEM) {
 				tb_xdomain_failed(xd);
-			else
+			} else if (tb_xdomain_had_remote_properties(xd)) {
+				/*
+				 * This was an ENUMERATED peer whose property
+				 * refresh failed and whose cached UUID now also
+				 * gets no answer. Keeping that old XDomain alive
+				 * is not protecting a booting peer: it prevents
+				 * the connection manager from creating the fresh
+				 * XDomain that can discover it. Observed on
+				 * appmana-025<->023 after sequential reboot:
+				 * lanes and native control traffic were live, but
+				 * both sides retained half-read UUIDs ending in
+				 * ffff:ffffffffffff and no tbverbs service ever
+				 * re-probed. Condemn only previously-enumerated
+				 * objects; a first-boot XDomain with no cached
+				 * properties keeps the unbounded co-reset retry.
+				 */
+				dev_warn(&xd->dev,
+					 "previously enumerated identity stopped answering; replacing stale XDomain\n");
+				xd->is_unplugged = true;
+				tb_xdomain_failed(xd);
+			} else {
 				tb_xdomain_queue_uuid(xd);
+			}
 		} else {
 			tb_xdomain_queue_properties_changed(xd);
 			if (xd->bonding_possible)

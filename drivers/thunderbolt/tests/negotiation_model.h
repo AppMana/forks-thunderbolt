@@ -365,6 +365,7 @@ struct ident_peer {
 struct ident_xd {
 	u32 cached_uuid;	/* xd->remote_uuid */
 	int state;		/* IDENT_STATE_* */
+	bool cached_properties; /* xd->remote_properties: enumerated before */
 	bool enumerated;	/* properties read; services probed */
 	bool unplugged;		/* xd->is_unplugged: waiting for CM replace */
 };
@@ -394,8 +395,19 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 			xd->state = IDENT_STATE_UUID;	/* re-verify identity */
 		break;
 	case IDENT_STATE_UUID:
-		if (!peer->answers)
-			break;			/* re-queue UUID, not terminal */
+		if (!peer->answers) {
+			/*
+			 * One full UUID retry budget is one model tick.
+			 * Previously-enumerated objects are stale topology:
+			 * replace them so a fresh handshake can discover a
+			 * rebooted peer. A first-boot object has no cached
+			 * properties and preserves the unbounded co-reset
+			 * retry.
+			 */
+			if (xd->cached_properties)
+				xd->unplugged = true;
+			break;
+		}
 		if (xd->cached_uuid != peer->true_uuid)
 			xd->unplugged = true;	/* tb_xdomain_get_uuid mismatch */
 		else
@@ -415,6 +427,7 @@ static inline void ident_cm_replace(struct ident_xd *xd,
 		return;
 	xd->cached_uuid = peer->true_uuid;
 	xd->state = IDENT_STATE_PROPERTIES;
+	xd->cached_properties = false;
 	xd->unplugged = false;
 }
 
