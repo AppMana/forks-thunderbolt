@@ -1490,6 +1490,24 @@ static bool tbv_qp_entry_expired(unsigned long queued, unsigned long now,
 	return timeout && queued && time_after_eq(now, queued + timeout);
 }
 
+/*
+ * Partial receive timeouts are idle deadlines, not whole-message deadlines.
+ *
+ * A large message can legitimately take longer than one verbs ACK timeout to
+ * cross a busy shared path while still making forward progress. Keeping the
+ * timestamp from the first fragment makes the timeout worker NAK that healthy
+ * message, and the resulting full-message retransmits amplify the backlog
+ * until every QP exhausts. Each newly accepted byte/fragment proves the peer
+ * and path are alive, so restart both the idle clock and recovery budget.
+ */
+static void tbv_rx_note_progress(unsigned long *progress_jiffies,
+				 u8 *timeout_retries,
+				 unsigned long now)
+{
+	*progress_jiffies = now;
+	*timeout_retries = 0;
+}
+
 static void tbv_qp_schedule_timeout_delay_locked(struct tbv_qp *tqp,
 						 unsigned long delay,
 						 bool replace)
@@ -5459,6 +5477,75 @@ int tbv_test_rx_timeout_deadline(unsigned long timeout, u8 retry_cnt,
 	if (active_out)
 		*active_out = tqp->rx_write.active;
 	ret = 0;
+destroy:
+	mutex_destroy(&tqp->rx_lock);
+	mutex_destroy(&state->lock);
+out:
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+
+int tbv_test_rx_progress_extends_deadline(unsigned long timeout,
+					  unsigned long progress_after,
+					  bool *active_at_old_deadline_out,
+					  u8 *retries_after_progress_out,
+					  unsigned long *remaining_out)
+{
+	struct tbv_deadline deadline;
+	struct tbv_state *state;
+	struct tbv_qp *tqp;
+	unsigned long start;
+	unsigned long progress;
+	unsigned long delay;
+	int ret = -ENOMEM;
+
+	if (!timeout || !progress_after || progress_after >= timeout ||
+	    timeout > MAX_JIFFY_OFFSET)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!state || !tqp)
+		goto out;
+
+	mutex_init(&state->lock);
+	spin_lock_init(&tqp->lock);
+	mutex_init(&tqp->rx_lock);
+	INIT_LIST_HEAD(&tqp->rx_reorder);
+	tqp->owner = state;
+	tqp->closing = true;
+	tqp->state = IB_QPS_RTS;
+	tqp->attr.retry_cnt = 2;
+
+	start = jiffies ?: 1;
+	progress = start + progress_after;
+	tqp->rx_expected_psn = 37;
+	tqp->rx_write.active = true;
+	tqp->rx_write.psn = 37;
+	tqp->rx_write.src_qp = 11;
+	tqp->rx_write.started_jiffies = start;
+	tqp->rx_write.timeout_retries = 2;
+
+	tbv_rx_note_progress(&tqp->rx_write.started_jiffies,
+			     &tqp->rx_write.timeout_retries, progress);
+
+	tbv_deadline_init(&deadline);
+	tbv_qp_timeout_reap_rx(tqp, start + timeout, timeout, &deadline);
+	if (!tbv_deadline_delay(&deadline, start + timeout, &delay)) {
+		ret = -EINVAL;
+		goto destroy;
+	}
+
+	if (active_at_old_deadline_out)
+		*active_at_old_deadline_out = tqp->rx_write.active;
+	if (retries_after_progress_out)
+		*retries_after_progress_out =
+			tqp->rx_write.timeout_retries;
+	if (remaining_out)
+		*remaining_out = delay;
+	ret = 0;
+
 destroy:
 	mutex_destroy(&tqp->rx_lock);
 	mutex_destroy(&state->lock);
@@ -10781,6 +10868,8 @@ static void tbv_rx_buffer_fragment_locked(struct tbv_state *state,
 	set_bit(frag_idx, msg->frag_seen);
 	msg->frags_received++;
 	msg->received += hdr->length;
+	tbv_rx_note_progress(&msg->first_jiffies, &msg->timeout_retries,
+			     jiffies);
 	if (msg->frags_received == msg->frag_count)
 		msg->complete = true;
 	if (msg->complete)
@@ -10905,6 +10994,8 @@ static void tbv_rx_buffer_write_fragment_locked(
 	set_bit(frag_idx, msg->frag_seen);
 	msg->frags_received++;
 	msg->received += hdr->length;
+	tbv_rx_note_progress(&msg->first_jiffies, &msg->timeout_retries,
+			     jiffies);
 	if (msg->frags_received == msg->frag_count)
 		msg->complete = true;
 	if (msg->complete)
@@ -11046,6 +11137,8 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 			set_bit(frag_idx, msg->frag_seen);
 			msg->frags_received++;
 			msg->received += hdr->length;
+			tbv_rx_note_progress(&msg->started_jiffies,
+					     &msg->timeout_retries, jiffies);
 		}
 
 		if (msg->frags_received == msg->frag_count) {
@@ -11171,6 +11264,9 @@ static void tbv_rx_handle_send_fragment(struct tbv_state *state,
 		msg->status = IB_WC_LOC_PROT_ERR;
 
 	msg->received += copy_len;
+	if (copy_len)
+		tbv_rx_note_progress(&msg->started_jiffies,
+				     &msg->timeout_retries, jiffies);
 	if (last) {
 		tbv_rx_finish_send(state, tqp, rx_path);
 		tbv_rx_drain_reorder_locked(state, tqp, rx_path);
@@ -11308,6 +11404,8 @@ static void tbv_rx_write_merge_buffered_locked(struct tbv_state *state,
 		}
 
 		wrx->received = frag->offset + frag->len;
+		tbv_rx_note_progress(&wrx->started_jiffies,
+				     &wrx->timeout_retries, jiffies);
 		if (msg->buffered_bytes >= frag->len)
 			msg->buffered_bytes -= frag->len;
 		else
@@ -11595,6 +11693,8 @@ static void tbv_rx_handle_rdma_write_fragment(struct tbv_state *state,
 		}
 
 		wrx->received = copy_offset + copy_len;
+		tbv_rx_note_progress(&wrx->started_jiffies,
+				     &wrx->timeout_retries, jiffies);
 		/* a filled hole may unlock buffered same-PSN tail fragments */
 		tbv_rx_write_merge_buffered_locked(state, tqp, rx_path);
 	}

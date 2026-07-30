@@ -40,9 +40,29 @@ static void tbv_rx_timeout_zero_retry_fails_once(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, active);
 }
 
+static void tbv_rx_progress_restarts_idle_deadline(struct kunit *test)
+{
+	unsigned long timeout = msecs_to_jiffies(800);
+	unsigned long progress_after = msecs_to_jiffies(300);
+	unsigned long remaining = 0;
+	u8 retries_after_progress = 0xff;
+	bool active_at_old_deadline = false;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_rx_progress_extends_deadline(
+				timeout, progress_after,
+				&active_at_old_deadline,
+				&retries_after_progress, &remaining),
+			0);
+	KUNIT_EXPECT_TRUE(test, active_at_old_deadline);
+	KUNIT_EXPECT_EQ(test, retries_after_progress, (u8)0);
+	KUNIT_EXPECT_EQ(test, remaining, progress_after);
+}
+
 static struct kunit_case tbv_rx_timeout_deadline_cases[] = {
 	KUNIT_CASE(tbv_rx_timeout_retries_within_deadline_budget),
 	KUNIT_CASE(tbv_rx_timeout_zero_retry_fails_once),
+	KUNIT_CASE(tbv_rx_progress_restarts_idle_deadline),
 	{}
 };
 

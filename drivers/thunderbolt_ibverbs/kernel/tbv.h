@@ -1121,6 +1121,10 @@ int tbv_test_rx_timeout_deadline(unsigned long timeout, u8 retry_cnt,
 				 unsigned long *first_delay_out,
 				 u32 *wakeups_out, u32 *recoveries_out,
 				 bool *active_out);
+int tbv_test_rx_progress_extends_deadline(
+	unsigned long timeout, unsigned long progress_after,
+	bool *active_at_old_deadline_out, u8 *retries_after_progress_out,
+	unsigned long *remaining_out);
 
 /*
  * Runs the TX walk up to @passes times against a head send whose tx_pending
