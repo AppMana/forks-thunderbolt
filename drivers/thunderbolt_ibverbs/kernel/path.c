@@ -143,6 +143,19 @@ module_param(zcopy_map_full_page, bool, 0644);
 MODULE_PARM_DESC(zcopy_map_full_page,
 		 "Map zero-copy TX frames to the page boundary so an NHI over-read cannot fault past the mapping; 0 maps exactly the transmitted length");
 
+/*
+ * The NHI hardware CRC errors observed under the 32-QP bidirectional workload
+ * overwhelmingly affect short, header-bearing native frames; full 4096-byte
+ * descriptors complete cleanly. Send those self-delimiting frames from a
+ * zero-filled full buffer while retaining the real payload length in their
+ * native header. Raw stream frames and the Apple backend remain exact-sized.
+ * Settable for immediate hardware A/B and rollback without rebuilding.
+ */
+static bool native_pad_short_frames = true;
+module_param(native_pad_short_frames, bool, 0644);
+MODULE_PARM_DESC(native_pad_short_frames,
+		 "Pad ordinary short native frames to 4096 bytes on the wire; excludes raw streams and Apple framing");
+
 static uint tx_stall_warn_ms = 5000;
 module_param(tx_stall_warn_ms, uint, 0644);
 MODULE_PARM_DESC(tx_stall_warn_ms,
@@ -2430,6 +2443,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		struct tbv_tx_packet *packet;
 		struct tbv_data_frame *f;
 		bool needs_staging;
+		bool pad_short_native;
 		bool old_raw_stream_active;
 		bool old_raw_stream_end_seen;
 		bool old_raw_stream_window_open;
@@ -2657,13 +2671,23 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			return;
 		}
 
+		pad_short_native =
+			READ_ONCE(native_pad_short_frames) &&
+			path->rail && path->rail->peer &&
+			path->rail->peer->backend == TBV_BACKEND_NATIVE &&
+			tbv_native_data_can_pad_short_frame(packet->buf,
+							    packet->len);
 		memcpy(f->buf, packet->buf, packet->len);
+		if (pad_short_native)
+			memset(f->buf + packet->len, 0,
+			       TBV_DATA_FRAME_SIZE - packet->len);
 		f->packet = packet;
 		f->done = packet->done;
 		f->done_ctx = packet->done_ctx;
 		f->frame.callback = tbv_path_tx_complete;
-		f->frame.size = packet->len == TBV_DATA_FRAME_SIZE ? 0 :
-							       packet->len;
+		f->frame.size = pad_short_native ||
+				packet->len == TBV_DATA_FRAME_SIZE ?
+				0 : packet->len;
 		f->frame.flags = 0;
 		f->frame.sof = packet->sof;
 		f->frame.eof = packet->eof;

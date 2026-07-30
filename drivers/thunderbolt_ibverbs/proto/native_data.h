@@ -232,6 +232,33 @@ tbv_native_data_parse_header(const void *buf, size_t size,
 }
 
 /*
+ * Short copied frames have shown NHI receive-CRC failures under sustained
+ * bidirectional load while full 4096-byte frames remain reliable. A normal
+ * native frame is self-delimiting: hdr.length records the real payload bytes,
+ * so its ring descriptor may safely cover a zero-filled 4096-byte buffer and
+ * the receiver will ignore the tail.
+ *
+ * Raw-stream headers must remain header-sized because they open an exact-length
+ * unframed payload window, and raw payload frames have no native header at all.
+ * Requiring a complete, internally consistent ordinary header excludes both.
+ */
+static inline bool
+tbv_native_data_can_pad_short_frame(const void *buf, size_t size)
+{
+	struct tbv_native_data_header hdr;
+
+	if (size < TBV_NATIVE_DATA_HDR_SIZE ||
+	    size >= TBV_NATIVE_DATA_FRAME_SIZE)
+		return false;
+	if (tbv_native_data_parse_header(buf, size, &hdr))
+		return false;
+	if (hdr.flags & TBV_NATIVE_DATA_F_RAW_STREAM)
+		return false;
+
+	return hdr.length <= size - TBV_NATIVE_DATA_HDR_SIZE;
+}
+
+/*
  * Synthesize the per-fragment header for @payload_len raw bytes of a stream.
  * The stream header's frag_offset is the stream's base offset within the
  * operation: legacy full-message streams carry 0 there, per-fragment split

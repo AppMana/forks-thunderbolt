@@ -381,6 +381,62 @@ static void tbv_raw_desync_header_is_detected(struct kunit *test)
 					     &parsed), 0);
 }
 
+static void tbv_short_native_frame_padding_contract(struct kunit *test)
+{
+	struct tbv_native_data_header hdr = {};
+	struct tbv_native_data_header parsed;
+	u8 *frame;
+	const u32 payload_len = 128;
+	const u32 wire_len = TBV_NATIVE_DATA_HDR_SIZE + payload_len;
+	u32 i;
+
+	frame = kunit_kzalloc(test, TBV_NATIVE_DATA_FRAME_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	hdr.opcode = TBV_NATIVE_DATA_OP_RDMA_WRITE;
+	hdr.flags = TBV_NATIVE_DATA_F_LAST;
+	hdr.dest_qp = 7;
+	hdr.src_qp = 9;
+	hdr.psn = 42;
+	hdr.length = payload_len;
+	KUNIT_ASSERT_GT(test,
+		tbv_native_data_build_header(frame, wire_len, &hdr), 0);
+	for (i = 0; i < payload_len; i++)
+		frame[TBV_NATIVE_DATA_HDR_SIZE + i] = (u8)(i * 11u + 3u);
+
+	/* A complete ordinary short frame is safe to send as a full buffer. */
+	KUNIT_EXPECT_TRUE(test,
+		tbv_native_data_can_pad_short_frame(frame, wire_len));
+	KUNIT_ASSERT_EQ(test,
+		tbv_native_data_parse_header(frame,
+					     TBV_NATIVE_DATA_FRAME_SIZE,
+					     &parsed), 0);
+	KUNIT_EXPECT_EQ(test, parsed.length, payload_len);
+	for (i = wire_len; i < TBV_NATIVE_DATA_FRAME_SIZE; i++)
+		KUNIT_EXPECT_EQ(test, frame[i], (u8)0);
+
+	/* A truncated declared payload must not become valid through padding. */
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_can_pad_short_frame(frame, wire_len - 1));
+
+	/* Raw-stream headers and their headerless payload frames stay exact. */
+	hdr.flags = TBV_NATIVE_DATA_F_RAW_STREAM;
+	KUNIT_ASSERT_GT(test,
+		tbv_native_data_build_header(
+			frame, TBV_NATIVE_DATA_FRAME_SIZE, &hdr), 0);
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_can_pad_short_frame(frame,
+						    TBV_NATIVE_DATA_HDR_SIZE));
+	memset(frame, 0xa5, TBV_NATIVE_DATA_HDR_SIZE);
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_can_pad_short_frame(frame,
+						    TBV_NATIVE_DATA_HDR_SIZE));
+
+	/* Full-sized descriptors already use the stable hardware shape. */
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_can_pad_short_frame(
+			frame, TBV_NATIVE_DATA_FRAME_SIZE));
+}
+
 static void tbv_zcopy_frame_map_len_covers_page(struct kunit *test)
 {
 	/*
@@ -516,6 +572,7 @@ static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_dma_sgt_locate_nonzero_mr_offset),
 	KUNIT_CASE(tbv_write_shape_resolver_prefers_known_count),
 	KUNIT_CASE(tbv_raw_desync_header_is_detected),
+	KUNIT_CASE(tbv_short_native_frame_padding_contract),
 	{}
 };
 
