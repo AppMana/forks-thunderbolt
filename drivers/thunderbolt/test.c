@@ -3204,24 +3204,19 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
  */
 static void tb_test_cm_reconcile_empty_unplugged_retrains(struct kunit *test)
 {
-	struct cm_host h;
+	struct tb_reconcile_decision decision;
 
-	memset(&h, 0, sizeof(h));
+	decision = tb_reconcile_decide(false, false, TB_PORT_UNPLUGGED);
+	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_NONE);
+	KUNIT_EXPECT_TRUE(test, decision.retrain);
 
-	/* Reconciliation is inert until hotplug handling is armed. */
-	cm_reconcile(&h);
-	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 0U);
+	decision = tb_reconcile_decide(true, false, TB_PORT_UNPLUGGED);
+	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_UNPLUG);
+	KUNIT_EXPECT_TRUE(test, decision.retrain);
 
-	cm_arm_hotplug(&h);
-	cm_reconcile(&h);
-	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 1U);
-	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
-
-	/* An actually trained lane is scanned, not needlessly re-armed. */
-	cm_link_up_lost(&h, 0);
-	cm_reconcile(&h);
-	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 1U);
-	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	decision = tb_reconcile_decide(false, false, TB_PORT_UP);
+	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_PLUG);
+	KUNIT_EXPECT_FALSE(test, decision.retrain);
 }
 
 /*

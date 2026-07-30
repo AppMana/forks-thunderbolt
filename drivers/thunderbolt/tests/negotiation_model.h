@@ -234,7 +234,6 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
 struct cm_port {
 	bool link_up;	/* peer's link has trained */
 	bool xdomain;	/* this port's XDomain was enumerated */
-	unsigned int detection_kicks; /* lane-disable toggles while UNPLUGGED */
 };
 
 struct cm_host {
@@ -329,14 +328,6 @@ static inline void cm_reconcile(struct cm_host *h)
 			h->port[i].xdomain = false;	/* synthesized unplug */
 		else if (!h->port[i].xdomain && h->port[i].link_up)
 			h->port[i].xdomain = true;	/* synthesized plug */
-
-		/*
-		 * tb_port_kick_detection() also runs for an empty UNPLUGGED
-		 * port.  That is the cold-boot case: there is no stale XDomain
-		 * whose teardown branch could otherwise trigger the kick.
-		 */
-		if (!h->port[i].link_up)
-			h->port[i].detection_kicks++;
 	}
 }
 

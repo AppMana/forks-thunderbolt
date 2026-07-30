@@ -2650,7 +2650,8 @@ static void tb_reconcile_work(struct work_struct *work)
 		goto out_unlock;
 
 	tb_switch_for_each_port(tb->root_switch, port) {
-		bool present, gone;
+		struct tb_reconcile_decision decision;
+		bool has_topology;
 		int state;
 
 		if (!tb_port_is_null(port) || tb_is_upstream_port(port))
@@ -2665,48 +2666,37 @@ static void tb_reconcile_work(struct work_struct *work)
 		if (state < 0)
 			continue;
 
-		present = state == TB_PORT_UP ||
-			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
-		gone = state == TB_PORT_UNPLUGGED;
+		has_topology = port->xdomain || port->remote;
+		decision = tb_reconcile_decide(
+			has_topology,
+			port->xdomain && port->xdomain->is_unplugged,
+			state);
 
-		if ((port->xdomain || port->remote) &&
-		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
-			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
-				continue;
-			port->reconcile_synth = TB_RECONCILE_UNPLUG;
-			tb_port_warn(port,
-				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
-				     port->xdomain ? "XDomain present" :
-						     "router present",
-				     state);
-			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
-					 true);
-			/*
-			 * The segment may be detection-wedged (both ends
-			 * UNPLUGGED with a live cable); give the PHY a fresh
-			 * edge so the peer's port sees one too.
-			 */
-		} else if (!port->xdomain && !port->remote && present) {
-			if (port->reconcile_synth == TB_RECONCILE_PLUG)
-				continue;
-			port->reconcile_synth = TB_RECONCILE_PLUG;
-			tb_port_warn(port,
-				     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
-				     state);
-			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
-					 false);
+		if (decision.synth == TB_RECONCILE_UNPLUG) {
+			if (port->reconcile_synth != TB_RECONCILE_UNPLUG) {
+				port->reconcile_synth = TB_RECONCILE_UNPLUG;
+				tb_port_warn(port,
+					     "lost unplug: %s but lane state %d, synthesizing unplug\n",
+					     port->xdomain ? "XDomain present" :
+							     "router present",
+					     state);
+				tb_queue_hotplug(tb, tb_route(port->sw),
+						 port->port, true);
+			}
+		} else if (decision.synth == TB_RECONCILE_PLUG) {
+			if (port->reconcile_synth != TB_RECONCILE_PLUG) {
+				port->reconcile_synth = TB_RECONCILE_PLUG;
+				tb_port_warn(port,
+					     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
+					     state);
+				tb_queue_hotplug(tb, tb_route(port->sw),
+						 port->port, false);
+			}
 		} else {
 			port->reconcile_synth = TB_RECONCILE_NONE;
 		}
 
-		/*
-		 * Re-arm detection even when software has no object for the
-		 * port.  In particular, after a cold boot a detection-wedged
-		 * cable has neither a remote router nor an XDomain, so limiting
-		 * this to the stale-object branch above leaves the port
-		 * UNPLUGGED forever.
-		 */
-		if (gone)
+		if (decision.retrain)
 			tb_port_kick_detection(port);
 	}
 
