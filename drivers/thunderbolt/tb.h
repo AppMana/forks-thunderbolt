@@ -313,33 +313,8 @@ struct tb_port {
 #define TB_RECONCILE_UNPLUG	1
 #define TB_RECONCILE_PLUG	2
 
-struct tb_reconcile_decision {
-	u8 synth;
-	bool retrain;
-};
-
-static inline struct tb_reconcile_decision
-tb_reconcile_decide(bool has_topology, bool xdomain_unplugged, int state)
-{
-	struct tb_reconcile_decision decision = {
-		.synth = TB_RECONCILE_NONE,
-	};
-	bool present = state == TB_PORT_UP ||
-		       (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
-	bool gone = state == TB_PORT_UNPLUGGED;
-
-	if (has_topology && (gone || xdomain_unplugged))
-		decision.synth = TB_RECONCILE_UNPLUG;
-	else if (!has_topology && present)
-		decision.synth = TB_RECONCILE_PLUG;
-
-	/*
-	 * A detection-wedged cable can be UNPLUGGED before software has ever
-	 * created an XDomain or remote router, especially after a cold boot.
-	 */
-	decision.retrain = gone;
-	return decision;
-}
+bool tb_icm_port_needs_retrain(bool has_topology, int state);
+void tb_port_kick_detection(struct tb_port *port);
 
 /**
  * struct usb4_port - USB4 port device

@@ -2593,7 +2593,7 @@ out:
  * re-arms harmlessly. Deliberately-disabled ports (TB_PORT_DISABLED) are left
  * alone.
  */
-static void tb_port_kick_detection(struct tb_port *port)
+void tb_port_kick_detection(struct tb_port *port)
 {
 	if (!port_retrain)
 		return;
@@ -2650,8 +2650,7 @@ static void tb_reconcile_work(struct work_struct *work)
 		goto out_unlock;
 
 	tb_switch_for_each_port(tb->root_switch, port) {
-		struct tb_reconcile_decision decision;
-		bool has_topology;
+		bool present, gone;
 		int state;
 
 		if (!tb_port_is_null(port) || tb_is_upstream_port(port))
@@ -2666,38 +2665,41 @@ static void tb_reconcile_work(struct work_struct *work)
 		if (state < 0)
 			continue;
 
-		has_topology = port->xdomain || port->remote;
-		decision = tb_reconcile_decide(
-			has_topology,
-			port->xdomain && port->xdomain->is_unplugged,
-			state);
+		present = state == TB_PORT_UP ||
+			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
+		gone = state == TB_PORT_UNPLUGGED;
 
-		if (decision.synth == TB_RECONCILE_UNPLUG) {
-			if (port->reconcile_synth != TB_RECONCILE_UNPLUG) {
-				port->reconcile_synth = TB_RECONCILE_UNPLUG;
-				tb_port_warn(port,
-					     "lost unplug: %s but lane state %d, synthesizing unplug\n",
-					     port->xdomain ? "XDomain present" :
-							     "router present",
-					     state);
-				tb_queue_hotplug(tb, tb_route(port->sw),
-						 port->port, true);
-			}
-		} else if (decision.synth == TB_RECONCILE_PLUG) {
-			if (port->reconcile_synth != TB_RECONCILE_PLUG) {
-				port->reconcile_synth = TB_RECONCILE_PLUG;
-				tb_port_warn(port,
-					     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
-					     state);
-				tb_queue_hotplug(tb, tb_route(port->sw),
-						 port->port, false);
-			}
+		if ((port->xdomain || port->remote) &&
+		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
+			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
+				continue;
+			port->reconcile_synth = TB_RECONCILE_UNPLUG;
+			tb_port_warn(port,
+				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
+				     port->xdomain ? "XDomain present" :
+						     "router present",
+				     state);
+			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
+					 true);
+			/*
+			 * The segment may be detection-wedged (both ends
+			 * UNPLUGGED with a live cable); give the PHY a fresh
+			 * edge so the peer's port sees one too.
+			 */
+			if (gone)
+				tb_port_kick_detection(port);
+		} else if (!port->xdomain && !port->remote && present) {
+			if (port->reconcile_synth == TB_RECONCILE_PLUG)
+				continue;
+			port->reconcile_synth = TB_RECONCILE_PLUG;
+			tb_port_warn(port,
+				     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
+				     state);
+			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
+					 false);
 		} else {
 			port->reconcile_synth = TB_RECONCILE_NONE;
 		}
-
-		if (decision.retrain)
-			tb_port_kick_detection(port);
 	}
 
 out_unlock:

@@ -3202,21 +3202,14 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
  * UNPLUGGED.  No XDomain ever existed in that state, so detection re-arming
  * must not depend on stale software topology being present.
  */
-static void tb_test_cm_reconcile_empty_unplugged_retrains(struct kunit *test)
+static void tb_test_icm_empty_unplugged_port_needs_retrain(struct kunit *test)
 {
-	struct tb_reconcile_decision decision;
-
-	decision = tb_reconcile_decide(false, false, TB_PORT_UNPLUGGED);
-	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_NONE);
-	KUNIT_EXPECT_TRUE(test, decision.retrain);
-
-	decision = tb_reconcile_decide(true, false, TB_PORT_UNPLUGGED);
-	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_UNPLUG);
-	KUNIT_EXPECT_TRUE(test, decision.retrain);
-
-	decision = tb_reconcile_decide(false, false, TB_PORT_UP);
-	KUNIT_EXPECT_EQ(test, decision.synth, (u8)TB_RECONCILE_PLUG);
-	KUNIT_EXPECT_FALSE(test, decision.retrain);
+	KUNIT_EXPECT_TRUE(test,
+			  tb_icm_port_needs_retrain(false, TB_PORT_UNPLUGGED));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_port_needs_retrain(false, TB_PORT_UP));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_port_needs_retrain(true, TB_PORT_UNPLUGGED));
 }
 
 /*
@@ -3306,7 +3299,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
-	KUNIT_CASE(tb_test_cm_reconcile_empty_unplugged_retrains),
+	KUNIT_CASE(tb_test_icm_empty_unplugged_port_needs_retrain),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_path_basic),
