@@ -362,6 +362,27 @@ tbv_native_data_resync_delta(tbv_wire_u32 seen, tbv_wire_u32 total)
 }
 
 /*
+ * Cumulative credit counters use 32-bit serial-number arithmetic. A forward
+ * value is at most 2^31-1 ahead; a larger modular delta names an older value,
+ * not a wrap. Credit resync runs every second, so a legitimate half-space jump
+ * is impossible in practice and rejecting the ambiguous midpoint is safe.
+ */
+static inline bool
+tbv_native_data_resync_forward(tbv_wire_u32 seen, tbv_wire_u32 total,
+			       tbv_wire_u32 *delta)
+{
+	tbv_wire_u32 d;
+
+	if (!delta)
+		return false;
+	d = tbv_native_data_resync_delta(seen, total);
+	if (d > (tbv_wire_u32)S32_MAX)
+		return false;
+	*delta = d;
+	return true;
+}
+
+/*
  * NAK header validation. Only the psn / frag_offset / imm_data fields carry
  * information (see TBV_NATIVE_DATA_OP_NAK); everything else must be zero so
  * the fields stay available for later extension.

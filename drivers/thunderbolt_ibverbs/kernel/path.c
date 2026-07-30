@@ -631,19 +631,19 @@ void tbv_path_refund_remote_data_credits(struct tbv_path *path, u32 frames)
 }
 
 /*
- * Apply a peer's absolute returned-credit count. The delta against what has
- * already been applied here is exactly the credits lost with a dropped
- * PATH_CREDIT frame, so this heals the window without the peer knowing which
- * frame was lost. Granting goes through the normal add path, which clamps at
- * the window maximum: a duplicated or stale resync can therefore never let the
- * sender exceed the peer's ring depth. The first resync after a capacity
- * change only adopts the baseline, since the two counters restart apart.
+ * Apply a peer's absolute returned-credit count. A backward serial is stale,
+ * not a four-billion-credit wrap. Advance the observed total and restore the
+ * balance atomically: dropping the lock between computing the delta and
+ * applying it lets a concurrent PATH_CREDIT update the same ledger twice.
+ * The first resync after a capacity change only adopts the baseline, since the
+ * two counters restart independently across a re-HELLO.
  */
 void tbv_path_sync_remote_rx_credits(struct tbv_path *path, u32 total)
 {
 	struct tbv_state *state;
 	unsigned long flags;
 	u32 delta = 0;
+	u32 accepted = 0;
 
 	if (!path)
 		return;
@@ -657,19 +657,31 @@ void tbv_path_sync_remote_rx_credits(struct tbv_path *path, u32 total)
 	if (!path->tx_credit_sync_primed) {
 		path->tx_credit_sync_primed = true;
 		path->tx_remote_credit_returned_seen = total;
-	} else {
-		delta = tbv_native_data_resync_delta(
-			path->tx_remote_credit_returned_seen, total);
+	} else if (tbv_native_data_resync_forward(
+			   path->tx_remote_credit_returned_seen, total,
+			   &delta)) {
+		u32 room = path->tx_remote_data_credits >=
+				   path->tx_remote_data_credit_max ?
+				   0 : path->tx_remote_data_credit_max -
+					       path->tx_remote_data_credits;
+
+		path->tx_remote_credit_returned_seen = total;
+		accepted = min(delta, room);
+		path->tx_remote_data_credits += accepted;
 	}
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
-	if (!delta)
+	if (!accepted)
 		return;
 
 	if (state)
-		atomic64_add(delta, &state->data_tx_credit_resync_recovered);
-	atomic64_add(delta, &path->data_tx_credit_resync_recovered);
-	tbv_path_add_remote_rx_credits(path, delta);
+		atomic64_add(accepted,
+			     &state->data_tx_credit_resync_recovered);
+	atomic64_add(accepted, &path->data_tx_credit_resync_recovered);
+	if (state)
+		atomic64_add(accepted, &state->data_tx_credit_received);
+	atomic64_add(accepted, &path->data_tx_credit_received);
+	tbv_path_schedule_tx(path);
 }
 
 static bool tbv_path_credit_sync_supported(const struct tbv_path *path)
@@ -3556,6 +3568,37 @@ int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 		*credits_out = path->tx_remote_data_credits;
 	if (max_out)
 		*max_out = path->tx_remote_data_credit_max;
+	kfree(path);
+	return 0;
+}
+
+int tbv_test_path_credit_stale_sync(u32 *credits_out, u32 *seen_out,
+				    u64 *recovered_out)
+{
+	struct tbv_path_config cfg;
+	struct tbv_path *path;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	tbv_path_init(path, &cfg, NULL);
+	tbv_path_set_remote_rx_capacity(path, cfg.rx_ring_size);
+	tbv_path_sync_remote_rx_credits(path, 0);
+	tbv_path_add_remote_rx_credits(path, 100);
+
+	/* Model a fully charged-down sender, then deliver an older sync. */
+	path->tx_remote_data_credits = 0;
+	tbv_path_sync_remote_rx_credits(path, 99);
+
+	if (credits_out)
+		*credits_out = path->tx_remote_data_credits;
+	if (seen_out)
+		*seen_out = path->tx_remote_credit_returned_seen;
+	if (recovered_out)
+		*recovered_out =
+			atomic64_read(&path->data_tx_credit_resync_recovered);
 	kfree(path);
 	return 0;
 }

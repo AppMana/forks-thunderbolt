@@ -140,15 +140,16 @@ MODULE_PARM_DESC(native_home_rail_qp,
 		 "Keep native data QPs on the rail backing the selected ib_device");
 
 /*
- * Hardware E2E credit grants have repeatedly wedged native TX rings on this
- * fleet (posted descriptors with no TX completion and no remote RX). Keep the
- * software PATH_CREDIT window as the default and make E2E an explicit canary
- * opt-in. This is consumed when rings are allocated, so it is read-only.
+ * -1 auto, 0 off, 1 on. Hardware E2E is the reliable fast path on the Intel
+ * Maple/Titan Ridge controllers: without it a saturated bidirectional link can
+ * overrun the peer and report NHI CRC errors. AMD NHI has separately reproduced
+ * TX-completion wedges with multiple E2E rings, so auto leaves it disabled
+ * there. This is consumed when rings are allocated and is therefore read-only.
  */
-static bool native_data_e2e;
-module_param(native_data_e2e, bool, 0444);
+static int native_data_e2e = -1;
+module_param(native_data_e2e, int, 0444);
 MODULE_PARM_DESC(native_data_e2e,
-		 "Enable native NHI hardware E2E flow control (experimental; default off)");
+		 "Native NHI hardware E2E flow control: -1 auto (on except AMD NHI), 0 off, 1 on");
 
 static bool register_verbs;
 module_param(register_verbs, bool, 0444);

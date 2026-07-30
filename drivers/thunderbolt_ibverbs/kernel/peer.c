@@ -261,6 +261,30 @@ void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer)
 	kfree(peer);
 }
 
+/*
+ * Resolve hardware E2E for the local NHI. Intel Maple/Titan Ridge gets E2E in
+ * auto mode; AMD remains on the software-credit fallback because multiple live
+ * E2E rings have wedged its TX completion path. An explicit 0/1 always wins.
+ */
+static bool tbv_native_data_e2e_for_peer(const struct tbv_peer *peer)
+{
+	const struct tb_xdomain *xd;
+	struct device *dev;
+
+	if (!peer || !peer->state)
+		return false;
+	if (peer->state->native_data_e2e >= 0)
+		return peer->state->native_data_e2e > 0;
+
+	xd = peer->xd;
+	if (!xd || !xd->tb)
+		return true;
+	dev = xd->tb->dev.parent;
+	if (!dev || !dev_is_pci(dev))
+		return true;
+	return to_pci_dev(dev)->vendor != PCI_VENDOR_ID_AMD;
+}
+
 struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 				   const struct tbv_rail_key *key,
 				   u32 native_lane)
@@ -311,7 +335,7 @@ struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 	tbv_native_control_init_rail(rail, peer);
 	tbv_path_default_config(peer->backend, &path_cfg);
 	if (peer->backend == TBV_BACKEND_NATIVE &&
-	    peer->state->native_data_e2e) {
+	    tbv_native_data_e2e_for_peer(peer)) {
 		/*
 		 * Native rails only bind to Linux peers.  Even in mixed mode the
 		 * Mac-facing wire format is handled by the separate Apple

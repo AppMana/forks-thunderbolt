@@ -137,9 +137,32 @@ static void tbv_credit_partial_loss_heals_exactly(struct kunit *test)
 /* The resync arithmetic is modular so the cumulative counters may wrap. */
 static void tbv_credit_resync_delta_wraps(struct kunit *test)
 {
+	u32 delta = 0;
+
 	KUNIT_EXPECT_EQ(test, tbv_native_data_resync_delta(0, 7), 7U);
 	KUNIT_EXPECT_EQ(test, tbv_native_data_resync_delta(U32_MAX - 2, 5), 8U);
 	KUNIT_EXPECT_EQ(test, tbv_native_data_resync_delta(9, 9), 0U);
+	KUNIT_EXPECT_TRUE(test,
+			 tbv_native_data_resync_forward(U32_MAX - 2, 5,
+							&delta));
+	KUNIT_EXPECT_EQ(test, delta, 8U);
+	KUNIT_EXPECT_FALSE(test,
+			  tbv_native_data_resync_forward(100, 99, &delta));
+}
+
+static void tbv_credit_stale_sync_does_not_refill(struct kunit *test)
+{
+	u64 recovered = U64_MAX;
+	u32 credits = U32_MAX;
+	u32 seen = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_path_credit_stale_sync(&credits, &seen,
+							&recovered),
+			0);
+	KUNIT_EXPECT_EQ(test, credits, 0U);
+	KUNIT_EXPECT_EQ(test, seen, 100U);
+	KUNIT_EXPECT_EQ(test, recovered, 0ULL);
 }
 
 /* The resync frame must survive a build/parse round trip and validate. */
@@ -171,6 +194,7 @@ static struct kunit_case tbv_credit_stall_recovery_cases[] = {
 	KUNIT_CASE(tbv_credit_lost_frame_heals_on_resync),
 	KUNIT_CASE(tbv_credit_partial_loss_heals_exactly),
 	KUNIT_CASE(tbv_credit_resync_delta_wraps),
+	KUNIT_CASE(tbv_credit_stale_sync_does_not_refill),
 	KUNIT_CASE(tbv_credit_resync_frame_round_trips),
 	KUNIT_CASE(tbv_credit_stall_queue_has_a_ceiling),
 	KUNIT_CASE(tbv_credit_stall_waits_inside_the_ceiling),

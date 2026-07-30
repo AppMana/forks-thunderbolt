@@ -651,7 +651,7 @@ struct tbv_state {
 	bool apple_data;
 	bool native_fragment_striping;
 	bool native_home_rail_qp;
-	bool native_data_e2e;
+	int native_data_e2e; /* -1 auto, 0 off, 1 on */
 	bool register_verbs;
 	/*
 	 * Which subsystem owns this host's Thunderbolt DMA data path.
@@ -1217,6 +1217,8 @@ int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
  */
 int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 				u32 *credits_out, u32 *max_out);
+int tbv_test_path_credit_stale_sync(u32 *credits_out, u32 *seen_out,
+				    u64 *recovered_out);
 int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
 			      u32 remote_caps, u32 *credits_out, u32 *max_out);
 int tbv_test_path_inline_prepare(u32 len, u32 *fill_calls_out,
