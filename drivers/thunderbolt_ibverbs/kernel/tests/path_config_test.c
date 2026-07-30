@@ -11,17 +11,17 @@
 #include "../../proto/native_wire.h"
 #include "../tbv.h"
 
-static void tbv_native_path_enables_hardware_e2e(struct kunit *test)
+static void tbv_native_path_defaults_to_software_credits(struct kunit *test)
 {
 	struct tbv_path_config cfg;
 
 	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
 
-	KUNIT_EXPECT_TRUE(test, cfg.e2e);
+	KUNIT_EXPECT_FALSE(test, cfg.e2e);
 	KUNIT_EXPECT_TRUE(test, cfg.tx_flags & RING_FLAG_FRAME);
 	KUNIT_EXPECT_TRUE(test, cfg.rx_flags & RING_FLAG_FRAME);
-	KUNIT_EXPECT_TRUE(test, cfg.tx_flags & RING_FLAG_E2E);
-	KUNIT_EXPECT_TRUE(test, cfg.rx_flags & RING_FLAG_E2E);
+	KUNIT_EXPECT_FALSE(test, cfg.tx_flags & RING_FLAG_E2E);
+	KUNIT_EXPECT_FALSE(test, cfg.rx_flags & RING_FLAG_E2E);
 }
 
 static void tbv_e2e_peers_bypass_software_credits(struct kunit *test)
@@ -100,7 +100,7 @@ static void tbv_copied_packet_owns_inline_payload(struct kunit *test)
 }
 
 static struct kunit_case tbv_path_config_cases[] = {
-	KUNIT_CASE(tbv_native_path_enables_hardware_e2e),
+	KUNIT_CASE(tbv_native_path_defaults_to_software_credits),
 	KUNIT_CASE(tbv_e2e_peers_bypass_software_credits),
 	KUNIT_CASE(tbv_old_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_peer_keeps_software_credits),

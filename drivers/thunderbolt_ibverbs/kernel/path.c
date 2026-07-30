@@ -28,19 +28,6 @@ module_param(data_tx_max_inflight, uint, 0644);
 MODULE_PARM_DESC(data_tx_max_inflight,
 		 "Max native data frames posted to the TX ring before draining completions");
 
-/*
- * Couple each native RX ring to its TX ring through the NHI's hardware
- * end-to-end credit path. Hardware E2E stops transmission until the paired RX
- * ring has room; peers that advertise E2E_NO_SW_CREDIT use it as the sole
- * frame-flow-control mechanism.
- *
- * Read-only because the choice is consumed when rings are allocated; changing
- * it on a live path would not reprogram those rings.
- */
-static bool native_e2e = true;
-module_param(native_e2e, bool, 0444);
-MODULE_PARM_DESC(native_e2e,
-		 "Enable NHI hardware end-to-end flow control on native TX/RX rings");
 /* Apple-originated bursts can exhaust a 256-entry RX ring before credits
  * recycle. 1024 entries passed checked Mac-to-Linux UC bursts beyond one full
  * ring while keeping per-direction buffer cost modest.
@@ -981,11 +968,6 @@ void tbv_path_default_config(enum tbv_backend_type backend,
 		cfg->rx_ring_size = native_ring_size;
 		cfg->tx_flags = RING_FLAG_FRAME;
 		cfg->rx_flags = RING_FLAG_FRAME;
-		if (READ_ONCE(native_e2e)) {
-			cfg->tx_flags |= RING_FLAG_E2E;
-			cfg->rx_flags |= RING_FLAG_E2E;
-			cfg->e2e = true;
-		}
 		cfg->sof_mask = BIT(1);
 		cfg->eof_mask = BIT(2) | BIT(3);
 		break;

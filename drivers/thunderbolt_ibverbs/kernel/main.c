@@ -140,32 +140,15 @@ MODULE_PARM_DESC(native_home_rail_qp,
 		 "Keep native data QPs on the rail backing the selected ib_device");
 
 /*
- * Default E2E off: on the AppMana X670E USB4 fleet, thunderbolt_net only
- * runs stably with e2e=0 (the tbfix stability knobs), and the 2026-06-08/09
- * appmana-020<->appmana-009 canary showed the exact E2E starvation
- * signature with this module: QP reaches RTS, READY exchanged both ways,
- * sends post to the TX ring, but no completion ever fires and nothing
- * reaches the remote RX ring. With RING_FLAG_E2E on the TX ring, a frame
- * only transmits after the peer RX ring grants credits to the paired TX
- * HopID; if credit grants are broken on this fabric the descriptor sits in
- * the ring forever, which matches the observed posted>0/completed=0 stall.
- * Opt back in per-host with native_data_e2e=1 once a pair passes
- * ib_send_bw with it enabled.
+ * Hardware E2E credit grants have repeatedly wedged native TX rings on this
+ * fleet (posted descriptors with no TX completion and no remote RX). Keep the
+ * software PATH_CREDIT window as the default and make E2E an explicit canary
+ * opt-in. This is consumed when rings are allocated, so it is read-only.
  */
-/*
- * -1 auto, 0 off, 1 on. The earlier blanket-off was a misdiagnosis: the
- * observed posted>0/completed=0 stall was the phantom second native lane
- * on a single-cable x1 link (now fixed by advertising rails per negotiated
- * link width), not broken E2E credit grants. Hardware E2E is required for
- * usable bidirectional throughput (the software credit window alone
- * collapses ~10x under simultaneous load). Auto enables it everywhere
- * except AMD NHI, where Strix Halo reproduced TX-completion wedges with
- * multiple E2E rings active.
- */
-static int native_data_e2e = -1;
-module_param(native_data_e2e, int, 0444);
+static bool native_data_e2e;
+module_param(native_data_e2e, bool, 0444);
 MODULE_PARM_DESC(native_data_e2e,
-		 "Native data ring hardware E2E flow control: -1 auto (on except AMD NHI), 0 off, 1 on");
+		 "Enable native NHI hardware E2E flow control (experimental; default off)");
 
 static bool register_verbs;
 module_param(register_verbs, bool, 0444);
