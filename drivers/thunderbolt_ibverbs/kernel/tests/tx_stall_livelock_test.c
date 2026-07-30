@@ -2,12 +2,11 @@
 /*
  * KUnit: a send whose tx_pending never clears must not defer forever.
  *
- * The TX walk skips any send with frames still posting so a retransmit cannot
- * race the posting path. That skip happens before the retry and exhaustion
- * branches, so a frame the fabric never drains leaves its send unable to
- * retry, unable to exhaust and unable to complete, while the walk keeps
- * reporting that another pass is needed. The QP never surfaces an error and
- * the timeout work re-arms on the same unchanged state indefinitely.
+ * When the optional send-level stall ceiling is enabled, the TX walk must
+ * eventually fail a send whose tx_pending never clears. The production
+ * default instead relies on the path queue/ring deadlines because tx_pending
+ * also includes healthy queued frames, but the opt-in guard must still
+ * converge rather than re-arm the same unchanged state forever.
  *
  * Ready out-of-order-acked entries queued behind such a head cannot drain
  * either, because the drain only moves the ready prefix.

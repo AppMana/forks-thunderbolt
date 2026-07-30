@@ -190,10 +190,10 @@ MODULE_PARM_DESC(tbv_retransmit_base_ms,
  * to its own timeout, never exhausts, never completes, and the timeout work
  * re-arms on it forever. The ceiling bounds that wait.
  */
-static uint tbv_tx_stall_timeout_mult = 16;
+static uint tbv_tx_stall_timeout_mult;
 module_param(tbv_tx_stall_timeout_mult, uint, 0644);
 MODULE_PARM_DESC(tbv_tx_stall_timeout_mult,
-		 "Multiple of the TX timeout after which a send stuck with tx_pending is failed with -ETIMEDOUT; 0 disables the ceiling (wait forever)");
+		 "Optional multiple of the TX timeout after which a send with tx_pending is failed; 0 relies on the path queue/ring deadlines (default)");
 
 /*
  * Absolute ceiling on RNR retransmits for a send whose verbs rnr_retry is 7.
@@ -5079,7 +5079,16 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 	u32 pending = 0;
 	u32 used = 0;
 	u32 i;
+	u32 saved_stall_mult;
 	int ret = -ENOMEM;
+
+	/*
+	 * The production default delegates this bound to the path queue/ring
+	 * deadlines because tx_pending also counts healthy queued frames. This
+	 * hook explicitly exercises the optional send-level ceiling itself.
+	 */
+	saved_stall_mult = READ_ONCE(tbv_tx_stall_timeout_mult);
+	WRITE_ONCE(tbv_tx_stall_timeout_mult, 16);
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
@@ -5159,6 +5168,7 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 	*tx_failed_out = tx_failed;
 	ret = 0;
 out:
+	WRITE_ONCE(tbv_tx_stall_timeout_mult, saved_stall_mult);
 	for (i = 0; i < ARRAY_SIZE(sends); i++)
 		kfree(sends[i]);
 	kfree(tqp);

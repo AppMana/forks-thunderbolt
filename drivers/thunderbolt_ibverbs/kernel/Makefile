@@ -77,6 +77,7 @@ thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/control_queue_bound_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/send_capacity_defer_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/verbs_sge_contract_test.o
 thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/max_message_capacity_test.o
+thunderbolt_ibverbs-$(CONFIG_KUNIT) += tests/path_config_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src) -I$(src)/..
 
