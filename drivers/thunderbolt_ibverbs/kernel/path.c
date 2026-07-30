@@ -151,7 +151,7 @@ MODULE_PARM_DESC(zcopy_map_full_page,
  * native header. Raw stream frames and the Apple backend remain exact-sized.
  * Settable for immediate hardware A/B and rollback without rebuilding.
  */
-static bool native_pad_short_frames = true;
+static bool native_pad_short_frames;
 module_param(native_pad_short_frames, bool, 0644);
 MODULE_PARM_DESC(native_pad_short_frames,
 		 "Pad ordinary short native frames to 4096 bytes on the wire; excludes raw streams and Apple framing");
