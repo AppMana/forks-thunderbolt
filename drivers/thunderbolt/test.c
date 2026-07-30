@@ -3198,6 +3198,33 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
 }
 
 /*
+ * A cable can be present at cold boot while both lane adapters remain in
+ * UNPLUGGED.  No XDomain ever existed in that state, so detection re-arming
+ * must not depend on stale software topology being present.
+ */
+static void tb_test_cm_reconcile_empty_unplugged_retrains(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+
+	/* Reconciliation is inert until hotplug handling is armed. */
+	cm_reconcile(&h);
+	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 0U);
+
+	cm_arm_hotplug(&h);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 1U);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+
+	/* An actually trained lane is scanned, not needlessly re-armed. */
+	cm_link_up_lost(&h, 0);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_EQ(test, h.port[0].detection_kicks, 1U);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+/*
  * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
  * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
  * tail from a half-trained-link read) fails every property read -- the healthy
@@ -3284,6 +3311,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
+	KUNIT_CASE(tb_test_cm_reconcile_empty_unplugged_retrains),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_path_basic),

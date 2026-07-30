@@ -2686,8 +2686,6 @@ static void tb_reconcile_work(struct work_struct *work)
 			 * UNPLUGGED with a live cable); give the PHY a fresh
 			 * edge so the peer's port sees one too.
 			 */
-			if (gone)
-				tb_port_kick_detection(port);
 		} else if (!port->xdomain && !port->remote && present) {
 			if (port->reconcile_synth == TB_RECONCILE_PLUG)
 				continue;
@@ -2700,6 +2698,16 @@ static void tb_reconcile_work(struct work_struct *work)
 		} else {
 			port->reconcile_synth = TB_RECONCILE_NONE;
 		}
+
+		/*
+		 * Re-arm detection even when software has no object for the
+		 * port.  In particular, after a cold boot a detection-wedged
+		 * cable has neither a remote router nor an XDomain, so limiting
+		 * this to the stale-object branch above leaves the port
+		 * UNPLUGGED forever.
+		 */
+		if (gone)
+			tb_port_kick_detection(port);
 	}
 
 out_unlock:
