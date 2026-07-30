@@ -1289,6 +1289,10 @@ int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
 int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
 					    bool *pending_out,
 					    bool *deferred_out);
+int tbv_test_initial_send_fifo(bool *first_claimed_out,
+			       bool *second_claimed_out,
+			       u32 *first_retry_psn_out,
+			       u32 *second_retry_psn_out);
 /*
  * Report the SGE limits exposed by query_device and the largest receive SGE
  * count post_recv can actually consume.  These must agree: advertising four

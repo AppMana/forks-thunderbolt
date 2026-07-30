@@ -640,6 +640,13 @@ struct tbv_send_ctx {
 	bool pending;
 	bool retryable;
 	bool retrying;
+	/*
+	 * The synchronous post_send caller currently owns the initial
+	 * packetization attempt. Keep this separate from retrying: TX
+	 * completions may clear retrying before post_frames() returns, but a
+	 * timeout worker must never race that still-running initial attempt.
+	 */
+	bool initial_posting;
 	bool initial_deferred;
 	bool rnr_waiting;
 	bool recv_credit_required;
@@ -1959,9 +1966,19 @@ static void tbv_qp_release_sendq_counted(struct tbv_qp *tqp, bool *counted)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 }
 
-static void tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
+/*
+ * Put @send on the SQ and claim its initial packetization only if every older
+ * WR has already been fully admitted to the path queue. The path queue is FIFO,
+ * so successful whole-WR admission preserves RC PSN order. Letting a later WR
+ * bypass an older capacity-deferred WR creates a PSN hole locally: the peer
+ * then correctly stalls on the missing PSN and the recovery machinery
+ * avalanches even though the physical link delivered every submitted frame.
+ */
+static bool tbv_qp_queue_send(struct tbv_qp *tqp,
+			      struct tbv_send_ctx *send)
 {
 	unsigned long flags;
+	bool claim_initial = true;
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	/*
@@ -1976,9 +1993,54 @@ static void tbv_qp_queue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
 	send->first_queued_jiffies = jiffies;
 	send->pending = true;
 	send->retrying = false;
+	send->initial_posting = false;
+	send->initial_deferred = true;
 	send->rnr_waiting = false;
 	send->retry_reason = TBV_SEND_POST_INITIAL;
+	/*
+	 * Deferred initial posts are a suffix of pending_sends. Therefore the
+	 * previous tail is the only ordering state this new tail needs to
+	 * inspect; keep the hot post_send path O(1) at the 1024-WR SQ limit.
+	 */
+	if (!list_empty(&tqp->pending_sends) &&
+	    list_last_entry(&tqp->pending_sends, struct tbv_send_ctx,
+			    node)->initial_deferred)
+		claim_initial = false;
 	list_add_tail(&send->node, &tqp->pending_sends);
+	if (claim_initial)
+		send->initial_posting = true;
+	spin_unlock_irqrestore(&tqp->lock, flags);
+	return claim_initial;
+}
+
+static bool tbv_qp_has_deferred_initial_locked(const struct tbv_qp *tqp)
+{
+	const struct tbv_send_ctx *tail;
+
+	if (list_empty(&tqp->pending_sends))
+		return false;
+	tail = list_last_entry(&tqp->pending_sends, struct tbv_send_ctx, node);
+	return tail->initial_deferred && !tail->initial_posting;
+}
+
+static void tbv_send_finish_initial_post(struct tbv_qp *tqp,
+					 struct tbv_send_ctx *send)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	send->initial_posting = false;
+	if (send->pending && !send->completed) {
+		send->initial_deferred = false;
+		/*
+		 * Release the next capacity-deferred WR immediately. Waiting
+		 * for the normal retransmit interval here needlessly starves
+		 * the SQ even though this WR is now safely ahead of it in the
+		 * path FIFO.
+		 */
+		if (tbv_qp_has_deferred_initial_locked(tqp))
+			tbv_qp_schedule_timeout_now_locked(tqp);
+	}
 	spin_unlock_irqrestore(&tqp->lock, flags);
 }
 
@@ -1996,6 +2058,7 @@ static bool tbv_send_defer_initial_capacity(struct tbv_qp *tqp,
 	if (send->pending && !send->completed && !tqp->closing &&
 	    tqp->state != IB_QPS_ERR) {
 		send->initial_deferred = true;
+		send->initial_posting = false;
 		send->retrying = false;
 		tbv_send_mark_queued(send, jiffies);
 		deferred = true;
@@ -2092,6 +2155,7 @@ static bool tbv_qp_unqueue_send(struct tbv_qp *tqp, struct tbv_send_ctx *send)
 		list_del_init(&send->node);
 		send->pending = false;
 		send->retrying = false;
+		send->initial_posting = false;
 		send->rnr_waiting = false;
 		tbv_qp_release_sendq_counted_locked(tqp, &send->sq_counted);
 		found = true;
@@ -4828,6 +4892,7 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 	unsigned long flags;
 	bool need_resched = false;
 	bool drain_ready = false;
+	bool initial_fifo_blocked = false;
 
 	spin_lock_irqsave(&tqp->lock, flags);
 	list_for_each_entry_safe(send, send_tmp, &tqp->pending_sends, node) {
@@ -4851,6 +4916,18 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 			unsigned long ceiling = mult ? timeout * mult : 0;
 
 			/*
+			 * Exactly one deferred initial post may run per QP.
+			 * Every later deferred WR stays behind it regardless of
+			 * whether the head is waiting for capacity or is already
+			 * being packetized by post_send/the timeout worker.
+			 */
+			if (initial_fifo_blocked) {
+				need_resched = true;
+				continue;
+			}
+			initial_fifo_blocked = true;
+
+			/*
 			 * The SQ accepted this WR, but the path did not yet
 			 * have enough packet slots to frame it. Retry initial
 			 * packetization from the worker; a path shortage is not
@@ -4867,7 +4944,8 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 					*tx_failed = true;
 				continue;
 			}
-			if (!send->retrying && !tqp->closing &&
+			if (!send->initial_posting && !send->retrying &&
+			    !tqp->closing &&
 			    tqp->state != IB_QPS_ERR) {
 				send->retrying = true;
 				send->retry_reason = TBV_SEND_POST_INITIAL;
@@ -5622,6 +5700,9 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 	if (pending && !ret) {
 		if (reason == TBV_SEND_POST_INITIAL) {
 			send->initial_deferred = false;
+			send->initial_posting = false;
+			if (tbv_qp_has_deferred_initial_locked(tqp))
+				tbv_qp_schedule_timeout_now_locked(tqp);
 		} else if (reason == TBV_SEND_POST_RETRY_RNR) {
 			if (send->rnr_retries < U32_MAX)
 				send->rnr_retries++;
@@ -5636,6 +5717,7 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 	if (pending && ret == -ENOMEM) {
 		if (reason == TBV_SEND_POST_INITIAL) {
 			send->initial_deferred = true;
+			send->initial_posting = false;
 			send->retrying = false;
 			tbv_send_mark_queued(send, now);
 			return TBV_SEND_RETRY_REARM;
@@ -5675,12 +5757,15 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 			send->ready = true;
 			send->completion_status = -ETIMEDOUT;
 			send->retrying = false;
+			send->initial_posting = false;
 			send->rnr_waiting = false;
 		}
 		tbv_qp_drain_ready_sends_locked(tqp, completed_sends);
 		return TBV_SEND_RETRY_FAIL;
 	}
 	send->retrying = false;
+	if (reason == TBV_SEND_POST_INITIAL)
+		send->initial_posting = false;
 	return TBV_SEND_RETRY_IDLE;
 }
 
@@ -7850,6 +7935,7 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	int nsegs = 0;
 	bool credit_consumed = false;
 	bool recv_credit_required;
+	bool initial_claimed;
 	bool is_send = wr->opcode == IB_WR_SEND ||
 		       wr->opcode == IB_WR_SEND_WITH_IMM;
 	bool send_with_imm = wr->opcode == IB_WR_SEND_WITH_IMM;
@@ -7977,7 +8063,17 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 	spin_unlock_irqrestore(&tqp->lock, flags);
 	ctx->psn = psn;
 
-	tbv_qp_queue_send(tqp, ctx);
+	initial_claimed = tbv_qp_queue_send(tqp, ctx);
+	if (!initial_claimed) {
+		/*
+		 * The WR is valid and owns an SQ slot, but an older WR has not
+		 * yet been admitted to the path queue. Keep verbs admission
+		 * asynchronous and let the per-QP FIFO worker packetize it.
+		 */
+		atomic64_inc(&tqp->owner->data_tx_accepted);
+		tbv_qp_schedule_timeout_now(tqp);
+		return 0;
+	}
 	tbv_send_ctx_get(ctx);
 	ret = tbv_native_send_ctx_post_frames(ctx, TBV_SEND_POST_INITIAL);
 	if (ret) {
@@ -7995,6 +8091,7 @@ static int tbv_post_send_one(struct tbv_qp *tqp, const struct ib_send_wr *wr)
 		tbv_send_ctx_put(ctx);
 		return ret;
 	}
+	tbv_send_finish_initial_post(tqp, ctx);
 	atomic64_inc(&tqp->owner->data_tx_accepted);
 	tbv_send_ctx_put(ctx);
 	return 0;
@@ -8066,6 +8163,115 @@ int tbv_test_initial_send_capacity_deferred(int *post_ret_out,
 	list_del_init(&send->node);
 out:
 	kfree(send);
+	kfree(tqp);
+	kfree(state);
+	return ret;
+}
+
+int tbv_test_initial_send_fifo(bool *first_claimed_out,
+			       bool *second_claimed_out,
+			       u32 *first_retry_psn_out,
+			       u32 *second_retry_psn_out)
+{
+	LIST_HEAD(retry_sends);
+	LIST_HEAD(completed_sends);
+	LIST_HEAD(timed_out_reads);
+	struct tbv_send_ctx *first = NULL;
+	struct tbv_send_ctx *second = NULL;
+	struct tbv_state *state = NULL;
+	struct tbv_qp *tqp = NULL;
+	unsigned long flags;
+	bool tx_failed = false;
+	bool first_claimed;
+	bool second_claimed;
+	int ret = -ENOMEM;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	first = kzalloc(sizeof(*first), GFP_KERNEL);
+	second = kzalloc(sizeof(*second), GFP_KERNEL);
+	if (!state || !tqp || !first || !second)
+		goto out;
+
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	INIT_LIST_HEAD(&tqp->pending_reads);
+	tqp->owner = state;
+	tqp->state = IB_QPS_RTS;
+
+	INIT_LIST_HEAD(&first->node);
+	INIT_LIST_HEAD(&first->retry_node);
+	refcount_set(&first->refs, 1);
+	first->tqp = tqp;
+	first->psn = 101;
+	first->retryable = true;
+	first->max_retries = TBV_SEND_MAX_RETRIES;
+
+	INIT_LIST_HEAD(&second->node);
+	INIT_LIST_HEAD(&second->retry_node);
+	refcount_set(&second->refs, 1);
+	second->tqp = tqp;
+	second->psn = 102;
+	second->retryable = true;
+	second->max_retries = TBV_SEND_MAX_RETRIES;
+
+	first_claimed = tbv_qp_queue_send(tqp, first);
+	if (!tbv_send_defer_initial_capacity(tqp, first, -ENOMEM)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	second_claimed = tbv_qp_queue_send(tqp, second);
+
+	tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+			       &timed_out_reads, jiffies,
+			       msecs_to_jiffies(100), &tx_failed);
+	if (list_empty(&retry_sends)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	*first_retry_psn_out =
+		list_first_entry(&retry_sends, struct tbv_send_ctx,
+				 retry_node)->psn;
+	list_del_init(&first->retry_node);
+	tbv_send_ctx_put(first);
+
+	/*
+	 * Model a successful whole-WR enqueue without arming real delayed work
+	 * in this pure decision hook. The next reap must now release WR #2.
+	 */
+	spin_lock_irqsave(&tqp->lock, flags);
+	first->initial_deferred = false;
+	first->retrying = false;
+	tbv_send_mark_queued(first, jiffies);
+	spin_unlock_irqrestore(&tqp->lock, flags);
+
+	tbv_qp_timeout_reap_tx(tqp, &retry_sends, &completed_sends,
+			       &timed_out_reads, jiffies,
+			       msecs_to_jiffies(100), &tx_failed);
+	if (list_empty(&retry_sends)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	*second_retry_psn_out =
+		list_first_entry(&retry_sends, struct tbv_send_ctx,
+				 retry_node)->psn;
+	list_del_init(&second->retry_node);
+	tbv_send_ctx_put(second);
+
+	*first_claimed_out = first_claimed;
+	*second_claimed_out = second_claimed;
+	ret = 0;
+out:
+	if (first && !list_empty(&first->retry_node))
+		list_del_init(&first->retry_node);
+	if (second && !list_empty(&second->retry_node))
+		list_del_init(&second->retry_node);
+	if (first && !list_empty(&first->node))
+		list_del_init(&first->node);
+	if (second && !list_empty(&second->node))
+		list_del_init(&second->node);
+	kfree(second);
+	kfree(first);
 	kfree(tqp);
 	kfree(state);
 	return ret;
