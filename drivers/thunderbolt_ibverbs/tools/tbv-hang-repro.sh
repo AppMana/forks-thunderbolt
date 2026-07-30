@@ -55,17 +55,26 @@ snapshot() {
 	local node="$1" tag="$2"
 	{
 		echo "### node=$node tag=$tag t=$(date -Is)"
-		ssh_node "$node" 'sudo cat /sys/kernel/debug/thunderbolt_ibverbs/summary 2>/dev/null; echo "@@@PEERS@@@"; sudo cat /sys/kernel/debug/thunderbolt_ibverbs/peers 2>/dev/null' 30
+		ssh_node "$node" 'echo "@@@HOST@@@"; printf "hostname=%s boot_id=%s uptime=%s kernel=%s loaded_src=%s\n" "$(hostname)" "$(cat /proc/sys/kernel/random/boot_id)" "$(cut -d. -f1 /proc/uptime)" "$(uname -r)" "$(cat /sys/module/thunderbolt_ibverbs/srcversion 2>/dev/null || echo none)"; echo "@@@SUMMARY@@@"; sudo cat /sys/kernel/debug/thunderbolt_ibverbs/summary 2>/dev/null; echo "@@@PEERS@@@"; sudo cat /sys/kernel/debug/thunderbolt_ibverbs/peers 2>/dev/null' 30
 	} >> "$OUTDIR/counters-$node.txt" 2>&1
 }
 
 oob=$(ssh_node "$SERVER" "ip -o -4 addr show | awk '\$4 ~ /^10[.]2[.]0[.]/ {split(\$4,a,\"/\"); print a[1]; exit}'" 30)
 [ -n "$oob" ] || { echo "ERROR: no 10.2.0.x oob address on $SERVER" >&2; exit 1; }
 
-pick_dev() { ssh_node "$1" "ls /sys/class/infiniband/ | grep '^usb4_rdma' | head -1" 30; }
-SDEV="${TBV_DEV_SERVER:-$(pick_dev "$SERVER")}"
-CDEV="${TBV_DEV_CLIENT:-$(pick_dev "$CLIENT")}"
+pick_dev() {
+	local node="$1" peer="$2" peer_key
+
+	peer_key="${peer%%.*}"
+	peer_key="${peer_key//-/}"
+	ssh_node "$node" "expected='tbr-$peer_key'; for d in /sys/class/infiniband/usb4_rdma*; do [ -e \"\$d\" ] || continue; ndev=\$(cat \"\$d/ports/1/gid_attrs/ndevs/0\" 2>/dev/null || true); if [ \"\$ndev\" = \"\$expected\" ]; then basename \"\$d\"; fi; done" 30
+}
+SDEV="${TBV_DEV_SERVER:-$(pick_dev "$SERVER" "$CLIENT")}"
+CDEV="${TBV_DEV_CLIENT:-$(pick_dev "$CLIENT" "$SERVER")}"
 [ -n "$SDEV" ] && [ -n "$CDEV" ] || { echo "ERROR: no usb4_rdma rail ($SERVER=$SDEV $CLIENT=$CDEV)" >&2; exit 1; }
+[ "$(printf '%s\n' "$SDEV" | wc -l)" -eq 1 ] &&
+	[ "$(printf '%s\n' "$CDEV" | wc -l)" -eq 1 ] ||
+	{ echo "ERROR: ambiguous usb4_rdma rail ($SERVER=$SDEV $CLIENT=$CDEV); set TBV_DEV_SERVER/TBV_DEV_CLIENT" >&2; exit 1; }
 
 echo "== $SERVER($SDEV) <- $CLIENT($CDEV) oob=$oob size=$SIZE tx_depth=$TX_DEPTH qps=$QPS"
 snapshot "$SERVER" pre
