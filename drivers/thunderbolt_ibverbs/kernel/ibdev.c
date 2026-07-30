@@ -177,7 +177,7 @@ MODULE_PARM_DESC(creddbg,
  * while the TOTAL budget stays large (sum of doublings >> any single recovery).
  * 0 disables backoff (flat verbs-derived interval).
  */
-static uint tbv_retransmit_base_ms = 10;
+static uint tbv_retransmit_base_ms = 60;
 module_param(tbv_retransmit_base_ms, uint, 0644);
 MODULE_PARM_DESC(tbv_retransmit_base_ms,
 		 "First RC retransmit interval in ms; doubles each retry up to the verbs ack_timeout (exponential backoff). 0 = flat verbs-derived interval");

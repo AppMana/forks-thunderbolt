@@ -98,6 +98,13 @@ enum tbv_native_wire_cap {
 	 * older peer rejects the opcode as a bad header.
 	 */
 	TBV_NATIVE_WIRE_CAP_CREDIT_SYNC = 1u << 6,
+	/*
+	 * Peer understands that PATH_CREDIT is redundant when both ends
+	 * advertise hardware E2E for the native path. A sender may bypass the
+	 * software window only when this bit and the peer's E2E path flag are
+	 * both present; mixed-version and non-E2E paths retain PATH_CREDIT.
+	 */
+	TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT = 1u << 7,
 };
 
 enum tbv_native_wire_path_flag {

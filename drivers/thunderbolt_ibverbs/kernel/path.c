@@ -14,20 +14,14 @@
 #define TBV_NATIVE_RING_SIZE 1024
 
 /*
- * Bidirectional flow-control tuning. The software credit window is
- * rx_ring_size minus the control reserve; a 20 Gb/s link with multi-ms RTT
- * needs a bandwidth-delay-product-sized window (and matching RX buffering)
- * or the sender start-credit-stalls under simultaneous bidirectional load
- * (~10x throughput loss vs unidirectional). Exposed so the window depth and
- * the TX pipeline depth can be sized to the link without a rebuild. This
- * software protocol window is layered over the NHI hardware E2E ring credits:
- * software credits bound end-to-end protocol ownership, while hardware
- * credits prevent a local router/NHI FIFO from silently dropping frames.
+ * Native ring and TX-pipeline tuning. New peers negotiate away the old
+ * PATH_CREDIT protocol when both ends use the NHI hardware E2E credit path.
+ * The software window remains as a rolling-upgrade/non-E2E fallback.
  */
 static uint native_ring_size = TBV_NATIVE_RING_SIZE;
 module_param(native_ring_size, uint, 0444);
 MODULE_PARM_DESC(native_ring_size,
-		 "Native TX/RX ring size = software credit window (power of two)");
+		 "Native TX/RX ring size (power of two)");
 
 static uint data_tx_max_inflight = 32;
 module_param(data_tx_max_inflight, uint, 0644);
@@ -36,10 +30,9 @@ MODULE_PARM_DESC(data_tx_max_inflight,
 
 /*
  * Couple each native RX ring to its TX ring through the NHI's hardware
- * end-to-end credit path. Software PATH_CREDIT remains the protocol-level
- * window, but it cannot prevent a router/NHI FIFO from silently discarding an
- * already-posted frame under multi-QP bidirectional pressure. Hardware E2E
- * stops transmission until the paired RX ring has room.
+ * end-to-end credit path. Hardware E2E stops transmission until the paired RX
+ * ring has room; peers that advertise E2E_NO_SW_CREDIT use it as the sole
+ * frame-flow-control mechanism.
  *
  * Read-only because the choice is consumed when rings are allocated; changing
  * it on a live path would not reprogram those rings.
@@ -534,6 +527,23 @@ static u32 tbv_path_data_credit_window(u32 rx_ring_size)
 	return credits;
 }
 
+static bool tbv_path_uses_software_credits(const struct tbv_path *path)
+{
+	const struct tbv_peer *peer;
+
+	if (!path->cfg.e2e || !READ_ONCE(path->remote_e2e))
+		return true;
+	if (!path->rail || !path->rail->peer)
+		return true;
+
+	peer = path->rail->peer;
+	if (peer->backend != TBV_BACKEND_NATIVE)
+		return true;
+
+	return !(READ_ONCE(peer->remote_caps) &
+		 TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT);
+}
+
 void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size)
 {
 	unsigned long flags;
@@ -542,7 +552,8 @@ void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size)
 	if (!path)
 		return;
 
-	credits = tbv_path_data_credit_window(rx_ring_size);
+	credits = tbv_path_uses_software_credits(path) ?
+		  tbv_path_data_credit_window(rx_ring_size) : 0;
 	spin_lock_irqsave(&path->tx_lock, flags);
 	path->tx_remote_data_credit_max = credits;
 	path->tx_remote_data_credits = credits;
@@ -674,6 +685,8 @@ void tbv_path_sync_remote_rx_credits(struct tbv_path *path, u32 total)
 
 static bool tbv_path_credit_sync_supported(const struct tbv_path *path)
 {
+	if (!tbv_path_uses_software_credits(path))
+		return false;
 	if (!path->rail || !path->rail->peer)
 		return false;
 	if (path->rail->peer->backend != TBV_BACKEND_NATIVE)
@@ -773,6 +786,8 @@ static void tbv_path_return_rx_data_credit(struct tbv_path *path, u32 credits)
 	int ret;
 
 	if (!path || !credits)
+		return;
+	if (!tbv_path_uses_software_credits(path))
 		return;
 
 	state = tbv_path_state(path);
@@ -3592,6 +3607,37 @@ int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 		tbv_path_add_remote_rx_credits(path, total - lost);
 	if (deliver_sync)
 		tbv_path_sync_remote_rx_credits(path, total);
+
+	if (credits_out)
+		*credits_out = path->tx_remote_data_credits;
+	if (max_out)
+		*max_out = path->tx_remote_data_credit_max;
+	kfree(path);
+	return 0;
+}
+
+int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
+			      u32 remote_caps, u32 *credits_out, u32 *max_out)
+{
+	struct tbv_peer peer = {
+		.backend = TBV_BACKEND_NATIVE,
+		.remote_caps = remote_caps,
+	};
+	struct tbv_rail rail = {
+		.peer = &peer,
+	};
+	struct tbv_path_config cfg;
+	struct tbv_path *path;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	cfg.e2e = local_e2e;
+	tbv_path_init(path, &cfg, &rail);
+	path->remote_e2e = remote_e2e;
+	tbv_path_set_remote_rx_capacity(path, cfg.rx_ring_size);
 
 	if (credits_out)
 		*credits_out = path->tx_remote_data_credits;

@@ -218,6 +218,12 @@ struct tbv_path {
 	u32 tx_remote_data_credit_max;
 	u32 rx_data_credit_pending;
 	/*
+	 * The peer's HELLO path flag. Software data credits are bypassed only
+	 * when local and remote rings both use hardware E2E and the peer
+	 * advertised TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT.
+	 */
+	bool remote_e2e;
+	/*
 	 * Absolute credit resync state (TBV_NATIVE_WIRE_CAP_CREDIT_SYNC).
 	 * rx_data_credit_returned_total counts every credit this side has
 	 * become eligible to return since the capacity was negotiated and is
@@ -1219,6 +1225,8 @@ int tbv_test_path_credit_stall_timeout(u32 age_ms, u32 timeout_ms,
  */
 int tbv_test_path_credit_resync(u32 total, u32 lost, bool deliver_sync,
 				u32 *credits_out, u32 *max_out);
+int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
+			      u32 remote_caps, u32 *credits_out, u32 *max_out);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 /*

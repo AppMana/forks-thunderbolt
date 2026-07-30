@@ -36,14 +36,16 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 	if (peer->nr_rails > 1)
 		caps |= TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
 	/*
-	 * Receive-side support for all three is unconditional in this module:
+	 * Receive-side support for all four is unconditional in this module:
 	 * split-base raw streams, inbound NAKs and inbound absolute credit
-	 * resyncs need no per-node state. The peer gates its own TX on these
-	 * bits, which matters for the resync because an older peer rejects the
-	 * opcode as a bad header.
+	 * resyncs, and negotiated hardware-E2E-only flow control need no
+	 * per-node state. The peer gates its own TX on these bits, which matters
+	 * for the resync because an older peer rejects the opcode as a bad
+	 * header.
 	 */
 	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK |
-		TBV_NATIVE_WIRE_CAP_CREDIT_SYNC;
+		TBV_NATIVE_WIRE_CAP_CREDIT_SYNC |
+		TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT;
 
 	return caps;
 }
@@ -529,6 +531,9 @@ static int tbv_native_control_apply_remote(struct tbv_state *state,
 			 * that reloads with an older module downgrades us.
 			 */
 			WRITE_ONCE(peer->remote_caps, remote->capabilities);
+			WRITE_ONCE(rail->path.remote_e2e,
+				   !!(remote->path_flags &
+				      TBV_NATIVE_WIRE_PATH_E2E));
 			tbv_path_set_remote_rx_capacity(&rail->path,
 							remote->rx_ring_size);
 			/*
