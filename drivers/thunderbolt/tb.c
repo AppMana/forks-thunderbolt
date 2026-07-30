@@ -2593,7 +2593,7 @@ out:
  * re-arms harmlessly. Deliberately-disabled ports (TB_PORT_DISABLED) are left
  * alone.
  */
-void tb_port_kick_detection(struct tb_port *port)
+static void tb_port_kick_detection(struct tb_port *port)
 {
 	if (!port_retrain)
 		return;

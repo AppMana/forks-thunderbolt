@@ -95,21 +95,6 @@ module_param(native_pcie_hotplug_rescan_retries, uint, 0444);
 MODULE_PARM_DESC(native_pcie_hotplug_rescan_retries,
 		 "native PCIe hotplug delayed rescan retries while link is active and bus is empty (default: 6)");
 
-#define ICM_PHY_RETRAIN_DELAY_MS		2000
-#define ICM_PHY_RETRAIN_ATTEMPTS	3
-
-static unsigned int icm_phy_retrain_delay_ms = ICM_PHY_RETRAIN_DELAY_MS;
-module_param(icm_phy_retrain_delay_ms, uint, 0444);
-MODULE_PARM_DESC(icm_phy_retrain_delay_ms,
-		 "delay (ms) between bounded ICM root-port lane retrain attempts, 0 disables (default: "
-		 __MODULE_STRING(ICM_PHY_RETRAIN_DELAY_MS) ")");
-
-static unsigned int icm_phy_retrain_attempts = ICM_PHY_RETRAIN_ATTEMPTS;
-module_param(icm_phy_retrain_attempts, uint, 0444);
-MODULE_PARM_DESC(icm_phy_retrain_attempts,
-		 "number of bounded ICM root-port lane retrain attempts (default: "
-		 __MODULE_STRING(ICM_PHY_RETRAIN_ATTEMPTS) ")");
-
 /**
  * struct usb4_switch_nvm_auth - Holds USB4 NVM_AUTH status
  * @reply: Reply from ICM firmware is placed here
@@ -126,9 +111,6 @@ struct usb4_switch_nvm_auth {
  * struct icm - Internal connection manager private data
  * @request_lock: Makes sure only one message is send to ICM at time
  * @rescan_work: Work used to rescan the surviving switches after resume
- * @phy_retrain_work: Bounded recovery for empty root ports stuck unplugged
- * @phy_retrain_attempts: Remaining bounded root-port retrain attempts
- * @phy_retrain_supported: Whether this controller needs bounded PHY recovery
  * @upstream_port: Pointer to the PCIe upstream port this host
  *		   controller is connected. This is only set for systems
  *		   where ICM needs to be started manually
@@ -162,9 +144,6 @@ struct usb4_switch_nvm_auth {
 struct icm {
 	struct mutex request_lock;
 	struct delayed_work rescan_work;
-	struct delayed_work phy_retrain_work;
-	unsigned int phy_retrain_attempts;
-	bool phy_retrain_supported;
 	struct pci_dev *upstream_port;
 	int vnd_cap;
 	bool safe_mode;
@@ -260,11 +239,6 @@ static bool intel_vss_is_rtd3(const void *ep_name, size_t size)
 static inline struct tb *icm_to_tb(struct icm *icm)
 {
 	return ((void *)icm - sizeof(struct tb));
-}
-
-bool tb_icm_port_needs_retrain(bool has_topology, int state)
-{
-	return !has_topology && state == TB_PORT_UNPLUGGED;
 }
 
 static inline u8 phy_port_from_route(u64 route, u8 depth)
@@ -2813,8 +2787,6 @@ static int icm_suspend(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 
-	cancel_delayed_work(&icm->phy_retrain_work);
-
 	if (icm->save_devices)
 		icm->save_devices(tb);
 
@@ -2903,69 +2875,7 @@ static void icm_rescan_work(struct work_struct *work)
 	mutex_unlock(&tb->lock);
 }
 
-static void icm_phy_retrain_work(struct work_struct *work)
-{
-	struct icm *icm = container_of(to_delayed_work(work), struct icm,
-				      phy_retrain_work);
-	struct tb *tb = icm_to_tb(icm);
-	struct tb_port *port;
-
-	pm_runtime_get_sync(&tb->dev);
-	mutex_lock(&tb->lock);
-
-	if (!tb->root_switch)
-		goto out_unlock;
-
-	tb_switch_for_each_port(tb->root_switch, port) {
-		bool has_topology;
-		int state;
-
-		if (!tb_port_is_null(port) || tb_is_upstream_port(port) ||
-		    !port->cap_phy || port->disabled)
-			continue;
-		if (port->dual_link_port && port->link_nr)
-			continue;
-
-		state = tb_port_state(port);
-		if (state < 0)
-			continue;
-
-		has_topology = port->xdomain || port->remote;
-		if (!tb_icm_port_needs_retrain(has_topology, state))
-			continue;
-
-		tb_port_warn(port,
-			     "ICM root port has no topology and lane state %d; re-arming detection\n",
-			     state);
-		tb_port_kick_detection(port);
-	}
-
-	if (icm->phy_retrain_attempts)
-		icm->phy_retrain_attempts--;
-	if (icm->phy_retrain_attempts && icm_phy_retrain_delay_ms)
-		queue_delayed_work(tb->wq, &icm->phy_retrain_work,
-				   msecs_to_jiffies(icm_phy_retrain_delay_ms));
-
-out_unlock:
-	mutex_unlock(&tb->lock);
-	pm_runtime_mark_last_busy(&tb->dev);
-	pm_runtime_put_autosuspend(&tb->dev);
-}
-
-static void icm_schedule_phy_retrain(struct tb *tb)
-{
-	struct icm *icm = tb_priv(tb);
-
-	if (!icm->phy_retrain_supported || !icm_phy_retrain_delay_ms ||
-	    !icm_phy_retrain_attempts)
-		return;
-
-	icm->phy_retrain_attempts = icm_phy_retrain_attempts;
-	mod_delayed_work(tb->wq, &icm->phy_retrain_work,
-			 msecs_to_jiffies(icm_phy_retrain_delay_ms));
-}
-
-static void __icm_complete(struct tb *tb, bool schedule_phy_retrain)
+static void icm_complete(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 
@@ -2993,13 +2903,6 @@ static void __icm_complete(struct tb *tb, bool schedule_phy_retrain)
 	 * if any.
 	 */
 	queue_delayed_work(tb->wq, &icm->rescan_work, msecs_to_jiffies(500));
-	if (schedule_phy_retrain)
-		icm_schedule_phy_retrain(tb);
-}
-
-static void icm_complete(struct tb *tb)
-{
-	__icm_complete(tb, true);
 }
 
 static int icm_runtime_suspend(struct tb *tb)
@@ -3029,12 +2932,10 @@ static int icm_runtime_resume_switch(struct tb_switch *sw)
 static int icm_runtime_resume(struct tb *tb)
 {
 	/*
-	 * Reuse the system-resume flow, but do not schedule PHY recovery here.
-	 * The recovery worker resumes the device itself; scheduling the same
-	 * delayed work from that runtime-resume callback would continually reset
-	 * its bounded-attempt counter.
+	 * We can reuse the same resume functionality than with system
+	 * suspend.
 	 */
-	__icm_complete(tb, false);
+	icm_complete(tb);
 	return 0;
 }
 
@@ -3060,8 +2961,6 @@ static int icm_start(struct tb *tb, bool not_used)
 	if (ret) {
 		tb_switch_put(tb->root_switch);
 		tb->root_switch = NULL;
-	} else {
-		icm_schedule_phy_retrain(tb);
 	}
 
 	return ret;
@@ -3072,7 +2971,6 @@ static void icm_stop(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 
 	cancel_delayed_work(&icm->rescan_work);
-	cancel_delayed_work(&icm->phy_retrain_work);
 	icm_cancel_pcie_rescan(icm);
 	icm_disconnect_pcie_tunnels(tb);
 	tb_switch_remove(tb->root_switch);
@@ -3356,7 +3254,6 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	icm = tb_priv(tb);
 	INIT_DELAYED_WORK(&icm->rescan_work, icm_rescan_work);
-	INIT_DELAYED_WORK(&icm->phy_retrain_work, icm_phy_retrain_work);
 	INIT_DELAYED_WORK(&icm->pcie_rescan_work, icm_pcie_rescan_work);
 	mutex_init(&icm->request_lock);
 	INIT_LIST_HEAD(&icm->tunnel_list);
@@ -3454,7 +3351,6 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
-		icm->phy_retrain_supported = true;
 		icm->can_upgrade_nvm = true;
 		icm->is_supported = icm_tgl_is_supported;
 		icm->get_mode = icm_ar_get_mode;

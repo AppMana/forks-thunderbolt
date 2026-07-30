@@ -313,9 +313,6 @@ struct tb_port {
 #define TB_RECONCILE_UNPLUG	1
 #define TB_RECONCILE_PLUG	2
 
-bool tb_icm_port_needs_retrain(bool has_topology, int state);
-void tb_port_kick_detection(struct tb_port *port);
-
 /**
  * struct usb4_port - USB4 port device
  * @dev: Device for the port
