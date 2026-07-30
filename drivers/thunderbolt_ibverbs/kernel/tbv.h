@@ -254,6 +254,14 @@ struct tbv_path {
 	 * it.
 	 */
 	bool tx_ring_stalled;
+	/*
+	 * Set when the no-progress watchdog has requested an ICM tunnel
+	 * recovery, and cleared only by a real ring completion. Re-enabling the
+	 * same tunnel is not proof of progress; without this latch the poll
+	 * tears down and re-HELLOs the rail every tx_stall_warn_ms while the
+	 * original descriptors remain stuck.
+	 */
+	bool tx_recovery_attempted;
 	struct delayed_work tx_poll_work;
 	struct delayed_work rx_supp_poll_work;
 	struct delayed_work credit_sync_work;

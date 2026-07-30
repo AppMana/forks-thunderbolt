@@ -209,6 +209,24 @@ bool tbv_path_tx_stalled(const struct tbv_path *path)
 	return time_after(jiffies, progress + msecs_to_jiffies(tx_stall_skip_ms));
 }
 
+static bool tbv_path_mark_tx_recovery_attempted(struct tbv_path *path)
+{
+	unsigned long flags;
+	bool first = false;
+
+	if (!path->rail || !path->rail->peer ||
+	    path->rail->peer->backend != TBV_BACKEND_NATIVE)
+		return false;
+
+	spin_lock_irqsave(&path->tx_lock, flags);
+	if (!path->tx_recovery_attempted) {
+		path->tx_recovery_attempted = true;
+		first = true;
+	}
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+	return first;
+}
+
 struct tbv_data_frame {
 	struct ring_frame frame;
 	struct tbv_path *path;
@@ -1012,6 +1030,7 @@ static void tbv_path_tx_complete(struct tb_ring *ring, struct ring_frame *frame,
 	f->frame.eof = 0;
 	f->posted_jiffies = 0;
 	path->tx_ring_stalled = false;
+	path->tx_recovery_attempted = false;
 	list_del_init(&f->free_node);
 	list_add_tail(&f->free_node, &path->tx_free);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
@@ -1085,7 +1104,7 @@ static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
 	struct tbv_data_frame *tmp;
 	struct tbv_tx_packet *packet;
 	unsigned long flags;
-	LIST_HEAD(stranded);
+	LIST_HEAD(expired);
 	u32 count = 0;
 
 	if (!timeout)
@@ -1096,15 +1115,24 @@ static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
 		if (!f->posted_jiffies ||
 		    !time_after(jiffies, f->posted_jiffies + timeout))
 			continue;
-		list_move_tail(&f->free_node, &stranded);
-		count++;
-	}
-	spin_unlock_irqrestore(&path->tx_lock, flags);
-
-	while (!list_empty(&stranded)) {
-		f = list_first_entry(&stranded, struct tbv_data_frame,
-				     free_node);
-		spin_lock_irqsave(&path->tx_lock, flags);
+		/*
+		 * Complete the ownership transition while holding tx_lock.
+		 *
+		 * Do not move f->free_node to a temporary list and drop the
+		 * lock: the ring completion callback is allowed to run then,
+		 * remove that same node and return the frame to tx_free. The
+		 * timeout worker would subsequently operate on a recycled frame
+		 * and leave its stack-local list corrupted. The next expiry scan
+		 * can then loop forever with IRQs disabled (the hard lockup seen
+		 * on appmana-023).
+		 *
+		 * The ring still owns the frame, so leave its node detached and
+		 * mark it released. A late completion sees released, returns the
+		 * frame to tx_free, and does not spend the inflight slot twice.
+		 * The packet is ours after f->packet is cleared; its node is
+		 * otherwise detached while the copied frame is in the ring, so
+		 * use that node for deferred completion outside the spinlock.
+		 */
 		list_del_init(&f->free_node);
 		packet = f->packet;
 		f->packet = NULL;
@@ -1112,19 +1140,30 @@ static u32 tbv_path_expire_tx_ring_frames(struct tbv_path *path)
 		f->done_ctx = NULL;
 		f->posted_jiffies = 0;
 		f->released = true;
-		spin_unlock_irqrestore(&path->tx_lock, flags);
-		/*
-		 * The frame itself is NOT returned to tx_free: the ring still
-		 * owns its buffer and may complete it later. Only the packet is
-		 * released, so the owning WR can fail instead of hanging.
-		 */
-		atomic_dec(&path->tx_inflight);
 		if (packet)
-			tbv_path_tx_packet_release(packet, -ETIMEDOUT);
+			list_add_tail(&packet->node, &expired);
+		count++;
+	}
+	if (count)
+		path->tx_ring_stalled = true;
+	spin_unlock_irqrestore(&path->tx_lock, flags);
+
+	/*
+	 * Hand every expired frame's slot back before invoking owner callbacks.
+	 * A concurrent late ring completion observes f->released and therefore
+	 * skips its decrement; the poll caller schedules the newly available
+	 * frames after this function returns.
+	 */
+	if (count)
+		atomic_sub(count, &path->tx_inflight);
+
+	while (!list_empty(&expired)) {
+		packet = list_first_entry(&expired, struct tbv_tx_packet, node);
+		list_del_init(&packet->node);
+		tbv_path_tx_packet_release(packet, -ETIMEDOUT);
 	}
 
 	if (count) {
-		WRITE_ONCE(path->tx_ring_stalled, true);
 		pr_warn_ratelimited("tx ring stalled route=0x%llx rail=0x%x: released %u frame(s) the ring never completed\n",
 				    path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
 				    path->rail ? path->rail->rail_id : 0xffffffff,
@@ -1250,9 +1289,12 @@ static void tbv_path_tx_poll_work(struct work_struct *work)
 			 * response: the rail stayed data-ready and kept feeding
 			 * an ICM tunnel that no longer consumed descriptors. Ask
 			 * the existing native negotiation worker to disconnect
-			 * and re-establish it. The helper coalesces repeated polls.
+			 * and re-establish it once. Re-enabling the same ring does
+			 * not count as recovery; only a completion clears the
+			 * per-path attempt latch.
 			 */
-			tbv_native_control_recover_stalled_rail(path->rail);
+			if (tbv_path_mark_tx_recovery_attempted(path))
+				tbv_native_control_recover_stalled_rail(path->rail);
 
 			if (time_after(jiffies,
 				       READ_ONCE(path->tx_last_stall_warn_jiffies) +
@@ -1402,6 +1444,8 @@ static void tbv_path_zcopy_tx_complete(struct tb_ring *ring,
 		list_del_init(&packet->node);
 		packet->inflight = false;
 	}
+	path->tx_ring_stalled = false;
+	path->tx_recovery_attempted = false;
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
 	if (state) {
@@ -2017,7 +2061,6 @@ int tbv_path_enable_tunnel(struct tbv_path *path, struct tb_xdomain *xd,
 	if (!in_hop_allocated)
 		path->remote_transmit_path = remote_transmit_path;
 	path->state = TBV_PATH_TUNNEL_ENABLED;
-	WRITE_ONCE(path->tx_ring_stalled, false);
 	WRITE_ONCE(path->tx_last_progress_jiffies, jiffies);
 	pr_info("enabled tunnel route=0x%llx rail=0x%x out_hop=%d remote_out_hop=%d tx_hop=%d rx_hop=%d tx_flags=0x%x rx_flags=0x%x e2e=%u\n",
 		path->rail && path->rail->peer ? path->rail->peer->xd->route : 0,
@@ -2394,6 +2437,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		u32 old_raw_stream_inflight;
 		bool charged_data_credit;
 		bool from_control_queue;
+		bool packet_control;
 		u32 old_start_credit_group_frames;
 		int ret;
 
@@ -2526,6 +2570,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			path->tx_data_queued--;
 		list_del_init(&packet->node);
 		packet->queued = false;
+		packet_control = packet->control;
 		old_raw_stream_active = path->tx_raw_stream_active;
 		old_raw_stream_owner = path->tx_raw_stream_owner;
 		old_raw_stream_end_seen = path->tx_raw_stream_end_seen;
@@ -2626,21 +2671,27 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 					   f->dma, TBV_DATA_FRAME_SIZE,
 					   DMA_TO_DEVICE);
 
+		/*
+		 * Publish the frame as inflight before giving it to the ring.
+		 * Once tb_ring_tx() accepts it, an interrupt completion may run
+		 * on another CPU before tb_ring_tx() returns. Linking it only in
+		 * the success branch lets that completion put f on tx_free and
+		 * then makes this CPU link the same node into tx_frame_inflight,
+		 * corrupting both lists.
+		 */
+		spin_lock_irqsave(&path->tx_lock, flags);
+		f->posted_jiffies = jiffies;
+		list_add_tail(&f->free_node, &path->tx_frame_inflight);
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+
 		ret = tb_ring_tx(path->tx_ring, &f->frame);
 		if (!ret) {
 			if (state)
 				atomic64_inc(&state->data_tx_posted);
-			if (packet->control)
+			if (packet_control)
 				atomic64_inc(&path->control_tx_posted);
 			else
 				atomic64_inc(&path->data_tx_posted);
-			if (f) {
-				spin_lock_irqsave(&path->tx_lock, flags);
-				f->posted_jiffies = jiffies;
-				list_add_tail(&f->free_node,
-					      &path->tx_frame_inflight);
-				spin_unlock_irqrestore(&path->tx_lock, flags);
-			}
 			tbv_path_queue_tx_poll(path, 0);
 			tbv_path_queue_rx_supp_poll(
 				path,
@@ -2655,6 +2706,8 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		f->done_ctx = NULL;
 		f->frame.callback = NULL;
 		spin_lock_irqsave(&path->tx_lock, flags);
+		f->posted_jiffies = 0;
+		list_del_init(&f->free_node);
 		list_add_tail(&f->free_node, &path->tx_free);
 		path->tx_raw_stream_active = old_raw_stream_active;
 		path->tx_raw_stream_owner = old_raw_stream_owner;

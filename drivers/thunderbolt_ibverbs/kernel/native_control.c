@@ -1049,8 +1049,10 @@ static void tbv_native_control_work(struct work_struct *work)
 	 * was acknowledged yet is no longer forwarding. Disconnect it through
 	 * the same serialized path used for peer re-hop, then invalidate the
 	 * latched negotiation so this pass runs the ordinary HELLO, tunnel and
-	 * READY sequence from the beginning. The TX poll stamps a fresh progress
-	 * deadline when enable_tunnel succeeds, which is also the retry cooldown.
+	 * READY sequence from the beginning. Re-enabling the same ring is not
+	 * evidence that it resumed: the path-level recovery-attempt latch remains
+	 * set until an actual TX completion, preventing a five-second re-HELLO
+	 * loop around the same stranded descriptors.
 	 */
 	if (READ_ONCE(rail->native_tunnel_recover) &&
 	    rail->path.state == TBV_PATH_TUNNEL_ENABLED) {
