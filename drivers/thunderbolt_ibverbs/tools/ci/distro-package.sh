@@ -67,8 +67,23 @@ install_deps() {
 
 stage_source() {
 	local stage="$1"
+	local contaminant
 	install -d -m 0755 "$stage"
-	tar -C "$repo_root" -cf - \
+	# A developer package is commonly built immediately after `make`. Never
+	# stage those host-kernel objects into an architecture-independent DKMS
+	# source package: DKMS must rebuild only source against the target kernel
+	# and the installed tbfix header/symbol table.
+	tar -C "$repo_root" \
+		--exclude='*.o' \
+		--exclude='*.ko' \
+		--exclude='*.mod' \
+		--exclude='*.mod.c' \
+		--exclude='*.cmd' \
+		--exclude='Module.symvers' \
+		--exclude='modules.order' \
+		--exclude='.tmp_*' \
+		--exclude='.tbfix-gen-include' \
+		-cf - \
 		Makefile \
 		dkms.conf \
 		LICENSE \
@@ -76,6 +91,17 @@ stage_source() {
 		kernel \
 		proto \
 		| tar -C "$stage" -xf -
+	contaminant="$(find "$stage" -type f \( \
+		-name '*.o' -o -name '*.ko' -o -name '*.mod' -o \
+		-name '*.mod.c' -o -name '*.cmd' -o \
+		-name 'Module.symvers' -o -name 'modules.order' \
+		\) -print -quit)"
+	[[ -z "$contaminant" ]] || {
+		printf 'error: build artefact escaped DKMS source filter: %s\n' \
+			"$contaminant" >&2
+		exit 1
+	}
+	chmod -R a+rX,u+w,go-w "$stage"
 	sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$version\"/" \
 		"$stage/dkms.conf"
 }
