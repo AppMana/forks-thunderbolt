@@ -141,6 +141,8 @@ build_deb() {
 		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr"
 	install -D -m 0644 "$repo_root/packaging/udev/tbv-rdma-addr-lib.sh" \
 		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh"
+	install -D -m 0755 "$repo_root/scripts/tbv-nhi-reset.sh" \
+		"$stage/usr/lib/thunderbolt-ibverbs/tbv-nhi-reset"
 
 	local deb="$out_dir/${pkgname}_${version}_all.deb"
 	dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null

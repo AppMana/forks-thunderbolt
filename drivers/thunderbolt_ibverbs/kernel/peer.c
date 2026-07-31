@@ -2,31 +2,12 @@
 
 #define pr_fmt(fmt) "thunderbolt_ibverbs: " fmt
 
-#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/thunderbolt.h>
 
 #include "tbv.h"
-
-/*
- * Experiment: host-to-host (XDomain) Thunderbolt links power on at single
- * lane (x1, 20 Gb/s) because XDomain lane bonding is normally only driven by
- * thunderbolt-net after a ThunderboltIP login, which our chain does not run.
- * The kernel exports tb_xdomain_lane_bonding_enable(); the cable already
- * trains Gen3 (20 Gb/s/lane), so bonding should yield a DUAL-width 40 Gb/s
- * logical link. Keep lanes=1 so the native lane-count stays 1 (one rail over
- * the now-wider link) instead of resurrecting a second rail. Off by default;
- * the host uplink is PCIe 3.0 x4 (~31.5 Gb/s/dir) so the upside is ~1.5x.
- */
-static bool native_lane_bonding;
-module_param(native_lane_bonding, bool, 0644);
-MODULE_PARM_DESC(native_lane_bonding,
-		 "Attempt XDomain lane bonding (x1->x2, 40 Gb/s) on native peers");
-
-#define TBV_LANE_BOND_MAX_ATTEMPTS 12
-#define TBV_LANE_BOND_RETRY_MS 1000
 
 /*
  * Rail-teardown wait budget. The ring fence in tbv_peer_remove_rail actively
@@ -46,43 +27,6 @@ static unsigned int rail_teardown_force_ms = 60000;
 module_param(rail_teardown_force_ms, uint, 0644);
 MODULE_PARM_DESC(rail_teardown_force_ms,
 		 "Hard cap (ms) after which rail teardown force-proceeds with an NHI-safe leak; 0 = wait forever");
-
-bool tbv_xdomain_bond_sync(struct tb_xdomain *xd)
-{
-	int attempt;
-	int ret = 0;
-
-	if (!xd)
-		return false;
-	if (!READ_ONCE(native_lane_bonding))
-		return xd->link_width != TB_LINK_WIDTH_SINGLE;
-	if (xd->link_width != TB_LINK_WIDTH_SINGLE)
-		return true;
-
-	/*
-	 * -ENOTCONN means our second lane adapter is enabled but the remote
-	 * had not enabled its own within the wait window. tb_port_enable
-	 * leaves the adapter enabled, so retrying converges once the peer
-	 * (probing concurrently) also enables. Block the probe briefly; both
-	 * ends run this and meet.
-	 */
-	for (attempt = 1; attempt <= TBV_LANE_BOND_MAX_ATTEMPTS; attempt++) {
-		ret = tb_xdomain_lane_bonding_enable(xd);
-		if (!ret) {
-			pr_info("lane bonding enabled route=0x%llx width->%u speed=%uGb/s after %d attempt(s)\n",
-				xd->route, xd->link_width, xd->link_speed,
-				attempt);
-			return true;
-		}
-		if (ret != -ENOTCONN)
-			break;
-		msleep(TBV_LANE_BOND_RETRY_MS);
-	}
-
-	pr_warn("lane bonding route=0x%llx gave up ret=%d width=%u (staying x1)\n",
-		xd->route, ret, xd->link_width);
-	return false;
-}
 
 static bool tbv_peer_matches(const struct tbv_peer *peer,
 			     enum tbv_backend_type backend,
@@ -216,14 +160,6 @@ struct tbv_peer *tbv_peer_get_or_create(struct tbv_state *state,
 	pr_info("peer %u created backend=%s\n", peer->peer_id,
 		tbv_backend_name(backend));
 
-	/*
-	 * The service probe bonds the link (tbv_xdomain_bond_sync) before
-	 * creating us, so record whether it is now dual-lane for clean
-	 * teardown (disable on the last put).
-	 */
-	if (native_lane_bonding && backend == TBV_BACKEND_NATIVE && xd &&
-	    xd->link_width != TB_LINK_WIDTH_SINGLE)
-		peer->lane_bonded = true;
 	return peer;
 }
 

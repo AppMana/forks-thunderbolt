@@ -305,43 +305,16 @@ static u32 tbv_service_native_lane(const struct tb_service_id *id)
 	return (u32)id->driver_data;
 }
 
-/*
- * Number of usable native lanes on a specific XDomain link, read from the
- * width the Thunderbolt controller actually negotiated. A single-cable
- * TB3/TB4 daisy-chain link trains to TB_LINK_WIDTH_SINGLE (one 20Gb/s
- * lane); advertising a second native rail there creates a phantom whose
- * TX ring never egresses. Dual / asymmetric links expose two lanes.
- */
-static u32 tbv_link_width_lane_count(enum tb_link_width width)
+static u32 tbv_native_service_count(void)
 {
-	switch (width) {
-	case TB_LINK_WIDTH_SINGLE:
-		return 1;
-	case TB_LINK_WIDTH_DUAL:
-	case TB_LINK_WIDTH_ASYM_TX:
-	case TB_LINK_WIDTH_ASYM_RX:
-		return 2;
-	default:
-		/* Unknown width: fall back to single lane, the safe minimum. */
-		return 1;
-	}
-}
-
-static u32 tbv_config_native_lane_count(const struct tbv_state *state)
-{
-	if (state->cfg.requested.lanes_auto)
-		return min_t(u32, 2, TBV_NATIVE_MAX_LANES);
-
-	return state->cfg.requested.lanes_max;
-}
-
-/* Lanes we will actually bind on this link: config request capped by the
- * physical link width the controller reports. */
-static u32 tbv_link_native_lane_count(const struct tbv_state *state,
-				      const struct tb_xdomain *xd)
-{
-	return min(tbv_config_native_lane_count(state),
-		   tbv_link_width_lane_count(xd->link_width));
+	/*
+	 * One XDomain is one logical Thunderbolt link. A DUAL-width link is
+	 * striped by the controller after lane bonding; the DMA-path API has no
+	 * physical-lane selector. Advertising one service per physical lane
+	 * creates duplicate tunnels on the same link, not lane-affined rails.
+	 * Distinct cables are distinct XDomains and still get distinct rails.
+	 */
+	return 1;
 }
 
 static u32 tbv_service_path_id(const struct tb_service *svc,
@@ -383,21 +356,11 @@ static int tbv_service_probe(struct tb_service *svc,
 	    !tbv_service_apple_xdomain_allowed(tbv_service_state, xd))
 		return -ENODEV;
 
-	/*
-	 * Bond the link to dual lane BEFORE the lane-count gate so a 40 Gb/s
-	 * link exposes its second native rail (one rail caps ~16 Gb/s; the win
-	 * is striping across two rails). No-op unless native_lane_bonding is
-	 * set. Both ends probe concurrently and converge.
-	 */
-	if (backend == TBV_BACKEND_NATIVE)
-		tbv_xdomain_bond_sync(xd);
-
 	if (backend == TBV_BACKEND_NATIVE &&
-	    native_lane >= tbv_link_native_lane_count(tbv_service_state, xd)) {
+	    native_lane >= tbv_native_service_count()) {
 		dev_dbg(&xd->dev,
-			"skip native lane %u: link width 0x%x exposes %u lane(s)\n",
-			native_lane, xd->link_width,
-			tbv_link_native_lane_count(tbv_service_state, xd));
+			"skip duplicate native service %u on one logical XDomain link\n",
+			native_lane);
 		return -ENODEV;
 	}
 
@@ -599,7 +562,7 @@ static int tbv_register_native_dirs(struct tbv_state *state, u32 prtcstns)
 	if (!state->cfg.native_enabled || !state->native_data)
 		return 0;
 
-	count = tbv_config_native_lane_count(state);
+	count = tbv_native_service_count();
 
 	if (!count || count > TBV_NATIVE_MAX_LANES) {
 		pr_err("native lanes request %u exceeds supported maximum %u\n",
@@ -733,8 +696,11 @@ err_clear:
 
 bool tbv_services_reannounce_native(struct tbv_state *state)
 {
+#ifdef TB_XDOMAIN_HAS_REANNOUNCE
+	typedef void (*reannounce_fn_t)(void);
+	reannounce_fn_t reannounce;
+#endif
 	unsigned long last;
-	int ret;
 
 	if (!state || !state->services_registered || !state->native_dir_count)
 		return false;
@@ -746,22 +712,25 @@ bool tbv_services_reannounce_native(struct tbv_state *state)
 	WRITE_ONCE(state->native_reannounce_jiffies, jiffies);
 
 	/*
-	 * tb_unregister_property_dir + tb_register_property_dir both push an
-	 * XDomain properties-changed notification to every connected peer. A
-	 * peer whose earlier property read raced our module load (and gave up,
-	 * leaving us service-less on its side, our HELLOs unanswered with
-	 * -ETIMEDOUT) restarts its read cycle on the fresh notification and
-	 * recreates the tbverbs service. Healthy peers re-read and find the
-	 * same content -- idempotent.
+	 * Bump the generation and notify while keeping every service directory
+	 * continuously advertised. The old unregister/register sequence exposed
+	 * an empty generation that made healthy peers remove all rails; if the
+	 * second best-effort notification was lost they never came back.
 	 */
-	tbv_unregister_native_dirs(state);
-	ret = tbv_register_native_dirs(state, state->native_prtcstns);
-	if (ret) {
-		pr_warn("native property re-announce failed: %d\n", ret);
+#ifdef TB_XDOMAIN_HAS_REANNOUNCE
+	reannounce = symbol_get(tb_reannounce_property_dirs);
+	if (!reannounce) {
+		pr_warn_ratelimited("native property re-announce unavailable in thunderbolt core; leaving live services intact\n");
 		return false;
 	}
-	pr_info("re-announced native services (HELLO retries exhausted; prodding stale peers)\n");
+	reannounce();
+	symbol_put(tb_reannounce_property_dirs);
+	pr_info("re-announced native services without changing the service set\n");
 	return true;
+#else
+	pr_warn_ratelimited("native property re-announce unavailable in thunderbolt headers; leaving live services intact\n");
+	return false;
+#endif
 }
 
 void tbv_services_stop(struct tbv_state *state)

@@ -228,6 +228,44 @@ static inline void model_host_reload(struct model_host *h)
  */
 #define MODEL_MAX_RAILS 4
 
+/*
+ * Service-publication model for a live, already-bound native rail.  A
+ * destructive reannounce has two observable generations: first no native
+ * service, then native again.  If the second best-effort notification is
+ * lost, the remote remains unbound forever.  A generation-only reannounce
+ * never exposes the empty intermediate state, so losing its notification
+ * cannot tear down an already healthy rail.
+ */
+static inline bool
+model_reannounce_keeps_bound(bool removes_services, bool add_notify_lost)
+{
+	bool remote_bound = true;
+
+	if (!removes_services)
+		return remote_bound;
+
+	/* Remote observes unregister generation and removes the live service. */
+	remote_bound = false;
+	if (!add_notify_lost)
+		remote_bound = true;
+
+	return remote_bound;
+}
+
+/*
+ * A Thunderbolt dual-width link is one hardware-bonded logical link.  The DMA
+ * path API has no physical-lane selector, so mirroring physical lane count
+ * into provider rails creates duplicate tunnels rather than one rail per lane.
+ */
+static inline unsigned int
+model_provider_rail_count(unsigned int physical_lanes,
+			  bool rails_follow_physical_lanes)
+{
+	if (!physical_lanes)
+		return 0;
+	return rails_follow_physical_lanes ? physical_lanes : 1;
+}
+
 struct model_rail {
 	int settle;
 	bool have_remote;

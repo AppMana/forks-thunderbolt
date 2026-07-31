@@ -93,6 +93,32 @@ static void tbv_test_native_handshake_multirail(struct kunit *test)
 }
 
 /*
+ * Live failure, appmana-023<->025 2026-07-31: rail 1 exhausted HELLO and the
+ * recovery path briefly unadvertised BOTH native services.  The peer observed
+ * that empty generation, removed both rails, then missed the add notification.
+ */
+static void tbv_test_native_reannounce_is_non_destructive(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+		model_reannounce_keeps_bound(
+			TBV_REANNOUNCE_REMOVES_NATIVE_SERVICES,
+			/* add_notify_lost=*/true));
+}
+
+/*
+ * Physical x2 is a bond inside one logical Thunderbolt link, not two
+ * addressable DMA lanes.  One provider rail must use that bonded link.
+ */
+static void tbv_test_bonded_link_is_one_provider_rail(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		model_provider_rail_count(
+			/* physical_lanes=*/2,
+			TBV_NATIVE_RAILS_FOLLOW_PHYSICAL_LANES),
+		1u);
+}
+
+/*
  * flaw #1: tbv_native_control_kick_matching_rail must re-arm a budget-exhausted
  * rail on an inbound peer request (HELLO/READY), mirroring net's TBIP_LOGIN
  * handler resetting login_retries. The flawed kick re-scheduled work without
@@ -495,6 +521,8 @@ static struct kunit_case tbv_ack_routing_test_cases[] = {
 	KUNIT_CASE(tbv_test_native_rehello_supersede),
 	KUNIT_CASE(tbv_test_native_rehello_changed_hops),
 	KUNIT_CASE(tbv_test_native_handshake_multirail),
+	KUNIT_CASE(tbv_test_native_reannounce_is_non_destructive),
+	KUNIT_CASE(tbv_test_bonded_link_is_one_provider_rail),
 	KUNIT_CASE(tbv_test_native_kick_rearm),
 	KUNIT_CASE(tbv_ack_route_peer_prefers_rx_path),
 	KUNIT_CASE(tbv_ack_route_peer_falls_back_to_qp),

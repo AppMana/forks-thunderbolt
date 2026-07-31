@@ -444,7 +444,6 @@ struct tbv_peer {
 	struct mutex control_lock;
 	u32 native_qp_rr_rail_id;
 	u32 nr_rails;
-	bool lane_bonded;
 	/*
 	 * The peer's RoCE GID identity, learned from its HELLO (wire v2):
 	 * remote_roce_eui64 is the modified-EUI-64 the peer's kernel derives
@@ -588,6 +587,14 @@ struct tbv_tbnet_identity_config {
 
 #define TBV_CONFIGURED_LINK_NAME_LEN (TBV_CFG_LINK_NAME_MAX + 1u)
 
+/*
+ * Negotiation-model policy switches.  Keep these tied to the production
+ * implementation: the KUnit model exercises the service-set transitions that
+ * the driver cannot safely provoke against a live XDomain.
+ */
+#define TBV_REANNOUNCE_REMOVES_NATIVE_SERVICES 0
+#define TBV_NATIVE_RAILS_FOLLOW_PHYSICAL_LANES 0
+
 struct tbv_configured_link {
 	struct list_head node;
 	u32 link_id;
@@ -610,9 +617,9 @@ struct tbv_state {
 	 * Saved prtcstns + rate limit for tbv_services_reannounce_native(): when
 	 * a rail exhausts its HELLO retries (the peer has not recreated our
 	 * service after a module reload -- its one-shot XDomain property read
-	 * raced our initialization and gave up), re-registering the property
-	 * dirs sends a fresh properties-changed notification that restarts the
-	 * peer's read cycle. Without this, module reloads converge ~1 in 10
+	 * raced our initialization and gave up), reannouncing the unchanged
+	 * property set sends a fresh properties-changed notification that
+	 * restarts the peer's read cycle. Without this, module reloads converge ~1 in 10
 	 * (2026-06-12 fleet roll) and the only reliable recovery is a reboot.
 	 */
 	u32 native_prtcstns;
@@ -1049,9 +1056,9 @@ int tbv_services_start(struct tbv_state *state, bool bind_services,
 		       const struct tbv_service_config *service_cfg);
 void tbv_services_stop(struct tbv_state *state);
 /*
- * Re-register the native property dirs to push a fresh XDomain
- * properties-changed notification to every neighbour (rate-limited; returns
- * false when skipped). Used by native control when HELLO retries exhaust.
+ * Reannounce the unchanged native property set to every neighbour
+ * (rate-limited; returns false when skipped). Used by native control when
+ * HELLO retries exhaust.
  */
 bool tbv_services_reannounce_native(struct tbv_state *state);
 int tbv_native_control_start(struct tbv_state *state);
@@ -1086,13 +1093,6 @@ struct tbv_peer *tbv_peer_get_or_create(struct tbv_state *state,
 					enum tbv_backend_type backend,
 					struct tb_xdomain *xd);
 void tbv_peer_put(struct tbv_state *state, struct tbv_peer *peer);
-/*
- * Synchronously bring an XDomain link up at dual lane (40 Gb/s) before rails
- * are built, so tbv_service_probe's lane-count gate exposes the second rail.
- * No-op when native_lane_bonding is off or the link is already DUAL. Returns
- * the resulting xd->link_width is DUAL (true) or stayed SINGLE (false).
- */
-bool tbv_xdomain_bond_sync(struct tb_xdomain *xd);
 struct tbv_rail *tbv_peer_add_rail(struct tbv_peer *peer,
 				   const struct tbv_rail_key *key,
 				   u32 native_lane);
