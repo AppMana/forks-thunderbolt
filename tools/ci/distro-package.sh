@@ -75,6 +75,9 @@ stage_source() {
 		printf 'fork-describe=%s\n' "$(git -C "$repo_root" describe --always --dirty 2>/dev/null || printf unknown)"
 		printf 'packaged-at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} > "$stage/.tbfix-source"
+	# Worktrees may be group-writable.  A binary package must not preserve
+	# developer umask/checkout permissions in /usr/src.
+	chmod -R a+rX,u+w,go-w "$stage"
 }
 
 substitute() {
