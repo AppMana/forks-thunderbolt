@@ -7087,7 +7087,9 @@ static int tbv_native_send_ctx_post_split(struct tbv_send_ctx *ctx,
 	struct tbv_qp *tqp = ctx->tqp;
 	u32 count = tbv_native_data_split_window_count(ctx->total_len);
 	unsigned int send_flags = TBV_PATH_SEND_DEFER |
-				  (retransmit ? TBV_PATH_SEND_REFUND : 0);
+				  (retransmit ?
+				   TBV_PATH_SEND_REFUND |
+				   TBV_PATH_SEND_PRIORITY : 0);
 	u32 idx;
 	bool sent_any = false;
 	int ret = 0;
@@ -7318,6 +7320,9 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 
 		{
 			struct tbv_send_page_stream *stream;
+			unsigned int send_flags =
+				reason == TBV_SEND_POST_INITIAL ? 0 :
+				TBV_PATH_SEND_REFUND | TBV_PATH_SEND_PRIORITY;
 
 			tbv_send_ctx_build_native_header(ctx, 0, ctx->total_len,
 							 true, &hdr);
@@ -7341,7 +7346,8 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			atomic_inc(&ctx->tx_pending);
 			atomic64_inc(&tqp->owner->data_wr_path_send);
 			ret = tbv_path_send_page_stream(path, &hdr,
-							ctx->total_len, 0,
+							ctx->total_len,
+							send_flags,
 							tbv_send_tx_done, ctx,
 							tbv_send_page_stream_next,
 							stream);
@@ -7527,7 +7533,10 @@ out_unlock_paths:
 
 			ret = tbv_path_enqueue_prepared_reserved(
 				paths[list_idx], &packet_lists[list_idx],
-				packet_counts[list_idx], TBV_PATH_SEND_DEFER);
+				packet_counts[list_idx],
+				TBV_PATH_SEND_DEFER |
+				(reason == TBV_SEND_POST_INITIAL ? 0 :
+				 TBV_PATH_SEND_PRIORITY));
 			if (!ret) {
 				queued_frames += packet_counts[list_idx];
 				reservations[list_idx] = 0;

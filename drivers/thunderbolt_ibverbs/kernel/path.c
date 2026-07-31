@@ -2364,9 +2364,50 @@ static int tbv_path_enqueue_data(struct tbv_path *path,
 	return 0;
 }
 
+/*
+ * Put recovery data ahead of unsent initial traffic. If an unframed window is
+ * already open, its remaining frames must stay at the head: inserting a
+ * foreign frame between the raw header and payload would desynchronize the
+ * receiver, while hiding the active payload behind the retry would deadlock
+ * the scheduler's owner gate. In that case, preempt at the end of the current
+ * window instead.
+ */
+static void tbv_path_queue_data_list_locked(struct tbv_path *path,
+					    struct list_head *packets,
+					    bool priority)
+{
+	struct tbv_tx_packet *packet;
+
+	if (!priority) {
+		list_splice_tail_init(packets, &path->tx_data_queue);
+		return;
+	}
+
+	if (path->tx_raw_stream_active && path->tx_raw_stream_window_open) {
+		list_for_each_entry(packet, &path->tx_data_queue, node) {
+			if (packet->owner_ctx != path->tx_raw_stream_owner)
+				continue;
+			if (!packet->raw_stream_end)
+				continue;
+			list_splice_init(packets, &packet->node);
+			return;
+		}
+
+		/*
+		 * The open window's end must already be queued. Preserve the
+		 * existing queue if state is transiently inconsistent instead
+		 * of placing a foreign frame at its head.
+		 */
+		list_splice_tail_init(packets, &path->tx_data_queue);
+		return;
+	}
+
+	list_splice_init(packets, &path->tx_data_queue);
+}
+
 static int tbv_path_enqueue_data_list(struct tbv_path *path,
 				      struct list_head *packets, u32 count,
-				      bool defer_schedule)
+				      bool defer_schedule, bool priority)
 {
 	struct tbv_tx_packet *packet;
 	unsigned long flags;
@@ -2397,7 +2438,7 @@ static int tbv_path_enqueue_data_list(struct tbv_path *path,
 		atomic64_inc(&path->data_tx_enqueued);
 		first = false;
 	}
-	list_splice_tail_init(packets, &path->tx_data_queue);
+	tbv_path_queue_data_list_locked(path, packets, priority);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
 	tbv_path_arm_queue_watchdog(path);
@@ -2408,7 +2449,8 @@ static int tbv_path_enqueue_data_list(struct tbv_path *path,
 
 static int tbv_path_enqueue_reserved_data_list(struct tbv_path *path,
 					       struct list_head *packets,
-					       u32 count, bool defer_schedule)
+					       u32 count, bool defer_schedule,
+					       bool priority)
 {
 	struct tbv_tx_packet *packet;
 	unsigned long flags;
@@ -2436,7 +2478,7 @@ static int tbv_path_enqueue_reserved_data_list(struct tbv_path *path,
 		atomic64_inc(&path->data_tx_enqueued);
 		first = false;
 	}
-	list_splice_tail_init(packets, &path->tx_data_queue);
+	tbv_path_queue_data_list_locked(path, packets, priority);
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 
 	tbv_path_arm_queue_watchdog(path);
@@ -2575,9 +2617,16 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			needs_staging = !packet->zcopy;
 		}
 
-		if (!from_control_queue &&
-		    atomic_read(&path->tx_inflight) >=
-			    READ_ONCE(data_tx_max_inflight)) {
+		/*
+		 * Data and reliability/control frames share one hardware ring,
+		 * so the in-flight ceiling is a ring budget, not a data-only
+		 * budget. Control retains queue priority above, but may no
+		 * longer turn one loss into hundreds of outstanding
+		 * descriptors while the data side is already at its limit.
+		 */
+		if (!tbv_path_tx_inflight_available(
+			    atomic_read(&path->tx_inflight),
+			    READ_ONCE(data_tx_max_inflight))) {
 			path->tx_scheduling = false;
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
@@ -2832,6 +2881,16 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 	}
 }
 
+bool tbv_path_tx_inflight_available(int inflight, u32 max_inflight)
+{
+	/*
+	 * tx_inflight is shared by copied data, zero-copy data and control
+	 * descriptors on one NHI ring. A transient negative value is a
+	 * bookkeeping fault, not a reason to wedge the path forever.
+	 */
+	return inflight < 0 || (u32)inflight < max_inflight;
+}
+
 void tbv_path_kick_tx(struct tbv_path *path)
 {
 	if (path)
@@ -3056,13 +3115,14 @@ int tbv_path_enqueue_prepared_reserved(struct tbv_path *path,
 
 	if (!path || !packets)
 		return -EINVAL;
-	if (send_flags & ~(TBV_PATH_SEND_DEFER)) {
+	if (send_flags & ~(TBV_PATH_SEND_DEFER | TBV_PATH_SEND_PRIORITY)) {
 		tbv_path_release_packet_list_silent(packets, -EINVAL);
 		return -EINVAL;
 	}
 
 	ret = tbv_path_enqueue_reserved_data_list(
-		path, packets, packet_count, send_flags & TBV_PATH_SEND_DEFER);
+		path, packets, packet_count, send_flags & TBV_PATH_SEND_DEFER,
+		send_flags & TBV_PATH_SEND_PRIORITY);
 	if (ret)
 		tbv_path_release_packet_list_silent(packets, ret);
 	return ret;
@@ -3089,7 +3149,8 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		ret = -EINVAL;
 		goto err_meta_done;
 	}
-	if (send_flags & ~(TBV_PATH_SEND_DEFER | TBV_PATH_SEND_REFUND)) {
+	if (send_flags & ~(TBV_PATH_SEND_DEFER | TBV_PATH_SEND_REFUND |
+			   TBV_PATH_SEND_PRIORITY)) {
 		ret = -EINVAL;
 		goto err_meta_done;
 	}
@@ -3266,7 +3327,8 @@ have_packet:
 		tbv_path_refund_remote_data_credits(path, packet_count);
 
 	ret = tbv_path_enqueue_data_list(path, &packets, packet_count,
-					 send_flags & TBV_PATH_SEND_DEFER);
+					 send_flags & TBV_PATH_SEND_DEFER,
+					 send_flags & TBV_PATH_SEND_PRIORITY);
 	if (ret)
 		goto err_release;
 	return 0;
@@ -4387,6 +4449,77 @@ out:
 	path->state = TBV_PATH_STOPPED;
 	tbv_path_flush_tx_queue(path, -ECANCELED);
 	tbv_path_free_control_packets(path);
+	kfree(path);
+	return ret;
+}
+
+int tbv_test_path_retransmit_priority(u32 *first_out, u32 *second_out,
+				      u32 *third_out)
+{
+	struct tbv_tx_packet initial_a = {};
+	struct tbv_tx_packet initial_b = {};
+	struct tbv_tx_packet retry = {};
+	struct tbv_tx_packet *packet;
+	struct tbv_path *path;
+	LIST_HEAD(initial);
+	LIST_HEAD(recovery);
+	u32 order[3] = {};
+	u32 i = 0;
+	int ret;
+
+	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+	spin_lock_init(&path->tx_lock);
+	INIT_LIST_HEAD(&path->tx_data_queue);
+	path->state = TBV_PATH_TUNNEL_ENABLED;
+	path->tx_data_queue_limit = 3;
+	path->tx_data_reserved = 3;
+
+	INIT_LIST_HEAD(&initial_a.node);
+	INIT_LIST_HEAD(&initial_b.node);
+	INIT_LIST_HEAD(&retry.node);
+	initial_a.len = 1;
+	initial_b.len = 2;
+	retry.len = 3;
+	list_add_tail(&initial_a.node, &initial);
+	list_add_tail(&initial_b.node, &initial);
+	list_add_tail(&retry.node, &recovery);
+
+	/*
+	 * Exercise the production reserved-enqueue primitive twice: ordinary
+	 * traffic first, then recovery traffic. No ring is installed, so the
+	 * scheduler cannot consume the queue while its order is inspected.
+	 */
+	ret = tbv_path_enqueue_reserved_data_list(path, &initial, 2, true,
+						  false);
+	if (ret)
+		goto out;
+	ret = tbv_path_enqueue_reserved_data_list(path, &recovery, 1, true,
+						  true);
+	if (ret)
+		goto out;
+
+	list_for_each_entry(packet, &path->tx_data_queue, node) {
+		if (i >= ARRAY_SIZE(order)) {
+			ret = -EOVERFLOW;
+			goto out;
+		}
+		order[i++] = packet->len;
+	}
+	if (i != ARRAY_SIZE(order)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (first_out)
+		*first_out = order[0];
+	if (second_out)
+		*second_out = order[1];
+	if (third_out)
+		*third_out = order[2];
+	ret = 0;
+out:
 	kfree(path);
 	return ret;
 }

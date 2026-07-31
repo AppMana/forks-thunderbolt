@@ -959,6 +959,12 @@ typedef int (*tbv_path_next_page_fn)(void *ctx, struct page **page,
  * in the framed retransmit path; see the leak note there).
  */
 #define TBV_PATH_SEND_REFUND	BIT(2)
+/*
+ * Recovery traffic must bypass unsent initial data. This is deliberately a
+ * data-queue priority (not CONTROL): retransmitted native frames still consume
+ * data credits and retain their normal framing.
+ */
+#define TBV_PATH_SEND_PRIORITY	BIT(3)
 extern const uuid_t tbv_native_service_uuid;
 
 int tbv_config_parse(struct tbv_config *cfg, const char *compat,
@@ -1104,6 +1110,11 @@ void tbv_rail_put(struct tbv_rail *rail);
  */
 struct tbv_peer *tbv_ack_route_peer(struct tbv_rail *qp_rail,
 				    struct tbv_path *rx_path);
+/*
+ * A single NHI TX ring carries both data and reliability/control frames.
+ * Report whether its shared in-flight budget can admit one more descriptor.
+ */
+bool tbv_path_tx_inflight_available(int inflight, u32 max_inflight);
 #if IS_ENABLED(CONFIG_KUNIT)
 /*
  * Scenario hook for tests/timeout_reap_drain_test.c (the QP/send-ctx structs
@@ -1284,6 +1295,12 @@ int tbv_test_path_cancel_orphans_raw_window(bool *window_open_out,
  */
 int tbv_test_path_control_queue_bound(u32 extra, u32 *capacity_out,
 				      u32 *accepted_out, u32 *queued_out);
+/*
+ * Queue two unsent initial frames, then a selective retransmit frame, through
+ * the real path enqueue primitive. Reports the resulting transmission order.
+ */
+int tbv_test_path_retransmit_priority(u32 *first_out, u32 *second_out,
+				      u32 *third_out);
 /*
  * Apply an initial -ENOMEM from the path frame reservation to a real pending
  * send. Reports the synchronous post result and whether the WR remains owned by

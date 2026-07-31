@@ -29,8 +29,26 @@ static void tbv_control_queue_stops_at_pool_capacity(struct kunit *test)
 			    "control queue grew beyond its preallocated bound");
 }
 
+/*
+ * Control frames share the same hardware descriptor ring as data. They need
+ * priority over queued data, but they must not bypass the ring's total
+ * in-flight ceiling: a burst of ACK/NAK traffic after one loss otherwise
+ * expands a nominal 32-frame pipeline into hundreds of outstanding
+ * descriptors and turns recovery into a second corruption storm.
+ */
+static void tbv_control_frames_obey_shared_inflight_ceiling(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tbv_path_tx_inflight_available(0, 32));
+	KUNIT_EXPECT_TRUE(test, tbv_path_tx_inflight_available(31, 32));
+	KUNIT_EXPECT_FALSE(test, tbv_path_tx_inflight_available(32, 32));
+	KUNIT_EXPECT_FALSE(test, tbv_path_tx_inflight_available(185, 32));
+	/* A defensive negative read must not permanently close the ring. */
+	KUNIT_EXPECT_TRUE(test, tbv_path_tx_inflight_available(-1, 32));
+}
+
 static struct kunit_case tbv_control_queue_bound_cases[] = {
 	KUNIT_CASE(tbv_control_queue_stops_at_pool_capacity),
+	KUNIT_CASE(tbv_control_frames_obey_shared_inflight_ceiling),
 	{}
 };
 
