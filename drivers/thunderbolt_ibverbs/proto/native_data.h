@@ -56,7 +56,15 @@ enum tbv_native_data_flag {
 	TBV_NATIVE_DATA_F_LAST = 1u << 0,
 	TBV_NATIVE_DATA_F_SOLICITED = 1u << 1,
 	TBV_NATIVE_DATA_F_RAW_STREAM = 1u << 2,
+	TBV_NATIVE_DATA_F_RAW_HEADER_PADDED = 1u << 3,
 };
+
+static inline tbv_wire_u32
+tbv_native_data_raw_header_wire_len(tbv_wire_u32 peer_caps)
+{
+	return peer_caps & TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER ?
+		TBV_NATIVE_DATA_FRAME_SIZE : TBV_NATIVE_DATA_HDR_SIZE;
+}
 
 enum tbv_native_read_ack_status {
 	TBV_NATIVE_READ_ACK_OK = 0,
@@ -91,6 +99,22 @@ struct tbv_native_data_header {
 	tbv_wire_u32 rkey;
 	tbv_wire_u32 frag_offset;
 };
+
+static inline bool
+tbv_native_data_valid_raw_header(const struct tbv_native_data_header *hdr,
+				 u32 frame_len)
+{
+	u8 allowed = TBV_NATIVE_DATA_F_LAST | TBV_NATIVE_DATA_F_SOLICITED |
+		     TBV_NATIVE_DATA_F_RAW_STREAM |
+		     TBV_NATIVE_DATA_F_RAW_HEADER_PADDED;
+
+	if (!hdr || !(hdr->flags & TBV_NATIVE_DATA_F_RAW_STREAM) ||
+	    !hdr->length || (hdr->flags & ~allowed))
+		return false;
+	if (hdr->flags & TBV_NATIVE_DATA_F_RAW_HEADER_PADDED)
+		return frame_len == TBV_NATIVE_DATA_FRAME_SIZE;
+	return frame_len == TBV_NATIVE_DATA_HDR_SIZE;
+}
 
 /*
  * The receiver returns path data-credits batched at this threshold; a
@@ -281,6 +305,7 @@ tbv_native_data_raw_payload_header(const struct tbv_native_data_header *stream,
 
 	*payload = *stream;
 	payload->flags &= ~(TBV_NATIVE_DATA_F_RAW_STREAM |
+			    TBV_NATIVE_DATA_F_RAW_HEADER_PADDED |
 			    TBV_NATIVE_DATA_F_LAST |
 			    TBV_NATIVE_DATA_F_SOLICITED);
 	if (payload_len == remaining)

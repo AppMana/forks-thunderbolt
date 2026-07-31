@@ -45,7 +45,8 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 	 */
 	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK |
 		TBV_NATIVE_WIRE_CAP_CREDIT_SYNC |
-		TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT;
+		TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT |
+		TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER;
 
 	return caps;
 }

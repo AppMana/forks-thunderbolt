@@ -46,10 +46,22 @@
 
 #define SPLIT_TEST_MIN_BYTES 8192u
 #define SPLIT_TEST_CAPS (TBV_NATIVE_WIRE_CAP_RC | TBV_NATIVE_WIRE_CAP_SPLIT_DATA)
+#define SPLIT_TEST_FULL_STREAM_CAPS \
+	(SPLIT_TEST_CAPS | TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER)
 #define SPLIT_TEST_OLD_CAPS TBV_NATIVE_WIRE_CAP_RC
 
 static void tbv_zcopy_mode_selection(struct kunit *test)
 {
+	/*
+	 * A current peer can carry one padded metadata descriptor followed by
+	 * the whole MR-backed payload. The WR remains owned until its remote ACK,
+	 * so retry may safely reread the pinned MR without 64 split headers.
+	 */
+	KUNIT_EXPECT_EQ(test,
+		tbv_zcopy_select_mode(true, false, true, SZ_1M,
+				      SPLIT_TEST_MIN_BYTES,
+				      SPLIT_TEST_FULL_STREAM_CAPS),
+		TBV_ZCOPY_TX_RAW_STREAM);
 	/* retryable RC WRITE to a split-capable peer: the fixed behavior */
 	KUNIT_EXPECT_EQ(test,
 		tbv_zcopy_select_mode(true, false, true, SZ_1M,
@@ -89,6 +101,28 @@ static void tbv_zcopy_mode_selection(struct kunit *test)
 		tbv_zcopy_select_mode(false, false, true, SZ_1M,
 				      SPLIT_TEST_MIN_BYTES, SPLIT_TEST_CAPS),
 		TBV_ZCOPY_TX_NONE);
+}
+
+static void tbv_zero_copy_is_enabled_for_bulk_writes_by_default(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ_MSG(test, TBV_ZCOPY_MIN_BYTES_DEFAULT, 8192U,
+		"shipping zcopy disabled silently returns NCCL bulk writes to the bounce-copy latency path despite the validated full-stream provider");
+}
+
+static void tbv_full_stream_skips_split_window_scan(struct kunit *test)
+{
+	/*
+	 * FULL_RAW_HEADER opens one stream over the already pinned, persistently
+	 * DMA-mapped MR. The per-window page-offset proof belongs only to the
+	 * legacy SPLIT framing. Running it for RAW_STREAM makes a 256 KiB WR walk
+	 * the page list from its beginning 64 times before it can post anything.
+	 */
+	KUNIT_EXPECT_FALSE(test,
+		tbv_zcopy_requires_split_scan(TBV_ZCOPY_TX_RAW_STREAM));
+	KUNIT_EXPECT_TRUE(test,
+		tbv_zcopy_requires_split_scan(TBV_ZCOPY_TX_SPLIT));
+	KUNIT_EXPECT_FALSE(test,
+		tbv_zcopy_requires_split_scan(TBV_ZCOPY_TX_NONE));
 }
 
 static void tbv_split_window_framing(struct kunit *test)
@@ -437,6 +471,61 @@ static void tbv_short_native_frame_padding_contract(struct kunit *test)
 			frame, TBV_NATIVE_DATA_FRAME_SIZE));
 }
 
+static void tbv_short_native_frame_padding_is_safe_by_default(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE_MSG(test, TBV_NATIVE_PAD_SHORT_DEFAULT,
+		"the sustained 32-QP hardware trace corrupts only short standalone native frames; requiring an operator toggle leaves ACK/credit loss and multi-second retransmissions enabled after every boot");
+}
+
+static void tbv_raw_stream_header_uses_full_hardware_frame(struct kunit *test)
+{
+	struct tbv_native_data_header hdr = {
+		.opcode = TBV_NATIVE_DATA_OP_RDMA_WRITE,
+		.flags = TBV_NATIVE_DATA_F_RAW_STREAM |
+			 TBV_NATIVE_DATA_F_RAW_HEADER_PADDED,
+		.length = 262144,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+		tbv_native_data_raw_header_wire_len(
+			TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER),
+		TBV_NATIVE_DATA_FRAME_SIZE);
+	KUNIT_EXPECT_EQ(test, tbv_native_data_raw_header_wire_len(0),
+		TBV_NATIVE_DATA_HDR_SIZE);
+	KUNIT_EXPECT_TRUE(test,
+		tbv_native_data_valid_raw_header(&hdr,
+			TBV_NATIVE_DATA_FRAME_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_valid_raw_header(&hdr,
+			TBV_NATIVE_DATA_HDR_SIZE));
+
+	hdr.flags = TBV_NATIVE_DATA_F_RAW_STREAM;
+	KUNIT_EXPECT_TRUE(test,
+		tbv_native_data_valid_raw_header(&hdr,
+			TBV_NATIVE_DATA_HDR_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		tbv_native_data_valid_raw_header(&hdr,
+			TBV_NATIVE_DATA_FRAME_SIZE));
+}
+
+static void tbv_padded_raw_header_flag_stays_off_payload(struct kunit *test)
+{
+	struct tbv_native_data_header stream = {
+		.opcode = TBV_NATIVE_DATA_OP_RDMA_WRITE,
+		.flags = TBV_NATIVE_DATA_F_RAW_STREAM |
+			 TBV_NATIVE_DATA_F_RAW_HEADER_PADDED,
+		.length = TBV_NATIVE_DATA_SPLIT_UNIT,
+	};
+	struct tbv_native_data_header payload = {};
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_native_data_raw_payload_header(&stream, 0, stream.length,
+					   stream.length, &payload),
+		0);
+	KUNIT_EXPECT_EQ_MSG(test, payload.flags, (u8)0,
+		"RAW_HEADER_PADDED describes only the metadata descriptor; carrying it into synthesized RDMA payload headers makes every zero-copy fragment fail normal flag validation");
+}
+
 static void tbv_zcopy_frame_map_len_covers_page(struct kunit *test)
 {
 	/*
@@ -563,6 +652,8 @@ static void tbv_dma_sgt_locate_nonzero_mr_offset(struct kunit *test)
 
 static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_zcopy_mode_selection),
+	KUNIT_CASE(tbv_zero_copy_is_enabled_for_bulk_writes_by_default),
+	KUNIT_CASE(tbv_full_stream_skips_split_window_scan),
 	KUNIT_CASE(tbv_split_window_framing),
 	KUNIT_CASE(tbv_split_geometry_identical_to_copied),
 	KUNIT_CASE(tbv_split_page_alignment_gate),
@@ -573,6 +664,9 @@ static struct kunit_case tbv_zcopy_split_cases[] = {
 	KUNIT_CASE(tbv_write_shape_resolver_prefers_known_count),
 	KUNIT_CASE(tbv_raw_desync_header_is_detected),
 	KUNIT_CASE(tbv_short_native_frame_padding_contract),
+	KUNIT_CASE(tbv_short_native_frame_padding_is_safe_by_default),
+	KUNIT_CASE(tbv_raw_stream_header_uses_full_hardware_frame),
+	KUNIT_CASE(tbv_padded_raw_header_flag_stays_off_payload),
 	{}
 };
 

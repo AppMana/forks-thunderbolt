@@ -20,8 +20,28 @@ static void tbv_max_message_fits_bounded_path_queue(struct kunit *test)
 			    required, limit);
 }
 
+/*
+ * The production NCCL/perftest shape keeps 32 QPs at depth 128 with 256 KiB
+ * WRs.  If the bounded path queue cannot hold that legal verbs working set,
+ * every QP falls into the 10 ms timeout-worker capacity poll and the live
+ * link drops from ~30 Gb/s to ~3.5 Gb/s despite having credits available.
+ */
+static void tbv_qps32_write_working_set_fits_path_queue(struct kunit *test)
+{
+	u32 required = 0;
+	u32 limit = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			tbv_test_qps32_write_queue_capacity(&required, &limit),
+			0);
+	KUNIT_EXPECT_GE_MSG(test, limit, required,
+			    "qps32/depth128/256KiB needs %u frame slots but the path has %u; deferred QPs will poll capacity on their retransmit timers",
+			    required, limit);
+}
+
 static struct kunit_case tbv_max_message_capacity_cases[] = {
 	KUNIT_CASE(tbv_max_message_fits_bounded_path_queue),
+	KUNIT_CASE(tbv_qps32_write_working_set_fits_path_queue),
 	{}
 };
 

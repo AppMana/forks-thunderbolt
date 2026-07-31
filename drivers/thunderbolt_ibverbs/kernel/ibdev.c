@@ -97,19 +97,16 @@ const char *tbv_ibdev_roce_netdev_name(void)
 }
 
 /*
- * Zero-copy split-stream TX threshold. A tuned value of 8192 (two split
- * windows) is where per-window stream setup starts to beat the bounce copy;
- * NCCL's bulk RDMA_WRITEs (hundreds of KiB to MiB) sit far above it. Kept at 0
- * (disabled) as the shipped default after the 0.2.26 hardware run showed the
- * page-straddling/mid-page zcopy frames failing the receiver CRC; the fix
- * (tbv_send_segments_split_clean: only page-aligned sources are zero-copied,
- * every frame page-offset-0 like tbnet) makes >0 safe. Enable per-run for
- * validation, then flip the default once it holds on hardware.
+ * Zero-copy TX threshold. 8192 is where stream setup starts to beat the bounce
+ * copy; NCCL's bulk RDMA_WRITEs sit far above it. Current peers use one padded
+ * full-message stream over the persistent MR mapping. Older SPLIT_DATA peers
+ * retain the strict page-aligned-window gate, and unsupported memory types
+ * fall back to the copy path.
  */
-static uint zcopy_min_bytes;
+static uint zcopy_min_bytes = TBV_ZCOPY_MIN_BYTES_DEFAULT;
 module_param(zcopy_min_bytes, uint, 0644);
 MODULE_PARM_DESC(zcopy_min_bytes,
-		 "Minimum native RDMA_WRITE bytes before zero-copy streaming; retryable RC WRITE to a split-capable peer uses per-fragment split streams from PAGE-ALIGNED sources (unaligned sources fall back to framed copies -> data_wr_zcopy_fallback_unaligned). 0 disables zero-copy");
+		 "Minimum native RDMA_WRITE bytes before zero-copy streaming (default 8192); 0 disables zero-copy");
 
 /*
  * CRC-investigation diagnostic: when set, a message with ANY partial (non-4096)
@@ -532,6 +529,8 @@ struct tbv_mr {
 	struct device *dma_dev;
 	struct sg_table dma_sgt;
 	bool dma_mapped;
+	/* Every pinned page passed the NHI-readable memory-type check. */
+	bool zcopy_safe;
 	refcount_t refs;
 	struct work_struct free_work;
 	u64 start;
@@ -758,6 +757,7 @@ static int tbv_umem_page_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 				   u32 *page_off_out, u32 *len_out);
 static int tbv_umem_dma_from_addr(struct tbv_mr *mr, u64 addr, u32 max_len,
 				  dma_addr_t *dma_out, u32 *len_out);
+static bool tbv_page_zcopy_safe(struct page *page);
 static int tbv_rx_copy_to_wqe(struct tbv_state *state,
 			      const struct tbv_recv_wqe *wqe, u32 offset,
 			      const void *payload, u32 len, u32 *delivered);
@@ -873,9 +873,23 @@ enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
 		return TBV_ZCOPY_TX_NONE;
 	if (!retryable)
 		return TBV_ZCOPY_TX_RAW_STREAM;
+	/*
+	 * Current peers pad the one metadata descriptor to the hardware frame
+	 * size. Keep the MR referenced until the remote ACK, as this provider
+	 * already does for every retryable send, and stream the payload once.
+	 * SPLIT_DATA remains the compatibility fallback for peers whose short
+	 * raw header cannot safely open a full-message stream.
+	 */
+	if (peer_caps & TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER)
+		return TBV_ZCOPY_TX_RAW_STREAM;
 	if (peer_caps & TBV_NATIVE_WIRE_CAP_SPLIT_DATA)
 		return TBV_ZCOPY_TX_SPLIT;
 	return TBV_ZCOPY_TX_NONE;
+}
+
+bool tbv_zcopy_requires_split_scan(enum tbv_zcopy_tx_mode mode)
+{
+	return mode == TBV_ZCOPY_TX_SPLIT;
 }
 
 void tbv_send_retry_range(u8 opcode, u32 total_len, u32 acked_prefix,
@@ -1184,11 +1198,17 @@ static void tbv_mr_dma_map(struct tbv_mr *mr, struct device *dma_dev)
 
 	sg = mr->dma_sgt.sgl;
 	for_each_sgtable_page(&mr->umem->sgt_append.sgt, &piter, 0) {
+		struct page *page = sg_page_iter_page(&piter);
+
 		if (!sg) {
 			sg_free_table(&mr->dma_sgt);
 			return;
 		}
-		sg_set_page(sg, sg_page_iter_page(&piter), PAGE_SIZE, 0);
+		if (!tbv_page_zcopy_safe(page)) {
+			sg_free_table(&mr->dma_sgt);
+			return;
+		}
+		sg_set_page(sg, page, PAGE_SIZE, 0);
 		sg = sg_next(sg);
 	}
 
@@ -1209,6 +1229,7 @@ static void tbv_mr_dma_map(struct tbv_mr *mr, struct device *dma_dev)
 
 	mr->dma_dev = dma_dev;
 	mr->dma_mapped = true;
+	mr->zcopy_safe = true;
 }
 
 static void tbv_mr_dma_unmap(struct tbv_mr *mr)
@@ -1218,6 +1239,7 @@ static void tbv_mr_dma_unmap(struct tbv_mr *mr)
 	dma_unmap_sgtable(mr->dma_dev, &mr->dma_sgt, DMA_TO_DEVICE, 0);
 	sg_free_table(&mr->dma_sgt);
 	mr->dma_mapped = false;
+	mr->zcopy_safe = false;
 	mr->dma_dev = NULL;
 }
 
@@ -6864,50 +6886,25 @@ static bool tbv_page_zcopy_safe(struct page *page)
 static bool tbv_send_segments_zcopy_safe(struct tbv_send_segment *segs,
 					 int nsegs, u32 total_len)
 {
-	u32 offset = 0;
+	u32 covered = 0;
+	int i;
 
-	while (offset < total_len) {
-		u32 skipped = 0;
-		bool found = false;
-		int i;
-
-		for (i = 0; i < nsegs; i++) {
-			struct tbv_send_segment *seg = &segs[i];
-			struct page *page;
-			u32 page_off;
-			u32 len;
-			u32 seg_off = 0;
-			u32 remaining;
-			int ret;
-
-			if (offset >= skipped + seg->length) {
-				skipped += seg->length;
-				continue;
-			}
-			if (offset > skipped)
-				seg_off = offset - skipped;
-
-			remaining = min_t(u32, seg->length - seg_off,
-					  total_len - offset);
-			ret = tbv_umem_page_from_addr(seg->mr,
-						      seg->addr + seg_off,
-						      remaining, &page,
-						      &page_off, &len);
-			if (ret || !len)
-				return false;
-			if (!tbv_page_zcopy_safe(page))
-				return false;
-
-			offset += len;
-			found = true;
-			break;
-		}
-
-		if (!found)
+	/*
+	 * Registration already walked every pinned page while constructing the
+	 * persistent NHI DMA table and cached the memory-type result on the MR.
+	 * Rewalking from the start of the umem SG list once per 4 KiB frame here
+	 * made admission quadratic in message size and delayed queued WRs long
+	 * enough to trigger their transport timeout before first transmission.
+	 */
+	for (i = 0; i < nsegs && covered < total_len; i++) {
+		if (!segs[i].mr || !segs[i].mr->dma_mapped ||
+		    !segs[i].mr->zcopy_safe)
+			return false;
+		if (check_add_overflow(covered, segs[i].length, &covered))
 			return false;
 	}
 
-	return true;
+	return covered >= total_len;
 }
 
 /*
@@ -7265,7 +7262,7 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 			zcopy_mode = TBV_ZCOPY_TX_NONE;
 			atomic64_inc(
 				&tqp->owner->data_wr_zcopy_fallback_unsafe_sge);
-		} else if (zcopy_mode != TBV_ZCOPY_TX_NONE &&
+		} else if (tbv_zcopy_requires_split_scan(zcopy_mode) &&
 			   !tbv_send_segments_split_clean(ctx->segs, ctx->nsegs,
 							  ctx->total_len)) {
 			/*
@@ -12782,6 +12779,7 @@ static struct ib_mr *tbv_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	tbv_mr_dma_map(mr, pd->device->dev.parent);
 	ret = tbv_mr_publish(mr, pd);
 	if (ret) {
+		tbv_mr_dma_unmap(mr);
 		ib_umem_release(mr->umem);
 		kfree(mr);
 		return ERR_PTR(ret);

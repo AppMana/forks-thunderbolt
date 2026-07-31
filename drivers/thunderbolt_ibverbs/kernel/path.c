@@ -14,19 +14,19 @@
 #define TBV_NATIVE_RING_SIZE 1024
 
 /*
- * Native ring and TX-pipeline tuning. New peers negotiate away the old
- * PATH_CREDIT protocol when both ends use the NHI hardware E2E credit path.
- * The software window remains as a rolling-upgrade/non-E2E fallback.
+ * Native ring and TX-pipeline tuning. Native paths use FRAME-mode ICM tunnels
+ * and the software PATH_CREDIT window; hardware E2E remains opt-in because it
+ * is not reliable across the mixed Maple/Titan Ridge fleet.
  */
 static uint native_ring_size = TBV_NATIVE_RING_SIZE;
 module_param(native_ring_size, uint, 0444);
 MODULE_PARM_DESC(native_ring_size,
 		 "Native TX/RX ring size (power of two)");
 
-static uint data_tx_max_inflight = 32;
+static uint data_tx_max_inflight = TBV_DATA_TX_MAX_INFLIGHT_DEFAULT;
 module_param(data_tx_max_inflight, uint, 0644);
 MODULE_PARM_DESC(data_tx_max_inflight,
-		 "Max native data frames posted to the TX ring before draining completions");
+		 "Max native data frames posted to the TX ring before draining completions (default 1 for low-latency full-duplex pacing)");
 
 /* Apple-originated bursts can exhaust a 256-entry RX ring before credits
  * recycle. 1024 entries passed checked Mac-to-Linux UC bursts beyond one full
@@ -37,7 +37,6 @@ MODULE_PARM_DESC(data_tx_max_inflight,
 #define TBV_CONTROL_FRAME_SIZE 256
 #define TBV_CONTROL_QUEUE_MULTIPLIER 4
 #define TBV_DATA_CREDIT_CONTROL_RESERVE 256
-#define TBV_DATA_TX_MAX_INFLIGHT 32
 /*
  * TX completion is interrupt-driven (NHI MSI-X -> ring_work -> frame->callback)
  * and measured to drain ~100% of completions on its own; the supplemental
@@ -51,12 +50,15 @@ MODULE_PARM_DESC(data_tx_max_inflight,
 #define TBV_RX_SUPP_POLL_DELAY_MS 1
 #define TBV_RX_SUPP_POLL_WINDOW_MS 16
 /*
- * Raw-stream zcopy serializes each DMA path, so several QPs sharing a rail can
- * briefly queue a full TX-depth worth of packetized WRs behind one active
- * stream. Keep enough metadata headroom for qps=8/TX-depth=16/1 MiB WRITE and
- * qps=4/TX-depth=128/64 KiB without reporting a false SQ-full error.
+ * Raw-stream zcopy serializes each DMA path, so QPs sharing a rail can queue a
+ * full verbs working set behind one active stream. The production NCCL shape
+ * is qps=32/TX-depth=128/256 KiB WRITE: 266240 frame descriptors at the native
+ * 4048-byte reservation unit. Keep a small recovery margin above that instead
+ * of sending most QPs through the 10 ms capacity-poll timeout worker. The
+ * bound limits queued metadata; hardware/software credits still bound frames
+ * submitted to the NHI ring.
  */
-#define TBV_DATA_QUEUE_MULTIPLIER 64
+#define TBV_DATA_QUEUE_MULTIPLIER 272
 #define TBV_DATA_PACKET_POOL_LIMIT 1024
 
 typedef int (*tbv_ring_throttling_fn)(struct tb_ring *ring,
@@ -146,7 +148,7 @@ MODULE_PARM_DESC(zcopy_map_full_page,
  * native header. Raw stream frames and the Apple backend remain exact-sized.
  * Settable for immediate hardware A/B and rollback without rebuilding.
  */
-static bool native_pad_short_frames;
+static bool native_pad_short_frames = TBV_NATIVE_PAD_SHORT_DEFAULT;
 module_param(native_pad_short_frames, bool, 0644);
 MODULE_PARM_DESC(native_pad_short_frames,
 		 "Pad ordinary short native frames to 4096 bytes on the wire; excludes raw streams and Apple framing");
@@ -1629,11 +1631,7 @@ static void tbv_path_rx_complete(struct tb_ring *ring, struct ring_frame *frame,
 				}
 			} else if (!ret &&
 				   (hdr.flags & TBV_NATIVE_DATA_F_RAW_STREAM)) {
-				if (len != TBV_NATIVE_DATA_HDR_SIZE ||
-				    !hdr.length ||
-				    (hdr.flags & ~(TBV_NATIVE_DATA_F_LAST |
-						   TBV_NATIVE_DATA_F_SOLICITED |
-						   TBV_NATIVE_DATA_F_RAW_STREAM))) {
+				if (!tbv_native_data_valid_raw_header(&hdr, len)) {
 					atomic64_inc(&state->data_rx_bad_frame);
 				} else {
 					return_rx_credits = 1;
@@ -1847,6 +1845,32 @@ int tbv_test_max_message_frame_capacity(u32 *required_frames_out,
 		return ret;
 
 	*required_frames_out = TBV_NATIVE_DATA_MAX_FRAGS;
+	*queue_limit_out = path.tx_data_queue_limit;
+	tbv_path_free_control_packets(&path);
+	return 0;
+}
+
+int tbv_test_qps32_write_queue_capacity(u32 *required_frames_out,
+					u32 *queue_limit_out)
+{
+	struct tbv_path_config cfg;
+	struct tbv_path path = {};
+	u32 frames_per_wr;
+	int ret;
+
+	if (!required_frames_out || !queue_limit_out)
+		return -EINVAL;
+
+	tbv_path_default_config(TBV_BACKEND_NATIVE, &cfg);
+	path.cfg = cfg;
+	INIT_LIST_HEAD(&path.tx_control_free);
+	ret = tbv_path_alloc_control_packets(&path);
+	if (ret)
+		return ret;
+
+	frames_per_wr = DIV_ROUND_UP(SZ_256K,
+				       TBV_NATIVE_DATA_MAX_PAYLOAD);
+	*required_frames_out = 32 * 128 * frames_per_wr;
 	*queue_limit_out = path.tx_data_queue_limit;
 	tbv_path_free_control_packets(&path);
 	return 0;
@@ -3156,6 +3180,8 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 	u32 prepared = 0;
 	u32 packet_count = 0;
 	struct tbv_tx_packet *packet;
+	u32 header_wire_len;
+	u32 peer_caps = 0;
 	u32 max_raw_payload;
 	struct tbv_native_data_header stream_hdr;
 	u8 *hdr_buf;
@@ -3190,7 +3216,12 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 		goto err_meta_done;
 	}
 
-	hdr_buf = kzalloc(TBV_NATIVE_DATA_HDR_SIZE, GFP_KERNEL);
+	if (path->rail && path->rail->peer &&
+	    path->rail->peer->backend == TBV_BACKEND_NATIVE)
+		peer_caps = READ_ONCE(path->rail->peer->remote_caps);
+	header_wire_len = tbv_native_data_raw_header_wire_len(peer_caps);
+
+	hdr_buf = kzalloc(header_wire_len, GFP_KERNEL);
 	if (!hdr_buf) {
 		ret = -ENOMEM;
 		goto err_release;
@@ -3204,7 +3235,9 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 	stream_hdr = *hdr;
 	stream_hdr.length = total_length;
 	stream_hdr.flags |= TBV_NATIVE_DATA_F_RAW_STREAM;
-	ret = tbv_native_data_build_header(hdr_buf, TBV_NATIVE_DATA_HDR_SIZE,
+	if (header_wire_len == TBV_NATIVE_DATA_FRAME_SIZE)
+		stream_hdr.flags |= TBV_NATIVE_DATA_F_RAW_HEADER_PADDED;
+	ret = tbv_native_data_build_header(hdr_buf, header_wire_len,
 					   &stream_hdr);
 	if (ret < 0) {
 		kfree(hdr_buf);
@@ -3212,7 +3245,7 @@ int tbv_path_send_page_stream(struct tbv_path *path,
 	}
 
 	packet = tbv_path_alloc_data_packet_owned(path, hdr_buf,
-						  TBV_NATIVE_DATA_HDR_SIZE,
+						  header_wire_len,
 						  meta_done, meta_done_ctx);
 	if (!packet) {
 		kfree(hdr_buf);

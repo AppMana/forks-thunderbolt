@@ -24,6 +24,17 @@ static void tbv_native_path_defaults_to_software_credits(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, cfg.rx_flags & RING_FLAG_E2E);
 }
 
+static void tbv_native_path_defaults_to_low_latency_pacing(struct kunit *test)
+{
+	/*
+	 * 023<->025, 32 QPs x depth 128 x 256 KiB bidirectional: 32 NHI
+	 * descriptors in flight corrupts full-duplex frames, while one completes
+	 * three rounds at the same 3.6 Gb/s with no new CRC, header, retry, or
+	 * timeout counters. One also removes avoidable hardware queueing latency.
+	 */
+	KUNIT_EXPECT_EQ(test, TBV_DATA_TX_MAX_INFLIGHT_DEFAULT, 1U);
+}
+
 static void tbv_e2e_peers_bypass_software_credits(struct kunit *test)
 {
 	u32 credits = U32_MAX;
@@ -101,6 +112,7 @@ static void tbv_copied_packet_owns_inline_payload(struct kunit *test)
 
 static struct kunit_case tbv_path_config_cases[] = {
 	KUNIT_CASE(tbv_native_path_defaults_to_software_credits),
+	KUNIT_CASE(tbv_native_path_defaults_to_low_latency_pacing),
 	KUNIT_CASE(tbv_e2e_peers_bypass_software_credits),
 	KUNIT_CASE(tbv_old_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_peer_keeps_software_credits),

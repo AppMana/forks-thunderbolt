@@ -52,6 +52,8 @@
 #define TBV_NATIVE_PRTCID 1
 #define TBV_NATIVE_PRTCVERS 1
 #define TBV_NATIVE_PRTCREVS 0
+#define TBV_DATA_TX_MAX_INFLIGHT_DEFAULT 1U
+#define TBV_ZCOPY_MIN_BYTES_DEFAULT 8192U
 #define TBV_APPLE_PRTCID 0xfa57
 #define TBV_APPLE_PRTCVERS 1
 #define TBV_APPLE_PRTCREVS 0
@@ -594,6 +596,14 @@ struct tbv_tbnet_identity_config {
  */
 #define TBV_REANNOUNCE_REMOVES_NATIVE_SERVICES 0
 #define TBV_NATIVE_RAILS_FOLLOW_PHYSICAL_LANES 0
+
+/*
+ * Maple Ridge corrupts occasional short native descriptors under sustained
+ * bidirectional load while full 4096-byte descriptors remain clean. Keep the
+ * default visible to KUnit so the safe wire shape cannot silently regress to
+ * an opt-in diagnostic toggle.
+ */
+#define TBV_NATIVE_PAD_SHORT_DEFAULT true
 
 struct tbv_configured_link {
 	struct list_head node;
@@ -1327,6 +1337,8 @@ int tbv_test_verbs_sge_contract(u32 *send_advertised_out,
  */
 int tbv_test_max_message_frame_capacity(u32 *required_frames_out,
 					u32 *queue_limit_out);
+int tbv_test_qps32_write_queue_capacity(u32 *required_frames_out,
+					u32 *queue_limit_out);
 #endif
 /*
  * Task 2 (local-completion WC) contract, design-only -- pins the floor the
@@ -1365,6 +1377,8 @@ enum tbv_zcopy_tx_mode {
 enum tbv_zcopy_tx_mode tbv_zcopy_select_mode(bool is_write, bool striping,
 					     bool retryable, u32 total_len,
 					     u32 min_bytes, u32 peer_caps);
+/* Whether this framing mode needs the expensive per-4096-byte page walk. */
+bool tbv_zcopy_requires_split_scan(enum tbv_zcopy_tx_mode mode);
 /*
  * Zero-copy TX frames the NHI can transmit without corrupting the on-wire CRC
  * must start at page offset 0. tbnet, the reference consumer of these rings,

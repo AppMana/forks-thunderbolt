@@ -105,6 +105,14 @@ enum tbv_native_wire_cap {
 	 * both present; mixed-version and non-E2E paths retain PATH_CREDIT.
 	 */
 	TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT = 1u << 7,
+	/*
+	 * Peer accepts a RAW_STREAM header in a full 4096-byte descriptor when
+	 * TBV_NATIVE_DATA_F_RAW_HEADER_PADDED is set. The bytes following the
+	 * fixed header are padding, not stream payload. This avoids the short
+	 * descriptor CRC failures observed on Maple Ridge without copying user
+	 * payload into the metadata frame.
+	 */
+	TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER = 1u << 8,
 };
 
 enum tbv_native_wire_path_flag {
