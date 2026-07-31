@@ -29,9 +29,12 @@ bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
 						      bool bonding_possible);
 bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							bool services_published,
-							int link_status_ret);
+							int link_status_ret,
+							bool peer_confirmed);
 bool tb_test_xdomain_direct_bonding_blocks_controller(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
+bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
+						      unsigned int generation);
 #endif
 #include "ctl.h"
 #include "dma_port.h"

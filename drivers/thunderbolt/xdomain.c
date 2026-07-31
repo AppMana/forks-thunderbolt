@@ -72,7 +72,8 @@ static bool tb_xdomain_initial_state_needs_link_status(bool needs_uuid,
 static bool
 tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 					     bool services_published,
-					     int link_status_ret);
+					     int link_status_ret,
+					     bool peer_confirmed);
 
 /*
  * Serializes access to the properties and protocol handlers below. If
@@ -1768,7 +1769,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				goto retry_state;
 			if (tb_xdomain_should_fallback_to_direct_bonding(
 					xd->bonding_possible,
-					device_is_registered(&xd->dev), ret)) {
+					device_is_registered(&xd->dev), ret,
+					false)) {
 				tb_xdomain_queue_direct_bonding(xd);
 				break;
 			}
@@ -2209,19 +2211,22 @@ bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
 static bool
 tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 					     bool services_published,
-					     int link_status_ret)
+					     int link_status_ret,
+					     bool peer_confirmed)
 {
-	return bonding_possible && !services_published &&
+	return bonding_possible && peer_confirmed && !services_published &&
 	       link_status_ret == -EOPNOTSUPP;
 }
 
 bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							bool services_published,
-							int link_status_ret)
+							int link_status_ret,
+							bool peer_confirmed)
 {
 	return tb_xdomain_should_fallback_to_direct_bonding(bonding_possible,
 							    services_published,
-							    link_status_ret);
+							    link_status_ret,
+							    peer_confirmed);
 }
 
 bool tb_test_xdomain_direct_bonding_blocks_controller(void)
@@ -2232,6 +2237,25 @@ bool tb_test_xdomain_direct_bonding_blocks_controller(void)
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
 {
 	return false;
+}
+
+/*
+ * Model the existing link-exit hardware access separately so KUnit can pin
+ * the teardown contract before the production path is changed.  Generation
+ * 4 only clears cached bonded flags; older generations synchronously disable
+ * or re-enable lane 1.
+ */
+static bool tb_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
+						       unsigned int generation)
+{
+	return !firmware_cm && generation < 4;
+}
+
+bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
+						      unsigned int generation)
+{
+	return tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
+							 generation);
 }
 
 static void tb_xdomain_link_init(struct tb_xdomain *xd, struct tb_port *down)
@@ -2262,14 +2286,30 @@ static void tb_xdomain_link_init(struct tb_xdomain *xd, struct tb_port *down)
 static void tb_xdomain_link_exit(struct tb_xdomain *xd)
 {
 	struct tb_port *down = tb_xdomain_downstream_port(xd);
+	unsigned int generation;
+	bool firmware_cm;
 
 	if (!down->dual_link_port)
 		return;
 
-	if (tb_port_get_link_generation(down) >= 4) {
+	generation = tb_port_get_link_generation(down);
+	firmware_cm = tb_switch_is_icm(down->sw);
+
+	/*
+	 * ICM reported this XDomain disconnect and owns physical-lane cleanup.
+	 * Do not issue config transactions from its removal callback: the adapter
+	 * may already be unreachable, and tb_domain_remove() must be able to flush
+	 * the ICM workqueue during module removal without waiting on dead hardware.
+	 * Gen 4 software-CM links likewise need only their cached flags cleared.
+	 */
+	if (!tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
+							  generation)) {
 		down->bonded = false;
 		down->dual_link_port->bonded = false;
-	} else if (xd->link_width > TB_LINK_WIDTH_SINGLE) {
+		return;
+	}
+
+	if (xd->link_width > TB_LINK_WIDTH_SINGLE) {
 		/*
 		 * Just return port structures back to way they were and
 		 * update credits. No need to update userspace because

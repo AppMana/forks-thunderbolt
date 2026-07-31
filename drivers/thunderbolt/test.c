@@ -3338,24 +3338,38 @@ static void tb_test_xdomain_icm_single_lane_enters_bonding_state(struct kunit *t
  * Maple Ridge ICM peers reject the optional XDomain link-state protocol even
  * though both physical lane adapters are present. Before services are
  * published (and therefore before DMA tunnels exist), that precise result
- * must select the symmetric direct-bonding fallback. Never change width after
- * service publication: doing so under thunderbolt-net reproduced controller
- * config-space timeouts and an asymmetric disconnect on appmana-023/025.
+ * may select the symmetric direct-bonding fallback only after the matching
+ * peer confirms readiness. Never change width after service publication:
+ * doing so under thunderbolt-net reproduced controller config-space timeouts
+ * and an asymmetric disconnect on appmana-023/025.
  */
 static void tb_test_xdomain_icm_unsupported_status_uses_early_direct_bonding(struct kunit *test)
 {
 	KUNIT_EXPECT_TRUE(test,
 		tb_test_xdomain_should_fallback_to_direct_bonding(true, false,
-								    -EOPNOTSUPP));
+								    -EOPNOTSUPP, true));
 	KUNIT_EXPECT_FALSE(test,
 		tb_test_xdomain_should_fallback_to_direct_bonding(false, false,
-								     -EOPNOTSUPP));
+								     -EOPNOTSUPP, true));
 	KUNIT_EXPECT_FALSE(test,
 		tb_test_xdomain_should_fallback_to_direct_bonding(true, true,
-								     -EOPNOTSUPP));
+								     -EOPNOTSUPP, true));
 	KUNIT_EXPECT_FALSE(test,
 		tb_test_xdomain_should_fallback_to_direct_bonding(true, false,
-								     -ETIMEDOUT));
+								     -ETIMEDOUT, true));
+}
+
+/*
+ * ICM can announce a host-to-host edge on only one controller.  Arming lane
+ * bonding from that single notification changed Maple Ridge hardware before
+ * the other endpoint was ready and stranded the otherwise usable x1 link.
+ */
+static void tb_test_xdomain_one_sided_icm_announcement_never_arms_bonding(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE_MSG(test,
+		tb_test_xdomain_should_fallback_to_direct_bonding(true, false,
+								     -EOPNOTSUPP, false),
+		"direct lane writes require confirmation from the matching peer");
 }
 
 static void tb_test_xdomain_two_port_bonding_does_not_serialize_peers(struct kunit *test)
@@ -3394,6 +3408,19 @@ static void tb_test_xdomain_bond_abort_preserves_single_lane(struct kunit *test)
 		tb_test_xdomain_direct_bonding_abort_disables_lane());
 }
 
+/*
+ * ICM owns physical-lane cleanup.  On appmana-025, module removal received an
+ * ICM XDomain-disconnected notification after the NHI had stopped answering.
+ * Link exit tried tb_port_lane_bonding_disable(), blocked in a config read,
+ * held the XDomain lock against ring_work, and stranded rmmod thunderbolt.
+ */
+static void tb_test_xdomain_icm_teardown_never_touches_lane_hardware(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE_MSG(test,
+		tb_test_xdomain_link_exit_touches_lane_hardware(true, 3),
+		"firmware-CM teardown must not issue synchronous lane register I/O after an XDomain disconnect");
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -3401,9 +3428,11 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_icm_still_initializes_link),
 	KUNIT_CASE(tb_test_xdomain_icm_single_lane_enters_bonding_state),
 	KUNIT_CASE(tb_test_xdomain_icm_unsupported_status_uses_early_direct_bonding),
+	KUNIT_CASE(tb_test_xdomain_one_sided_icm_announcement_never_arms_bonding),
 	KUNIT_CASE(tb_test_xdomain_two_port_bonding_does_not_serialize_peers),
 	KUNIT_CASE(tb_test_xdomain_never_bonds_after_services_publish),
 	KUNIT_CASE(tb_test_xdomain_bond_abort_preserves_single_lane),
+	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),
