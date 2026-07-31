@@ -34,6 +34,7 @@ jobs:
             ubuntu:24.04 \
             bash tools/ci/distro-package.sh ubuntu
           (cd dist && sha256sum -c thunderbolt-tbfix-dkms_*.deb.sha256)
+          bash tools/ci/test-tbfix-package.sh dist/thunderbolt-tbfix-dkms_*.deb
           ls -la dist/
 
       - name: Verify tbfix DKMS deb builds (noble HWE 6.17 headers)
