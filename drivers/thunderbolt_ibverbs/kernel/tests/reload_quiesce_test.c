@@ -66,9 +66,19 @@ static void tbv_hot_reload_quiesces_services_before_ibdev_finalize(struct kunit 
 			(u8)TBV_TEST_RELOAD_IBDEV_FINALIZE);
 }
 
+/* The unload waiter must not put a waitqueue lock in the live TX hot path. */
+static void tbv_live_scheduler_only_wakes_during_quiesce(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+		tbv_test_path_scheduler_wake(TBV_PATH_TUNNEL_ENABLED));
+	KUNIT_EXPECT_TRUE(test,
+		tbv_test_path_scheduler_wake(TBV_PATH_RING_STARTED));
+}
+
 static struct kunit_case tbv_reload_quiesce_cases[] = {
 	KUNIT_CASE(tbv_hot_reload_disables_icm_before_stopping_rings),
 	KUNIT_CASE(tbv_hot_reload_quiesces_services_before_ibdev_finalize),
+	KUNIT_CASE(tbv_live_scheduler_only_wakes_during_quiesce),
 	{}
 };
 

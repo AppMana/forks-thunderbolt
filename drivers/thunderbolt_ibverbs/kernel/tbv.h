@@ -1647,6 +1647,7 @@ enum tbv_test_reload_step {
 #if IS_ENABLED(CONFIG_KUNIT)
 int tbv_test_path_reload_order(u8 *steps, u32 capacity, u32 *count);
 int tbv_test_exit_reload_order(u8 *steps, u32 capacity, u32 *count);
+bool tbv_test_path_scheduler_wake(enum tbv_path_state state);
 #endif
 
 const struct tbv_backend_ops *tbv_backend_get(enum tbv_backend_type type);

@@ -2530,10 +2530,18 @@ void tbv_path_release_data_reservation(struct tbv_path *path, u32 frames)
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 }
 
+static bool tbv_path_scheduler_wake_needed(enum tbv_path_state state)
+{
+	return state != TBV_PATH_TUNNEL_ENABLED;
+}
+
 static void tbv_path_tx_scheduling_done_locked(struct tbv_path *path)
 {
+	bool wake = tbv_path_scheduler_wake_needed(path->state);
+
 	path->tx_scheduling = false;
-	wake_up_all(&path->tx_idle_wait);
+	if (wake)
+		wake_up_all(&path->tx_idle_wait);
 }
 
 static void tbv_path_schedule_tx(struct tbv_path *path)
@@ -3657,6 +3665,11 @@ int tbv_test_path_reload_order(u8 *steps, u32 capacity, u32 *count)
 					   &ctx);
 	*count = ctx.count;
 	return ret;
+}
+
+bool tbv_test_path_scheduler_wake(enum tbv_path_state state)
+{
+	return tbv_path_scheduler_wake_needed(state);
 }
 #endif
 
