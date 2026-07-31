@@ -3275,7 +3275,33 @@ static void tb_test_xdomain_silent_stale_identity_recovery(struct kunit *test)
 					 /*cm_reconciles=*/true));
 }
 
+/*
+ * NHI ring callbacks can consume an entire completed descriptor batch. The
+ * 32-QP USB4 RDMA reproducer observed ring_work monopolizing a bound worker
+ * for >10 ms before the first transport loss. Keep that potentially long
+ * completion path off the CPU-bound system workqueue.
+ */
+static void tb_test_ring_work_uses_unbound_queue(struct kunit *test)
+{
+	KUNIT_EXPECT_PTR_EQ(test, tb_test_ring_workqueue(),
+			    system_unbound_wq);
+}
+
+static void tb_test_ring_descriptor_is_one_complete_word(struct kunit *test)
+{
+	/*
+	 * length[11:0], eof[15:12], sof[19:16], flags[31:20]. This literal
+	 * catches both field placement and accidental omission of any field;
+	 * production publishes this exact word with one WRITE_ONCE().
+	 */
+	KUNIT_EXPECT_EQ(test,
+			tb_test_ring_descriptor_word(0xabc, 3, 1, 0xc),
+			(u32)0x00c13abc);
+}
+
 static struct kunit_case tb_test_cases[] = {
+	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
+	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),

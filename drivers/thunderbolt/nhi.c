@@ -245,6 +245,34 @@ static bool ring_empty(struct tb_ring *ring)
 	return ring->head == ring->tail;
 }
 
+static u32 ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags)
+{
+	return (length & 0x0fff) |
+	       ((u32)(eof & 0x0f) << 12) |
+	       ((u32)(sof & 0x0f) << 16) |
+	       ((u32)(flags & 0x0fff) << 20);
+}
+
+static u16 ring_descriptor_length(u32 word)
+{
+	return word & 0x0fff;
+}
+
+static u8 ring_descriptor_eof(u32 word)
+{
+	return (word >> 12) & 0x0f;
+}
+
+static u8 ring_descriptor_sof(u32 word)
+{
+	return (word >> 16) & 0x0f;
+}
+
+static u16 ring_descriptor_flags(u32 word)
+{
+	return (word >> 20) & 0x0fff;
+}
+
 /*
  * ring_write_descriptors() - post frames from ring->queue to the controller
  *
@@ -259,25 +287,22 @@ static void ring_write_descriptors(struct tb_ring *ring)
 			break;
 		list_move_tail(&frame->list, &ring->in_flight);
 		descriptor = &ring->descriptors[ring->head];
+		/*
+		 * A reused descriptor still contains POSTED|COMPLETED from its
+		 * previous trip around the ring. Unpublish it before changing
+		 * its address, then publish all metadata in one 32-bit store.
+		 */
+		WRITE_ONCE(descriptor->attributes, 0);
+		dma_wmb();
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
-		/*
-		 * length, eof, sof and flags are bitfields packed into ONE
-		 * 32-bit word, so every assignment here is a read-modify-write
-		 * of the same word the device is reading. Writing flags first
-		 * publishes RING_DESC_POSTED while length/eof/sof are still
-		 * zero, and the device is then free to consume a descriptor
-		 * that claims to be ready and describes a zero-length frame
-		 * with no framing. Fill the payload fields first and publish
-		 * POSTED last.
-		 */
-		if (ring->is_tx) {
-			descriptor->length = frame->size;
-			descriptor->eof = frame->eof;
-			descriptor->sof = frame->sof;
-		}
 		dma_wmb();
-		descriptor->flags = RING_DESC_POSTED | RING_DESC_INTERRUPT;
+		WRITE_ONCE(descriptor->attributes,
+			   ring_descriptor_word(
+				   ring->is_tx ? frame->size : 0,
+				   ring->is_tx ? frame->eof : 0,
+				   ring->is_tx ? frame->sof : 0,
+				   RING_DESC_POSTED | RING_DESC_INTERRUPT));
 		/*
 		 * The descriptor must be visible in coherent memory before the
 		 * doorbell tells the device to look at it; the doorbell is an
@@ -321,23 +346,25 @@ static void ring_work(struct work_struct *work)
 	}
 
 	while (!ring_empty(ring)) {
-		if (!(ring->descriptors[ring->tail].flags
-				& RING_DESC_COMPLETED))
+		u32 attributes =
+			READ_ONCE(ring->descriptors[ring->tail].attributes);
+
+		if (!(ring_descriptor_flags(attributes) & RING_DESC_COMPLETED))
 			break;
 		/*
-		 * Pairs with the dma_wmb() in ring_write_descriptors(). The
-		 * payload fields share a word with the flags, so they must not
-		 * be loaded before the COMPLETED test that makes them valid.
+		 * The metadata came from one snapshot above. Order subsequent
+		 * accesses to the DMA payload after the device's COMPLETED
+		 * publication.
 		 */
 		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_move_tail(&frame->list, &done);
 		if (!ring->is_tx) {
-			frame->size = ring->descriptors[ring->tail].length;
-			frame->eof = ring->descriptors[ring->tail].eof;
-			frame->sof = ring->descriptors[ring->tail].sof;
-			frame->flags = ring->descriptors[ring->tail].flags;
+			frame->size = ring_descriptor_length(attributes);
+			frame->eof = ring_descriptor_eof(attributes);
+			frame->sof = ring_descriptor_sof(attributes);
+			frame->flags = ring_descriptor_flags(attributes);
 		}
 		ring->tail = (ring->tail + 1) % ring->size;
 	}
@@ -357,6 +384,29 @@ invoke_callback:
 			frame->callback(ring, frame, canceled);
 	}
 }
+
+static struct workqueue_struct *ring_workqueue(void)
+{
+	/*
+	 * A completion can drain a full ring and invoke every frame callback.
+	 * Keep that potentially long batch off a CPU-bound system_wq worker:
+	 * under a 32-QP bidirectional RDMA load ring_work repeatedly exceeded
+	 * 10 ms before the first transport loss.
+	 */
+	return system_unbound_wq;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct workqueue_struct *tb_test_ring_workqueue(void)
+{
+	return ring_workqueue();
+}
+
+u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags)
+{
+	return ring_descriptor_word(length, eof, sof, flags);
+}
+#endif
 
 int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame)
 {
@@ -388,6 +438,7 @@ struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 {
 	struct ring_frame *frame = NULL;
 	unsigned long flags;
+	u32 attributes;
 
 	spin_lock_irqsave(&ring->lock, flags);
 	if (!ring->running)
@@ -395,18 +446,19 @@ struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 	if (ring_empty(ring))
 		goto unlock;
 
-	if (ring->descriptors[ring->tail].flags & RING_DESC_COMPLETED) {
-		/* see ring_work(): the payload is only valid after this test */
+	attributes = READ_ONCE(ring->descriptors[ring->tail].attributes);
+	if (ring_descriptor_flags(attributes) & RING_DESC_COMPLETED) {
+		/* See ring_work(): order payload access after COMPLETED. */
 		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_del_init(&frame->list);
 
 		if (!ring->is_tx) {
-			frame->size = ring->descriptors[ring->tail].length;
-			frame->eof = ring->descriptors[ring->tail].eof;
-			frame->sof = ring->descriptors[ring->tail].sof;
-			frame->flags = ring->descriptors[ring->tail].flags;
+			frame->size = ring_descriptor_length(attributes);
+			frame->eof = ring_descriptor_eof(attributes);
+			frame->sof = ring_descriptor_sof(attributes);
+			frame->flags = ring_descriptor_flags(attributes);
 		}
 
 		ring->tail = (ring->tail + 1) % ring->size;
@@ -447,7 +499,7 @@ static void __ring_interrupt(struct tb_ring *ring)
 		__ring_interrupt_mask(ring, true);
 		ring->start_poll(ring->poll_data);
 	} else {
-		schedule_work(&ring->work);
+		queue_work(ring_workqueue(), &ring->work);
 	}
 }
 

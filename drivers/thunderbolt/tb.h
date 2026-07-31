@@ -17,6 +17,11 @@
 #include <linux/bitfield.h>
 
 #include "tb_regs.h"
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct workqueue_struct *tb_test_ring_workqueue(void);
+u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags);
+#endif
 #include "ctl.h"
 #include "dma_port.h"
 
