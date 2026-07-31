@@ -26,7 +26,7 @@
 #   TBV_QPS        QPs per direction                 (default 4)
 #   TBV_ROUNDS     rounds to run before giving up    (default 40)
 #   TBV_ROUND_TIMEOUT  seconds a round may take      (default 60)
-#   TBV_DEV_SERVER / TBV_DEV_CLIENT  override rail selection
+#   TBV_DEV_SERVER / TBV_DEV_CLIENT  override rail selection (peer-checked)
 #   SSH_USER (default administrator), DOMAIN (default .i.appmana.com)
 set -uo pipefail
 
@@ -69,18 +69,44 @@ pick_dev() {
 	peer_key="${peer_key//-/}"
 	ssh_node "$node" "expected='tbr-$peer_key'; for d in /sys/class/infiniband/usb4_rdma*; do [ -e \"\$d\" ] || continue; ndev=\$(cat \"\$d/ports/1/gid_attrs/ndevs/0\" 2>/dev/null || true); if [ \"\$ndev\" = \"\$expected\" ]; then basename \"\$d\"; fi; done" 30
 }
+
+dev_netdev() {
+	local node="$1" dev="$2"
+
+	ssh_node "$node" "cat /sys/class/infiniband/$dev/ports/1/gid_attrs/ndevs/0 2>/dev/null" 30
+}
+
+require_peer_dev() {
+	local node="$1" peer="$2" dev="$3" peer_key expected actual
+
+	peer_key="${peer%%.*}"
+	peer_key="${peer_key//-/}"
+	expected="tbr-$peer_key"
+	actual="$(dev_netdev "$node" "$dev")"
+	[ "$actual" = "$expected" ] || {
+		echo "ERROR: $node device $dev belongs to ${actual:-<none>}, not $expected" >&2
+		return 1
+	}
+}
+
 SDEV="${TBV_DEV_SERVER:-$(pick_dev "$SERVER" "$CLIENT")}"
 CDEV="${TBV_DEV_CLIENT:-$(pick_dev "$CLIENT" "$SERVER")}"
 [ -n "$SDEV" ] && [ -n "$CDEV" ] || { echo "ERROR: no usb4_rdma rail ($SERVER=$SDEV $CLIENT=$CDEV)" >&2; exit 1; }
 [ "$(printf '%s\n' "$SDEV" | wc -l)" -eq 1 ] &&
 	[ "$(printf '%s\n' "$CDEV" | wc -l)" -eq 1 ] ||
 	{ echo "ERROR: ambiguous usb4_rdma rail ($SERVER=$SDEV $CLIENT=$CDEV); set TBV_DEV_SERVER/TBV_DEV_CLIENT" >&2; exit 1; }
+require_peer_dev "$SERVER" "$CLIENT" "$SDEV" || exit 1
+require_peer_dev "$CLIENT" "$SERVER" "$CDEV" || exit 1
 
 echo "== $SERVER($SDEV) <- $CLIENT($CDEV) oob=$oob size=$SIZE tx_depth=$TX_DEPTH qps=$QPS"
 snapshot "$SERVER" pre
 snapshot "$CLIENT" pre
 
-ARGS="-F -n $ITERS -s $SIZE -t $TX_DEPTH -q $QPS -b --report_gbits"
+# Peak-BW calculation is userspace post-processing, not transport load. With
+# qps=32 and iters=16000 perftest spins over 512,000 samples after every WR has
+# completed, which can outlive ROUND_TIMEOUT and look exactly like a CQ hang.
+# Keep average bandwidth reporting, but exclude that diagnostic-only phase.
+ARGS="-F -N -n $ITERS -s $SIZE -t $TX_DEPTH -q $QPS -b --report_gbits"
 
 hung=0
 for round in $(seq 1 "$ROUNDS"); do
