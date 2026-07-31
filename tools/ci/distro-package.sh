@@ -105,7 +105,10 @@ build_deb() {
 
 	local deb="$out_dir/${pkgname}_${version}_all.deb"
 	dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null
-	sha256sum "$deb" > "$deb.sha256"
+	(
+		cd "$out_dir"
+		sha256sum "$(basename "$deb")" > "$(basename "$deb").sha256"
+	)
 	printf '==> Built %s\n' "$deb"
 
 	if [[ "$lint" == "1" ]] && command -v lintian >/dev/null 2>&1; then
