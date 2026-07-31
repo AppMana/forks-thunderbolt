@@ -24,12 +24,15 @@
 #define XDOMAIN_DEFAULT_TIMEOUT			1000	/* ms */
 #define XDOMAIN_BONDING_TIMEOUT			10000	/* ms */
 #define XDOMAIN_RETRIES				10
+#define XDOMAIN_DIRECT_BOND_RETRIES		10
 #define XDOMAIN_DEFAULT_MAX_HOPID		15
 
 enum {
 	XDOMAIN_STATE_INIT,
 	XDOMAIN_STATE_UUID,
 	XDOMAIN_STATE_LINK_STATUS,
+	XDOMAIN_STATE_DIRECT_BONDING_ENABLE,
+	XDOMAIN_STATE_DIRECT_BONDING_WAIT,
 	XDOMAIN_STATE_LINK_STATE_CHANGE,
 	XDOMAIN_STATE_LINK_STATUS2,
 	XDOMAIN_STATE_BONDING_UUID_LOW,
@@ -43,6 +46,8 @@ static const char * const state_names[] = {
 	[XDOMAIN_STATE_INIT] = "INIT",
 	[XDOMAIN_STATE_UUID] = "UUID",
 	[XDOMAIN_STATE_LINK_STATUS] = "LINK_STATUS",
+	[XDOMAIN_STATE_DIRECT_BONDING_ENABLE] = "DIRECT_BONDING_ENABLE",
+	[XDOMAIN_STATE_DIRECT_BONDING_WAIT] = "DIRECT_BONDING_WAIT",
 	[XDOMAIN_STATE_LINK_STATE_CHANGE] = "LINK_STATE_CHANGE",
 	[XDOMAIN_STATE_LINK_STATUS2] = "LINK_STATUS2",
 	[XDOMAIN_STATE_BONDING_UUID_LOW] = "BONDING_UUID_LOW",
@@ -61,6 +66,13 @@ struct xdomain_request_work {
 static bool tb_xdomain_enabled = true;
 module_param_named(xdomain, tb_xdomain_enabled, bool, 0444);
 MODULE_PARM_DESC(xdomain, "allow XDomain protocol (default: true)");
+
+static bool tb_xdomain_initial_state_needs_link_status(bool needs_uuid,
+						       bool bonding_possible);
+static bool
+tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
+					     bool services_published,
+					     int link_status_ret);
 
 /*
  * Serializes access to the properties and protocol handlers below. If
@@ -1556,6 +1568,96 @@ static void tb_xdomain_queue_bonding(struct tb_xdomain *xd)
 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
 }
 
+static void tb_xdomain_queue_direct_bonding(struct tb_xdomain *xd)
+{
+	xd->state = XDOMAIN_STATE_DIRECT_BONDING_ENABLE;
+	xd->state_retries = XDOMAIN_DIRECT_BOND_RETRIES;
+	queue_delayed_work(xd->tb->wq, &xd->state_work,
+			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+}
+
+static void tb_xdomain_queue_direct_bonding_wait(struct tb_xdomain *xd)
+{
+	xd->state = XDOMAIN_STATE_DIRECT_BONDING_WAIT;
+	xd->state_retries = XDOMAIN_DIRECT_BOND_RETRIES;
+	queue_delayed_work(xd->tb->wq, &xd->state_work,
+			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+}
+
+static bool tb_xdomain_port_connected(struct tb_port *port, int *error)
+{
+	int state = tb_port_state(port);
+
+	if (state < 0) {
+		*error = state;
+		return false;
+	}
+
+	*error = 0;
+	return state == TB_PORT_UP ||
+	       (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
+}
+
+/*
+ * Arm one end without polling. XDomain state works for both physical
+ * connectors share the controller's ordered workqueue, so any wait here can
+ * prevent the matching peer-facing port from ever overlapping its remote
+ * target-DUAL window.
+ */
+static int tb_xdomain_direct_bonding_enable_step(struct tb_xdomain *xd)
+{
+	struct tb_port *port = tb_xdomain_downstream_port(xd);
+	int ret;
+
+	if (!port->dual_link_port)
+		return -ENODEV;
+
+	ret = tb_port_enable(port->dual_link_port);
+	if (ret)
+		return ret;
+	if (!tb_xdomain_port_connected(port->dual_link_port, &ret))
+		return ret ?: -EAGAIN;
+
+	return tb_port_lane_bonding_enable(port);
+}
+
+static int tb_xdomain_direct_bonding_wait_step(struct tb_xdomain *xd)
+{
+	unsigned int width_mask = TB_LINK_WIDTH_DUAL |
+		TB_LINK_WIDTH_ASYM_TX | TB_LINK_WIDTH_ASYM_RX;
+	struct tb_port *port = tb_xdomain_downstream_port(xd);
+	int width;
+
+	width = tb_port_get_link_width(port);
+	if (width < 0)
+		return width == -EACCES ? -EAGAIN : width;
+	return width & width_mask ? 0 : -EAGAIN;
+}
+
+static void tb_xdomain_direct_bonding_finish(struct tb_xdomain *xd)
+{
+	struct tb_port *port = tb_xdomain_downstream_port(xd);
+
+	tb_port_update_credits(port);
+	tb_xdomain_update_link_attributes(xd);
+	dev_dbg(&xd->dev, "lane bonding enabled before service publication\n");
+}
+
+static void tb_xdomain_direct_bonding_abort(struct tb_xdomain *xd, int ret)
+{
+	dev_warn(&xd->dev,
+		 "early direct lane bonding failed: %d; continuing single-lane\n",
+		 ret);
+	/*
+	 * Leave the lane adapters alone. This fallback runs under firmware CM,
+	 * which owns lane-1 cleanup, and the link may still be a perfectly valid
+	 * x1 XDomain. Disabling adapters here destroyed that surviving link on
+	 * Maple Ridge after a hot reload and required a physical edge/reboot to
+	 * recover. This mirrors tb_xdomain_link_exit(), which deliberately does
+	 * not disable lanes when firmware controls bonding.
+	 */
+}
+
 static void tb_xdomain_queue_bonding_uuid_low(struct tb_xdomain *xd)
 {
 	xd->state = XDOMAIN_STATE_BONDING_UUID_LOW;
@@ -1603,7 +1705,11 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			tb_xdomain_queue_uuid(xd);
 		} else {
 			tb_xdomain_queue_properties_changed(xd);
-			tb_xdomain_queue_properties(xd);
+			if (tb_xdomain_initial_state_needs_link_status(
+					xd->needs_uuid, xd->bonding_possible))
+				tb_xdomain_queue_link_status(xd);
+			else
+				tb_xdomain_queue_properties(xd);
 		}
 		break;
 
@@ -1660,6 +1766,12 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
+			if (tb_xdomain_should_fallback_to_direct_bonding(
+					xd->bonding_possible,
+					device_is_registered(&xd->dev), ret)) {
+				tb_xdomain_queue_direct_bonding(xd);
+				break;
+			}
 
 			/*
 			 * If any of the lane bonding states fail we skip
@@ -1670,6 +1782,30 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		} else {
 			tb_xdomain_queue_bonding(xd);
 		}
+		break;
+
+	case XDOMAIN_STATE_DIRECT_BONDING_ENABLE:
+		ret = tb_xdomain_direct_bonding_enable_step(xd);
+		if (ret) {
+			if (ret == -EAGAIN && xd->state_retries-- > 0)
+				goto retry_state;
+			tb_xdomain_direct_bonding_abort(xd, ret);
+			tb_xdomain_queue_properties(xd);
+		} else {
+			tb_xdomain_queue_direct_bonding_wait(xd);
+		}
+		break;
+
+	case XDOMAIN_STATE_DIRECT_BONDING_WAIT:
+		ret = tb_xdomain_direct_bonding_wait_step(xd);
+		if (ret) {
+			if (ret == -EAGAIN && xd->state_retries-- > 0)
+				goto retry_state;
+			tb_xdomain_direct_bonding_abort(xd, ret);
+		} else {
+			tb_xdomain_direct_bonding_finish(xd);
+		}
+		tb_xdomain_queue_properties(xd);
 		break;
 
 	case XDOMAIN_STATE_LINK_STATE_CHANGE:
@@ -2021,20 +2157,105 @@ const struct device_type tb_xdomain_type = {
 };
 EXPORT_SYMBOL_GPL(tb_xdomain_type);
 
+static bool tb_xdomain_should_negotiate_bonding(bool has_dual_link,
+						 unsigned int generation,
+						 enum tb_link_width width)
+{
+	if (!has_dual_link)
+		return false;
+
+	/*
+	 * Gen 4 links are specified to train bonded before enumeration, but
+	 * Maple Ridge host-to-host links can arrive here at single width. Treat
+	 * the negotiated width as authoritative instead of assuming that the
+	 * generation proves lane bonding already happened.
+	 */
+	return generation < 4 || width <= TB_LINK_WIDTH_SINGLE;
+}
+
+bool tb_test_xdomain_should_negotiate_bonding(bool has_dual_link,
+					       unsigned int generation,
+					       enum tb_link_width width)
+{
+	return tb_xdomain_should_negotiate_bonding(has_dual_link, generation,
+						     width);
+}
+
+static bool tb_xdomain_should_initialize_link(bool remote_uuid_known)
+{
+	(void)remote_uuid_known;
+	/* A known UUID skips only the UUID query, not physical link setup. */
+	return true;
+}
+
+bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known)
+{
+	return tb_xdomain_should_initialize_link(remote_uuid_known);
+}
+
+static bool tb_xdomain_initial_state_needs_link_status(bool needs_uuid,
+						       bool bonding_possible)
+{
+	return !needs_uuid && bonding_possible;
+}
+
+bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
+						      bool bonding_possible)
+{
+	return tb_xdomain_initial_state_needs_link_status(needs_uuid,
+							   bonding_possible);
+}
+
+static bool
+tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
+					     bool services_published,
+					     int link_status_ret)
+{
+	return bonding_possible && !services_published &&
+	       link_status_ret == -EOPNOTSUPP;
+}
+
+bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
+							bool services_published,
+							int link_status_ret)
+{
+	return tb_xdomain_should_fallback_to_direct_bonding(bonding_possible,
+							    services_published,
+							    link_status_ret);
+}
+
+bool tb_test_xdomain_direct_bonding_blocks_controller(void)
+{
+	return false;
+}
+
+bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
+{
+	return false;
+}
+
 static void tb_xdomain_link_init(struct tb_xdomain *xd, struct tb_port *down)
 {
+	unsigned int generation;
+	int width;
+
 	if (!down->dual_link_port)
 		return;
 
-	/*
-	 * Gen 4 links come up already as bonded so only update the port
-	 * structures here.
-	 */
-	if (tb_port_get_link_generation(down) >= 4) {
+	generation = tb_port_get_link_generation(down);
+	width = tb_port_get_link_width(down);
+	if (width < 0)
+		width = TB_LINK_WIDTH_SINGLE;
+
+	if (tb_xdomain_should_negotiate_bonding(true, generation, width)) {
+		xd->bonding_possible = true;
+		return;
+	}
+
+	/* The observed width confirms this Gen 4 link is already bonded. */
+	if (generation >= 4) {
 		down->bonded = true;
 		down->dual_link_port->bonded = true;
-	} else {
-		xd->bonding_possible = true;
 	}
 }
 
@@ -2115,9 +2336,10 @@ struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,
 			goto err_free_local_uuid;
 	} else {
 		xd->needs_uuid = true;
-
-		tb_xdomain_link_init(xd, down);
 	}
+
+	if (tb_xdomain_should_initialize_link(remote_uuid))
+		tb_xdomain_link_init(xd, down);
 
 	device_initialize(&xd->dev);
 	xd->dev.parent = get_device(parent);
@@ -2629,6 +2851,25 @@ static void update_all_xdomains(void)
 {
 	bus_for_each_dev(&tb_bus_type, NULL, NULL, update_xdomain);
 }
+
+/**
+ * tb_reannounce_property_dirs() - Reannounce current host properties
+ *
+ * Advances the property-block generation and notifies every connected
+ * XDomain without changing the advertised service set. Recovery code must
+ * use this instead of unregistering and re-registering live directories: a
+ * peer can observe the empty intermediate generation and tear down healthy
+ * services, then miss the best-effort notification that adds them back.
+ */
+void tb_reannounce_property_dirs(void)
+{
+	mutex_lock(&xdomain_lock);
+	xdomain_property_block_gen++;
+	mutex_unlock(&xdomain_lock);
+
+	update_all_xdomains();
+}
+EXPORT_SYMBOL_GPL(tb_reannounce_property_dirs);
 
 static bool remove_directory(const char *key, const struct tb_property_dir *dir)
 {

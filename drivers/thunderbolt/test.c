@@ -3299,9 +3299,111 @@ static void tb_test_ring_descriptor_is_one_complete_word(struct kunit *test)
 			(u32)0x00c13abc);
 }
 
+/*
+ * Maple Ridge host-to-host links on the live TB4 chain identify as Gen 4 but
+ * initially train at 20 Gb/s x1. The XDomain handshake must not treat the
+ * generation alone as proof that both lanes are already bonded.
+ */
+static void tb_test_xdomain_gen4_single_lane_negotiates_bonding(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_should_negotiate_bonding(true, 4,
+							 TB_LINK_WIDTH_SINGLE));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_should_negotiate_bonding(true, 4,
+							 TB_LINK_WIDTH_DUAL));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_should_negotiate_bonding(false, 4,
+							 TB_LINK_WIDTH_SINGLE));
+}
+
+/* ICM supplies the remote UUID, but that must only skip the UUID query. */
+static void tb_test_xdomain_icm_still_initializes_link(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_should_initialize_link(true));
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_should_initialize_link(false));
+}
+
+static void tb_test_xdomain_icm_single_lane_enters_bonding_state(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_initial_state_needs_link_status(false, true));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_initial_state_needs_link_status(false, false));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_initial_state_needs_link_status(true, true));
+}
+
+/*
+ * Maple Ridge ICM peers reject the optional XDomain link-state protocol even
+ * though both physical lane adapters are present. Before services are
+ * published (and therefore before DMA tunnels exist), that precise result
+ * must select the symmetric direct-bonding fallback. Never change width after
+ * service publication: doing so under thunderbolt-net reproduced controller
+ * config-space timeouts and an asymmetric disconnect on appmana-023/025.
+ */
+static void tb_test_xdomain_icm_unsupported_status_uses_early_direct_bonding(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_should_fallback_to_direct_bonding(true, false,
+								    -EOPNOTSUPP));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_should_fallback_to_direct_bonding(false, false,
+								     -EOPNOTSUPP));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_should_fallback_to_direct_bonding(true, true,
+								     -EOPNOTSUPP));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_should_fallback_to_direct_bonding(true, false,
+								     -ETIMEDOUT));
+}
+
+static void tb_test_xdomain_two_port_bonding_does_not_serialize_peers(struct kunit *test)
+{
+	struct bond_model_link link;
+
+	bond_model_appmana_023_025(&link);
+	bond_model_run(&link,
+		tb_test_xdomain_direct_bonding_blocks_controller());
+
+	KUNIT_EXPECT_TRUE(test, bond_model_pair_bonded(&link));
+	KUNIT_EXPECT_FALSE(test, link.destabilized);
+}
+
+static void tb_test_xdomain_never_bonds_after_services_publish(struct kunit *test)
+{
+	struct bond_model_link link;
+
+	bond_model_appmana_023_025(&link);
+	link.a.port[1].services_published = true;
+	bond_model_run(&link, false);
+
+	KUNIT_EXPECT_FALSE(test, bond_model_pair_bonded(&link));
+	KUNIT_EXPECT_TRUE(test, link.destabilized);
+}
+
+/*
+ * A failed early bond is not a link-down event. ICM may own lane-1 cleanup,
+ * and an older peer may simply not support bonding. Disabling adapters here
+ * can destroy the still-valid x1 XDomain and strand a hot-reloaded controller
+ * until a physical edge or cold boot.
+ */
+static void tb_test_xdomain_bond_abort_preserves_single_lane(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_direct_bonding_abort_disables_lane());
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
+	KUNIT_CASE(tb_test_xdomain_gen4_single_lane_negotiates_bonding),
+	KUNIT_CASE(tb_test_xdomain_icm_still_initializes_link),
+	KUNIT_CASE(tb_test_xdomain_icm_single_lane_enters_bonding_state),
+	KUNIT_CASE(tb_test_xdomain_icm_unsupported_status_uses_early_direct_bonding),
+	KUNIT_CASE(tb_test_xdomain_two_port_bonding_does_not_serialize_peers),
+	KUNIT_CASE(tb_test_xdomain_never_bonds_after_services_publish),
+	KUNIT_CASE(tb_test_xdomain_bond_abort_preserves_single_lane),
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),

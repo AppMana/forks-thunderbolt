@@ -21,6 +21,17 @@
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void);
 u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags);
+bool tb_test_xdomain_should_negotiate_bonding(bool has_dual_link,
+					       unsigned int generation,
+					       enum tb_link_width width);
+bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known);
+bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
+						      bool bonding_possible);
+bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
+							bool services_published,
+							int link_status_ret);
+bool tb_test_xdomain_direct_bonding_blocks_controller(void);
+bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 #endif
 #include "ctl.h"
 #include "dma_port.h"

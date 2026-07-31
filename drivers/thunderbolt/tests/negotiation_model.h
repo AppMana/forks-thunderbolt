@@ -444,4 +444,123 @@ static inline bool ident_run(struct ident_xd *xd, const struct ident_peer *peer,
 	return xd->enumerated;
 }
 
+/*
+ * ---- Two-port Maple Ridge lane-bonding scheduler ----
+ *
+ * A physical TB4 cable has TWO bidirectional lanes. Each Maple Ridge connector
+ * owns one such two-lane link to one peer; connectors are never bonded to one
+ * another. Linux represents the two lanes of one connector as a lane adapter
+ * and its dual_link_port.
+ *
+ * Live appmana-023/025 evidence (2026-07-31):
+ *
+ *   023 port 0 -> older/unresponsive 022
+ *   023 port 1 -> 025 port 0
+ *   025 port 0 -> 023 port 1
+ *   025 port 1 -> older 009
+ *
+ * tb_xdomain_lane_bonding_enable() waits synchronously for width DUAL for up
+ * to XDOMAIN_BONDING_TIMEOUT (10 seconds). XDomain state_work for both ports
+ * shares the controller's ordered workqueue. Consequently 023 first blocks on
+ * 022 while 025 targets 023; one timeout later 023 targets 025 while 025 blocks
+ * on 009. The two ends are individually capable but their target-DUAL windows
+ * never overlap. This is exactly the cold-boot trace: 025 returned -ETIMEDOUT,
+ * cleaned up, and only later did 023 return -ENOTCONN.
+ *
+ * The model deliberately includes two ports and distinct peers. A model with
+ * one host/one cable cannot reproduce this scheduler bug and would falsely
+ * bless the synchronous implementation.
+ */
+#define BOND_MODEL_PORTS 2
+#define BOND_MODEL_WAIT_TICKS 10
+
+struct bond_model_port {
+	int peer_port;		/* matching port on the other model host, -1 = legacy */
+	int window_start;
+	int window_end;
+	bool capable;
+	bool bonded;
+	bool services_published;
+};
+
+struct bond_model_host {
+	struct bond_model_port port[BOND_MODEL_PORTS];
+};
+
+struct bond_model_link {
+	struct bond_model_host a;
+	struct bond_model_host b;
+	bool destabilized;
+};
+
+static inline void bond_model_appmana_023_025(struct bond_model_link *L)
+{
+	memset(L, 0, sizeof(*L));
+
+	/* 023 visits the unresponsive 022-facing port before its 025 port. */
+	L->a.port[0].peer_port = -1;
+	L->a.port[0].capable = false;
+	L->a.port[1].peer_port = 0;
+	L->a.port[1].capable = true;
+
+	/* 025 visits its 023-facing port before the older 009-facing port. */
+	L->b.port[0].peer_port = 1;
+	L->b.port[0].capable = true;
+	L->b.port[1].peer_port = -1;
+	L->b.port[1].capable = false;
+}
+
+static inline bool bond_model_windows_overlap(const struct bond_model_port *a,
+					       const struct bond_model_port *b)
+{
+	return a->window_start < b->window_end &&
+	       b->window_start < a->window_end;
+}
+
+static inline void bond_model_schedule_host(struct bond_model_host *h,
+					    bool controller_blocking)
+{
+	int i;
+
+	for (i = 0; i < BOND_MODEL_PORTS; i++) {
+		h->port[i].window_start = controller_blocking ?
+			i * BOND_MODEL_WAIT_TICKS : 0;
+		h->port[i].window_end = h->port[i].window_start +
+			BOND_MODEL_WAIT_TICKS;
+	}
+}
+
+static inline void bond_model_run(struct bond_model_link *L,
+				  bool controller_blocking)
+{
+	int i;
+
+	bond_model_schedule_host(&L->a, controller_blocking);
+	bond_model_schedule_host(&L->b, controller_blocking);
+
+	for (i = 0; i < BOND_MODEL_PORTS; i++) {
+		struct bond_model_port *a = &L->a.port[i];
+		struct bond_model_port *b;
+
+		if (!a->capable || a->peer_port < 0)
+			continue;
+		b = &L->b.port[a->peer_port];
+		if (!b->capable || b->peer_port != i)
+			continue;
+		if (!bond_model_windows_overlap(a, b))
+			continue;
+		if (a->services_published || b->services_published) {
+			L->destabilized = true;
+			continue;
+		}
+		a->bonded = true;
+		b->bonded = true;
+	}
+}
+
+static inline bool bond_model_pair_bonded(const struct bond_model_link *L)
+{
+	return L->a.port[1].bonded && L->b.port[0].bonded;
+}
+
 #endif /* _TB_NEGOTIATION_MODEL_H */

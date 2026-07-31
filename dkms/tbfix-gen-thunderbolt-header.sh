@@ -45,6 +45,7 @@ add_completion=1; grep -q '#include <linux/completion.h>' "$src" && add_completi
 add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handler=0
 add_nhi=1;        grep -q 'domain_released' "$src" && add_nhi=0
 add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_active=0
+add_reannounce=1; grep -q 'TB_XDOMAIN_HAS_REANNOUNCE' "$src" && add_reannounce=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
@@ -56,7 +57,15 @@ add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_ac
 awk -v add_completion="$add_completion" \
     -v add_handler="$add_handler" \
     -v add_nhi="$add_nhi" \
-    -v add_paths_active="$add_paths_active" '
+    -v add_paths_active="$add_paths_active" \
+    -v add_reannounce="$add_reannounce" '
+	add_reannounce == 1 && \
+	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
+		print
+		print "#define TB_XDOMAIN_HAS_REANNOUNCE 1"
+		print "void tb_reannounce_property_dirs(void);"
+		next
+	}
 	add_completion == 1 && $0 == "#include <linux/workqueue.h>" {
 		print
 		print "#include <linux/completion.h>"
@@ -100,7 +109,7 @@ awk -v add_completion="$add_completion" \
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE'; do
+for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE'; do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1
