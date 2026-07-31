@@ -35,11 +35,15 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 headers_pkg=linux-headers-amd64
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-	# The fleet runs noble's HWE 6.17 kernel and this is a v6.17-based fork, so
-	# build against matching 6.17 headers (stock linux-headers-generic is 6.8 and
-	# would fail to compile). The HWE metapackage tracks the same kernel the
-	# nodes use.
-	headers_pkg="${TBFIX_HEADERS_PKG:-linux-headers-generic-hwe-24.04}"
+    # The fleet runs noble's HWE 6.17 kernel and this is a v6.17-based fork, so
+    # build against matching 6.17 headers (stock linux-headers-generic is 6.8 and
+    # would fail to compile). Do not use linux-headers-generic-hwe-24.04 here:
+    # that rolling meta-package now resolves to 7.x. Select the newest concrete
+    # 6.17 package exactly as the fleet playbook does.
+    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-6[.]17[.]0-[0-9]+-generic$' |
+        awk '{print $1}' | sort -V | tail -1)}"
+    [[ -n "$headers_pkg" ]] ||
+        { printf 'error: no concrete Ubuntu 6.17 headers package is available\n' >&2; exit 1; }
 fi
 apt-get install -y -qq --no-install-recommends \
 	build-essential ca-certificates dkms file kmod "$headers_pkg" make
@@ -70,8 +74,8 @@ if [[ "${TBFIX_VERIFY_DKMS_BUILD:-0}" != "1" ]]; then
 	exit 0
 fi
 
-# Pick the installed kernel that actually has build headers (the HWE 6.17 we
-# installed above), not $(uname -r) which in CI is the headerless runner kernel.
+# Pick the installed kernel that actually has build headers (the concrete 6.17
+# package above), not $(uname -r) which in CI is the headerless runner kernel.
 kver="$(for d in /lib/modules/*/build; do [[ -e "$d" ]] && basename "$(dirname "$d")"; done | sort -V | tail -n 1)"
 [[ -n "$kver" && -d "/lib/modules/$kver/build" ]] || { printf 'error: no kernel headers found\n' >&2; exit 1; }
 printf '==> Kernel:     %s\n' "$kver"
