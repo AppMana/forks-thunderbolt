@@ -321,6 +321,49 @@ err_path_symbols:
 	return ret;
 }
 
+typedef int (*tbv_exit_reload_step_fn)(void *ctx,
+				       enum tbv_test_reload_step step);
+
+/* Exact ordering shared by module exit and its KUnit regression trace. */
+static int tbv_run_exit_reload_sequence(tbv_exit_reload_step_fn run, void *ctx)
+{
+	static const enum tbv_test_reload_step order[] = {
+		TBV_TEST_RELOAD_IBDEV_QUIESCE,
+		TBV_TEST_RELOAD_SERVICES_STOP,
+		TBV_TEST_RELOAD_IBDEV_FINALIZE,
+	};
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(order); i++) {
+		int ret = run(ctx, order[i]);
+
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int tbv_run_exit_reload_step(void *ctx,
+				    enum tbv_test_reload_step step)
+{
+	struct tbv_state *state = ctx;
+
+	switch (step) {
+	case TBV_TEST_RELOAD_IBDEV_QUIESCE:
+		tbv_ibdev_quiesce(state);
+		break;
+	case TBV_TEST_RELOAD_SERVICES_STOP:
+		tbv_services_stop(state);
+		break;
+	case TBV_TEST_RELOAD_IBDEV_FINALIZE:
+		tbv_ibdev_finalize(state);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
 static void __exit tbv_exit(void)
 {
 	/* No new runtime link_owner applies past this point. */
@@ -331,12 +374,47 @@ static void __exit tbv_exit(void)
 
 	tbv_native_control_identity_notifier_unregister();
 	cancel_work_sync(&tbv_driver_state.identity_refresh_work);
-	tbv_ibdev_stop(&tbv_driver_state);
-	tbv_services_stop(&tbv_driver_state);
+	if (tbv_run_exit_reload_sequence(tbv_run_exit_reload_step,
+					 &tbv_driver_state))
+		pr_err("invalid module-exit reload sequence\n");
 	tbv_core_exit(&tbv_driver_state);
 	tbv_path_exit_optional_symbols();
 	pr_info("unloaded\n");
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+struct tbv_test_exit_reload_ctx {
+	u8 *steps;
+	u32 capacity;
+	u32 count;
+};
+
+static int tbv_test_record_reload_step(void *data,
+				       enum tbv_test_reload_step step)
+{
+	struct tbv_test_exit_reload_ctx *ctx = data;
+
+	if (!ctx->steps || ctx->count >= ctx->capacity)
+		return -ENOSPC;
+	ctx->steps[ctx->count++] = step;
+	return 0;
+}
+
+int tbv_test_exit_reload_order(u8 *steps, u32 capacity, u32 *count)
+{
+	struct tbv_test_exit_reload_ctx ctx = {
+		.steps = steps,
+		.capacity = capacity,
+	};
+	int ret;
+
+	if (!count)
+		return -EINVAL;
+	ret = tbv_run_exit_reload_sequence(tbv_test_record_reload_step, &ctx);
+	*count = ctx.count;
+	return ret;
+}
+#endif
 
 module_init(tbv_init);
 module_exit(tbv_exit);

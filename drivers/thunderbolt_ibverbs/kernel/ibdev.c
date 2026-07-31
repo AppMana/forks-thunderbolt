@@ -13467,17 +13467,14 @@ int tbv_ibdev_start(struct tbv_state *state, bool register_verbs)
 	return 0;
 }
 
-void tbv_ibdev_stop(struct tbv_state *state)
+void tbv_ibdev_quiesce(struct tbv_state *state)
 {
-	struct tbv_peer *peer;
-	bool any;
-
 	/*
-	 * Disable rising-edge registrations before draining. Doing this under
-	 * rail_register_lock ensures any in-flight up event either runs to
-	 * completion before us (its ib_device is then visible in the loop
-	 * below) or observes register_enabled=false and bails out without
-	 * publishing.
+	 * Close the rising-edge gate before service removal starts.  Do not
+	 * unregister devices here: service removal first disconnects each ICM
+	 * path and fences its rings, then unregisters that rail's ib_device.
+	 * Calling ib_unregister_device() before that path quiesce can wait for a
+	 * QP completion which itself needs the still-running NHI ring.
 	 */
 	mutex_lock(&state->rail_register_lock);
 	state->register_enabled = false;
@@ -13486,11 +13483,17 @@ void tbv_ibdev_stop(struct tbv_state *state)
 	state->verbs_registered = false;
 	if (state->workqueue)
 		flush_workqueue(state->workqueue);
+}
+
+void tbv_ibdev_finalize(struct tbv_state *state)
+{
+	struct tbv_peer *peer;
+	bool any;
 
 	/*
-	 * Walk every peer/rail and unregister anything still published.
-	 * ib_unregister_device may block waiting for verbs ops to drain, so
-	 * we drop state->lock around each event.
+	 * Service removal normally unregisters every per-rail device after its
+	 * path has been quiesced.  Retain this sweep for partial-init and error
+	 * paths, where a rail may not have been owned by a registered service.
 	 */
 	do {
 		struct tbv_rail *target = NULL;
@@ -13531,4 +13534,10 @@ void tbv_ibdev_stop(struct tbv_state *state)
 		flush_workqueue(state->workqueue);
 	tbv_ibdev_unregister_netdev_notifier(state);
 	ida_destroy(&tbv_qpn_ida);
+}
+
+void tbv_ibdev_stop(struct tbv_state *state)
+{
+	tbv_ibdev_quiesce(state);
+	tbv_ibdev_finalize(state);
 }

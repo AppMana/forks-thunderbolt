@@ -416,7 +416,14 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	mutex_unlock(&peer->state->lock);
 
 	/*
-	 * Fence the NHI rings BEFORE tearing down the ib_device. Any QP pinned to
+	 * Stop native-control retries first so none can re-enable this tunnel
+	 * while teardown is closing it.  Then disconnect the ICM path while its
+	 * rings and hop IDs are still valid, and only afterward stop the rings.
+	 * Leaving the ICM path live while stopping/freeing its DMA state poisoned
+	 * the next module load: descriptors were published to new rings but the
+	 * NHI never consumed them.
+	 *
+	 * The ring fence still occurs BEFORE tearing down the ib_device. Any QP pinned to
 	 * this rail holds a rail refcount that is dropped only when the QP finishes
 	 * destroying (tbv_qp_unbind_rail, the last thing tbv_destroy_qp does), and
 	 * that in turn needs the QP's in-flight frames to complete. tb_ring_stop
@@ -433,7 +440,10 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	 * IRQ-off/flush_work contract (might_sleep in tbv_path_fence) is satisfied.
 	 * KUnit: tbv_teardown_dead_link_drains_and_frees.
 	 */
-	tbv_path_fence(&rail->path);
+	tbv_native_control_cancel_rail(rail);
+	if (tbv_path_quiesce(&rail->path, peer->xd))
+		pr_warn("rail path quiesce reported an ICM teardown error peer=%u rail=%u; rings were still fenced\n",
+			peer->peer_id, rail->rail_id);
 
 	/*
 	 * Tear down the per-rail ib_device before the path: ib_unregister_device's
@@ -443,7 +453,6 @@ void tbv_peer_remove_rail(struct tbv_rail *rail)
 	 */
 	tbv_ibdev_rail_event(peer->state, rail, false);
 
-	tbv_native_control_cancel_rail(rail);
 	tbv_rail_put(rail);
 
 	/*

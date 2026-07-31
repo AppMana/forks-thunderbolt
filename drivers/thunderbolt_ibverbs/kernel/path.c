@@ -1005,6 +1005,7 @@ void tbv_path_init(struct tbv_path *path,
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
 	INIT_DELAYED_WORK(&path->credit_sync_work, tbv_path_credit_sync_work);
+	init_waitqueue_head(&path->tx_idle_wait);
 	atomic_set(&path->tx_inflight, 0);
 	path->local_transmit_path = -1;
 	path->local_tx_hop = -1;
@@ -1030,6 +1031,7 @@ void tbv_path_reset(struct tbv_path *path)
 	INIT_DELAYED_WORK(&path->rx_supp_poll_work,
 			  tbv_path_rx_supp_poll_work);
 	INIT_DELAYED_WORK(&path->credit_sync_work, tbv_path_credit_sync_work);
+	init_waitqueue_head(&path->tx_idle_wait);
 	atomic_set(&path->tx_inflight, 0);
 	path->local_transmit_path = -1;
 	path->local_tx_hop = -1;
@@ -2528,6 +2530,12 @@ void tbv_path_release_data_reservation(struct tbv_path *path, u32 frames)
 	spin_unlock_irqrestore(&path->tx_lock, flags);
 }
 
+static void tbv_path_tx_scheduling_done_locked(struct tbv_path *path)
+{
+	path->tx_scheduling = false;
+	wake_up_all(&path->tx_idle_wait);
+}
+
 static void tbv_path_schedule_tx(struct tbv_path *path)
 {
 	struct tbv_state *state = tbv_path_state(path);
@@ -2561,7 +2569,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		if (path->state != TBV_PATH_TUNNEL_ENABLED ||
 		    (list_empty(&path->tx_control_queue) &&
 		     list_empty(&path->tx_data_queue))) {
-			path->tx_scheduling = false;
+			tbv_path_tx_scheduling_done_locked(path);
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
 		}
@@ -2576,7 +2584,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		if (path->tx_raw_stream_active &&
 		    path->tx_raw_stream_window_open) {
 			if (list_empty(&path->tx_data_queue)) {
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				return;
 			}
@@ -2594,7 +2602,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			 */
 			if (packet->raw_stream_start ||
 			    packet->owner_ctx != path->tx_raw_stream_owner) {
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				return;
 			}
@@ -2607,7 +2615,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			needs_staging = true;
 		} else {
 			if (list_empty(&path->tx_data_queue)) {
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				return;
 			}
@@ -2627,13 +2635,13 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		if (!tbv_path_tx_inflight_available(
 			    atomic_read(&path->tx_inflight),
 			    READ_ONCE(data_tx_max_inflight))) {
-			path->tx_scheduling = false;
+			tbv_path_tx_scheduling_done_locked(path);
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
 		}
 
 		if (needs_staging && list_empty(&path->tx_free)) {
-			path->tx_scheduling = false;
+			tbv_path_tx_scheduling_done_locked(path);
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
 		}
@@ -2649,7 +2657,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 					path->tx_frame_count - inflight : 0;
 
 			if (available <= reserve) {
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				return;
 			}
@@ -2668,7 +2676,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 				if (state)
 					atomic64_inc(&state->data_tx_credit_stalls);
 				atomic64_inc(&path->data_tx_credit_stalls);
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				/*
 				 * Credits only return on peer PATH_CREDIT
@@ -2765,7 +2773,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 				packet->queued = true;
 				packet->start_credit_group_frames =
 					old_start_credit_group_frames;
-				path->tx_scheduling = false;
+				tbv_path_tx_scheduling_done_locked(path);
 				spin_unlock_irqrestore(&path->tx_lock, flags);
 				atomic_dec(&path->tx_inflight);
 				return;
@@ -2775,7 +2783,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 			tbv_path_finish_raw_stream_if_needed(path, packet);
 			tbv_path_tx_packet_release(packet, ret);
 			spin_lock_irqsave(&path->tx_lock, flags);
-			path->tx_scheduling = false;
+			tbv_path_tx_scheduling_done_locked(path);
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			return;
 		}
@@ -2866,7 +2874,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 					old_start_credit_group_frames;
 			}
 			packet->queued = true;
-			path->tx_scheduling = false;
+			tbv_path_tx_scheduling_done_locked(path);
 			spin_unlock_irqrestore(&path->tx_lock, flags);
 			atomic_dec(&path->tx_inflight);
 			return;
@@ -2875,7 +2883,7 @@ static void tbv_path_schedule_tx(struct tbv_path *path)
 		atomic_dec(&path->tx_inflight);
 		tbv_path_tx_packet_release(packet, ret);
 		spin_lock_irqsave(&path->tx_lock, flags);
-		path->tx_scheduling = false;
+		tbv_path_tx_scheduling_done_locked(path);
 		spin_unlock_irqrestore(&path->tx_lock, flags);
 		return;
 	}
@@ -3476,7 +3484,7 @@ static void tbv_path_flush_tx_queue(struct tbv_path *path, int status)
 	path->tx_control_queued = 0;
 	path->tx_data_queued = 0;
 	path->tx_data_reserved = 0;
-	path->tx_scheduling = false;
+	tbv_path_tx_scheduling_done_locked(path);
 	path->tx_raw_stream_active = false;
 	path->tx_raw_stream_owner = NULL;
 	path->tx_raw_stream_end_seen = false;
@@ -3501,48 +3509,156 @@ static void tbv_path_flush_tx_queue(struct tbv_path *path, int status)
 	}
 }
 
-/*
- * tbv_path_fence() - stop the NHI rings so in-flight frames are reclaimed
- *
- * tb_ring_stop() cancels every frame in the ring's in-flight list and runs its
- * completion callback with canceled=true (drivers/thunderbolt/nhi.c ring_work,
- * the !ring->running branch). That is the ONLY way to reclaim a frame already
- * handed to the ring: on a dead link (peer rebooted / cable pulled) hardware
- * never completes it, so the send/read context that owns it -- and the QP ref
- * it transitively pins -- would otherwise be held forever.
- *
- * tbv_peer_remove_rail() calls this BEFORE wait_for_completion(refs_zero) so
- * that wait can converge; the pre-fix ordering only reached tb_ring_stop()
- * inside tbv_path_destroy(), which runs AFTER the wait it was meant to unblock,
- * so rmmod / .shutdown hung in D-state until a cold boot. Leaves path->state
- * intact (tbv_path_destroy still needs it to gate the tunnel/hopid teardown);
- * only records rings_fenced so the ring is not stopped twice.
- *
- * Sleeping context only (tb_ring_stop flush_work()s the ring worker); never
- * from a ring frame callback or under a spinlock shared with the completion
- * path -- the forbidden-context deadlock guarded here and in tbv_path_destroy.
- */
-void tbv_path_fence(struct tbv_path *path)
+typedef int (*tbv_path_reload_step_fn)(void *ctx,
+				       enum tbv_test_reload_step step);
+
+/* Exact ordering shared by production rail removal and the KUnit trace. */
+static int tbv_path_run_reload_sequence(tbv_path_reload_step_fn run, void *ctx)
 {
-	bool rings_started = path->state == TBV_PATH_TUNNEL_ENABLED ||
-			     path->state == TBV_PATH_RING_STARTED;
+	static const enum tbv_test_reload_step order[] = {
+		TBV_TEST_RELOAD_DISABLE_ADMISSION,
+		TBV_TEST_RELOAD_DRAIN_TX_SCHEDULER,
+		TBV_TEST_RELOAD_DISABLE_ICM_PATH,
+		TBV_TEST_RELOAD_STOP_RX_RING,
+		TBV_TEST_RELOAD_STOP_TX_RING,
+	};
+	int first_error = 0;
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(order); i++) {
+		int ret = run(ctx, order[i]);
+
+		/* Teardown must keep fencing even if the ICM disconnect failed. */
+		if (ret && !first_error)
+			first_error = ret;
+	}
+	return first_error;
+}
+
+struct tbv_path_reload_ctx {
+	struct tbv_path *path;
+	struct tb_xdomain *xd;
+	bool tunnel_enabled;
+	bool rings_started;
+};
+
+static int tbv_path_run_reload_step(void *data,
+				    enum tbv_test_reload_step step)
+{
+	struct tbv_path_reload_ctx *ctx = data;
+	struct tbv_path *path = ctx->path;
+	unsigned long flags;
+	int ret = 0;
+
+	switch (step) {
+	case TBV_TEST_RELOAD_DISABLE_ADMISSION:
+		/* All enqueue/reserve paths gate on state under tx_lock. */
+		spin_lock_irqsave(&path->tx_lock, flags);
+		if (path->state == TBV_PATH_TUNNEL_ENABLED)
+			path->state = TBV_PATH_RING_STARTED;
+		spin_unlock_irqrestore(&path->tx_lock, flags);
+		break;
+	case TBV_TEST_RELOAD_DRAIN_TX_SCHEDULER:
+		/*
+		 * A scheduler can be between its state check and tb_ring_tx().
+		 * Admission is closed above, so wait until that last publisher
+		 * returns before disconnecting or stopping the hardware path.
+		 */
+		wait_event(path->tx_idle_wait,
+			   !READ_ONCE(path->tx_scheduling));
+		break;
+	case TBV_TEST_RELOAD_DISABLE_ICM_PATH:
+		if (!ctx->tunnel_enabled)
+			break;
+		if (destroy_disable_paths)
+			ret = tb_xdomain_disable_paths(ctx->xd,
+						 path->local_transmit_path,
+						 path->local_tx_hop,
+						 path->remote_transmit_path,
+						 path->local_rx_hop);
+		else
+			pr_warn("skipping tb_xdomain_disable_paths during rail quiesce route=0x%llx rail=0x%x\n",
+				path->rail && path->rail->peer ?
+					path->rail->peer->xd->route : 0,
+				path->rail ? path->rail->rail_id : 0xffffffff);
+		if (path->remote_transmit_path >= 0) {
+			tb_xdomain_release_in_hopid(ctx->xd,
+						 path->remote_transmit_path);
+			path->remote_transmit_path = -1;
+		}
+		break;
+	case TBV_TEST_RELOAD_STOP_RX_RING:
+		if (ctx->rings_started && !path->rings_fenced && path->rx_ring)
+			tb_ring_stop(path->rx_ring);
+		break;
+	case TBV_TEST_RELOAD_STOP_TX_RING:
+		if (ctx->rings_started && !path->rings_fenced && path->tx_ring)
+			tb_ring_stop(path->tx_ring);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	return ret;
+}
+
+int tbv_path_quiesce(struct tbv_path *path, struct tb_xdomain *xd)
+{
+	struct tbv_path_reload_ctx ctx = {
+		.path = path,
+		.xd = xd,
+		.tunnel_enabled = path->state == TBV_PATH_TUNNEL_ENABLED,
+		.rings_started = path->state == TBV_PATH_TUNNEL_ENABLED ||
+				 path->state == TBV_PATH_RING_STARTED,
+	};
+	int ret;
 
 	might_sleep();
-
-	if (!rings_started || path->rings_fenced)
-		return;
-
-	if (path->rx_ring)
-		tb_ring_stop(path->rx_ring);
-	if (path->tx_ring)
-		tb_ring_stop(path->tx_ring);
-	path->rings_fenced = true;
-
-	/* No new poll-driven completions after the rings are down. */
+	ret = tbv_path_run_reload_sequence(tbv_path_run_reload_step, &ctx);
+	if (ctx.rings_started) {
+		path->rings_fenced = true;
+		path->state = TBV_PATH_RING_ALLOCATED;
+	}
 	cancel_delayed_work_sync(&path->tx_poll_work);
 	cancel_delayed_work_sync(&path->rx_supp_poll_work);
 	cancel_delayed_work_sync(&path->credit_sync_work);
+	return ret;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+struct tbv_test_path_reload_ctx {
+	u8 *steps;
+	u32 capacity;
+	u32 count;
+};
+
+static int tbv_test_path_record_reload_step(void *data,
+					    enum tbv_test_reload_step step)
+{
+	struct tbv_test_path_reload_ctx *ctx = data;
+
+	if (!ctx->steps || ctx->count >= ctx->capacity)
+		return -ENOSPC;
+	ctx->steps[ctx->count++] = step;
+	return 0;
+}
+
+int tbv_test_path_reload_order(u8 *steps, u32 capacity, u32 *count)
+{
+	struct tbv_test_path_reload_ctx ctx = {
+		.steps = steps,
+		.capacity = capacity,
+	};
+	int ret;
+
+	if (!count)
+		return -EINVAL;
+	ret = tbv_path_run_reload_sequence(tbv_test_path_record_reload_step,
+					   &ctx);
+	*count = ctx.count;
+	return ret;
+}
+#endif
 
 #if IS_ENABLED(CONFIG_KUNIT)
 struct tbv_test_queue_timeout_ctx {
@@ -4543,12 +4659,7 @@ void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd)
 	might_sleep();
 
 	if (rings_started) {
-		/*
-		 * tbv_path_fence() may already have stopped the rings ahead of
-		 * the refs_zero wait; do not stop them twice (dev_WARN "already
-		 * stopped"). The tunnel/hopid teardown below still runs -- it is
-		 * gated on path->state, which fence deliberately left intact.
-		 */
+		/* tbv_path_quiesce() may already have stopped both rings. */
 		if (!path->rings_fenced) {
 			if (path->rx_ring)
 				tb_ring_stop(path->rx_ring);

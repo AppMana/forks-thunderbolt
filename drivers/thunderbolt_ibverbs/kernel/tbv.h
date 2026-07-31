@@ -18,6 +18,7 @@
 #include <linux/thunderbolt.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 
 #include "link_owner.h"
@@ -322,6 +323,7 @@ struct tbv_path {
 	bool tx_poll_enabled;
 	bool rx_supp_poll_enabled;
 	bool tx_scheduling;
+	wait_queue_head_t tx_idle_wait;
 	bool tx_raw_stream_active;
 	bool tx_raw_stream_end_seen;
 	/*
@@ -338,13 +340,7 @@ struct tbv_path {
 	int local_tx_hop;
 	int local_rx_hop;
 	int remote_transmit_path;
-	/*
-	 * Set by tbv_path_fence() once the NHI rings are stopped (in-flight
-	 * frames canceled) ahead of the refs_zero wait in tbv_peer_remove_rail.
-	 * tbv_path_destroy() consults it so it does not tb_ring_stop() a ring
-	 * that is already stopped (dev_WARN "already stopped"), while still
-	 * running the tunnel/hopid teardown its state gates.
-	 */
+	/* Rings were stopped by tbv_path_quiesce() before verbs teardown. */
 	bool rings_fenced;
 };
 
@@ -980,6 +976,8 @@ const char *tbv_tbnet_identity_name(enum tbv_tbnet_identity_mode mode);
 const char *tbv_backend_name(enum tbv_backend_type type);
 
 int tbv_ibdev_start(struct tbv_state *state, bool register_verbs);
+void tbv_ibdev_quiesce(struct tbv_state *state);
+void tbv_ibdev_finalize(struct tbv_state *state);
 void tbv_ibdev_stop(struct tbv_state *state);
 const char *tbv_ibdev_roce_netdev_name(void);
 
@@ -1626,8 +1624,30 @@ void tbv_path_kick_tx(struct tbv_path *path);
 void tbv_path_cancel_data_done_ctx(struct tbv_path *path,
 				   tbv_path_tx_done_fn done, void *done_ctx);
 void tbv_path_cancel_data_owner_ctx(struct tbv_path *path, void *owner_ctx);
-void tbv_path_fence(struct tbv_path *path);
+int tbv_path_quiesce(struct tbv_path *path, struct tb_xdomain *xd);
 void tbv_path_destroy(struct tbv_path *path, struct tb_xdomain *xd);
+
+/*
+ * Production-path teardown traces used by reload_quiesce_test.c.  These are
+ * deliberately implemented by the same ordered helpers used by module exit
+ * and rail removal; the tests must not carry another hand-written lifecycle
+ * model that can drift from the driver again.
+ */
+enum tbv_test_reload_step {
+	TBV_TEST_RELOAD_DISABLE_ADMISSION = 1,
+	TBV_TEST_RELOAD_DRAIN_TX_SCHEDULER,
+	TBV_TEST_RELOAD_DISABLE_ICM_PATH,
+	TBV_TEST_RELOAD_STOP_RX_RING,
+	TBV_TEST_RELOAD_STOP_TX_RING,
+	TBV_TEST_RELOAD_IBDEV_QUIESCE,
+	TBV_TEST_RELOAD_SERVICES_STOP,
+	TBV_TEST_RELOAD_IBDEV_FINALIZE,
+};
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_path_reload_order(u8 *steps, u32 capacity, u32 *count);
+int tbv_test_exit_reload_order(u8 *steps, u32 capacity, u32 *count);
+#endif
 
 const struct tbv_backend_ops *tbv_backend_get(enum tbv_backend_type type);
 int tbv_link_activate_config(struct tbv_state *state, const char *name,
