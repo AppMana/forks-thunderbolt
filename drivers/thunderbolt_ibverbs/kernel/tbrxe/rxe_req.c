@@ -783,13 +783,13 @@ int rxe_requester(struct rxe_qp *qp)
 
 	/* Mode A link admission (wire-spec section 6): refuse the packet
 	 * while the aggregate unacked charge against this QP's link is at
-	 * the advertised window. Parked exactly like a closed tbframe
-	 * window; ACK-driven release re-kicks via need_req_skb.
+	 * the advertised window. tbrxe_admit() parks the QP (need_req_skb,
+	 * under the admission lock so the release sweep cannot miss it);
+	 * ACK-driven release reschedules the send task.
 	 */
 	if (qp_type(qp) == IB_QPT_RC && !tbrxe_admit(qp)) {
 		if (ah)
 			rxe_put(ah);
-		qp->need_req_skb = 1;
 		goto exit;
 	}
 

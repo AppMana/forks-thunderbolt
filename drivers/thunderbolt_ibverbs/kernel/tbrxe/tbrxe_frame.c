@@ -214,6 +214,12 @@ bool tbrxe_admit(struct rxe_qp *qp)
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
 	if (link->unacked >= tbrxe_link_engine_window(link)) {
+		/* Park flag BEFORE the waiters flag, under the same lock the
+		 * release path takes: a concurrent release that observes
+		 * admission_waiters and sweeps is then guaranteed to see
+		 * need_req_skb and reschedule this QP (no lost wakeup).
+		 */
+		qp->need_req_skb = 1;
 		link->admission_waiters = true;
 		ok = false;
 	} else {
