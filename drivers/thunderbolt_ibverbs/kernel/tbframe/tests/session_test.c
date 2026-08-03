@@ -38,6 +38,11 @@ static void tbframe_session_happy_path(struct kunit *test)
 	/* link_up carried the negotiated session attributes. */
 	KUNIT_EXPECT_EQ(test, fx->mock.peer.gid_eui64,
 			fx->client.last_info.gid_eui64);
+	/* ... including the identity WE advertised in our own HELLO, so the
+	 * client can publish the same GID the peer derives for us.
+	 */
+	KUNIT_EXPECT_EQ(test, (u64)TBFRAME_MOCK_LOCAL_EUI64,
+			fx->client.last_info.local_gid_eui64);
 	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_MOCK_RING,
 			fx->client.last_info.rx_ring_entries);
 	KUNIT_EXPECT_EQ(test, (u16)(TBFRAME_MOCK_RING - TBFRAME_CTRL_RESERVE),

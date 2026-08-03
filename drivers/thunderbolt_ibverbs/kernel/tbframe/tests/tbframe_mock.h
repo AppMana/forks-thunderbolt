@@ -365,6 +365,7 @@ struct tbframe_mock_fixture {
 
 #define TBFRAME_MOCK_ROUTE	0x301ull
 #define TBFRAME_MOCK_RING	256
+#define TBFRAME_MOCK_LOCAL_EUI64 0xfedcba0908070605ull
 
 static int tbframe_mock_fixture_init(struct kunit *test,
 				     struct tbframe_mock_fixture *fx)
@@ -400,8 +401,8 @@ static int tbframe_mock_fixture_init(struct kunit *test,
 	fx->tf.client_ctx = &fx->client;
 
 	fx->link = tbframe_link_create(&fx->tf, &tbframe_mock_ops, &fx->mock,
-				       TBFRAME_MOCK_ROUTE, 0xfedcba0908070605ull,
-				       false);
+				       TBFRAME_MOCK_ROUTE,
+				       TBFRAME_MOCK_LOCAL_EUI64, false);
 	if (IS_ERR(fx->link)) {
 		destroy_workqueue(fx->tf.wq);
 		return PTR_ERR(fx->link);

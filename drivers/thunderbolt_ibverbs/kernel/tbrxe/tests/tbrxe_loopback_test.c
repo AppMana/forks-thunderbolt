@@ -12,7 +12,11 @@
  *
  * Uses the module-lifetime device (tbrxe_get_dev()); module init has
  * already run when the KUnit executor starts (late_initcall vs
- * kernel_init's kunit_run_all_tests).
+ * kernel_init's kunit_run_all_tests). The ib_device publishes at the FIRST
+ * link_up (self GID = the identity tbframe advertised in our HELLO), so the
+ * test drives a fake link_up before using the device - which also
+ * re-verifies the registration-fills-GID-cache ordering (sgid_index 0 must
+ * not read back -ENODATA at RTR) on the deferred-registration path.
  */
 
 #include <kunit/test.h>
@@ -20,7 +24,7 @@
 #include <rdma/ib_verbs.h>
 
 #include "rxe.h"
-#include "tbrxe_frame.h"
+#include "tbrxe_test_link.h"
 
 #define TBRXE_TEST_MSG_LEN	256
 #define TBRXE_TEST_POLL_MS	10
@@ -182,6 +186,7 @@ static int tbrxe_test_poll(struct ib_cq *cq, struct ib_wc *wc)
 
 static void tbrxe_rc_send_loopback_smoke(struct kunit *test)
 {
+	static int fake_link;
 	struct tbrxe_test_side a = {}, b = {};
 	const struct ib_recv_wr *bad_rwr;
 	const struct ib_send_wr *bad_swr;
@@ -203,8 +208,13 @@ static void tbrxe_rc_send_loopback_smoke(struct kunit *test)
 	atomic_set(&mock_wire_calls, 0);
 	tbrxe_set_transport_ops(&tbrxe_mock_transport);
 
+	/* First link_up publishes the ib_device and pins the self GID from
+	 * the advertised local identity.
+	 */
+	tbrxe_test_link_up(&fake_link);
+
 	/* The loopback target: our own self GID (driver GID table index 0,
-	 * a ULA derived from the per-boot EUI-64).
+	 * the ULA a peer would derive from our HELLO).
 	 */
 	err = tbrxe_query_gid(rxe, 0, &dgid);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -281,6 +291,7 @@ static void tbrxe_rc_send_loopback_smoke(struct kunit *test)
 	ib_destroy_cq(b.rcq);
 	ib_dealloc_pd(pd);
 
+	tbrxe_test_link_down(&fake_link);
 	tbrxe_set_transport_ops(NULL);
 }
 

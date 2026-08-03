@@ -51,16 +51,19 @@
  * scalar, port_num==1 is asserted throughout), so this scaffold uses ONE
  * ib_device with ONE port and resolves "which link reaches this GID" purely
  * through the peer table below; per-link ports are an open item. The local
- * GID table holds a single self GID (index 0) derived from a per-boot
- * random EUI-64: the tbframe contract only advertises the PEER's gid_eui64
- * per link (tbframe_link_info), so per-link LOCAL ULAs cannot be derived
- * yet -- contract gap, open item.
+ * GID table holds a single self GID (index 0) set at the FIRST link_up from
+ * info->local_gid_eui64 -- the identity tbframe advertised in OUR OWN HELLO
+ * on that link -- so the GID a peer derives from our HELLO and the GID we
+ * hand to userspace agree end to end (deriving the self GID from any other
+ * source made every remote dgid miss the peer table and parked requesters
+ * forever). The ib_device itself is published at that same first link_up
+ * (the legacy driver's publish-on-rail-ready), because the identity does
+ * not exist before a link comes up. All links share the one identity;
+ * per-link local ULAs/ports remain an open item.
  */
 
 #include <linux/skbuff.h>
 #include <linux/hash.h>
-#include <linux/unaligned.h>
-#include <net/addrconf.h>
 #include <rdma/ib_addr.h>
 
 #include "rxe.h"
@@ -99,9 +102,13 @@ static struct {
 	u64			self_eui64;
 	const struct tbrxe_transport_ops *ops;
 	bool			registered;
+	/* publication of the ib_device at the first link_up */
+	struct mutex		publish_lock;
+	bool			published;
 } tbrxe = {
 	.lock	= __SPIN_LOCK_UNLOCKED(tbrxe.lock),
 	.links	= LIST_HEAD_INIT(tbrxe.links),
+	.publish_lock = __MUTEX_INITIALIZER(tbrxe.publish_lock),
 };
 
 /* Weak: the production binding in tbrxe_tbframe_glue.c overrides this. */
@@ -482,8 +489,8 @@ static void tbrxe_client_rx(void *ctx, struct tbframe_link *tblink,
 		return;
 
 	skb_reserve(skb, TBRXE_GRH_BYTES);
-	/* daddr: our single self GID; per-link local ULAs are an open item
-	 * (the tbframe contract does not expose the local gid_eui64).
+	/* daddr: our single self GID (the first link's advertised local
+	 * identity); per-link local ULAs are an open item.
 	 */
 	tbrxe_fill_grh(skb, &peer_gid, &tbrxe.self_gid, len);
 	memcpy(skb_put(skb, len), frame->data, len);
@@ -537,26 +544,64 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 	struct tbrxe_link *link;
 	unsigned long flags;
 	bool first;
+	int err;
 
 	if (!rxe)
 		return;
 
 	if (info->max_payload < TBRXE_MIN_LINK_PAYLOAD) {
-		rxe_err_dev(rxe, "link %s max_payload %u below %u needed for IB_MTU_2048, ignoring link\n",
-			    tbrxe.ops && tbrxe.ops->link_name ?
+		pr_err("tbrxe: link %s max_payload %u below %u needed for IB_MTU_2048, ignoring link\n",
+		       tbrxe.ops && tbrxe.ops->link_name ?
 				tbrxe.ops->link_name(tblink) : "?",
-			    info->max_payload,
-			    (unsigned int)TBRXE_MIN_LINK_PAYLOAD);
+		       info->max_payload,
+		       (unsigned int)TBRXE_MIN_LINK_PAYLOAD);
 		return;
 	}
 
-	link = kzalloc(sizeof(*link), GFP_ATOMIC);
+	/*
+	 * First link: adopt the identity tbframe advertised in OUR HELLO on
+	 * this link as the device self GID, then publish the ib_device
+	 * (registration fills the GID cache from rxe_query_gid, so the self
+	 * GID must exist before ib_register_device or sgid_index 0 reads
+	 * back -ENODATA at RTR). Upcall context is tbframe's workqueue
+	 * (process context, no tbframe locks held), so sleeping is fine.
+	 */
+	mutex_lock(&tbrxe.publish_lock);
+	if (!tbrxe.published) {
+		tbrxe.self_eui64 = info->local_gid_eui64;
+		tbrxe_gid_from_eui64(tbrxe.self_eui64, &tbrxe.self_gid);
+		err = tbrxe_publish(rxe);
+		if (err) {
+			mutex_unlock(&tbrxe.publish_lock);
+			pr_err("tbrxe: publishing ib_device at link up failed: %d\n",
+			       err);
+			return;
+		}
+		tbrxe.published = true;
+	} else if (info->local_gid_eui64 != tbrxe.self_eui64) {
+		/* Single shared identity per device for now; a second link
+		 * advertising its own per-link ULA cannot be reached through
+		 * the published self GID (per-link ports are an open item).
+		 */
+		pr_warn("tbrxe: link %s advertises local eui64 %016llx but device identity is %016llx; peers on this link will miss\n",
+			tbrxe.ops && tbrxe.ops->link_name ?
+				tbrxe.ops->link_name(tblink) : "?",
+			info->local_gid_eui64, tbrxe.self_eui64);
+	}
+	mutex_unlock(&tbrxe.publish_lock);
+
+	link = kzalloc(sizeof(*link), GFP_KERNEL);
 	if (!link)
 		return;
 
 	link->tblink = tblink;
 	link->info = *info;
 	tbrxe_gid_from_eui64(info->gid_eui64, &link->peer_gid);
+
+	dev_info(&rxe->ib_dev.dev, "link %s up peer_eui64=%016llx local_eui64=%016llx\n",
+		 tbrxe.ops && tbrxe.ops->link_name ?
+			tbrxe.ops->link_name(tblink) : "?",
+		 info->gid_eui64, info->local_gid_eui64);
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
 	first = list_empty(&tbrxe.links);
@@ -605,25 +650,25 @@ static const struct tbframe_client_ops tbrxe_client_ops = {
 	.link_down	= tbrxe_client_link_down,
 };
 
+/* Test hook: the client ops tbrxe registers with tbframe, so KUnit can
+ * drive the upcalls directly (there is no tbframe module in that kernel).
+ */
+const struct tbframe_client_ops *tbrxe_frame_client_ops(void)
+{
+	return &tbrxe_client_ops;
+}
+
 /* ---- lifecycle -------------------------------------------------------- */
 
 /*
- * Must run BEFORE ib_register_device(): the core fills its GID cache from
- * rxe_query_gid at registration (IB link layer), so the self GID has to
- * exist by then or sgid_index 0 reads back invalid (-ENODATA at RTR).
+ * Bind the transport to the (not yet published) device. The self identity
+ * is NOT derived here: it is the identity tbframe advertises in our own
+ * HELLO, which only exists once a link comes up (tbrxe_client_link_up sets
+ * the self GID and publishes the ib_device on the first one).
  */
-void tbrxe_frame_init_identity(struct rxe_dev *rxe)
+void tbrxe_frame_init(struct rxe_dev *rxe)
 {
-	u8 eui64[8];
-
 	tbrxe.rxe = rxe;
-
-	/* Self identity: per-boot random EUI-64 expanded from the device's
-	 * random raw_gid, ULA-ized with the same derivation used for peers.
-	 */
-	addrconf_addr_eui48(eui64, rxe->raw_gid);
-	tbrxe.self_eui64 = get_unaligned_be64(eui64);
-	tbrxe_gid_from_eui64(tbrxe.self_eui64, &tbrxe.self_gid);
 }
 
 int tbrxe_frame_register(struct rxe_dev *rxe)

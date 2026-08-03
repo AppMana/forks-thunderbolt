@@ -98,7 +98,13 @@
 
 void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload);
 
-int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name);
+int rxe_add(struct rxe_dev *rxe, unsigned int mtu);
+
+/* Publish (register) the device. Called by the transport at the FIRST
+ * tbframe link_up, after it set the self GID from the link's advertised
+ * local identity; registration fills the GID cache from rxe_query_gid.
+ */
+int tbrxe_publish(struct rxe_dev *rxe);
 
 /* The module-lifetime scaffold device (NULL before init / after exit). */
 struct rxe_dev *tbrxe_get_dev(void);

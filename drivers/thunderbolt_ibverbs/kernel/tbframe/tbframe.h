@@ -96,6 +96,11 @@ enum tbframe_down_reason {
 /**
  * struct tbframe_link_info - session attributes valid while the link is UP
  * @gid_eui64:    peer's per-link ULA EUI-64 from HELLO (GID derivation)
+ * @local_gid_eui64: the EUI-64 THIS side advertised in its own HELLO on
+ *                this link. The client must publish GIDs derived from this
+ *                identity (not one of its own making), so the GID a peer
+ *                derives from our HELLO and the GID we hand to userspace
+ *                agree end to end.
  * @rx_ring_entries: peer's advertised RX ring size (Mode A window basis)
  * @data_window:  admitted concurrent data frames (ring entries minus
  *                reserve in Mode A; larger when Mode B/E2E is active)
@@ -106,6 +111,7 @@ enum tbframe_down_reason {
  */
 struct tbframe_link_info {
 	u64	gid_eui64;
+	u64	local_gid_eui64;
 	u16	rx_ring_entries;
 	u16	data_window;
 	u16	max_payload;

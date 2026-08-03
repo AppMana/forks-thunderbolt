@@ -48,10 +48,17 @@ const struct tbrxe_transport_ops *tbrxe_builtin_transport(void);
 /* Test hook: swap the transport ops (NULL restores the null transport). */
 void tbrxe_set_transport_ops(const struct tbrxe_transport_ops *ops);
 
-/* Client lifecycle, driven from rxe.c module init/exit. Identity must be
- * derived before ib_register_device() so the GID cache fill sees it.
+/* Test hook: the client ops tbrxe registers with tbframe (KUnit drives the
+ * link_up/link_down/rx upcalls directly against them).
  */
-void tbrxe_frame_init_identity(struct rxe_dev *rxe);
+const struct tbframe_client_ops *tbrxe_frame_client_ops(void);
+
+/* Client lifecycle, driven from rxe.c module init/exit. The self identity
+ * (and with it ib_device publication via tbrxe_publish) is deferred to the
+ * first tbframe link_up: the self GID must be the identity tbframe
+ * advertised in our own HELLO, so both ends derive the same GID.
+ */
+void tbrxe_frame_init(struct rxe_dev *rxe);
 int tbrxe_frame_register(struct rxe_dev *rxe);
 void tbrxe_frame_unregister(void);
 

@@ -18,6 +18,7 @@ MODULE_VERSION(TBV_PKG_VERSION);
 
 /* The single scaffold device (see tbrxe_frame.c on the one-port choice). */
 static struct rxe_dev *tbrxe_dev;
+static bool tbrxe_dev_published;
 
 struct rxe_dev *tbrxe_get_dev(void)
 {
@@ -94,8 +95,9 @@ static void rxe_init_device_param(struct rxe_dev *rxe)
 
 	/*
 	 * There is no netdev underneath a tbrxe device. A per-boot random
-	 * address seeds the node/sys-image GUIDs and the self EUI-64 the
-	 * transport turns into the loopback ULA GID (tbrxe_frame_register).
+	 * address seeds the node/sys-image GUIDs only; the self GID comes
+	 * from the tbframe-advertised identity at the first link_up
+	 * (tbrxe_client_link_up), never from this address.
 	 */
 	eth_random_addr(rxe->raw_gid);
 
@@ -227,17 +229,37 @@ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload)
 }
 
 /* Create a tbrxe device. The caller should allocate memory for rxe by
- * calling ib_alloc_device.
+ * calling ib_alloc_device. Publication (ib_register_device) is deferred to
+ * the first tbframe link_up: the self GID is the identity tbframe
+ * advertised in our own HELLO, which does not exist before a link is up.
  */
-int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name)
+int rxe_add(struct rxe_dev *rxe, unsigned int mtu)
 {
 	rxe_init(rxe);
 	rxe_set_mtu(rxe, mtu);
+	rxe_init_device(rxe);
+	tbrxe_frame_init(rxe);
 
-	/* Self GID must exist before registration fills the GID cache. */
-	tbrxe_frame_init_identity(rxe);
+	return 0;
+}
 
-	return rxe_register_device(rxe, ibdev_name);
+/* First-link publication (called from tbrxe_client_link_up with the self
+ * GID already set, so the registration-time GID cache fill sees it).
+ */
+int tbrxe_publish(struct rxe_dev *rxe)
+{
+	int err;
+
+	if (WARN_ON(rxe != tbrxe_dev || tbrxe_dev_published))
+		return -EINVAL;
+
+	err = rxe_register_device(rxe, "tbrxe%d");
+	if (err)
+		return err;
+
+	tbrxe_dev_published = true;
+	dev_info(&rxe->ib_dev.dev, "published over tbframe\n");
+	return 0;
 }
 
 static int __init rxe_module_init(void)
@@ -258,7 +280,7 @@ static int __init rxe_module_init(void)
 	/* Frame payload budget: eth_mtu_int_to_enum() subtracts the 80-byte
 	 * header allowance, so hand it 2048 + 80 to land on IB_MTU_2048.
 	 */
-	err = rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH, "tbrxe%d");
+	err = rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH);
 	if (err) {
 		ib_dealloc_device(&rxe->ib_dev);
 		rxe_destroy_wq();
@@ -268,7 +290,10 @@ static int __init rxe_module_init(void)
 
 	err = tbrxe_frame_register(rxe);
 	if (err) {
-		ib_unregister_device(&rxe->ib_dev);
+		/* Never published (no link_up can have run): dealloc, not
+		 * unregister; dealloc_driver is wired by rxe_init_device().
+		 */
+		ib_dealloc_device(&rxe->ib_dev);
 		tbrxe_dev = NULL;
 		rxe_destroy_wq();
 		return err;
@@ -288,8 +313,12 @@ static void __exit rxe_module_exit(void)
 	 * (rxe_lan) too.
 	 */
 	if (tbrxe_dev) {
-		ib_unregister_device(&tbrxe_dev->ib_dev);
+		if (tbrxe_dev_published)
+			ib_unregister_device(&tbrxe_dev->ib_dev);
+		else
+			ib_dealloc_device(&tbrxe_dev->ib_dev);
 		tbrxe_dev = NULL;
+		tbrxe_dev_published = false;
 	}
 	rxe_destroy_wq();
 

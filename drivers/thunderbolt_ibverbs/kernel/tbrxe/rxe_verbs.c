@@ -1514,9 +1514,13 @@ static const struct ib_device_ops rxe_dev_ops = {
 	INIT_RDMA_OBJ_SIZE(ib_mw, rxe_mw, ibmw),
 };
 
-int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name)
+/*
+ * Device-shape setup, run at rxe_add() time so dealloc_driver is wired even
+ * if the device is torn down before it was ever published (registration is
+ * deferred to the first tbframe link_up, see tbrxe_publish()).
+ */
+void rxe_init_device(struct rxe_dev *rxe)
 {
-	int err;
 	struct ib_device *dev = &rxe->ib_dev;
 
 	strscpy(dev->node_desc, "tbrxe", sizeof(dev->node_desc));
@@ -1533,8 +1537,13 @@ int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name)
 
 	/* tbrxe: no ib_device_set_netdev(); the transport is tbframe. */
 	ib_set_device_ops(dev, &rxe_dev_ops);
+}
 
-	err = ib_register_device(dev, ibdev_name, NULL);
+int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name)
+{
+	int err;
+
+	err = ib_register_device(&rxe->ib_dev, ibdev_name, NULL);
 	if (err)
 		rxe_dbg_dev(rxe, "failed with error %d\n", err);
 

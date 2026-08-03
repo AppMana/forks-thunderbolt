@@ -504,6 +504,7 @@ static inline struct rxe_pd *rxe_mw_pd(struct rxe_mw *mw)
 	return to_rpd(mw->ibmw.pd);
 }
 
+void rxe_init_device(struct rxe_dev *rxe);
 int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name);
 
 #endif /* RXE_VERBS_H */
