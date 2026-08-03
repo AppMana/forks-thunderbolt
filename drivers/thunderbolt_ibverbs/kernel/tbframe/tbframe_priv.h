@@ -130,10 +130,24 @@ struct tbframe_link {
 
 	enum tbframe_link_state	state;
 	bool			removing;
+	/*
+	 * Parked by tbframe_unregister_client(): the session is closed and
+	 * every work re-queue gate refuses to re-arm it, so no link_up can
+	 * be delivered after the client's last link_down. Cleared (and the
+	 * session kicked) by the next tbframe_register_client().
+	 */
+	bool			parked;
 	bool			hello_done;
 	bool			rings_up;
 	bool			paths_enabled;
 	bool			in_hopid_held;
+	/*
+	 * The remote HopID the CURRENT session actually allocated its in-HopID
+	 * with and enabled its paths on. An inbound HELLO rewrites
+	 * ->remote_hopid from the dispatch context at any time, so teardown
+	 * must undo what it did, not what the peer most recently said.
+	 */
+	u16			active_remote_hopid;
 	struct tb_xdomain_handshake hs;	/* READY handshake + zombie predicate */
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
@@ -193,6 +207,10 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 			       size_t size);
 int tbframe_handle_packet(struct tbframe *tf, const void *token,
 			  const void *buf, size_t size);
+/* Instance-explicit forms of the public client API (KUnit uses these). */
+int tbframe_register_client_tf(struct tbframe *tf,
+			       const struct tbframe_client_ops *ops, void *ctx);
+void tbframe_unregister_client_tf(struct tbframe *tf);
 void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled);
 void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			      u16 len, u8 pdf, bool bad);

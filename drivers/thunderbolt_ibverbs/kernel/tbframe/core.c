@@ -47,12 +47,21 @@ static void tbframe_link_put(struct tbframe_link *link)
 		complete(&link->refs_zero);
 }
 
-/* Queue the session work honoring the removing/DEAD gates. Lock held. */
+/*
+ * Queue the session work honoring every re-arm gate. Lock held.
+ *
+ * This is the ONLY place the session work is queued, so the gates below are
+ * the complete set of conditions under which tbframe can re-enter its state
+ * machine (the mainline 2c5d2d3c3f70 "removing flag checked under the lock
+ * at every queue site" discipline). ->parked is what makes the client's
+ * link_down the last upcall it can ever see for a link.
+ */
 static void tbframe_link_kick_locked(struct tbframe_link *link,
 				     unsigned long delay)
 {
 	lockdep_assert_held(&link->lock);
-	if (!link->removing && link->state != TBFRAME_STATE_DEAD)
+	if (!link->removing && !link->parked &&
+	    link->state != TBFRAME_STATE_DEAD)
 		queue_delayed_work(link->tf->wq, &link->session_work, delay);
 }
 
@@ -239,7 +248,18 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	ret = link->ops->alloc_in_hopid(link->hw, remote_hopid);
 	if (ret < 0)
 		goto err_free_rings;
+	/*
+	 * Record what we actually allocated. Teardown must release THIS
+	 * HopID: an inbound HELLO can rewrite link->remote_hopid from the
+	 * dispatch context between here and down_session, and releasing a
+	 * HopID that was never allocated both splats ida_free() and leaks
+	 * the real one -- after which the next session's alloc_in_hopid()
+	 * fails -EBUSY and the link never comes back.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	link->active_remote_hopid = remote_hopid;
 	link->in_hopid_held = true;
+	spin_unlock_irqrestore(&link->lock, flags);
 
 	link->ops->start_rings(link->hw);
 
@@ -285,9 +305,13 @@ err_stop_rings:
 	link->ops->stop_rings(link->hw);
 err_free_rings:
 	link->ops->free_rings(link->hw);
+	spin_lock_irqsave(&link->lock, flags);
 	if (link->in_hopid_held) {
-		link->ops->release_in_hopid(link->hw, remote_hopid);
 		link->in_hopid_held = false;
+		spin_unlock_irqrestore(&link->lock, flags);
+		link->ops->release_in_hopid(link->hw, remote_hopid);
+	} else {
+		spin_unlock_irqrestore(&link->lock, flags);
 	}
 	return ret;
 }
@@ -413,7 +437,12 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	had_rings = link->rings_up;
 	had_paths = link->paths_enabled;
 	had_hopid = link->in_hopid_held;
-	remote_hopid = link->remote_hopid;
+	/*
+	 * NOT link->remote_hopid: that field tracks the peer's latest HELLO
+	 * and an inbound HELLO can move it from the dispatch context while
+	 * this session is up. Undo exactly what bring_up did.
+	 */
+	remote_hopid = link->active_remote_hopid;
 	link->rings_up = false;
 	link->paths_enabled = false;
 	link->in_hopid_held = false;
@@ -477,7 +506,16 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 	lockdep_assert_held(&link->session_lock);
 
 	spin_lock_irqsave(&link->lock, flags);
-	if (link->removing || link->state == TBFRAME_STATE_DEAD) {
+	/*
+	 * Entry gate, not just a queue gate. tbframe_link_kick_locked()
+	 * refuses to re-arm a removing/parked/DEAD link, but a work item
+	 * already queued before the gate closed still runs, and the step is
+	 * also reachable directly. Re-checking here keeps the invariant
+	 * local: a parked session never advances, so the client's last
+	 * link_down() cannot be followed by a link_up().
+	 */
+	if (link->removing || link->parked ||
+	    link->state == TBFRAME_STATE_DEAD) {
 		spin_unlock_irqrestore(&link->lock, flags);
 		return;
 	}
@@ -494,14 +532,23 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 	}
 
 	if (!hello_done) {
+		unsigned int attempts;
+
 		ret = tbframe_link_hello_once(link);
 		if (ret) {
-			if (++link->hello_attempts >= TBFRAME_HELLO_RETRIES) {
-				pr_warn_ratelimited("%s: HELLO unanswered after %u attempts (%d); re-announcing services and retrying\n",
-						    link->name,
-						    link->hello_attempts, ret);
-				tbframe_link_reannounce(link);
+			/*
+			 * Under the lock: the inbound HELLO handler re-arms
+			 * this budget from the dispatch context.
+			 */
+			spin_lock_irqsave(&link->lock, flags);
+			attempts = ++link->hello_attempts;
+			if (attempts >= TBFRAME_HELLO_RETRIES)
 				link->hello_attempts = 0;
+			spin_unlock_irqrestore(&link->lock, flags);
+			if (attempts >= TBFRAME_HELLO_RETRIES) {
+				pr_warn_ratelimited("%s: HELLO unanswered after %u attempts (%d); re-announcing services and retrying\n",
+						    link->name, attempts, ret);
+				tbframe_link_reannounce(link);
 			}
 			tbframe_link_kick(link,
 					  msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
@@ -530,22 +577,25 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 		spin_unlock_irqrestore(&link->lock, flags);
 	}
 	if (!ready_sent) {
+		unsigned int attempts;
+
 		ret = tbframe_link_ready_once(link);
 		if (ret) {
-			if (++link->hs.attempts >= TBFRAME_READY_RETRIES) {
+			spin_lock_irqsave(&link->lock, flags);
+			attempts = ++link->hs.attempts;
+			if (attempts >= TBFRAME_READY_RETRIES)
+				tb_xdomain_handshake_reset(&link->hs);
+			spin_unlock_irqrestore(&link->lock, flags);
+			if (attempts >= TBFRAME_READY_RETRIES) {
 				/*
 				 * Like HELLO, READY must never give up for
 				 * good: a coordinated fleet reload exhausts
 				 * any finite budget while the peer settles.
-				 * Re-arm the handshake and re-announce.
+				 * The handshake was re-armed above; re-announce.
 				 */
 				pr_warn_ratelimited("%s: READY unanswered after %u attempts (%d); re-announcing services and retrying\n",
-						    link->name,
-						    link->hs.attempts, ret);
+						    link->name, attempts, ret);
 				tbframe_link_reannounce(link);
-				spin_lock_irqsave(&link->lock, flags);
-				tb_xdomain_handshake_reset(&link->hs);
-				spin_unlock_irqrestore(&link->lock, flags);
 			}
 			tbframe_link_kick(link,
 					  msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
@@ -588,7 +638,8 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 	int ret;
 
 	spin_lock_irqsave(&link->lock, flags);
-	if (link->removing || link->state != TBFRAME_STATE_UP) {
+	if (link->removing || link->parked ||
+	    link->state != TBFRAME_STATE_UP) {
 		spin_unlock_irqrestore(&link->lock, flags);
 		return;
 	}
@@ -641,8 +692,20 @@ static void tbframe_verify_workfn(struct work_struct *work)
 static void tbframe_verify_timer_fn(struct timer_list *t)
 {
 	struct tbframe_link *link = timer_container_of(link, t, verify_timer);
+	unsigned long flags;
 
-	queue_work(link->tf->wq, &link->verify_work);
+	/*
+	 * Re-queue gate, same discipline as tbframe_link_kick_locked(). The
+	 * timer_shutdown_sync() + cancel_work_sync() pair in link_destroy is
+	 * what actually guarantees quiescence (Documentation: the
+	 * timer-schedules-work-rearms-timer pattern in
+	 * kernel/time/timer.c:timer_shutdown_sync); this only keeps the
+	 * window small.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	if (!link->removing && !link->parked)
+		queue_work(link->tf->wq, &link->verify_work);
+	spin_unlock_irqrestore(&link->lock, flags);
 }
 
 /* Inbound control-plane packet for one link. Returns 1 when consumed. */
@@ -666,6 +729,24 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		return 0;
 	}
 	if (info.route != link->route)
+		return 0;
+
+	/*
+	 * Inbound-request vs teardown fence. A peer that is mid-handshake
+	 * while this side unbinds its service (or unloads) keeps HELLOing;
+	 * answering from a link whose rings/HopIDs/paths are being undone
+	 * mutates session state behind the teardown's back. Refuse and let
+	 * the peer retry -- convergence costs one retry interval, and the
+	 * teardown becomes provably free of inbound mutation.
+	 *
+	 * Returning 0 (not consumed) is deliberate: another link may still
+	 * want this packet, and an unconsumed request makes the core answer
+	 * the peer with an error rather than silence.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	ret = link->removing || link->state == TBFRAME_STATE_DEAD;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (ret)
 		return 0;
 
 	switch (info.op) {
@@ -758,23 +839,78 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 	}
 }
 
-int tbframe_handle_packet(struct tbframe *tf, const void *token,
-			  const void *buf, size_t size)
+/*
+ * Look up the next candidate link past @skip and take a reference to it.
+ * Returns NULL when the walk is exhausted. tf->lock held only here.
+ */
+static struct tbframe_link *tbframe_dispatch_next(struct tbframe *tf,
+						  const void *token,
+						  unsigned int *skip)
 {
-	struct tbframe_link *link;
-	int ret = 0;
+	struct tbframe_link *link, *target = NULL;
+	unsigned int idx = 0;
 
 	mutex_lock(&tf->lock);
 	list_for_each_entry(link, &tf->links, node) {
+		if (idx++ < *skip)
+			continue;
 		if (token && link->ops->match &&
 		    !link->ops->match(link->hw, token))
 			continue;
-		ret = tbframe_link_handle_packet(link, buf, size);
-		if (ret)
-			break;
+		/*
+		 * A link still on the list still holds its base reference:
+		 * tbframe_link_destroy() delists under tf->lock before it
+		 * drops that reference, so this get cannot resurrect a
+		 * dying link, and destroy's bounded refs-zero wait covers
+		 * the reference taken here.
+		 */
+		refcount_inc(&link->refcnt);
+		target = link;
+		*skip = idx;
+		break;
 	}
 	mutex_unlock(&tf->lock);
-	return ret;
+	return target;
+}
+
+/*
+ * Inbound control-plane dispatch. Runs from the thunderbolt core's XDomain
+ * dispatch walk, which is itself the ctl RX ring's callback context and
+ * holds the core's global xdomain_dispatch_lock across this call
+ * (drivers/thunderbolt/xdomain.c, commit 054b92c).
+ *
+ * Consequently this function must be SHORT and must never block on anything
+ * that can wait for the control channel: tf->lock is dropped before the
+ * per-link handler runs. Holding it across the handler used to close a
+ * three-way cycle -- dispatch blocked on tf->lock, tbframe_unregister_client()
+ * holding tf->lock while waiting for session_lock, and the session work
+ * holding session_lock inside tb_xdomain_request() waiting for a control
+ * response that only this very ctl RX worker can deliver. It resolved only
+ * on the 1 s control timeout, stalling every XDomain protocol on the host
+ * (including the core's own handshakes) for the duration, once per retry.
+ *
+ * The index cursor is re-evaluated under tf->lock on every step. A link
+ * removed mid-walk can shift the indices and cost one skipped delivery;
+ * the peer retries, and no reference or lock is held across the gap.
+ */
+int tbframe_handle_packet(struct tbframe *tf, const void *token,
+			  const void *buf, size_t size)
+{
+	unsigned int skip = 0;
+	int ret = 0;
+
+	for (;;) {
+		struct tbframe_link *link;
+
+		link = tbframe_dispatch_next(tf, token, &skip);
+		if (!link)
+			return ret;
+
+		ret = tbframe_link_handle_packet(link, buf, size);
+		tbframe_link_put(link);
+		if (ret)
+			return ret;
+	}
 }
 
 /* Uncharge and return a TX frame to the pool; lock held. Returns whether
@@ -1248,9 +1384,9 @@ int tbframe_link_destroy(struct tbframe_link *link,
 
 /* Client registration (one client per module instance). */
 
-int tbframe_register_client(const struct tbframe_client_ops *ops, void *ctx)
+int tbframe_register_client_tf(struct tbframe *tf,
+			       const struct tbframe_client_ops *ops, void *ctx)
 {
-	struct tbframe *tf = tbframe_instance();
 	struct tbframe_link *link;
 	unsigned long flags;
 
@@ -1268,10 +1404,11 @@ int tbframe_register_client(const struct tbframe_client_ops *ops, void *ctx)
 	tf->client_ctx = ctx;
 	up_write(&tf->client_rwsem);
 
-	/* Kick every session; established links replay link_up. */
+	/* Unpark and kick every session; established links replay link_up. */
 	mutex_lock(&tf->lock);
 	list_for_each_entry(link, &tf->links, node) {
 		spin_lock_irqsave(&link->lock, flags);
+		link->parked = false;
 		if (link->state == TBFRAME_STATE_UP)
 			link->announce_pending = true;
 		tbframe_link_kick_locked(link, 0);
@@ -1280,12 +1417,46 @@ int tbframe_register_client(const struct tbframe_client_ops *ops, void *ctx)
 	mutex_unlock(&tf->lock);
 	return 0;
 }
+
+int tbframe_register_client(const struct tbframe_client_ops *ops, void *ctx)
+{
+	return tbframe_register_client_tf(tbframe_instance(), ops, ctx);
+}
 EXPORT_SYMBOL_GPL(tbframe_register_client);
 
-void tbframe_unregister_client(void)
+/*
+ * Close one link for a departing client. Called with a reference held and
+ * NO tf->lock: down_session() runs a bounded publisher drain and a ring
+ * stop (tb_ring_stop() flushes the ring's work item), which must never be
+ * done under the lock the inbound dispatch path needs.
+ */
+static void tbframe_link_park(struct tbframe_link *link)
 {
-	struct tbframe *tf = tbframe_instance();
-	struct tbframe_link *link;
+	unsigned long flags;
+
+	/*
+	 * Park BEFORE closing. Between down_session() and the client_rwsem
+	 * fence below, an inbound HELLO/READY can still mark the handshake
+	 * and kick the session work, which would drive the link back UP and
+	 * deliver a link_up() to a client that has already seen its final
+	 * link_down() -- and then never see the matching link_down again.
+	 * Parked, every re-queue gate refuses, so link_down is delivered
+	 * exactly once per up link and is the last upcall.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	link->parked = true;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	cancel_delayed_work_sync(&link->session_work);
+
+	mutex_lock(&link->session_lock);
+	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
+	mutex_unlock(&link->session_lock);
+}
+
+void tbframe_unregister_client_tf(struct tbframe *tf)
+{
+	unsigned int skip = 0;
 
 	if (!tf)
 		return;
@@ -1293,20 +1464,28 @@ void tbframe_unregister_client(void)
 	/*
 	 * Close every link for the departing client: sessions drop to the
 	 * negotiation floor and are parked (CLOSED does not re-handshake);
-	 * a later register kicks them again.
+	 * a later register unparks and kicks them again. One link at a time,
+	 * referenced, with tf->lock dropped across the teardown.
 	 */
-	mutex_lock(&tf->lock);
-	list_for_each_entry(link, &tf->links, node) {
-		mutex_lock(&link->session_lock);
-		tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
-		mutex_unlock(&link->session_lock);
+	for (;;) {
+		struct tbframe_link *link;
+
+		link = tbframe_dispatch_next(tf, NULL, &skip);
+		if (!link)
+			break;
+		tbframe_link_park(link);
+		tbframe_link_put(link);
 	}
-	mutex_unlock(&tf->lock);
 
 	/* Fence: returns only when no upcall is running or can run again. */
 	down_write(&tf->client_rwsem);
 	tf->client_ops = NULL;
 	tf->client_ctx = NULL;
 	up_write(&tf->client_rwsem);
+}
+
+void tbframe_unregister_client(void)
+{
+	tbframe_unregister_client_tf(tbframe_instance());
 }
 EXPORT_SYMBOL_GPL(tbframe_unregister_client);
