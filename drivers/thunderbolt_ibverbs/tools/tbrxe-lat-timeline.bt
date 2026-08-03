@@ -1,0 +1,57 @@
+#!/usr/bin/env bpftrace
+/*
+ * Per-stage timeline of tbrxe ping-pong iterations. One line per event:
+ *   <ns> <EVT> cpu=<n> [op=<bth opcode> psn=<psn>] [ring=<ptr>]
+ * Correlate offline; exactly one WR in flight during ib_send_lat so
+ * event order is the iteration order.
+ *
+ * Contexts (from code):
+ *   POST  rxe_post_send        syscall (perftest task)
+ *   SEND  rxe_sender           rxe_wq worker (requester+completer)
+ *   RECV  rxe_receiver         rxe_wq worker (responder)
+ *   XMIT  tbframe_xmit         caller context (engine task)
+ *   ENQ   __tb_ring_enqueue    doorbell write
+ *   IRQ   ring_msix            hardirq
+ *   WORK  ring_work            ring workqueue worker
+ *   CLIRX tbrxe_client_rx      ring workqueue worker (copy + rxe_rcv)
+ *   TXC   tbframe_core_tx_complete  ring workqueue worker (TX reclaim)
+ *   CQ    rxe_cq_post          CQE visible to userspace poller
+ */
+
+kprobe:rxe_post_send    { printf("%llu POST cpu=%d\n", nsecs, cpu); }
+kprobe:rxe_sender       { printf("%llu SEND cpu=%d\n", nsecs, cpu); }
+kprobe:rxe_receiver     { printf("%llu RECV cpu=%d\n", nsecs, cpu); }
+
+kprobe:tbframe_xmit
+{
+	$d = *(uint64 *)arg1;          /* frame->data */
+	$op = *(uint8 *)$d;
+	$p2 = (uint32)(*(uint8 *)($d + 9));
+	$p1 = (uint32)(*(uint8 *)($d + 10));
+	$p0 = (uint32)(*(uint8 *)($d + 11));
+	printf("%llu XMIT cpu=%d op=%x psn=%u\n", nsecs, cpu,
+	       $op, ($p2 << 16) | ($p1 << 8) | $p0);
+}
+
+kprobe:__tb_ring_enqueue
+	{ printf("%llu ENQ cpu=%d ring=%llx\n", nsecs, cpu, (uint64)arg0); }
+kprobe:ring_msix
+	{ printf("%llu IRQ cpu=%d ring=%llx\n", nsecs, cpu, (uint64)arg1); }
+kprobe:ring_work
+	{ printf("%llu WORK cpu=%d work=%llx\n", nsecs, cpu, (uint64)arg0); }
+
+kprobe:tbframe_core_tx_complete
+	{ printf("%llu TXC cpu=%d\n", nsecs, cpu); }
+
+kprobe:tbrxe_client_rx
+{
+	$d = *(uint64 *)arg2;          /* frame->data */
+	$op = *(uint8 *)$d;
+	$p2 = (uint32)(*(uint8 *)($d + 9));
+	$p1 = (uint32)(*(uint8 *)($d + 10));
+	$p0 = (uint32)(*(uint8 *)($d + 11));
+	printf("%llu CLIRX cpu=%d op=%x psn=%u\n", nsecs, cpu,
+	       $op, ($p2 << 16) | ($p1 << 8) | $p0);
+}
+
+kprobe:rxe_cq_post      { printf("%llu CQ cpu=%d\n", nsecs, cpu); }
