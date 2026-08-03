@@ -104,12 +104,24 @@ awk -v add_completion="$add_completion" \
 		print "bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec);"
 		next
 	}
-	add_handler == 1 && in_ph == 1 && \
-	    $0 ~ /int \(\*callback\)\(const void \*buf, size_t size, void \*data\);/ {
-		print
+	# ->callback_xd is APPENDED after ->list, never inserted mid-struct: a
+	# consumer module compiled against the STOCK header but linked with the
+	# tbfix Module.symvers loads cleanly (CRCs come from the symvers file)
+	# yet lays out uuid/callback/data/list at the stock offsets and its
+	# storage ends at ->list. A mid-struct insertion shifted ->data onto the
+	# offset the core reads as ->callback_xd, and the dispatch walk jumped
+	# through the registrant data pointer (appmana-025 NX-execute panic,
+	# kdump 202608031305). With the member appended, every stock field keeps
+	# its stock offset and the core only reads ->callback_xd for registrants
+	# that left ->callback NULL (which therefore provide the extended
+	# struct). NOTE: this awk program lives in a single-quoted sh string;
+	# no apostrophes in comments.
+	add_handler == 1 && in_ph == 1 && $0 == "};" {
 		print "#define TB_PROTOCOL_HANDLER_HAS_XDOMAIN 1"
 		print "\tint (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,"
 		print "\t\t\t   void *data);"
+		print "};"
+		in_ph = 0
 		next
 	}
 	add_nhi == 1 && in_nhi == 1 && $0 == "};" {

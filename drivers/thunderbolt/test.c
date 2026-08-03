@@ -7,7 +7,9 @@
  */
 
 #include <kunit/test.h>
+#include <linux/completion.h>
 #include <linux/idr.h>
+#include <linux/kthread.h>
 
 #include "tb.h"
 #include "tunnel.h"
@@ -3421,6 +3423,246 @@ static void tb_test_xdomain_icm_teardown_never_touches_lane_hardware(struct kuni
 		"firmware-CM teardown must not issue synchronous lane register I/O after an XDomain disconnect");
 }
 
+/*
+ * XDomain protocol handler ABI and reload-race regressions (appmana-025
+ * kdump 202608031305). A tbframe.ko rebuilt against the stock
+ * <linux/thunderbolt.h> registered a handler laid out uuid/callback/data/
+ * list while this core read the extended layout: the walk in
+ * tb_xdomain_handle_request() fetched ->callback_xd from the offset the
+ * module had written ->data into and jumped into the module's .bss
+ * (NX-execute panic in ring_work, RIP == tbframe_global+0x0, data arg 0).
+ * The extended member must therefore live BEHIND the stock members, and
+ * dispatch must never read it for a registrant that set ->callback (whose
+ * storage may end at ->list). Independently,
+ * tb_unregister_protocol_handler() used to return while a dispatch walk
+ * could still be inside the handler's callback, so a module reload could
+ * free code the walk was executing.
+ */
+
+static const uuid_t tb_test_handler_uuid =
+	UUID_INIT(0x3b9d1c60, 0x8f24, 0x4b11, 0xa5, 0x40,
+		  0x0e, 0x0f, 0x27, 0x1c, 0x9f, 0x11);
+
+struct handler_test_ctx {
+	struct completion entered;
+	struct completion release;
+	struct completion dispatch_done;
+	struct completion unreg_done;
+	struct tb_protocol_handler *unreg_handler;
+	struct tb *tb;
+	struct tb_xdp_header pkt;
+	atomic_t blocking_calls;
+	atomic_t stock_calls;
+	atomic_t xd_calls;
+	atomic_t wrong_calls;
+};
+
+static struct tb *tb_test_handler_domain(struct kunit *test)
+{
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, tb);
+	mutex_init(&tb->lock);
+	tb->root_switch = alloc_host(test);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, tb->root_switch);
+	return tb;
+}
+
+static void tb_test_handler_fill_pkt(struct tb_xdp_header *hdr)
+{
+	memset(hdr, 0, sizeof(*hdr));
+	hdr->xd_hdr.length_sn = sizeof(*hdr) / 4 - sizeof(hdr->xd_hdr) / 4;
+	uuid_copy(&hdr->uuid, &tb_test_handler_uuid);
+}
+
+/*
+ * The extended source-aware member may only be appended after the stock
+ * members: a registrant compiled against the stock header stores
+ * uuid/callback/data/list at these exact offsets and its storage ends at
+ * ->list. Reordering (the original mid-struct insertion of ->callback_xd)
+ * re-introduces the NX-execute panic.
+ */
+static void tb_test_xdomain_handler_abi_stock_offsets(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, offsetof(struct tb_protocol_handler, uuid),
+			0 * sizeof(void *));
+	KUNIT_EXPECT_EQ(test, offsetof(struct tb_protocol_handler, callback),
+			1 * sizeof(void *));
+	KUNIT_EXPECT_EQ(test, offsetof(struct tb_protocol_handler, data),
+			2 * sizeof(void *));
+	KUNIT_EXPECT_EQ(test, offsetof(struct tb_protocol_handler, list),
+			3 * sizeof(void *));
+	KUNIT_EXPECT_GE(test, offsetof(struct tb_protocol_handler, callback_xd),
+			offsetof(struct tb_protocol_handler, list) +
+			sizeof(struct list_head));
+}
+
+static int tb_test_handler_stock_cb(const void *buf, size_t size, void *data)
+{
+	struct handler_test_ctx *ctx = data;
+
+	atomic_inc(&ctx->stock_calls);
+	return 1;
+}
+
+static int tb_test_handler_poison_xd_cb(struct tb_xdomain *xd, const void *buf,
+					size_t size, void *data)
+{
+	struct handler_test_ctx *ctx = data;
+
+	atomic_inc(&ctx->wrong_calls);
+	return 1;
+}
+
+/*
+ * A registrant that set ->callback may be stock-built: its storage ends at
+ * ->list, so ->callback_xd would read adjacent garbage. Dispatch must call
+ * ->callback and never even look at ->callback_xd (poisoned here to stand
+ * in for that garbage).
+ */
+static void tb_test_xdomain_handler_dispatch_source_blind_registrant(struct kunit *test)
+{
+	struct tb_protocol_handler *handler;
+	struct handler_test_ctx *ctx;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ctx);
+	ctx->tb = tb_test_handler_domain(test);
+	tb_test_handler_fill_pkt(&ctx->pkt);
+
+	handler = kunit_kzalloc(test, sizeof(*handler), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, handler);
+	handler->uuid = &tb_test_handler_uuid;
+	handler->callback = tb_test_handler_stock_cb;
+	handler->callback_xd = tb_test_handler_poison_xd_cb;
+	handler->data = ctx;
+	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(handler), 0);
+
+	KUNIT_EXPECT_TRUE(test,
+		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
+					  &ctx->pkt, sizeof(ctx->pkt)));
+
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->stock_calls), 1);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->wrong_calls), 0);
+
+	tb_unregister_protocol_handler(handler);
+}
+
+static int tb_test_handler_blocking_cb(const void *buf, size_t size, void *data)
+{
+	struct handler_test_ctx *ctx = data;
+
+	atomic_inc(&ctx->blocking_calls);
+	complete(&ctx->entered);
+	wait_for_completion(&ctx->release);
+	return 1;
+}
+
+static int tb_test_handler_new_instance_xd_cb(struct tb_xdomain *xd,
+					      const void *buf, size_t size,
+					      void *data)
+{
+	struct handler_test_ctx *ctx = data;
+
+	atomic_inc(&ctx->xd_calls);
+	return 1;
+}
+
+static int tb_test_handler_dispatch_thread(void *arg)
+{
+	struct handler_test_ctx *ctx = arg;
+
+	tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ, &ctx->pkt,
+				  sizeof(ctx->pkt));
+	complete(&ctx->dispatch_done);
+	return 0;
+}
+
+static int tb_test_handler_unreg_thread(void *arg)
+{
+	struct handler_test_ctx *ctx = arg;
+
+	tb_unregister_protocol_handler(ctx->unreg_handler);
+	complete(&ctx->unreg_done);
+	return 0;
+}
+
+/*
+ * The module reload race: the peer's control packet is being dispatched
+ * into the old instance's callback while that instance unregisters.
+ * tb_unregister_protocol_handler() must not return until the in-flight
+ * callback has finished, and a re-registered new instance (same UUID,
+ * fresh data) must then receive subsequent packets.
+ */
+static void tb_test_xdomain_handler_unregister_waits_for_dispatch(struct kunit *test)
+{
+	struct tb_protocol_handler *old_inst, *new_inst;
+	struct handler_test_ctx *ctx;
+	struct task_struct *task;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ctx);
+	init_completion(&ctx->entered);
+	init_completion(&ctx->release);
+	init_completion(&ctx->dispatch_done);
+	init_completion(&ctx->unreg_done);
+	ctx->tb = tb_test_handler_domain(test);
+	tb_test_handler_fill_pkt(&ctx->pkt);
+
+	old_inst = kunit_kzalloc(test, sizeof(*old_inst), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, old_inst);
+	old_inst->uuid = &tb_test_handler_uuid;
+	old_inst->callback = tb_test_handler_blocking_cb;
+	old_inst->data = ctx;
+	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(old_inst), 0);
+	ctx->unreg_handler = old_inst;
+
+	task = kthread_run(tb_test_handler_dispatch_thread, ctx,
+			   "tb-test-dispatch");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, task);
+	KUNIT_ASSERT_NE(test,
+			wait_for_completion_timeout(&ctx->entered, 5 * HZ),
+			0UL);
+
+	task = kthread_run(tb_test_handler_unreg_thread, ctx, "tb-test-unreg");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, task);
+
+	/*
+	 * The callback is still blocked, so unregistration must not have
+	 * returned. The pre-fix code returned immediately here, letting the
+	 * module free the callback it was executing.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			wait_for_completion_timeout(&ctx->unreg_done,
+						    msecs_to_jiffies(200)),
+			0UL);
+
+	complete(&ctx->release);
+	KUNIT_EXPECT_NE(test,
+			wait_for_completion_timeout(&ctx->unreg_done, 5 * HZ),
+			0UL);
+	KUNIT_EXPECT_NE(test,
+			wait_for_completion_timeout(&ctx->dispatch_done, 5 * HZ),
+			0UL);
+
+	/* Reload: a new instance takes over the same UUID. */
+	new_inst = kunit_kzalloc(test, sizeof(*new_inst), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, new_inst);
+	new_inst->uuid = &tb_test_handler_uuid;
+	new_inst->callback_xd = tb_test_handler_new_instance_xd_cb;
+	new_inst->data = ctx;
+	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(new_inst), 0);
+
+	KUNIT_EXPECT_TRUE(test,
+		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
+					  &ctx->pkt, sizeof(ctx->pkt)));
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->xd_calls), 1);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->blocking_calls), 1);
+
+	tb_unregister_protocol_handler(new_inst);
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -3433,6 +3675,9 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_never_bonds_after_services_publish),
 	KUNIT_CASE(tb_test_xdomain_bond_abort_preserves_single_lane),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
+	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),
+	KUNIT_CASE(tb_test_xdomain_handler_dispatch_source_blind_registrant),
+	KUNIT_CASE(tb_test_xdomain_handler_unregister_waits_for_dispatch),
 	KUNIT_CASE(tb_test_xdomain_properties_stale),
 	KUNIT_CASE(tb_test_xdomain_reboot_stranding),
 	KUNIT_CASE(tb_test_xdomain_coreset_strand),

@@ -82,6 +82,20 @@ tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
  */
 static DEFINE_MUTEX(xdomain_lock);
 
+/*
+ * Serializes the protocol handler dispatch walk against unregistration.
+ * Held across the whole walk in tb_xdomain_handle_request() INCLUDING the
+ * handler callbacks (xdomain_lock alone cannot do this: it must be dropped
+ * around the callback, which may itself register handlers or property
+ * directories). Because tb_unregister_protocol_handler() takes this lock,
+ * its return guarantees no callback of that handler is running or can run
+ * again, so a service module may free the handler and unload immediately
+ * afterwards. Consequently a handler callback must never call
+ * tb_unregister_protocol_handler() itself. Lock order:
+ * xdomain_dispatch_lock -> xdomain_lock.
+ */
+static DEFINE_MUTEX(xdomain_dispatch_lock);
+
 /* Properties exposed to the remote domains */
 static struct tb_property_dir *xdomain_property_dir;
 static u32 xdomain_property_block_gen;
@@ -629,6 +643,11 @@ static int tb_xdp_link_state_change_response(struct tb_ctl *ctl, u64 route,
  */
 int tb_register_protocol_handler(struct tb_protocol_handler *handler)
 {
+	/*
+	 * Short-circuit order matters: a stock-built registrant's storage
+	 * ends at ->list, so ->callback_xd may only be read once ->callback
+	 * is known to be NULL.
+	 */
 	if (!handler->uuid || (!handler->callback && !handler->callback_xd))
 		return -EINVAL;
 	if (uuid_equal(handler->uuid, &tb_xdp_uuid))
@@ -650,9 +669,19 @@ EXPORT_SYMBOL_GPL(tb_register_protocol_handler);
  */
 void tb_unregister_protocol_handler(struct tb_protocol_handler *handler)
 {
+	/*
+	 * The dispatch lock waits out a walk currently inside a handler
+	 * callback; once held, no walk can observe the handler again. On
+	 * appmana-025 the old delist-only unregister let a service module
+	 * unload while the peer's control packet was still being dispatched,
+	 * and the next reload's dispatch went through stale module memory
+	 * (kdump 202608031305). Must not be called from a handler callback.
+	 */
+	mutex_lock(&xdomain_dispatch_lock);
 	mutex_lock(&xdomain_lock);
 	list_del_init(&handler->list);
 	mutex_unlock(&xdomain_lock);
+	mutex_unlock(&xdomain_dispatch_lock);
 }
 EXPORT_SYMBOL_GPL(tb_unregister_protocol_handler);
 
@@ -2854,7 +2883,7 @@ EXPORT_SYMBOL_GPL(tb_xdomain_find_by_route);
 bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 			       const void *buf, size_t size)
 {
-	const struct tb_protocol_handler *handler, *tmp;
+	const struct tb_protocol_handler *handler;
 	const struct tb_xdp_header *hdr = buf;
 	struct tb_xdomain *source_xd = NULL;
 	unsigned int length;
@@ -2883,23 +2912,44 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 		~BIT_ULL(63);
 	source_xd = tb_xdomain_find_by_route_locked(tb, route);
 
+	/*
+	 * The dispatch lock is held across the whole walk including the
+	 * callbacks, so tb_unregister_protocol_handler() (which takes it)
+	 * cannot delist or free a handler this walk is about to call, and
+	 * dropping xdomain_lock around the callback can no longer leave the
+	 * cached next pointer dangling. Only registration (xdomain_lock
+	 * alone) may run during a callback, and list_add_tail keeps the walk
+	 * cursor valid.
+	 */
+	mutex_lock(&xdomain_dispatch_lock);
 	mutex_lock(&xdomain_lock);
-	list_for_each_entry_safe(handler, tmp, &protocol_handlers, list) {
+	list_for_each_entry(handler, &protocol_handlers, list) {
 		if (!uuid_equal(&hdr->uuid, handler->uuid))
 			continue;
 
 		mutex_unlock(&xdomain_lock);
-		if (handler->callback_xd)
+		/*
+		 * ->callback first: a registrant that set it may be built
+		 * against the stock <linux/thunderbolt.h>, whose struct ends
+		 * at ->list -- ->callback_xd may only be read once ->callback
+		 * is known to be NULL (a source-aware registrant, which
+		 * always provides the extended struct). Reading ->callback_xd
+		 * unconditionally is how a stock-built tbframe.ko sent this
+		 * core through its ->data pointer (appmana-025 NX panic,
+		 * kdump 202608031305).
+		 */
+		if (handler->callback)
+			ret = handler->callback(buf, size, handler->data);
+		else if (handler->callback_xd)
 			ret = handler->callback_xd(source_xd, buf, size,
 						   handler->data);
-		else if (handler->callback)
-			ret = handler->callback(buf, size, handler->data);
 		mutex_lock(&xdomain_lock);
 
 		if (ret)
 			break;
 	}
 	mutex_unlock(&xdomain_lock);
+	mutex_unlock(&xdomain_dispatch_lock);
 	tb_xdomain_put(source_xd);
 
 	return ret > 0;

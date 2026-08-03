@@ -48,6 +48,11 @@ rsync -a --delete --exclude='.git' "$REPO/drivers/net/thunderbolt/" "$TREE/drive
 # (completion.h, callback_xd/TB_PROTOCOL_HANDLER_HAS_XDOMAIN, domain_released).
 # The shim reads <ksrc>/include/linux/thunderbolt.h and writes <out>/linux/;
 # here ksrc == the overlay tree, and we copy the result back in place.
+# Restore the pristine upstream header first: a previous run overwrote it
+# with the shimmed copy, and the shim's idempotency grep would then keep
+# whatever (possibly stale) layout that old copy carries instead of applying
+# the current one.
+git -C "$TREE" checkout -- include/linux/thunderbolt.h
 HDR_GEN="$(mktemp -d)"
 "$REPO/dkms/tbfix-gen-thunderbolt-header.sh" "$TREE" "$HDR_GEN"
 cp "$HDR_GEN/linux/thunderbolt.h" "$TREE/include/linux/thunderbolt.h"
