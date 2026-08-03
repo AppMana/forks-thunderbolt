@@ -1,0 +1,91 @@
+From 7f42549f1970d77e7e095b3311b4fcb6a82208d8 Mon Sep 17 00:00:00 2001
+From: AppMana <accounts@appmana.com>
+Date: Mon, 3 Aug 2026 16:38:45 -0700
+Subject: [PATCH] providers/rxe: bind to out-of-tree usb4_rdma (tbrxe) devices
+
+tbrxe is an rxe-derived software RDMA engine that runs over Thunderbolt/USB4
+frames instead of UDP. It presents the same uverbs ABI as rdma_rxe, so this
+provider drives it unchanged, but it cannot share RDMA_DRIVER_RXE: the kernel's
+ib_unregister_driver() unregisters every device carrying a given driver id, so
+unloading rdma_rxe tore down live tbrxe devices, and tbrxe could not use that
+same fence for its own module exit without destroying the rdma_rxe rail.
+
+Match tbrxe's private driver id as well, and carry the per-device id into the
+uverbs ioctl header instead of hardcoding RDMA_DRIVER_RXE, which the kernel
+rejects with EINVAL on mismatch. Matching stays driver-id only: the usb4_rdma*
+device name also belongs to the legacy out-of-tree provider, which has its own
+ABI.
+---
+ providers/rxe/rxe.c | 10 +++++++++-
+ providers/rxe/rxe.h | 17 +++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/providers/rxe/rxe.c b/providers/rxe/rxe.c
+index 62615e6..8ea4648 100644
+--- a/providers/rxe/rxe.c
++++ b/providers/rxe/rxe.c
+@@ -61,6 +61,7 @@ static void rxe_free_context(struct ibv_context *ibctx);
+ 
+ static const struct verbs_match_ent hca_table[] = {
+ 	VERBS_DRIVER_ID(RDMA_DRIVER_RXE),
++	VERBS_DRIVER_ID(RDMA_DRIVER_USB4_RDMA),
+ 	VERBS_NAME_MATCH("rxe", NULL),
+ 	{},
+ };
+@@ -1867,7 +1868,7 @@ static struct verbs_context *rxe_alloc_context(struct ibv_device *ibdev,
+ 	struct ib_uverbs_get_context_resp resp;
+ 
+ 	context = verbs_init_and_alloc_context(ibdev, cmd_fd, context, ibv_ctx,
+-					       RDMA_DRIVER_RXE);
++					       to_rdev(ibdev)->driver_id);
+ 	if (!context)
+ 		return NULL;
+ 
+@@ -1909,6 +1910,13 @@ static struct verbs_device *rxe_device_alloc(struct verbs_sysfs_dev *sysfs_dev)
+ 		return NULL;
+ 
+ 	dev->abi_version = sysfs_dev->abi_ver;
++	/*
++	 * Devices matched by name or modalias rather than by driver id report
++	 * RDMA_DRIVER_UNKNOWN; those can only be the in-tree engine, whose id
++	 * this provider used to hardcode.
++	 */
++	dev->driver_id = sysfs_dev->driver_id != RDMA_DRIVER_UNKNOWN ?
++			 sysfs_dev->driver_id : RDMA_DRIVER_RXE;
+ 
+ 	return &dev->ibv_dev;
+ }
+diff --git a/providers/rxe/rxe.h b/providers/rxe/rxe.h
+index 6da22b8..d4c45c2 100644
+--- a/providers/rxe/rxe.h
++++ b/providers/rxe/rxe.h
+@@ -42,9 +42,26 @@
+ #include <rdma/rdma_user_rxe.h>
+ #include "rxe-abi.h"
+ 
++/*
++ * Out-of-tree tbrxe (usb4_rdma*) devices speak the same uverbs ABI as the
++ * in-tree rdma_rxe engine but must own a distinct RDMA driver id, because
++ * ib_unregister_driver() unregisters by driver id and `rmmod rdma_rxe` would
++ * otherwise sweep live tbrxe devices off the node. There is no upstream enum
++ * value for an out-of-tree USB4 provider, so tbrxe uses a private id far
++ * outside the allocated range.
++ */
++#define RDMA_DRIVER_USB4_RDMA	0x55534234	/* "USB4" */
++
+ struct rxe_device {
+ 	struct verbs_device	ibv_dev;
+ 	int	abi_version;
++	/*
++	 * The driver id the kernel reported for this device: RDMA_DRIVER_RXE
++	 * for rdma_rxe, RDMA_DRIVER_USB4_RDMA for tbrxe. It has to be echoed
++	 * back in the uverbs ioctl header, which the kernel rejects with
++	 * EINVAL on mismatch (drivers/infiniband/core/uverbs_ioctl.c).
++	 */
++	uint32_t driver_id;
+ };
+ 
+ struct rxe_context {
+-- 
+2.43.0
+

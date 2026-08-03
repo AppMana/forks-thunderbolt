@@ -34,6 +34,35 @@
  */
 #define RXE_UVERBS_ABI_VERSION		2
 
+/*
+ * tbrxe's own RDMA driver id.
+ *
+ * The driver id is the unregistration namespace, not just a label:
+ * ib_unregister_driver() (drivers/infiniband/core/device.c:1639) sweeps every
+ * device in the global xarray whose ops.driver_id matches, with no owner or
+ * module check. While tbrxe inherited RDMA_DRIVER_RXE from the rxe fork,
+ * `rmmod rdma_rxe` -- whose exit path is ib_unregister_driver(RDMA_DRIVER_RXE)
+ * -- tore down every live tbrxe device on the node, and symmetrically tbrxe
+ * could not use that fence for its own module exit without destroying the
+ * rxe_lan fallback rail.
+ *
+ * enum rdma_driver_id (include/uapi/rdma/ib_user_ioctl_verbs.h:235) has no
+ * value for an out-of-tree USB4 provider, and RDMA_DRIVER_UNKNOWN is not a
+ * private namespace: ib_core documents and implements it as "matches all" in
+ * device lookup (device.c:367-381, :2364-2381) and rdma-core skips driver-id
+ * matching entirely when the kernel reports it (libibverbs/init.c:326, :448).
+ * Claiming the next free enum slot would collide with whatever upstream
+ * allocates there next, so use a value far outside the allocated range.
+ *
+ * Kernel side this is only ever compared for equality (device.c:379, :1646,
+ * :2381, uverbs_ioctl.c:570) and exported to userspace as a u32 netlink
+ * attribute (RDMA_NLDEV_ATTR_UVERBS_DRIVER_ID, uverbs_main.c:1065).
+ * Userspace side it is an ABI change: see
+ * ../../packaging/rdma-core-patches/0004-providers-rxe-bind-to-usb4_rdma-devices.patch
+ * -- tbrxe.ko and rdma-core must be rolled together.
+ */
+#define RDMA_DRIVER_USB4_RDMA	((enum rdma_driver_id)0x55534234)	/* "USB4" */
+
 #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt, __func__, ##__VA_ARGS__)
 #define rxe_dbg_dev(rxe, fmt, ...) ibdev_dbg(&(rxe)->ib_dev,		\
 		"%s: " fmt, __func__, ##__VA_ARGS__)

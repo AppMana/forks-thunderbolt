@@ -27,7 +27,31 @@ puts only these two files in the standalone `usb4-rdma-provider` package:
 0003-libibverbs-verbs.h-declare-verbs_provider_usb4_rdma.patch
    Declares the provider's exported registration symbol for static-provider
    builds.
+
+0004-providers-rxe-bind-to-usb4_rdma-devices.patch
+   Teaches the in-tree `rxe` provider tbrxe's private RDMA driver id.
 ```
+
+## Patch 0004 is not optional once tbrxe.ko is updated
+
+Patches 0001-0003 are about the *legacy* `usb4_rdma` engine (kernel
+`ibdev.c`). Patch 0004 is about `tbrxe.ko`, the rxe-derived engine, which is
+driven by the stock `rxe` provider because it speaks the rxe uverbs ABI.
+
+tbrxe used to register with `RDMA_DRIVER_RXE`, which is how the stock `rxe`
+provider found it. It no longer can: `ib_unregister_driver()` unregisters by
+driver id with no owner check, so `rmmod rdma_rxe` swept live tbrxe devices
+off the node, and tbrxe could not use that fence for its own module exit
+without destroying the `rxe_lan` rail. tbrxe now owns
+`RDMA_DRIVER_USB4_RDMA` (`kernel/tbrxe/rxe.h`).
+
+The driver id is load-bearing in userspace twice over: rdma-core matches
+providers by driver id first (`libibverbs/init.c`, `try_drivers()`), and the
+provider stamps its compiled-in id into every uverbs ioctl header, which the
+kernel rejects with `EINVAL` on mismatch. A name match alone cannot fix
+either. **So `tbrxe.ko` and a patch-0004 rdma-core must be rolled together:
+a new tbrxe against a stock rdma-core leaves `usb4_rdma*` devices with no
+userspace provider.**
 
 The patches are auto-generated from the source in `userspace/usb4_rdma/`
 via `git format-patch`, and apply cleanly against upstream rdma-core ≥ v62.

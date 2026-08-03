@@ -1436,7 +1436,8 @@ static int rxe_enable_driver(struct ib_device *ib_dev)
 
 static const struct ib_device_ops rxe_dev_ops = {
 	.owner = THIS_MODULE,
-	.driver_id = RDMA_DRIVER_RXE,
+	/* tbrxe's own id, NOT RDMA_DRIVER_RXE: see rxe.h. */
+	.driver_id = RDMA_DRIVER_USB4_RDMA,
 	.uverbs_abi_ver = RXE_UVERBS_ABI_VERSION,
 
 	.alloc_hw_port_stats = rxe_ib_alloc_hw_port_stats,
