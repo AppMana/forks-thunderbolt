@@ -991,19 +991,35 @@ void tb_ring_stop(struct tb_ring *ring)
 	spin_lock(&ring->lock);
 	dev_dbg(&ring->nhi->pdev->dev, "stopping %s %d\n",
 		RING_TYPE(ring), ring->hop);
-	if (ring->nhi->going_away)
-		goto err;
 	if (!ring->running) {
 		dev_WARN(&ring->nhi->pdev->dev, "%s %d already stopped\n",
 			 RING_TYPE(ring), ring->hop);
 		goto err;
 	}
-	ring_interrupt_active(ring, false);
 
-	ring_iowrite32options(ring, 0, 0);
-	ring_iowrite64desc(ring, 0, 0);
-	ring_iowrite32desc(ring, 0, 8);
-	ring_iowrite32desc(ring, 0, 12);
+	/*
+	 * A poisoned NHI skips the MMIO, never the software cancel.
+	 *
+	 * ring->running is what makes ring_work() take its cancel branch and
+	 * complete every in-flight and queued frame with canceled = true.
+	 * Bailing out before clearing it left the flag set, so the
+	 * flush_work() below ran ring_work()'s NORMAL branch, which only
+	 * completes frames the (gone) hardware marked done -- i.e. none.
+	 * Every frame stayed in ->in_flight with its callback unrun, so a
+	 * service driver's per-frame references never dropped: teardown then
+	 * burned its full bounded wait and force-leaked the link on every
+	 * surprise removal, which is exactly when unloading has to work.
+	 * That also silently broke this function's documented contract
+	 * above.
+	 */
+	if (!ring->nhi->going_away) {
+		ring_interrupt_active(ring, false);
+
+		ring_iowrite32options(ring, 0, 0);
+		ring_iowrite64desc(ring, 0, 0);
+		ring_iowrite32desc(ring, 0, 8);
+		ring_iowrite32desc(ring, 0, 12);
+	}
 	ring->head = 0;
 	ring->tail = 0;
 	ring->running = false;
