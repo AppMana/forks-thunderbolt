@@ -61,8 +61,25 @@ const struct tbframe_client_ops *tbrxe_frame_client_ops(void);
 /* The ib_device published for one tbframe link (NULL when none). */
 struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink);
 
+/*
+ * dealloc_driver tail: release the link record and GID-anchor netdev that
+ * belong to @rxe. Called from rxe_dealloc(), the last op ib_core invokes on
+ * a device, because unpublishing is asynchronous
+ * (ib_unregister_device_queued) and nothing tied to the device's lifetime
+ * may be freed before then. No-op for a device that never got a record.
+ */
+void tbrxe_link_release(struct rxe_dev *rxe);
+
+/*
+ * Wait for every queued unpublish to have run its dealloc_driver. Sleeps;
+ * callable from module exit and from tests, never from a tbframe upcall.
+ */
+void tbrxe_frame_drain(void);
+
 /* Client lifecycle, driven from rxe.c module init/exit. Devices are
  * created per link at link_up; the module owns none of its own.
+ * tbrxe_frame_unregister() is a full fence: on return no upcall, no queued
+ * unregistration and no driver op of this module can still be running.
  */
 int tbrxe_frame_register(void);
 void tbrxe_frame_unregister(void);

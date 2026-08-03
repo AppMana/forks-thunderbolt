@@ -111,6 +111,16 @@ static struct {
 	.publish_lock = __MUTEX_INITIALIZER(tbrxe.publish_lock),
 };
 
+/*
+ * Unpublish accounting. Unpublishing is asynchronous (see
+ * tbrxe_link_unpublish()), so the module needs its own count of devices whose
+ * teardown has been queued but whose driver-private state (the record and its
+ * GID-anchor netdev, released from rxe_dealloc()) has not been freed yet.
+ * tbrxe_frame_drain() is the fence.
+ */
+static atomic_t tbrxe_unpublishing = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(tbrxe_unpublish_waitq);
+
 static void tbrxe_kick_parked_qps(struct rxe_dev *rxe);
 
 /* Weak: the production binding in tbrxe_tbframe_glue.c overrides this. */
@@ -391,6 +401,76 @@ static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info
 		return ERR_PTR(err);
 	}
 	return ndev;
+}
+
+/* ---- publish / unpublish lifecycle ------------------------------------ */
+
+/*
+ * Start tearing down one link's device. The caller has already taken the
+ * record off tbrxe.links, so no upcall can find it again.
+ *
+ * ASYNCHRONOUS ON PURPOSE. tbrxe has no .disassociate_ucontext (its user
+ * mappings are untracked remap_vmalloc_range() mappings, rxe_mmap.c, which
+ * uverbs_user_mmap_disassociate() cannot zap -- same as upstream rxe and
+ * siw), so ib_uverbs_remove_one() takes the wait_clients path
+ * (drivers/infiniband/core/uverbs_main.c:1254-1284) and a synchronous
+ * ib_unregister_device() blocks with no timeout until every userspace
+ * process closes its verbs FD. This runs from a tbframe upcall (its
+ * workqueue) and from module exit, neither of which may block on userspace,
+ * so use the queued form -- the same choice rxe (rxe_net.c:589) and siw
+ * (siw_main.c:391) make in their netdev-loss callbacks. It also removes the
+ * publish_lock -> rtnl nesting the synchronous form had.
+ *
+ * The corollary (ib_unregister_device_queued kernel-doc, device.c:1663-1687)
+ * is that module exit MUST fence with ib_unregister_driver(); see
+ * tbrxe_frame_unregister().
+ */
+static void tbrxe_link_unpublish(struct tbrxe_link *link)
+{
+	atomic_inc(&tbrxe_unpublishing);
+	ib_unregister_device_queued(&link->rxe->ib_dev);
+}
+
+/*
+ * dealloc_driver tail (rxe_dealloc()): the last op ib_core calls on the
+ * device (ib_dealloc_device(), device.c:690-693), so this is the only point
+ * at which the record and its GID-anchor netdev may be freed. Freeing the
+ * netdev any earlier would make unregister_netdev() spin waiting for the
+ * reference ib_device_set_netdev() holds, which ib_core only drops in
+ * free_netdevs() during unregistration (device.c:1566, :707).
+ *
+ * Also reached for a device that failed registration and is being dropped
+ * with ib_dealloc_device(); that path clears rxe->tbl_link first and does
+ * its own unwind, so this becomes a no-op there.
+ */
+void tbrxe_link_release(struct rxe_dev *rxe)
+{
+	struct tbrxe_link *link = rxe->tbl_link;
+	unsigned long flags;
+
+	if (!link)
+		return;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	rxe->tbl_link = NULL;
+	link->rxe = NULL;
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+
+	unregister_netdev(link->ndev);
+	free_netdev(link->ndev);
+	kfree(link);
+
+	if (atomic_dec_and_test(&tbrxe_unpublishing))
+		wake_up(&tbrxe_unpublish_waitq);
+}
+
+/*
+ * Wait until every queued unpublish has run its dealloc_driver, i.e. until
+ * tbrxe owns no per-link state any more. Sleeps; never called from an upcall.
+ */
+void tbrxe_frame_drain(void)
+{
+	wait_event(tbrxe_unpublish_waitq, !atomic_read(&tbrxe_unpublishing));
 }
 
 /* ---- packet paths ------------------------------------------------------ */
@@ -846,7 +926,14 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 		pr_err("tbrxe: publishing ib_device for link %s failed: %d\n",
 		       tbrxe.ops && tbrxe.ops->link_name ?
 				tbrxe.ops->link_name(tblink) : "?", err);
-		/* dealloc_driver is wired: pools are cleaned up too. */
+		/*
+		 * dealloc_driver is wired, so this cleans the pools and calls
+		 * tbrxe_link_release(). Detach the record first: this path
+		 * unwinds the netdev and the record itself below, and the
+		 * unpublish counter was never incremented for this device.
+		 */
+		rxe->tbl_link = NULL;
+		link->rxe = NULL;
 		ib_dealloc_device(&rxe->ib_dev);
 		goto out_ndev;
 	}
@@ -909,16 +996,16 @@ static void tbrxe_client_link_down(void *ctx, struct tbframe_link *tblink,
 		return;
 	}
 
-	/* dealloc_driver is wired, so unregister also frees the rxe_dev
-	 * once every QP/user is drained; the record must outlive that
-	 * drain (engine admission derefs rxe->tbl_link).
+	/*
+	 * Queued: this upcall runs on tbframe's workqueue and must not block
+	 * on userspace closing verbs FDs. The record and its netdev outlive
+	 * the queued teardown and are freed from rxe_dealloc() ->
+	 * tbrxe_link_release(), which also keeps rxe->tbl_link valid for the
+	 * engine right up to the last QP being drained.
 	 */
-	dev_info(&link->rxe->ib_dev.dev, "unpublished (link down %d)\n",
+	dev_info(&link->rxe->ib_dev.dev, "unpublishing (link down %d)\n",
 		 reason);
-	ib_unregister_device(&link->rxe->ib_dev);
-	unregister_netdev(link->ndev);
-	free_netdev(link->ndev);
-	kfree(link);
+	tbrxe_link_unpublish(link);
 
 	mutex_unlock(&tbrxe.publish_lock);
 }
@@ -957,27 +1044,56 @@ int tbrxe_frame_register(void)
 	return 0;
 }
 
+/*
+ * Teardown order (the shape of siw_exit_module(), siw_main.c:490-503):
+ *   1. unhook the source of new devices and events,
+ *   2. unpublish whatever is left,
+ *   3. fence, so nothing of ours is still running or callable.
+ */
 void tbrxe_frame_unregister(void)
 {
-	struct tbrxe_link *link, *tmp;
+	struct tbrxe_link *link;
+	unsigned long flags;
 
 	if (tbrxe.registered && tbrxe.ops && tbrxe.ops->unregister_client) {
 		/* Delivers link_down(TBFRAME_DOWN_CLOSED) for every link --
-		 * which unpublishes every device -- and returns only when no
-		 * upcall can run again.
+		 * which queues an unpublish for every device -- and returns
+		 * only when no upcall is running or can run again
+		 * (tbframe.h, tbframe_unregister_client()).
 		 */
 		tbrxe.ops->unregister_client();
 		tbrxe.registered = false;
 	}
 
-	/* Null transport (KUnit without mock teardown): drop leftovers. */
+	/* Null/mock transport, or a transport that did not deliver a terminal
+	 * link_down for every link: unpublish the leftovers.
+	 */
 	mutex_lock(&tbrxe.publish_lock);
-	list_for_each_entry_safe(link, tmp, &tbrxe.links, list) {
-		list_del_init(&link->list);
-		ib_unregister_device(&link->rxe->ib_dev);
-		unregister_netdev(link->ndev);
-		free_netdev(link->ndev);
-		kfree(link);
+	for (;;) {
+		spin_lock_irqsave(&tbrxe.lock, flags);
+		link = list_first_entry_or_null(&tbrxe.links,
+						struct tbrxe_link, list);
+		if (link)
+			list_del_init(&link->list);
+		spin_unlock_irqrestore(&tbrxe.lock, flags);
+		if (!link)
+			break;
+		tbrxe_link_unpublish(link);
 	}
 	mutex_unlock(&tbrxe.publish_lock);
+
+	/* Fence 1: every queued unpublish has reached dealloc_driver, so no
+	 * record, netdev or rxe_dev of ours is left.
+	 */
+	tbrxe_frame_drain();
+
+	/*
+	 * Fence 2: ib_core's own module-unload fence, mandatory for any
+	 * driver using ib_unregister_device_queued() (device.c:1663-1687) and
+	 * the only thing that guarantees no driver op is still callable when
+	 * the module text goes away (device.c:695-700). Safe only because
+	 * tbrxe owns its driver id now: it sweeps exactly our devices, never
+	 * the stock rdma_rxe rail.
+	 */
+	ib_unregister_driver(RDMA_DRIVER_USB4_RDMA);
 }

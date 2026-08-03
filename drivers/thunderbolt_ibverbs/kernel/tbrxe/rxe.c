@@ -23,6 +23,12 @@ void rxe_dealloc(struct ib_device *ib_dev)
 {
 	struct rxe_dev *rxe = container_of(ib_dev, struct rxe_dev, ib_dev);
 
+	/* Last op ib_core calls on this device (ib_dealloc_device(),
+	 * drivers/infiniband/core/device.c:690-693), so this is where the
+	 * link record and its GID-anchor netdev are released.
+	 */
+	tbrxe_link_release(rxe);
+
 	rxe_pool_cleanup(&rxe->uc_pool);
 	rxe_pool_cleanup(&rxe->pd_pool);
 	rxe_pool_cleanup(&rxe->ah_pool);
@@ -249,12 +255,15 @@ static int __init rxe_module_init(void)
 
 static void __exit rxe_module_exit(void)
 {
-	/* Downs every link (CLOSED), which unpublishes every device.
+	/*
+	 * Downs every link (CLOSED), which unpublishes every device, then
+	 * fences: drains the queued unregistrations and ends with
+	 * ib_unregister_driver(RDMA_DRIVER_USB4_RDMA). tbrxe owns that id
+	 * (rxe.h), so the sweep touches exactly our devices and never the
+	 * stock rdma_rxe rxe_lan rail.
 	 *
-	 * NOT ib_unregister_driver(RDMA_DRIVER_RXE): the driver id is shared
-	 * with the stock rdma_rxe module (so stock librxe binds to us), and
-	 * unregister-by-driver-id would tear down live rdma_rxe devices
-	 * (rxe_lan) too.
+	 * Only then may the engine workqueue go: every device is drained, so
+	 * no task can still be queued on it.
 	 */
 	tbrxe_frame_unregister();
 	rxe_destroy_wq();
