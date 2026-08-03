@@ -26,6 +26,8 @@ Traffic environment:
   TBV_QPS              QPs per direction                    (32)
   TBV_ROUNDS           maximum rounds                       (3)
   TBV_ROUND_TIMEOUT    seconds allowed per round            (90)
+  TBV_GID_INDEX        ib_write_bw -x GID index; required for GID-addressed
+                       providers such as tbrxe              (unset = LID)
 
 Address/device environment:
   TBV_SERVER_ADDR      client-reachable server bootstrap IP (auto-detected)
@@ -71,6 +73,9 @@ TX_DEPTH="${TBV_TX_DEPTH:-128}"
 QPS="${TBV_QPS:-32}"
 ROUNDS="${TBV_ROUNDS:-3}"
 ROUND_TIMEOUT="${TBV_ROUND_TIMEOUT:-90}"
+# GID-addressed providers (tbrxe): perftest must use a GRH, which on an IB
+# link-layer port means passing an explicit GID index. Empty = LID (legacy).
+GID_INDEX="${TBV_GID_INDEX:-}"
 SSH_USER="${SSH_USER:-${USER:-}}"
 DOMAIN="${DOMAIN:-}"
 if [[ -n "$DOMAIN" && "$DOMAIN" != .* ]]; then
@@ -266,6 +271,9 @@ fi
 # counts it can outlive the timeout after transport has completed and look like
 # a CQ hang, so retain average reporting and omit that diagnostic-only phase.
 ARGS="-F -N -n $ITERS -s $SIZE -t $TX_DEPTH -q $QPS -b --report_gbits"
+if [[ -n "$GID_INDEX" ]]; then
+	ARGS="$ARGS -x $GID_INDEX"
+fi
 
 start_server() {
 	ssh_node "$SERVER" "rm -f '$REMOTE_SERVER_LOG' '$REMOTE_SERVER_PID' '$REMOTE_SERVER_RC'; nohup setsid sh -c 'ib_write_bw -d $SDEV $ARGS; rc=\$?; printf \"%s\\n\" \"\$rc\" > \"$REMOTE_SERVER_RC\"; exit \"\$rc\"' > '$REMOTE_SERVER_LOG' 2>&1 < /dev/null & pid=\$!; started=\$(awk '{print \$22}' \"/proc/\$pid/stat\" 2>/dev/null || true); if [ -n \"\$started\" ]; then printf '%s %s\\n' \"\$pid\" \"\$started\" > '$REMOTE_SERVER_PID'; elif ! test -r '$REMOTE_SERVER_RC'; then exit 1; fi" 30
