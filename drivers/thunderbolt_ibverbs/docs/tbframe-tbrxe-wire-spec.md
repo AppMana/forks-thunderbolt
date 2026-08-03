@@ -48,17 +48,28 @@ reassembly exists at the tbframe layer.
 ### PDF (sof/eof) nibble assignment
 
 The NHI provides 4-bit sof/eof protocol-defined fields per frame, filtered
-by RX masks. Assignment for tbframe rings:
+by RX masks. On the wire a frame is segmented into transport packets; the
+SOF PDF marks the first packet and the EOF PDF the last, and the receiving
+NHI closes a frame on any packet whose PDF matches the RX ring's
+`eof_mask`. The SOF marker therefore MUST be distinct from every EOF
+(frame-type) value: with `sof == eof` (wire v1) the peer chopped every
+multi-packet frame at the first transport-packet boundary, so nothing
+above one packet (~252 bytes) was ever delivered. This is the same reason
+tbnet splits FRAME_START/FRAME_END. Assignment for tbframe rings (wire
+v2):
 
 | sof | eof | meaning |
 |-----|-----|---------|
-| 0x4 | 0x4 | tbrxe data packet (BTH..ICRC) |
-| 0x5 | 0x5 | tbframe keepalive/probe (payload: 8-byte session cookie) |
+| 0x6 | 0x4 | tbrxe data packet (BTH..ICRC) |
+| 0x6 | 0x5 | tbframe keepalive/probe (payload: 8-byte session cookie) |
 
-Values 0x1/0x2 are avoided (tbnet uses them); 0xF is avoided (control
-channel convention). RX rings are started with `sof_mask = eof_mask =
-BIT(4)|BIT(5)`. Frames failing the mask are dropped by hardware. A future
-frame type gets a new nibble value, never a header change.
+The frame type rides in the EOF PDF; single-packet frames carry only that
+nibble, and the RX descriptor reports only the closing PDF (sof reads back
+0). Values 0x1/0x2 are avoided (tbnet uses them); 0xF is avoided (control
+channel convention). RX rings are started with `sof_mask = BIT(6)` and
+`eof_mask = BIT(4)|BIT(5)`. Frames failing the mask are dropped by
+hardware. A future frame type gets a new EOF nibble value, never a header
+change.
 
 ## 3. Session establishment (control plane)
 
@@ -194,12 +205,36 @@ task context; every internal tbframe wait on hardware is
 `readx_poll_timeout`-bounded and a timeout poisons the link, never blocks
 the caller.
 
-## 8. GID and addressing
+## 8. GID and addressing (normative; verified against the NCCL fork and
+## ib_core, see nccl-routing-requirements analysis 2026-08-03)
 
-- GID = per-link ULA from `gid_eui64` in HELLO (existing EUI-64
-  convention). One ib_device port per link; `ib_device` naming stays
-  `usb4_rdma*`.
-- "Which link reaches this GID" is a single lookup in tbframe's peer
-  table. There is no identity refresh, no DHCP grace, no RTR-time rebind:
-  a GID is valid exactly as long as its link's session; supersede/zombie
-  transitions invalidate it via `link_down`.
+The addressing model is the fleet's proven per-rail scheme, unchanged:
+
+- **One ib_device per tbframe link**, published at that link's first
+  `link_up`, unpublished on terminal link_down. NCCL's rail routing selects
+  a *device* by GID /64 match (listen handle advertises every device's GID
+  table; connector picks the device sharing a /64 with a peer GID), so
+  per-link devices are the unit of routing. Naming stays `usb4_rdma*`
+  compatible for the webhook's HCA patterns.
+- **One GID-anchor netdev per ib_device**, bound with
+  `ib_device_set_netdev` before registration: IFF_NOARP, xmit drops — it
+  carries no data, ever. The kernel makes this mandatory: RoCE GID tables
+  populate ONLY from a bound netdev's IPs (`add_roce_gid` rejects a NULL
+  ndev), and RC `modify_qp(RTR)` runs a FIB lookup bound to the sgid's
+  netdev. All GID table management is ib_core's; the driver implements no
+  query_gid for RoCE and carries no identity of its own.
+- **Addresses are provisioned from userspace by the existing Ansible-owned
+  tooling** (`tbv-rdma-addr` convention): each cable gets a deterministic
+  ULA /64 (sha256 of the sorted endpoint UUID pair), `::1`/`::2` at the
+  ends, applied with `ip -6 addr replace`. That single address creates the
+  GID entry, the connected route RTR resolves over, and the /64-match
+  signal NCCL routes by. Ahead-of-time topology lives in addressing, where
+  it is inspectable with `ip addr`/`ip route`.
+- The engine needs no peer table and no GID lookup: each ib_device is
+  bound to exactly one point-to-point link; the transport for a packet is
+  the device's link. The HELLO `gid_eui64`/`local_gid_eui64` fields remain
+  in the wire format for diagnostics but are not an addressing authority.
+- No identity refresh, no RTR-time rebind: a GID is valid exactly as long
+  as its netdev's address, which outlives session resets; supersede/zombie
+  transitions bracket loss windows via link_down/link_up without touching
+  addressing.
