@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Install a thunderbolt-ibverbs-dkms or usb4-rdma-provider package built by the
-# matching distro-package*.sh script. Verifies:
+# Install a thunderbolt-ibverbs-dkms, thunderbolt-ibverbs-tools, or
+# usb4-rdma-provider package built by the matching distro-package*.sh script.
+# Verifies:
 #
 #   thunderbolt-ibverbs-dkms   — DKMS can build the module against the distro's
 #                                packaged kernel-headers.
 #   usb4-rdma-provider         — provider .so is installed at the expected path,
 #                                its dynamic deps resolve, and libibverbs does
 #                                not crash when its driver hint is present.
+#   thunderbolt-ibverbs-tools  — the capture harness is installed, parses, and
+#                                exposes its documented CLI.
 #
 # Does NOT load the kernel module — that needs a real distro kernel and lives
 # in tools/ci/vm-smoke.sh.
@@ -19,8 +22,8 @@ Usage:
   tools/ci/distro-install.sh <artefact-path-or-glob>
 
 Detects the package type from the artefact filename
-(thunderbolt-ibverbs-dkms or usb4-rdma-provider) and runs the appropriate
-verification flow.
+(thunderbolt-ibverbs-dkms, thunderbolt-ibverbs-tools, or usb4-rdma-provider)
+and runs the appropriate verification flow.
 EOF
 }
 
@@ -51,6 +54,7 @@ artefact="$(realpath "${artefacts[0]}")"
 
 case "$(basename "$artefact")" in
 	thunderbolt-ibverbs-dkms*) pkg_kind="dkms" ;;
+	thunderbolt-ibverbs-tools*) pkg_kind="tools" ;;
 	usb4-rdma-provider*)       pkg_kind="rdma-provider" ;;
 	*)
 		printf 'error: unknown package name in %s\n' "$artefact" >&2
@@ -98,6 +102,18 @@ install_provider_deps() {
 	else
 		printf 'error: unsupported distro\n' >&2
 		cat /etc/os-release >&2 || true
+		exit 1
+	fi
+}
+
+install_tools_deps() {
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -qq
+		apt-get install -y -qq --no-install-recommends \
+			bash coreutils openssh-client python3
+	else
+		printf 'error: thunderbolt-ibverbs-tools is currently packaged for Debian/Ubuntu only\n' >&2
 		exit 1
 	fi
 }
@@ -222,7 +238,26 @@ verify_provider() {
 	printf '==> provider install verification OK\n'
 }
 
+verify_tools() {
+	install_tools_deps
+	install_package
+	command -v tbv-hang-repro >/dev/null
+	command -v tbv-nhi-ring-regs >/dev/null
+	command -v tbv-trace-to-kunit >/dev/null
+	bash -n "$(command -v tbv-hang-repro)"
+	tbv-hang-repro --help | grep -q '^Usage:'
+	tbv-trace-to-kunit --help >/dev/null
+	python3 -c 'compile(open("/usr/bin/tbv-nhi-ring-regs", encoding="utf-8").read(), "/usr/bin/tbv-nhi-ring-regs", "exec")'
+	python3 -c 'compile(open("/usr/bin/tbv-trace-to-kunit", encoding="utf-8").read(), "/usr/bin/tbv-trace-to-kunit", "exec")'
+	for trace in tbv-post-trace.bt tbv-ring-progress.bt \
+		tbv-send-timeline.bt tbv-verb-trace.bt; do
+		test -r "/usr/share/thunderbolt-ibverbs/bpftrace/$trace"
+	done
+	printf '==> tools install verification OK\n'
+}
+
 case "$pkg_kind" in
 	dkms)          verify_dkms ;;
+	tools)         verify_tools ;;
 	rdma-provider) verify_provider ;;
 esac

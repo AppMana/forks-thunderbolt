@@ -159,21 +159,24 @@ echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/appmana-archive-keyring.gpg]
   | sudo tee /etc/apt/sources.list.d/appmana.list
 
 sudo apt update
-sudo apt install thunderbolt-ibverbs-dkms usb4-rdma-provider
+sudo apt install \
+    thunderbolt-ibverbs-dkms thunderbolt-ibverbs-tools usb4-rdma-provider
 ```
 
 Upstream Hellas DKMS source packages are attached to Hellas GitHub Releases:
 
   https://github.com/hellas-ai/thunderbolt-ibverbs/releases
 
-Each release ships two packages per distro: the DKMS source package for the
-kernel module, and a userspace libibverbs provider so `ibv_devices` and
-downstream RDMA tools (NCCL, perftest, vllm) enumerate the device.
+Each release ships the DKMS source package for the kernel module and a
+userspace libibverbs provider so `ibv_devices` and downstream RDMA tools
+(NCCL, perftest, vllm) enumerate the device. Debian releases also ship the
+architecture-independent `thunderbolt-ibverbs-tools` capture package.
 
 ```sh
 # Debian or Ubuntu (needs Linux 6.14+)
 sudo apt install \
     ./thunderbolt-ibverbs-dkms_<ver>_all.deb \
+    ./thunderbolt-ibverbs-tools_<ver>_all.deb \
     ./usb4-rdma-provider_<ver>_amd64.deb
 
 # Fedora
@@ -267,6 +270,11 @@ Build release packages:
 tools/ci/distro-package.sh debian
 tools/ci/distro-package-rdma.sh ubuntu
 ```
+
+The Debian command emits both `thunderbolt-ibverbs-dkms` and
+`thunderbolt-ibverbs-tools`; the latter installs the bounded
+`tbv-hang-repro` traffic-and-capture harness described in
+[`docs/tbv-hang-repro.md`](docs/tbv-hang-repro.md).
 
 Container verification:
 

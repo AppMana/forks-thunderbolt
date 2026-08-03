@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a DKMS source package for the given distro using the distro's native
-# packaging tooling. Run inside a container that matches the target distro
-# (debian:sid, fedora:rawhide, archlinux:latest). The script installs the
-# build dependencies it needs.
+# packaging tooling. The Debian build also emits the architecture-independent
+# reproduction-tools package. Run inside a matching distro container
+# (debian:sid, fedora:rawhide, archlinux:latest). The script installs the build
+# dependencies it needs.
 
 set -euo pipefail
 
@@ -33,7 +34,7 @@ case "${distro:-}" in
 	*) printf 'error: unsupported distro: %s\n' "$distro" >&2; exit 1 ;;
 esac
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 version="${TBV_VERSION:-$(awk -F'"' '/^PACKAGE_VERSION=/ { print $2; exit }' "$repo_root/dkms.conf")}"
 [[ -n "$version" ]] || { printf 'error: could not determine version from dkms.conf\n' >&2; exit 1; }
 out_dir="${OUT_DIR:-$repo_root/dist}"
@@ -153,6 +154,36 @@ build_deb() {
 		lintian --no-tag-display-limit \
 			--suppress-tags no-changelog,no-manual-page,no-copyright-file,extended-description-is-probably-too-short,initial-upload-closes-no-bugs,debian-changelog-file-missing \
 			"$deb" || true
+	fi
+
+	local tools_stage="$work_dir/deb-tools"
+	rm -rf "$tools_stage"
+	install -d -m 0755 "$tools_stage/DEBIAN"
+	substitute "$repo_root/packaging/debian/control-tools" \
+		"$tools_stage/DEBIAN/control"
+	install -D -m 0755 "$repo_root/tools/tbv-hang-repro.sh" \
+		"$tools_stage/usr/bin/tbv-hang-repro"
+	install -D -m 0755 "$repo_root/tools/nhi-ring-regs.py" \
+		"$tools_stage/usr/bin/tbv-nhi-ring-regs"
+	install -D -m 0755 "$repo_root/tools/tbv-trace-to-kunit.py" \
+		"$tools_stage/usr/bin/tbv-trace-to-kunit"
+	for trace in tbv-post-trace.bt tbv-ring-progress.bt \
+		tbv-send-timeline.bt tbv-verb-trace.bt; do
+		install -D -m 0644 "$repo_root/tools/$trace" \
+			"$tools_stage/usr/share/thunderbolt-ibverbs/bpftrace/$trace"
+	done
+	install -D -m 0644 "$repo_root/docs/tbv-hang-repro.md" \
+		"$tools_stage/usr/share/doc/thunderbolt-ibverbs-tools/README.md"
+
+	local tools_deb="$out_dir/thunderbolt-ibverbs-tools_${version}_all.deb"
+	dpkg-deb --root-owner-group --build "$tools_stage" "$tools_deb" >/dev/null
+	printf '==> Built %s\n' "$tools_deb"
+
+	if [[ "$lint" == "1" ]] && command -v lintian >/dev/null 2>&1; then
+		printf '==> lintian\n'
+		lintian --no-tag-display-limit \
+			--suppress-tags no-changelog,no-manual-page,no-copyright-file,extended-description-is-probably-too-short,initial-upload-closes-no-bugs,debian-changelog-file-missing \
+			"$tools_deb" || true
 	fi
 }
 

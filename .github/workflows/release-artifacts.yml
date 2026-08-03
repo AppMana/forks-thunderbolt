@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test reproduction harness supervision
+        run: drivers/thunderbolt_ibverbs/tools/tests/tbv-hang-repro-smoke.sh
+
       - name: Build tbfix DKMS deb
         run: |
           mkdir -p dist
@@ -46,7 +49,7 @@ jobs:
             ubuntu:24.04 \
             bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
 
-      - name: Build ibverbs DKMS deb
+      - name: Build ibverbs DKMS and reproduction-tools debs
         run: |
           docker run --rm \
             -v "$PWD:/work" \
@@ -55,6 +58,15 @@ jobs:
             ubuntu:24.04 \
             bash drivers/thunderbolt_ibverbs/tools/ci/distro-package.sh debian
           ls -la dist/
+
+      - name: Verify reproduction-tools deb
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ubuntu:24.04 \
+            bash drivers/thunderbolt_ibverbs/tools/ci/distro-install.sh \
+              'dist/thunderbolt-ibverbs-tools_*.deb'
 
       - name: Build usb4-rdma-provider deb (noble)
         run: |
