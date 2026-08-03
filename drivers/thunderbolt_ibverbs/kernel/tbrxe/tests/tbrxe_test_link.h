@@ -45,10 +45,16 @@ static inline void tbrxe_test_link_up(void *fake_link)
 	tbrxe_test_link_up_window(fake_link, 1984);
 }
 
+/*
+ * Terminal link_down + fence. Unpublishing is asynchronous
+ * (ib_unregister_device_queued), so tests that want the device, its netdev
+ * and the link record actually gone on return must drain.
+ */
 static inline void tbrxe_test_link_down(void *fake_link)
 {
 	tbrxe_frame_client_ops()->link_down(NULL, fake_link,
 					    TBFRAME_DOWN_CLOSED);
+	tbrxe_frame_drain();
 }
 
 static inline struct rxe_dev *tbrxe_test_dev(void *fake_link)
