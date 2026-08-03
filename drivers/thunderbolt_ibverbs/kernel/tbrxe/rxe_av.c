@@ -11,7 +11,9 @@ void rxe_init_av(struct rdma_ah_attr *attr, struct rxe_av *av)
 {
 	rxe_av_from_attr(rdma_ah_get_port_num(attr), av, attr);
 	rxe_av_fill_ip_info(av, attr);
-	memcpy(av->dmac, attr->roce.dmac, ETH_ALEN);
+	/* tbrxe: no dmac. The port is IB link layer (GID addressed); the
+	 * transport resolves the dgid through the tbframe peer table.
+	 */
 }
 
 static int chk_attr(void *obj, struct rdma_ah_attr *attr, bool obj_is_ah)
@@ -44,14 +46,18 @@ static int chk_attr(void *obj, struct rdma_ah_attr *attr, bool obj_is_ah)
 			return -EINVAL;
 		}
 
+		/* tbrxe: the port is IB link layer, so ib_core hands us
+		 * RDMA_NETWORK_IB GIDs (the per-link ULAs); they behave as
+		 * IPv6 addresses everywhere below. RoCEv1 stays invalid.
+		 */
 		type = rdma_gid_attr_network_type(grh->sgid_attr);
-		if (type < RDMA_NETWORK_IPV4 ||
-		    type > RDMA_NETWORK_IPV6) {
+		if (type != RDMA_NETWORK_IB &&
+		    (type < RDMA_NETWORK_IPV4 || type > RDMA_NETWORK_IPV6)) {
 			if (obj_is_ah)
-				rxe_dbg_ah(ah, "invalid network type for rdma_rxe = %d\n",
+				rxe_dbg_ah(ah, "invalid network type for tbrxe = %d\n",
 						type);
 			else
-				rxe_dbg_qp(qp, "invalid network type for rdma_rxe = %d\n",
+				rxe_dbg_qp(qp, "invalid network type for tbrxe = %d\n",
 						type);
 			return -EINVAL;
 		}
@@ -88,7 +94,7 @@ void rxe_av_to_attr(struct rxe_av *av, struct rdma_ah_attr *attr)
 {
 	struct ib_global_route *grh = rdma_ah_retrieve_grh(attr);
 
-	attr->type = RDMA_AH_ATTR_TYPE_ROCE;
+	attr->type = RDMA_AH_ATTR_TYPE_IB;
 
 	memcpy(grh->dgid.raw, av->grh.dgid.raw, sizeof(av->grh.dgid.raw));
 	grh->flow_label = av->grh.flow_label;
@@ -116,6 +122,8 @@ void rxe_av_fill_ip_info(struct rxe_av *av, struct rdma_ah_attr *attr)
 	case RDMA_NETWORK_IPV4:
 		type = RXE_NETWORK_TYPE_IPV4;
 		break;
+	case RDMA_NETWORK_IB:
+		/* tbrxe: IB-typed ULA GIDs are plain IPv6 addresses. */
 	case RDMA_NETWORK_IPV6:
 		type = RXE_NETWORK_TYPE_IPV6;
 		break;

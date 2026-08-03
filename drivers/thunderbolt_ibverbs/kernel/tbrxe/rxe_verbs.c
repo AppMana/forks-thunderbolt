@@ -11,6 +11,7 @@
 #include "rxe.h"
 #include "rxe_queue.h"
 #include "rxe_hw_counters.h"
+#include "tbrxe_frame.h"
 
 static int post_one_recv(struct rxe_rq *rq, const struct ib_recv_wr *ibwr);
 
@@ -41,8 +42,7 @@ static int rxe_query_port(struct ib_device *ibdev,
 			  u32 port_num, struct ib_port_attr *attr)
 {
 	struct rxe_dev *rxe = to_rdev(ibdev);
-	struct net_device *ndev;
-	int err, ret;
+	int err;
 
 	if (port_num != 1) {
 		err = -EINVAL;
@@ -50,30 +50,15 @@ static int rxe_query_port(struct ib_device *ibdev,
 		goto err_out;
 	}
 
-	ndev = rxe_ib_device_get_netdev(ibdev);
-	if (!ndev) {
-		err = -ENODEV;
-		goto err_out;
-	}
-
-	memcpy(attr, &rxe->port.attr, sizeof(*attr));
-
+	/* tbrxe: no netdev underneath. Port state is maintained by the
+	 * tbframe link_up/link_down upcalls (tbrxe_frame.c); width/speed
+	 * are the static init values for the scaffold.
+	 */
 	mutex_lock(&rxe->usdev_lock);
-	ret = ib_get_eth_speed(ibdev, port_num, &attr->active_speed,
-			       &attr->active_width);
-
-	attr->state = ib_get_curr_port_state(ndev);
-	if (attr->state == IB_PORT_ACTIVE)
-		attr->phys_state = IB_PORT_PHYS_STATE_LINK_UP;
-	else if (netif_get_flags(ndev) & IFF_UP)
-		attr->phys_state = IB_PORT_PHYS_STATE_POLLING;
-	else
-		attr->phys_state = IB_PORT_PHYS_STATE_DISABLED;
-
+	memcpy(attr, &rxe->port.attr, sizeof(*attr));
 	mutex_unlock(&rxe->usdev_lock);
 
-	dev_put(ndev);
-	return ret;
+	return 0;
 
 err_out:
 	rxe_err_dev(rxe, "returned err = %d\n", err);
@@ -85,11 +70,11 @@ static int rxe_query_gid(struct ib_device *ibdev, u32 port, int idx,
 {
 	struct rxe_dev *rxe = to_rdev(ibdev);
 
-	/* subnet_prefix == interface_id == 0; */
-	memset(gid, 0, sizeof(*gid));
-	memcpy(gid->raw, rxe->raw_gid, ETH_ALEN);
-
-	return 0;
+	/* tbrxe: driver-managed GID table (the port is IB link layer, so
+	 * ib_core fills its GID cache from this hook). Index 0 is the self
+	 * ULA GID; unused entries read as zero.
+	 */
+	return tbrxe_query_gid(rxe, idx, gid);
 }
 
 static int rxe_query_pkey(struct ib_device *ibdev,
@@ -186,7 +171,10 @@ static enum rdma_link_layer rxe_get_link_layer(struct ib_device *ibdev,
 		goto err_out;
 	}
 
-	return IB_LINK_LAYER_ETHERNET;
+	/* tbrxe: IB link layer. GID-addressed with driver-managed GIDs; no
+	 * RoCE dmac/neighbour resolution exists without a netdev.
+	 */
+	return IB_LINK_LAYER_INFINIBAND;
 
 err_out:
 	rxe_err_dev(rxe, "returned err = %d\n", err);
@@ -210,10 +198,14 @@ static int rxe_port_immutable(struct ib_device *ibdev, u32 port_num,
 	if (err)
 		goto err_out;
 
-	immutable->core_cap_flags = RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP;
+	/* tbrxe: IB protocol WITHOUT the MAD/SMI/CM/SA capability bits
+	 * (RDMA_CORE_PORT_IBA_IB would make ib_mad create an SMI QP this
+	 * driver cannot back). No MADs means max_mad_size stays 0.
+	 */
+	immutable->core_cap_flags = RDMA_CORE_CAP_PROT_IB;
 	immutable->pkey_tbl_len = attr.pkey_tbl_len;
 	immutable->gid_tbl_len = attr.gid_tbl_len;
-	immutable->max_mad_size = IB_MGMT_MAD_SIZE;
+	immutable->max_mad_size = 0;
 
 	return 0;
 
@@ -635,10 +627,9 @@ static int rxe_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		goto err_out;
 	}
 
-	if ((mask & IB_QP_AV) && (attr->ah_attr.ah_flags & IB_AH_GRH))
-		qp->src_port = rdma_get_udp_sport(attr->ah_attr.grh.flow_label,
-						  qp->ibqp.qp_num,
-						  qp->attr.dest_qp_num);
+	/* tbrxe: no UDP source port; per-QP flow entropy is meaningless on a
+	 * point-to-point tbframe link.
+	 */
 
 	return 0;
 
@@ -1452,16 +1443,9 @@ static const struct attribute_group rxe_attr_group = {
 static int rxe_enable_driver(struct ib_device *ib_dev)
 {
 	struct rxe_dev *rxe = container_of(ib_dev, struct rxe_dev, ib_dev);
-	struct net_device *ndev;
 
-	ndev = rxe_ib_device_get_netdev(ib_dev);
-	if (!ndev)
-		return -ENODEV;
-
-	rxe_set_port_state(rxe);
-	dev_info(&rxe->ib_dev.dev, "added %s\n", netdev_name(ndev));
-
-	dev_put(ndev);
+	dev_info(&rxe->ib_dev.dev, "added over %s\n",
+		 rxe_parent_name(rxe, 1));
 	return 0;
 }
 
@@ -1530,13 +1514,12 @@ static const struct ib_device_ops rxe_dev_ops = {
 	INIT_RDMA_OBJ_SIZE(ib_mw, rxe_mw, ibmw),
 };
 
-int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
-						struct net_device *ndev)
+int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name)
 {
 	int err;
 	struct ib_device *dev = &rxe->ib_dev;
 
-	strscpy(dev->node_desc, "rxe", sizeof(dev->node_desc));
+	strscpy(dev->node_desc, "tbrxe", sizeof(dev->node_desc));
 
 	dev->node_type = RDMA_NODE_IB_CA;
 	dev->phys_port_cnt = 1;
@@ -1548,10 +1531,8 @@ int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
 	dev->uverbs_cmd_mask |= BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
 				BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
 
+	/* tbrxe: no ib_device_set_netdev(); the transport is tbframe. */
 	ib_set_device_ops(dev, &rxe_dev_ops);
-	err = ib_device_set_netdev(&rxe->ib_dev, ndev, 1);
-	if (err)
-		return err;
 
 	err = ib_register_device(dev, ibdev_name, NULL);
 	if (err)

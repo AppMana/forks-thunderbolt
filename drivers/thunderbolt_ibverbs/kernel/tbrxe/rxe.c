@@ -4,17 +4,25 @@
  * Copyright (c) 2015 System Fabric Works, Inc. All rights reserved.
  */
 
-#include <rdma/rdma_netlink.h>
 #include <net/addrconf.h>
 #include "rxe.h"
 #include "rxe_loc.h"
+#include "tbrxe_frame.h"
 
 MODULE_AUTHOR("Bob Pearson, Frank Zago, John Groves, Kamal Heib");
-MODULE_DESCRIPTION("Soft RDMA transport");
+MODULE_DESCRIPTION("rxe-derived RDMA engine over the tbframe Thunderbolt frame service");
 MODULE_LICENSE("Dual BSD/GPL");
 #ifdef TBV_PKG_VERSION
 MODULE_VERSION(TBV_PKG_VERSION);
 #endif
+
+/* The single scaffold device (see tbrxe_frame.c on the one-port choice). */
+static struct rxe_dev *tbrxe_dev;
+
+struct rxe_dev *tbrxe_get_dev(void)
+{
+	return tbrxe_dev;
+}
 
 /* free resources for a rxe device all objects created for this device must
  * have been destroyed
@@ -42,7 +50,7 @@ static const struct ib_device_ops rxe_ib_dev_odp_ops = {
 };
 
 /* initialize rxe device parameters */
-static void rxe_init_device_param(struct rxe_dev *rxe, struct net_device *ndev)
+static void rxe_init_device_param(struct rxe_dev *rxe)
 {
 	rxe->max_inline_data			= RXE_MAX_INLINE_DATA;
 
@@ -84,16 +92,12 @@ static void rxe_init_device_param(struct rxe_dev *rxe, struct net_device *ndev)
 	rxe->attr.max_pkeys			= RXE_MAX_PKEYS;
 	rxe->attr.local_ca_ack_delay		= RXE_LOCAL_CA_ACK_DELAY;
 
-	if (ndev->addr_len) {
-		memcpy(rxe->raw_gid, ndev->dev_addr,
-			min_t(unsigned int, ndev->addr_len, ETH_ALEN));
-	} else {
-		/*
-		 * This device does not have a HW address, but
-		 * connection mangagement requires a unique gid.
-		 */
-		eth_random_addr(rxe->raw_gid);
-	}
+	/*
+	 * There is no netdev underneath a tbrxe device. A per-boot random
+	 * address seeds the node/sys-image GUIDs and the self EUI-64 the
+	 * transport turns into the loopback ULA GID (tbrxe_frame_register).
+	 */
+	eth_random_addr(rxe->raw_gid);
 
 	addrconf_addr_eui48((unsigned char *)&rxe->attr.sys_image_guid,
 			rxe->raw_gid);
@@ -127,9 +131,15 @@ static void rxe_init_device_param(struct rxe_dev *rxe, struct net_device *ndev)
 /* initialize port attributes */
 static void rxe_init_port_param(struct rxe_port *port)
 {
-	port->attr.state		= IB_PORT_DOWN;
-	port->attr.max_mtu		= IB_MTU_4096;
-	port->attr.active_mtu		= IB_MTU_256;
+	/*
+	 * The port is reported ACTIVE from the start: the loopback path is
+	 * always usable without hardware. Link transitions still dispatch
+	 * IB_EVENT_PORT_ACTIVE/PORT_ERR (tbrxe_frame.c).
+	 */
+	port->attr.state		= IB_PORT_ACTIVE;
+	/* Strict IB_MTU_2048 per tbframe-tbrxe-wire-spec.md section 5. */
+	port->attr.max_mtu		= IB_MTU_2048;
+	port->attr.active_mtu		= IB_MTU_2048;
 	port->attr.gid_tbl_len		= RXE_PORT_GID_TBL_LEN;
 	port->attr.port_cap_flags	= RXE_PORT_PORT_CAP_FLAGS;
 	port->attr.max_msg_sz		= RXE_PORT_MAX_MSG_SZ;
@@ -145,15 +155,15 @@ static void rxe_init_port_param(struct rxe_port *port)
 	port->attr.init_type_reply	= RXE_PORT_INIT_TYPE_REPLY;
 	port->attr.active_width		= RXE_PORT_ACTIVE_WIDTH;
 	port->attr.active_speed		= RXE_PORT_ACTIVE_SPEED;
-	port->attr.phys_state		= RXE_PORT_PHYS_STATE;
-	port->mtu_cap			= ib_mtu_enum_to_int(IB_MTU_256);
+	port->attr.phys_state		= IB_PORT_PHYS_STATE_LINK_UP;
+	port->mtu_cap			= ib_mtu_enum_to_int(IB_MTU_2048);
 	port->subnet_prefix		= cpu_to_be64(RXE_PORT_SUBNET_PREFIX);
 }
 
 /* initialize port state, note IB convention that HCA ports are always
  * numbered from 1
  */
-static void rxe_init_ports(struct rxe_dev *rxe, struct net_device *ndev)
+static void rxe_init_ports(struct rxe_dev *rxe)
 {
 	struct rxe_port *port = &rxe->port;
 
@@ -177,12 +187,12 @@ static void rxe_init_pools(struct rxe_dev *rxe)
 }
 
 /* initialize rxe device state */
-static void rxe_init(struct rxe_dev *rxe, struct net_device *ndev)
+static void rxe_init(struct rxe_dev *rxe)
 {
 	/* init default device parameters */
-	rxe_init_device_param(rxe, ndev);
+	rxe_init_device_param(rxe);
 
-	rxe_init_ports(rxe, ndev);
+	rxe_init_ports(rxe);
 	rxe_init_pools(rxe);
 
 	/* init pending mmap list */
@@ -197,89 +207,90 @@ static void rxe_init(struct rxe_dev *rxe, struct net_device *ndev)
 	mutex_init(&rxe->usdev_lock);
 }
 
-void rxe_set_mtu(struct rxe_dev *rxe, unsigned int ndev_mtu)
+void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload)
 {
 	struct rxe_port *port = &rxe->port;
 	enum ib_mtu mtu;
 
-	mtu = eth_mtu_int_to_enum(ndev_mtu);
+	mtu = eth_mtu_int_to_enum(frame_payload);
 
-	/* Make sure that new MTU in range */
-	mtu = mtu ? min_t(enum ib_mtu, mtu, IB_MTU_4096) : IB_MTU_256;
+	/*
+	 * Strict IB_MTU_2048 ceiling (wire-spec section 5): worst-case
+	 * transport unit 80 + 2048 + pad + 4 always fits the 4096-byte
+	 * tbframe frame; links with a smaller max_payload are rejected at
+	 * link_up (tbrxe_frame.c).
+	 */
+	mtu = mtu ? min_t(enum ib_mtu, mtu, IB_MTU_2048) : IB_MTU_256;
 
 	port->attr.active_mtu = mtu;
 	port->mtu_cap = ib_mtu_enum_to_int(mtu);
 }
 
-/* called by ifc layer to create new rxe device.
- * The caller should allocate memory for rxe by calling ib_alloc_device.
+/* Create a tbrxe device. The caller should allocate memory for rxe by
+ * calling ib_alloc_device.
  */
-int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name,
-			struct net_device *ndev)
+int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name)
 {
-	rxe_init(rxe, ndev);
+	rxe_init(rxe);
 	rxe_set_mtu(rxe, mtu);
 
-	return rxe_register_device(rxe, ibdev_name, ndev);
+	/* Self GID must exist before registration fills the GID cache. */
+	tbrxe_frame_init_identity(rxe);
+
+	return rxe_register_device(rxe, ibdev_name);
 }
-
-static int rxe_newlink(const char *ibdev_name, struct net_device *ndev)
-{
-	struct rxe_dev *rxe;
-	int err = 0;
-
-	if (is_vlan_dev(ndev)) {
-		rxe_err("rxe creation allowed on top of a real device only\n");
-		err = -EPERM;
-		goto err;
-	}
-
-	rxe = rxe_get_dev_from_net(ndev);
-	if (rxe) {
-		ib_device_put(&rxe->ib_dev);
-		rxe_err_dev(rxe, "already configured on %s\n", ndev->name);
-		err = -EEXIST;
-		goto err;
-	}
-
-	err = rxe_net_add(ibdev_name, ndev);
-	if (err) {
-		rxe_err("failed to add %s\n", ndev->name);
-		goto err;
-	}
-err:
-	return err;
-}
-
-static struct rdma_link_ops rxe_link_ops = {
-	.type = "rxe",
-	.newlink = rxe_newlink,
-};
 
 static int __init rxe_module_init(void)
 {
+	struct rxe_dev *rxe;
 	int err;
 
 	err = rxe_alloc_wq();
 	if (err)
 		return err;
 
-	err = rxe_net_init();
+	rxe = ib_alloc_device(rxe_dev, ib_dev);
+	if (!rxe) {
+		rxe_destroy_wq();
+		return -ENOMEM;
+	}
+
+	/* Frame payload budget: eth_mtu_int_to_enum() subtracts the 80-byte
+	 * header allowance, so hand it 2048 + 80 to land on IB_MTU_2048.
+	 */
+	err = rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH, "tbrxe%d");
 	if (err) {
+		ib_dealloc_device(&rxe->ib_dev);
+		rxe_destroy_wq();
+		return err;
+	}
+	tbrxe_dev = rxe;
+
+	err = tbrxe_frame_register(rxe);
+	if (err) {
+		ib_unregister_device(&rxe->ib_dev);
+		tbrxe_dev = NULL;
 		rxe_destroy_wq();
 		return err;
 	}
 
-	rdma_link_register(&rxe_link_ops);
 	pr_info("loaded\n");
 	return 0;
 }
 
 static void __exit rxe_module_exit(void)
 {
-	rdma_link_unregister(&rxe_link_ops);
-	ib_unregister_driver(RDMA_DRIVER_RXE);
-	rxe_net_exit();
+	tbrxe_frame_unregister();
+	/*
+	 * NOT ib_unregister_driver(RDMA_DRIVER_RXE): the driver id is shared
+	 * with the stock rdma_rxe module (so stock librxe binds to us), and
+	 * unregister-by-driver-id would tear down live rdma_rxe devices
+	 * (rxe_lan) too.
+	 */
+	if (tbrxe_dev) {
+		ib_unregister_device(&tbrxe_dev->ib_dev);
+		tbrxe_dev = NULL;
+	}
 	rxe_destroy_wq();
 
 	pr_info("unloaded\n");
@@ -287,5 +298,3 @@ static void __exit rxe_module_exit(void)
 
 late_initcall(rxe_module_init);
 module_exit(rxe_module_exit);
-
-MODULE_ALIAS_RDMA_LINK("rxe");

@@ -8,6 +8,7 @@
 
 #include "rxe.h"
 #include "rxe_loc.h"
+#include "tbrxe_frame.h"
 
 /* check that QP matches packet opcode type and is in a valid state */
 static int check_type_state(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
@@ -272,44 +273,33 @@ drop:
 }
 
 /**
- * rxe_chk_dgid - validate destination IP address
+ * rxe_chk_dgid - validate the destination GID
  * @rxe: rxe device that received packet
  * @skb: the received packet buffer
  *
+ * tbrxe adaptation: there is no IP stack and no ib_core-managed RoCE GID
+ * table. The dgid rides in the synthetic IPv6 header the transport writes
+ * into RX-skb headroom (tbrxe_fill_grh) and is validated against the
+ * driver's own local GID table.
+ *
  * Accept any loopback packets
- * Extract IP address from packet and
  * Accept if multicast packet
- * Accept if matches an SGID table entry
+ * Accept if matches a local GID table entry
  */
 static int rxe_chk_dgid(struct rxe_dev *rxe, struct sk_buff *skb)
 {
 	struct rxe_pkt_info *pkt = SKB_TO_PKT(skb);
-	const struct ib_gid_attr *gid_attr;
-	union ib_gid dgid;
 	union ib_gid *pdgid;
 
 	if (pkt->mask & RXE_LOOPBACK_MASK)
 		return 0;
 
-	if (skb->protocol == htons(ETH_P_IP)) {
-		ipv6_addr_set_v4mapped(ip_hdr(skb)->daddr,
-				       (struct in6_addr *)&dgid);
-		pdgid = &dgid;
-	} else {
-		pdgid = (union ib_gid *)&ipv6_hdr(skb)->daddr;
-	}
+	pdgid = (union ib_gid *)&ipv6_hdr(skb)->daddr;
 
 	if (rdma_is_multicast_addr((struct in6_addr *)pdgid))
 		return 0;
 
-	gid_attr = rdma_find_gid_by_port(&rxe->ib_dev, pdgid,
-					 IB_GID_TYPE_ROCE_UDP_ENCAP,
-					 1, skb->dev);
-	if (IS_ERR(gid_attr))
-		return PTR_ERR(gid_attr);
-
-	rdma_put_gid_attr(gid_attr);
-	return 0;
+	return tbrxe_gid_is_local(rxe, pdgid) ? 0 : -EINVAL;
 }
 
 /* rxe_rcv is called from the interface driver */

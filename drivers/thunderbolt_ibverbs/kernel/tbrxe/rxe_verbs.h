@@ -252,10 +252,6 @@ struct rxe_qp {
 	struct rxe_sq		sq;
 	struct rxe_rq		rq;
 
-	struct socket		*sk;
-	u32			dst_cookie;
-	u16			src_port;
-
 	struct rxe_av		pri_av;
 	struct rxe_av		alt_av;
 
@@ -443,11 +439,6 @@ struct rxe_dev {
 	struct rxe_port		port;
 };
 
-static inline struct net_device *rxe_ib_device_get_netdev(struct ib_device *dev)
-{
-	return ib_device_get_netdev(dev, RXE_PORT);
-}
-
 static inline void rxe_counter_inc(struct rxe_dev *rxe, enum rxe_counters index)
 {
 	atomic64_inc(&rxe->stats_counters[index]);
@@ -513,7 +504,6 @@ static inline struct rxe_pd *rxe_mw_pd(struct rxe_mw *mw)
 	return to_rpd(mw->ibmw.pd);
 }
 
-int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
-						struct net_device *ndev);
+int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name);
 
 #endif /* RXE_VERBS_H */

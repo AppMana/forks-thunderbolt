@@ -30,20 +30,12 @@
  */
 static int rxe_mcast_add(struct rxe_dev *rxe, union ib_gid *mgid)
 {
-	unsigned char ll_addr[ETH_ALEN];
-	struct net_device *ndev;
-	int ret;
-
-	ndev = rxe_ib_device_get_netdev(&rxe->ib_dev);
-	if (!ndev)
-		return -ENODEV;
-
-	ipv6_eth_mc_map((struct in6_addr *)mgid->raw, ll_addr);
-
-	ret = dev_mc_add(ndev, ll_addr);
-	dev_put(ndev);
-
-	return ret;
+	/* tbrxe: no netdev, so there is no L2 multicast filter to program.
+	 * Multicast delivery is local-only in the scaffold (the transport
+	 * loops mcast dgids back, see tbrxe_dest_is_local()); the mcg
+	 * rb-tree below is all that is needed for it.
+	 */
+	return 0;
 }
 
 /**
@@ -55,20 +47,8 @@ static int rxe_mcast_add(struct rxe_dev *rxe, union ib_gid *mgid)
  */
 static int rxe_mcast_del(struct rxe_dev *rxe, union ib_gid *mgid)
 {
-	unsigned char ll_addr[ETH_ALEN];
-	struct net_device *ndev;
-	int ret;
-
-	ndev = rxe_ib_device_get_netdev(&rxe->ib_dev);
-	if (!ndev)
-		return -ENODEV;
-
-	ipv6_eth_mc_map((struct in6_addr *)mgid->raw, ll_addr);
-
-	ret = dev_mc_del(ndev, ll_addr);
-	dev_put(ndev);
-
-	return ret;
+	/* tbrxe: see rxe_mcast_add(). */
+	return 0;
 }
 
 /**
