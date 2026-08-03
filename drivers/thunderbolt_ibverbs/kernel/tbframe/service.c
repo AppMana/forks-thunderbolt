@@ -250,16 +250,37 @@ err_clear:
 	return ret;
 }
 
+/*
+ * Teardown order is NOT the mirror of start, deliberately.
+ *
+ * The protocol handler goes FIRST. tb_unregister_protocol_handler() takes
+ * the core's xdomain_dispatch_lock, which the dispatch walk holds across the
+ * handler callbacks, so its return is a hard guarantee that no callback of
+ * ours is running and none can start again (drivers/thunderbolt/xdomain.c,
+ * commit 054b92c). Everything after this point -- unbinding every service,
+ * destroying every link, tearing down rings, HopIDs and paths -- therefore
+ * runs with inbound XDomain requests structurally excluded, instead of
+ * merely racing them under a flag. That is the property incident 1 needs:
+ * a peer that keeps HELLOing through our unload cannot touch a link that is
+ * being taken apart.
+ *
+ * The cost is one retry interval of unanswered HELLOs for a peer that is
+ * mid-handshake, which the peer's own retry budget already absorbs.
+ *
+ * Start order keeps the handler first for the opposite reason: the widest
+ * possible window in which an inbound HELLO can be answered. In both cases
+ * the handler brackets everything else.
+ */
 void tbframe_service_stop(struct tbframe *tf)
 {
+	if (tbframe_protocol_handler_registered) {
+		tb_unregister_protocol_handler(&tbframe_protocol_handler);
+		tbframe_protocol_handler_registered = false;
+	}
 	if (tbframe_service_driver_registered) {
 		/* Unbinds every service, destroying its link. */
 		tb_unregister_service_driver(&tbframe_service_driver);
 		tbframe_service_driver_registered = false;
-	}
-	if (tbframe_protocol_handler_registered) {
-		tb_unregister_protocol_handler(&tbframe_protocol_handler);
-		tbframe_protocol_handler_registered = false;
 	}
 	if (tbframe_service_dir) {
 		tb_unregister_property_dir(TBFRAME_PROTOCOL_KEY,

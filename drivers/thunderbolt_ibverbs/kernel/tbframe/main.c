@@ -95,13 +95,18 @@ static int __init tbframe_init(void)
 	if (!tf->wq)
 		return -ENOMEM;
 
-	tbframe_global_ready = true;
+	/*
+	 * Publish the instance only once the service is fully advertised: a
+	 * client that calls tbframe_register_client() must never attach to a
+	 * half-built module. Links created by an early service probe do not
+	 * need the instance pointer (they carry their own tf).
+	 */
 	ret = tbframe_service_start(tf);
 	if (ret) {
-		tbframe_global_ready = false;
 		destroy_workqueue(tf->wq);
 		return ret;
 	}
+	tbframe_global_ready = true;
 
 	pr_info("initialized ring_entries=%u e2e=%u keepalive=%u\n",
 		tf->ring_entries, tf->e2e, tf->keepalive);
@@ -113,8 +118,30 @@ static void __exit tbframe_exit(void)
 {
 	struct tbframe *tf = &tbframe_global;
 
-	tbframe_service_stop(tf);
+	/*
+	 * Unpublish first so no client can attach while we tear down; then
+	 * stop the service (protocol handler, service driver and every link),
+	 * and only then destroy the workqueue -- by that point every link is
+	 * gone and no work item can be re-armed (link_destroy shuts the
+	 * verify timer down and syncs all three work items).
+	 */
 	tbframe_global_ready = false;
+	tbframe_service_stop(tf);
+
+	/*
+	 * A registered client here would mean a module that uses our exported
+	 * symbols outlived us, which the module dependency refcount makes
+	 * impossible (rmmod tbframe returns -EWOULDBLOCK while tbrxe is
+	 * loaded). Assert it rather than trust it: its ops vector lives in
+	 * that module's text, so a stale pointer here is an NX-execute panic
+	 * on the next upcall.
+	 */
+	down_write(&tf->client_rwsem);
+	WARN_ON(tf->client_ops);
+	tf->client_ops = NULL;
+	tf->client_ctx = NULL;
+	up_write(&tf->client_rwsem);
+
 	destroy_workqueue(tf->wq);
 }
 module_exit(tbframe_exit);
