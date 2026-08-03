@@ -84,7 +84,14 @@ static int __init tbframe_init(void)
 	tf->teardown_warn_ms = teardown_warn_ms;
 	tf->teardown_force_ms = teardown_force_ms;
 
-	tf->wq = alloc_workqueue("tbframe", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+	/*
+	 * Not WQ_MEM_RECLAIM: session work issues tb_xdomain_request(),
+	 * whose tb_cfg_request_sync() flushes the (non-reclaim) thunderbolt
+	 * control workqueue -- a reclaim queue may never wait on a
+	 * non-reclaim queue (check_flush_dependency). Nothing in the
+	 * session path is on a memory-reclaim I/O path.
+	 */
+	tf->wq = alloc_workqueue("tbframe", WQ_UNBOUND, 0);
 	if (!tf->wq)
 		return -ENOMEM;
 
