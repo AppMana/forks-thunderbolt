@@ -56,6 +56,15 @@ CLIENT="${2:-}"
 	exit 1
 }
 
+# Provider generalization: MODULE names the kernel module whose srcversion
+# and params are recorded (thunderbolt_ibverbs, tbrxe, rdma_rxe). DEV_*
+# override device auto-detection (required for providers without per-link
+# tbr-* netdevs). DEBUGFS=0 skips the legacy debugfs counter capture.
+MODULE="${TBV_MODULE:-thunderbolt_ibverbs}"
+DEV_SERVER="${TBV_DEV_SERVER:-}"
+DEV_CLIENT="${TBV_DEV_CLIENT:-}"
+DEBUGFS="${TBV_DEBUGFS:-1}"
+
 SIZE="${TBV_SIZE:-1048576}"
 ITERS="${TBV_ITERS:-200}"
 TX_DEPTH="${TBV_TX_DEPTH:-128}"
@@ -129,7 +138,9 @@ printf '== output %s\n' "$OUTDIR"
 
 preflight() {
 	local node="$1"
-	ssh_node "$node" 'command -v ib_write_bw >/dev/null && command -v ip >/dev/null && command -v setsid >/dev/null && command -v awk >/dev/null && test -r /sys/module/thunderbolt_ibverbs/srcversion && sudo -n test -r /sys/kernel/debug/thunderbolt_ibverbs/summary' 30
+	local debugfs_check=true
+	[[ "$DEBUGFS" == 1 ]] && debugfs_check="sudo -n test -r /sys/kernel/debug/thunderbolt_ibverbs/summary"
+	ssh_node "$node" "command -v ib_write_bw >/dev/null && command -v ip >/dev/null && command -v setsid >/dev/null && command -v awk >/dev/null && test -r /sys/module/$MODULE/srcversion && $debugfs_check" 30
 }
 
 snapshot() {
@@ -138,7 +149,7 @@ snapshot() {
 		printf '### node=%s tag=%s t=%s\n' "$node" "$tag" "$(date -Is)"
 		# The expansions below intentionally execute on the remote host.
 		# shellcheck disable=SC2016
-		ssh_node "$node" 'echo "@@@HOST@@@"; printf "hostname=%s boot_id=%s uptime=%s kernel=%s loaded_version=%s loaded_src=%s\n" "$(hostname)" "$(cat /proc/sys/kernel/random/boot_id)" "$(cut -d. -f1 /proc/uptime)" "$(uname -r)" "$(modinfo -F version thunderbolt_ibverbs 2>/dev/null || echo none)" "$(cat /sys/module/thunderbolt_ibverbs/srcversion 2>/dev/null || echo none)"; echo "@@@PARAMS@@@"; for p in /sys/module/thunderbolt_ibverbs/parameters/*; do [ -r "$p" ] && printf "%s=%s\n" "${p##*/}" "$(cat "$p")"; done; echo "@@@SUMMARY@@@"; sudo -n cat /sys/kernel/debug/thunderbolt_ibverbs/summary 2>/dev/null || true; echo "@@@PEERS@@@"; sudo -n cat /sys/kernel/debug/thunderbolt_ibverbs/peers 2>/dev/null || true' 30
+		ssh_node "$node" 'MOD='"$MODULE"'; echo "@@@HOST@@@"; printf "hostname=%s boot_id=%s uptime=%s kernel=%s loaded_version=%s loaded_src=%s\n" "$(hostname)" "$(cat /proc/sys/kernel/random/boot_id)" "$(cut -d. -f1 /proc/uptime)" "$(uname -r)" "$(modinfo -F version "$MOD" 2>/dev/null || echo none)" "$(cat /sys/module/"$MOD"/srcversion 2>/dev/null || echo none)"; echo "@@@PARAMS@@@"; for p in /sys/module/"$MOD"/parameters/*; do [ -r "$p" ] && printf "%s=%s\n" "${p##*/}" "$(cat "$p")"; done; echo "@@@SUMMARY@@@"; sudo -n cat /sys/kernel/debug/thunderbolt_ibverbs/summary 2>/dev/null || true; echo "@@@PEERS@@@"; sudo -n cat /sys/kernel/debug/thunderbolt_ibverbs/peers 2>/dev/null || true; echo "@@@DMESG@@@"; sudo -n dmesg | grep -E "tbframe|tbrxe" | tail -30 || true' 30
 	} >> "$OUTDIR/counters-$role.txt" 2>&1
 }
 
@@ -225,8 +236,14 @@ for value in "$SDEV" "$CDEV"; do
 		exit 1
 	}
 done
-require_peer_dev "$SERVER" "$SDEV" "$server_expected" || exit 1
-require_peer_dev "$CLIENT" "$CDEV" "$client_expected" || exit 1
+# Explicit device overrides skip the tbr-* netdev binding check: providers
+# other than the legacy driver (tbrxe, rdma_rxe) have no per-link netdev.
+if [[ -z "$DEV_SERVER" ]]; then
+	require_peer_dev "$SERVER" "$SDEV" "$server_expected" || exit 1
+fi
+if [[ -z "$DEV_CLIENT" ]]; then
+	require_peer_dev "$CLIENT" "$CDEV" "$client_expected" || exit 1
+fi
 
 {
 	printf 'started=%s\n' "$(date -Is)"
