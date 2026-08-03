@@ -19,8 +19,27 @@ endif
 
 # Shadow the kernel's <linux/thunderbolt.h> with the fork-patched copy
 # (callback_xd, tb_xdomain_paths_active, tb_reannounce_property_dirs), same
-# mechanism as ../Makefile. Empty when built without the tbfix shim; the
-# #ifdef'd source-aware paths then compile out.
+# mechanism as ../Makefile. When the caller does not hand one in, GENERATE it
+# here: a bare `make TBFIX_SYMVERS=...` used to build source-blind against the
+# stock header while loading cleanly against the tbfix core (CRCs come from
+# the symvers file) -- before the core appended ->callback_xd behind the stock
+# members, that layout split-brain sent dispatch through this module's ->data
+# pointer (appmana-025 NX-execute panic, kdump 202608031305).
+TBF_MK_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ifeq ($(TBV_THUNDERBOLT_H_DIR),)
+TBFIX_HDR_GEN := $(firstword \
+	$(wildcard $(TBF_MK_DIR)../../../../dkms/tbfix-gen-thunderbolt-header.sh) \
+	$(shell ls -1 /usr/src/thunderbolt-tbfix-*/tbfix-gen-thunderbolt-header.sh 2>/dev/null | sort -V | tail -1))
+ifneq ($(TBFIX_HDR_GEN),)
+TBV_THUNDERBOLT_H_DIR := $(TBF_MK_DIR).tbfix-gen-include
+TBFIX_HDR_RC := $(shell $(TBFIX_HDR_GEN) "$(KDIR)" "$(TBV_THUNDERBOLT_H_DIR)" >&2; echo $$?)
+ifneq ($(TBFIX_HDR_RC),0)
+$(error tbfix header shim generation failed: $(TBFIX_HDR_GEN) "$(KDIR)")
+endif
+else
+$(warning tbfix header shim script not found; building source-blind against the stock <linux/thunderbolt.h>)
+endif
+endif
 ifneq ($(TBV_THUNDERBOLT_H_DIR),)
 LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
 endif

@@ -31,8 +31,26 @@ endif
 # Shadow the kernel's <linux/thunderbolt.h> with the fork-patched copy the top
 # Makefile generated (source-aware handler additions), so ibverbs sees the same
 # public struct layout as the core it links against. Prepended to LINUXINCLUDE
-# ahead of the kernel include dirs. Empty when built without the tbfix shim or
-# under the KUnit overlay (which patches the header directly).
+# ahead of the kernel include dirs. When the caller does not hand one in,
+# GENERATE it here (same trap as kernel/tbframe/Makefile: a bare build against
+# the stock header still loads against the tbfix core because the CRCs come
+# from the symvers file, but compiles the source-aware paths out). Left empty
+# only under the KUnit overlay, which patches the tree's header directly.
+TBV_MK_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ifeq ($(TBV_THUNDERBOLT_H_DIR),)
+TBFIX_HDR_GEN := $(firstword \
+	$(wildcard $(TBV_MK_DIR)../../../dkms/tbfix-gen-thunderbolt-header.sh) \
+	$(shell ls -1 /usr/src/thunderbolt-tbfix-*/tbfix-gen-thunderbolt-header.sh 2>/dev/null | sort -V | tail -1))
+ifneq ($(TBFIX_HDR_GEN),)
+TBV_THUNDERBOLT_H_DIR := $(TBV_MK_DIR).tbfix-gen-include
+TBFIX_HDR_RC := $(shell $(TBFIX_HDR_GEN) "$(KDIR)" "$(TBV_THUNDERBOLT_H_DIR)" >&2; echo $$?)
+ifneq ($(TBFIX_HDR_RC),0)
+$(error tbfix header shim generation failed: $(TBFIX_HDR_GEN) "$(KDIR)")
+endif
+else
+$(warning tbfix header shim script not found; building source-blind against the stock <linux/thunderbolt.h>)
+endif
+endif
 ifneq ($(TBV_THUNDERBOLT_H_DIR),)
 LINUXINCLUDE := -I$(TBV_THUNDERBOLT_H_DIR) $(LINUXINCLUDE)
 endif
