@@ -201,8 +201,11 @@ static int rxe_port_immutable(struct ib_device *ibdev, u32 port_num,
 	/* tbrxe: IB protocol WITHOUT the MAD/SMI/CM/SA capability bits
 	 * (RDMA_CORE_PORT_IBA_IB would make ib_mad create an SMI QP this
 	 * driver cannot back). No MADs means max_mad_size stays 0.
+	 * GRH_REQUIRED: the fabric is GID-addressed only (no LIDs), so the
+	 * core must resolve sgid_attr for every AV (see rxe_av.c chk_attr).
 	 */
-	immutable->core_cap_flags = RDMA_CORE_CAP_PROT_IB;
+	immutable->core_cap_flags = RDMA_CORE_CAP_PROT_IB |
+				    RDMA_CORE_CAP_IB_GRH_REQUIRED;
 	immutable->pkey_tbl_len = attr.pkey_tbl_len;
 	immutable->gid_tbl_len = attr.gid_tbl_len;
 	immutable->max_mad_size = 0;

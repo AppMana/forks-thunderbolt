@@ -35,32 +35,46 @@ static int chk_attr(void *obj, struct rdma_ah_attr *attr, bool obj_is_ah)
 
 	port = &rxe->port;
 
-	if (rdma_ah_get_ah_flags(attr) & IB_AH_GRH) {
-		if (grh->sgid_index > port->attr.gid_tbl_len) {
-			if (obj_is_ah)
-				rxe_dbg_ah(ah, "invalid sgid index = %d\n",
-						grh->sgid_index);
-			else
-				rxe_dbg_qp(qp, "invalid sgid index = %d\n",
-						grh->sgid_index);
-			return -EINVAL;
-		}
+	/* tbrxe is GID-addressed only (wire-spec section 8): the transport
+	 * routes by dgid through the tbframe peer table, so every AV must
+	 * carry a GRH with a core-resolved sgid_attr. LID addressing does
+	 * not exist on this fabric; a GRH-less AV (perftest without -x on an
+	 * IB link-layer port) used to reach rxe_av_fill_ip_info and deref
+	 * the NULL sgid_attr (appmana-023 kdump 202608031446). The port
+	 * advertises RDMA_CORE_CAP_IB_GRH_REQUIRED; this is the backstop.
+	 */
+	if (!(rdma_ah_get_ah_flags(attr) & IB_AH_GRH) || !grh->sgid_attr) {
+		if (obj_is_ah)
+			rxe_dbg_ah(ah, "AV without GRH/sgid_attr on a GID-addressed fabric\n");
+		else
+			rxe_dbg_qp(qp, "AV without GRH/sgid_attr on a GID-addressed fabric\n");
+		return -EINVAL;
+	}
 
-		/* tbrxe: the port is IB link layer, so ib_core hands us
-		 * RDMA_NETWORK_IB GIDs (the per-link ULAs); they behave as
-		 * IPv6 addresses everywhere below. RoCEv1 stays invalid.
-		 */
-		type = rdma_gid_attr_network_type(grh->sgid_attr);
-		if (type != RDMA_NETWORK_IB &&
-		    (type < RDMA_NETWORK_IPV4 || type > RDMA_NETWORK_IPV6)) {
-			if (obj_is_ah)
-				rxe_dbg_ah(ah, "invalid network type for tbrxe = %d\n",
-						type);
-			else
-				rxe_dbg_qp(qp, "invalid network type for tbrxe = %d\n",
-						type);
-			return -EINVAL;
-		}
+	if (grh->sgid_index > port->attr.gid_tbl_len) {
+		if (obj_is_ah)
+			rxe_dbg_ah(ah, "invalid sgid index = %d\n",
+					grh->sgid_index);
+		else
+			rxe_dbg_qp(qp, "invalid sgid index = %d\n",
+					grh->sgid_index);
+		return -EINVAL;
+	}
+
+	/* tbrxe: the port is IB link layer, so ib_core hands us
+	 * RDMA_NETWORK_IB GIDs (the per-link ULAs); they behave as
+	 * IPv6 addresses everywhere below. RoCEv1 stays invalid.
+	 */
+	type = rdma_gid_attr_network_type(grh->sgid_attr);
+	if (type != RDMA_NETWORK_IB &&
+	    (type < RDMA_NETWORK_IPV4 || type > RDMA_NETWORK_IPV6)) {
+		if (obj_is_ah)
+			rxe_dbg_ah(ah, "invalid network type for tbrxe = %d\n",
+					type);
+		else
+			rxe_dbg_qp(qp, "invalid network type for tbrxe = %d\n",
+					type);
+		return -EINVAL;
 	}
 
 	return 0;

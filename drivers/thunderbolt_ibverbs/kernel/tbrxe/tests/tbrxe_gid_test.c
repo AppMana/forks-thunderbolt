@@ -120,8 +120,85 @@ static void tbrxe_gid_identity_matches_hello(struct kunit *test)
 	tbrxe_set_transport_ops(NULL);
 }
 
+/*
+ * Regression: a GRH-less AV (perftest without -x on this IB link-layer
+ * port) must be rejected at modify_qp, not crash. tbrxe is GID-addressed
+ * only; rxe_av_fill_ip_info used to deref the NULL sgid_attr (appmana-023
+ * kdump 202608031446, NULL at rdma_gid2ip+0x0).
+ */
+static void tbrxe_grhless_av_is_rejected(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 4 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr	= 2,
+			.max_recv_wr	= 2,
+			.max_send_sge	= 1,
+			.max_recv_sge	= 1,
+		},
+		.sq_sig_type	= IB_SIGNAL_ALL_WR,
+		.qp_type	= IB_QPT_RC,
+	};
+	struct ib_qp_attr attr;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	int err;
+
+	rxe = tbrxe_get_dev();
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+
+	tbrxe_set_transport_ops(&gid_mock_transport);
+	tbrxe_test_link_up(&fake_link);
+	dev = &rxe->ib_dev;
+
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_INIT;
+	attr.pkey_index = 0;
+	attr.port_num = 1;
+	attr.qp_access_flags = IB_ACCESS_LOCAL_WRITE;
+	KUNIT_ASSERT_EQ(test, ib_modify_qp(qp, &attr,
+					   IB_QP_STATE | IB_QP_PKEY_INDEX |
+					   IB_QP_PORT | IB_QP_ACCESS_FLAGS), 0);
+
+	/* RTR with an AV that carries no GRH: must fail, not oops. */
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_RTR;
+	attr.path_mtu = IB_MTU_2048;
+	attr.dest_qp_num = qp->qp_num;
+	attr.rq_psn = 1;
+	attr.max_dest_rd_atomic = 1;
+	attr.min_rnr_timer = 12;
+	attr.ah_attr.type = rdma_ah_find_type(dev, 1);
+	rdma_ah_set_port_num(&attr.ah_attr, 1);
+	rdma_ah_set_dlid(&attr.ah_attr, 0);
+	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_AV |
+			   IB_QP_PATH_MTU | IB_QP_DEST_QPN | IB_QP_RQ_PSN |
+			   IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER);
+	KUNIT_EXPECT_NE(test, err, 0);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_gid_cases[] = {
 	KUNIT_CASE(tbrxe_gid_identity_matches_hello),
+	KUNIT_CASE(tbrxe_grhless_av_is_rejected),
 	{}
 };
 
