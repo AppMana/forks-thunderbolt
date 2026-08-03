@@ -46,6 +46,14 @@ add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handle
 add_nhi=1;        grep -q 'domain_released' "$src" && add_nhi=0
 add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_active=0
 add_reannounce=1; grep -q 'TB_XDOMAIN_HAS_REANNOUNCE' "$src" && add_reannounce=0
+# struct tb_xdomain::removing (xdomain.c: mainline 2c5d2d3c3f70 backport --
+# tb_xdomain_remove() sets it under xd->lock; every external
+# queue_delayed_work site checks it to close the cancel/requeue UAF race)
+add_removing=1;   grep -q 'bool removing;' "$src" && add_removing=0
+# struct tb_ring::wait + tb_ring_flush() (nhi.c: mainline 94a11cd5ddb1
+# backport -- lets service drivers wait for in-flight frames to complete
+# before stopping a ring)
+add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
@@ -58,7 +66,9 @@ awk -v add_completion="$add_completion" \
     -v add_handler="$add_handler" \
     -v add_nhi="$add_nhi" \
     -v add_paths_active="$add_paths_active" \
-    -v add_reannounce="$add_reannounce" '
+    -v add_reannounce="$add_reannounce" \
+    -v add_removing="$add_removing" \
+    -v add_ring_flush="$add_ring_flush" '
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
 		print
@@ -73,6 +83,27 @@ awk -v add_completion="$add_completion" \
 	}
 	/^struct tb_protocol_handler \{/ { in_ph = 1 }
 	/^struct tb_nhi \{/            { in_nhi = 1 }
+	/^struct tb_xdomain \{/        { in_xd = 1 }
+	add_removing == 1 && in_xd == 1 && $0 == "\tbool is_unplugged;" {
+		print
+		print "\tbool removing;"
+		next
+	}
+	in_xd == 1 && $0 == "};" { in_xd = 0 }
+	/^struct tb_ring \{/           { in_ring = 1 }
+	add_ring_flush == 1 && in_ring == 1 && $0 == "};" {
+		print "\twait_queue_head_t wait;"
+		print
+		in_ring = 0
+		next
+	}
+	in_ring == 1 && $0 == "};" { in_ring = 0 }
+	add_ring_flush == 1 && $0 == "void tb_ring_start(struct tb_ring *ring);" {
+		print
+		print "#define TB_RING_HAS_FLUSH 1"
+		print "bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec);"
+		next
+	}
 	add_handler == 1 && in_ph == 1 && \
 	    $0 ~ /int \(\*callback\)\(const void \*buf, size_t size, void \*data\);/ {
 		print
@@ -109,7 +140,7 @@ awk -v add_completion="$add_completion" \
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE'; do
+for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE' 'bool removing;' 'TB_RING_HAS_FLUSH'; do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1

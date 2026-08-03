@@ -52,6 +52,47 @@ MODULE_PARM_DESC(host_reset, "reset USB4 host router (default: true)");
 
 int tb_ring_throttling(struct tb_ring *ring, unsigned int interval_nsec);
 
+/*
+ * NHI MMIO read funnel (the ixgbe removal-detection pattern). Maple
+ * Ridge / Titan Ridge discrete controllers can latch up or surprise-
+ * remove such that BAR reads complete as all-ones (device gone, or a
+ * Completion Timeout synthesized the completion). Every NHI register
+ * read goes through nhi_read(): once the device is detected missing
+ * the NHI is poisoned via @going_away and no path touches MMIO again;
+ * interrupt handlers and ring poll paths bail out on the same flag.
+ */
+static void nhi_check_removal(struct tb_nhi *nhi)
+{
+	if (READ_ONCE(nhi->going_away))
+		return;
+
+	/*
+	 * A register can legitimately read all-ones (e.g. a fully set
+	 * interrupt bitfield), so verify through config space which
+	 * takes a different path than the (possibly wedged) BAR.
+	 */
+	if (pci_device_is_present(nhi->pdev))
+		return;
+
+	WRITE_ONCE(nhi->going_away, true);
+	dev_err_once(&nhi->pdev->dev,
+		     "NHI register read returned all ones and the device is gone, disabling all further MMIO access\n");
+}
+
+static u32 nhi_read(struct tb_nhi *nhi, void __iomem *reg)
+{
+	u32 val;
+
+	if (unlikely(READ_ONCE(nhi->going_away)))
+		return ~0U;
+
+	val = ioread32(reg);
+	if (unlikely(PCI_POSSIBLE_ERROR(val)))
+		nhi_check_removal(nhi);
+
+	return val;
+}
+
 static int ring_interrupt_index(const struct tb_ring *ring)
 {
 	int bit = ring->hop;
@@ -65,7 +106,7 @@ static void nhi_mask_interrupt(struct tb_nhi *nhi, int mask, int ring)
 	if (nhi->quirks & QUIRK_AUTO_CLEAR_INT) {
 		u32 val;
 
-		val = ioread32(nhi->iobase + REG_RING_INTERRUPT_BASE + ring);
+		val = nhi_read(nhi, nhi->iobase + REG_RING_INTERRUPT_BASE + ring);
 		iowrite32(val & ~mask, nhi->iobase + REG_RING_INTERRUPT_BASE + ring);
 	} else {
 		iowrite32(mask, nhi->iobase + REG_RING_INTERRUPT_MASK_CLEAR_BASE + ring);
@@ -75,7 +116,7 @@ static void nhi_mask_interrupt(struct tb_nhi *nhi, int mask, int ring)
 static void nhi_clear_interrupt(struct tb_nhi *nhi, int ring)
 {
 	if (nhi->quirks & QUIRK_AUTO_CLEAR_INT)
-		ioread32(nhi->iobase + REG_RING_NOTIFY_BASE + ring);
+		nhi_read(nhi, nhi->iobase + REG_RING_NOTIFY_BASE + ring);
 	else
 		iowrite32(~0, nhi->iobase + REG_RING_INT_CLEAR + ring);
 }
@@ -115,7 +156,7 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 		 * MSIX interrupts are simultaneously active and
 		 * reading the register clears both of them.
 		 */
-		misc = ioread32(ring->nhi->iobase + REG_DMA_MISC);
+		misc = nhi_read(ring->nhi, ring->nhi->iobase + REG_DMA_MISC);
 		if (ring->nhi->quirks & QUIRK_AUTO_CLEAR_INT)
 			auto_clear_bit = REG_DMA_MISC_INT_AUTO_CLEAR;
 		else
@@ -127,14 +168,14 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 		ivr_base = ring->nhi->iobase + REG_INT_VEC_ALLOC_BASE;
 		step = index / REG_INT_VEC_ALLOC_REGS * REG_INT_VEC_ALLOC_BITS;
 		shift = index % REG_INT_VEC_ALLOC_REGS * REG_INT_VEC_ALLOC_BITS;
-		ivr = ioread32(ivr_base + step);
+		ivr = nhi_read(ring->nhi, ivr_base + step);
 		ivr &= ~(REG_INT_VEC_ALLOC_MASK << shift);
 		if (active)
 			ivr |= ring->vector << shift;
 		iowrite32(ivr, ivr_base + step);
 	}
 
-	old = ioread32(ring->nhi->iobase + reg);
+	old = nhi_read(ring->nhi, ring->nhi->iobase + reg);
 	if (active)
 		new = old | mask;
 	else
@@ -383,6 +424,8 @@ invoke_callback:
 		if (frame->callback)
 			frame->callback(ring, frame, canceled);
 	}
+
+	wake_up(&ring->wait);
 }
 
 static struct workqueue_struct *ring_workqueue(void)
@@ -445,6 +488,12 @@ struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 		goto unlock;
 	if (ring_empty(ring))
 		goto unlock;
+	/*
+	 * Checked after ring_empty() so that service-driver tests may
+	 * poll a detached ring without a backing NHI.
+	 */
+	if (unlikely(READ_ONCE(ring->nhi->going_away)))
+		goto unlock;
 
 	attributes = READ_ONCE(ring->descriptors[ring->tail].attributes);
 	if (ring_descriptor_flags(attributes) & RING_DESC_COMPLETED) {
@@ -477,7 +526,7 @@ static void __ring_interrupt_mask(struct tb_ring *ring, bool mask)
 	int bit = idx % 32;
 	u32 val;
 
-	val = ioread32(ring->nhi->iobase + reg);
+	val = nhi_read(ring->nhi, ring->nhi->iobase + reg);
 	if (mask) {
 		val &= ~BIT(bit);
 		iowrite32(val, ring->nhi->iobase + reg);
@@ -530,10 +579,10 @@ void tb_ring_poll_complete(struct tb_ring *ring)
 	 * posted write so the enable actually reaches the hardware
 	 * before we drop the lock.
 	 */
-	if (ring->running) {
+	if (ring->running && !READ_ONCE(ring->nhi->going_away)) {
 		__ring_interrupt_mask(ring, false);
 		/* Flush the posted interrupt-enable write before unlock. */
-		ioread32(ring->nhi->iobase + REG_RING_INTERRUPT_BASE);
+		nhi_read(ring->nhi, ring->nhi->iobase + REG_RING_INTERRUPT_BASE);
 	}
 	spin_unlock(&ring->lock);
 	spin_unlock_irqrestore(&ring->nhi->lock, flags);
@@ -591,6 +640,9 @@ static void ring_clear_msix(const struct tb_ring *ring)
 static irqreturn_t ring_msix(int irq, void *data)
 {
 	struct tb_ring *ring = data;
+
+	if (unlikely(READ_ONCE(ring->nhi->going_away)))
+		return IRQ_HANDLED;
 
 	spin_lock(&ring->nhi->lock);
 	ring_clear_msix(ring);
@@ -738,6 +790,7 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	INIT_LIST_HEAD(&ring->queue);
 	INIT_LIST_HEAD(&ring->in_flight);
 	INIT_WORK(&ring->work, ring_work);
+	init_waitqueue_head(&ring->wait);
 
 	ring->nhi = nhi;
 	ring->hop = hop;
@@ -893,6 +946,31 @@ err:
 }
 EXPORT_SYMBOL_GPL(tb_ring_start);
 
+static bool tb_ring_empty(struct tb_ring *ring)
+{
+	guard(spinlock_irqsave)(&ring->lock);
+	return list_empty(&ring->in_flight);
+}
+
+/**
+ * tb_ring_flush() - Waits for a ring to be empty
+ * @ring: Ring to wait
+ * @timeout_msec: Timeout in ms how long to wait.
+ *
+ * This can be called before stopping a ring to make sure all the frames
+ * submitted prior have been completed.
+ *
+ * Return: %true if the ring is empty now, %false otherwise.
+ */
+bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec)
+{
+	if (!wait_event_timeout(ring->wait, tb_ring_empty(ring),
+				msecs_to_jiffies(timeout_msec)))
+		return false;
+	return tb_ring_empty(ring);
+}
+EXPORT_SYMBOL_GPL(tb_ring_flush);
+
 /**
  * tb_ring_stop() - shutdown a ring
  * @ring: Ring to stop
@@ -1009,16 +1087,18 @@ int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data)
 
 	iowrite32(data, nhi->iobase + REG_INMAIL_DATA);
 
-	val = ioread32(nhi->iobase + REG_INMAIL_CMD);
+	val = nhi_read(nhi, nhi->iobase + REG_INMAIL_CMD);
 	val &= ~(REG_INMAIL_CMD_MASK | REG_INMAIL_ERROR);
 	val |= REG_INMAIL_OP_REQUEST | cmd;
 	iowrite32(val, nhi->iobase + REG_INMAIL_CMD);
 
 	timeout = ktime_add_ms(ktime_get(), NHI_MAILBOX_TIMEOUT);
 	do {
-		val = ioread32(nhi->iobase + REG_INMAIL_CMD);
+		val = nhi_read(nhi, nhi->iobase + REG_INMAIL_CMD);
 		if (!(val & REG_INMAIL_OP_REQUEST))
 			break;
+		if (READ_ONCE(nhi->going_away))
+			return -ENODEV;
 		usleep_range(10, 20);
 	} while (ktime_before(ktime_get(), timeout));
 
@@ -1041,7 +1121,7 @@ enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi)
 {
 	u32 val;
 
-	val = ioread32(nhi->iobase + REG_OUTMAIL_CMD);
+	val = nhi_read(nhi, nhi->iobase + REG_OUTMAIL_CMD);
 	val &= REG_OUTMAIL_CMD_OPMODE_MASK;
 	val >>= REG_OUTMAIL_CMD_OPMODE_SHIFT;
 
@@ -1059,16 +1139,29 @@ static void nhi_interrupt_work(struct work_struct *work)
 
 	spin_lock_irq(&nhi->lock);
 
+	if (unlikely(READ_ONCE(nhi->going_away))) {
+		spin_unlock_irq(&nhi->lock);
+		return;
+	}
+
 	/*
 	 * Starting at REG_RING_NOTIFY_BASE there are three status bitfields
 	 * (TX, RX, RX overflow). We iterate over the bits and read a new
 	 * dwords as required. The registers are cleared on read.
 	 */
 	for (bit = 0; bit < 3 * nhi->hop_count; bit++) {
-		if (bit % 32 == 0)
-			value = ioread32(nhi->iobase
+		if (bit % 32 == 0) {
+			value = nhi_read(nhi, nhi->iobase
 					 + REG_RING_NOTIFY_BASE
 					 + 4 * (bit / 32));
+			/*
+			 * All-ones from a missing device is not ring
+			 * status; do not wake every ring on it.
+			 */
+			if (unlikely(PCI_POSSIBLE_ERROR(value)) &&
+			    READ_ONCE(nhi->going_away))
+				break;
+		}
 		if (++hop == nhi->hop_count) {
 			hop = 0;
 			type++;
@@ -1103,6 +1196,10 @@ static void nhi_interrupt_work(struct work_struct *work)
 static irqreturn_t nhi_msi(int irq, void *data)
 {
 	struct tb_nhi *nhi = data;
+
+	if (unlikely(READ_ONCE(nhi->going_away)))
+		return IRQ_HANDLED;
+
 	schedule_work(&nhi->interrupt_work);
 	return IRQ_HANDLED;
 }
@@ -1372,7 +1469,9 @@ static void nhi_reset(struct tb_nhi *nhi)
 	ktime_t timeout;
 	u32 val;
 
-	val = ioread32(nhi->iobase + REG_CAPS);
+	val = nhi_read(nhi, nhi->iobase + REG_CAPS);
+	if (READ_ONCE(nhi->going_away))
+		return;
 	/* Reset only v2 and later routers */
 	if (FIELD_GET(REG_CAPS_VERSION_MASK, val) < REG_CAPS_VERSION_2)
 		return;
@@ -1387,7 +1486,9 @@ static void nhi_reset(struct tb_nhi *nhi)
 
 	timeout = ktime_add_ms(ktime_get(), 500);
 	do {
-		val = ioread32(nhi->iobase + REG_RESET);
+		val = nhi_read(nhi, nhi->iobase + REG_RESET);
+		if (READ_ONCE(nhi->going_away))
+			break;
 		if (!(val & REG_RESET_HRR)) {
 			dev_warn(&nhi->pdev->dev, "host router reset successful\n");
 			return;
@@ -1498,7 +1599,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (res)
 		return dev_err_probe(dev, res, "cannot obtain PCI resources, aborting\n");
 
-	nhi->hop_count = ioread32(nhi->iobase + REG_CAPS) & 0x3ff;
+	nhi->hop_count = nhi_read(nhi, nhi->iobase + REG_CAPS) & 0x3ff;
 	dev_dbg(dev, "total paths: %d\n", nhi->hop_count);
 
 	nhi->tx_rings = devm_kcalloc(&pdev->dev, nhi->hop_count,

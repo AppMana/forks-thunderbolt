@@ -510,6 +510,15 @@ void tb_domain_remove(struct tb *tb)
 
 	flush_workqueue(tb->wq);
 
+	/*
+	 * tbfix addition (not in mainline a8937f35cf39): cm_ops->stop
+	 * marked every remaining XDomain unplugged under tb->lock but no
+	 * longer unregisters the device from the bus. Unregister them
+	 * here, outside the lock, so service driver remove callbacks run
+	 * before the domain goes away on driver unload.
+	 */
+	tb_domain_unregister_unplugged_xdomains(tb);
+
 	if (tb->cm_ops->deinit)
 		tb->cm_ops->deinit(tb);
 
@@ -902,6 +911,36 @@ int tb_domain_disconnect_all_paths(struct tb *tb)
 		return ret;
 
 	return bus_for_each_dev(&tb_bus_type, NULL, tb, disconnect_xdomain);
+}
+
+struct unregister_context {
+	const struct tb *tb;
+	int n;
+};
+
+static int unregister_unplugged_xdomain(struct device *dev, void *data)
+{
+	struct unregister_context *ctx = data;
+	struct tb_xdomain *xd;
+
+	xd = tb_to_xdomain(dev);
+	if (xd && xd->tb == ctx->tb && xd->is_unplugged) {
+		tb_xdomain_unregister(xd);
+		ctx->n++;
+	}
+	return 0;
+}
+
+int tb_domain_unregister_unplugged_xdomains(struct tb *tb)
+{
+	struct unregister_context ctx;
+
+	ctx.tb = tb_domain_get(tb);
+	ctx.n = 0;
+	bus_for_each_dev(&tb_bus_type, NULL, &ctx, unregister_unplugged_xdomain);
+	tb_domain_put(tb);
+
+	return ctx.n;
 }
 
 int tb_domain_init(void)
