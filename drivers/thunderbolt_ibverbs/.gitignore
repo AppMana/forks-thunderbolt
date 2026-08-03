@@ -31,3 +31,4 @@ thunderbolt-ibverbs/results/
 # Python bytecode
 __pycache__/
 *.pyc
+.tbfix-gen-include/
