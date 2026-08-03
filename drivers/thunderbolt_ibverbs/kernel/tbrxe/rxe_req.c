@@ -51,6 +51,10 @@ static void req_retry(struct rxe_qp *qp)
 	qp->req.wqe_index	= cons;
 	qp->req.psn		= qp->comp.psn;
 	qp->req.opcode		= -1;
+	/* Rewound packets release their link admission charge; each re-send
+	 * re-charges (it re-occupies a peer RX descriptor).
+	 */
+	tbrxe_unacked_sync(qp);
 
 	for (wqe_index = cons; wqe_index != prod;
 			wqe_index = queue_next_index(q, wqe_index)) {
@@ -777,6 +781,18 @@ int rxe_requester(struct rxe_qp *qp)
 		goto err;
 	}
 
+	/* Mode A link admission (wire-spec section 6): refuse the packet
+	 * while the aggregate unacked charge against this QP's link is at
+	 * the advertised window. Parked exactly like a closed tbframe
+	 * window; ACK-driven release re-kicks via need_req_skb.
+	 */
+	if (qp_type(qp) == IB_QPT_RC && !tbrxe_admit(qp)) {
+		if (ah)
+			rxe_put(ah);
+		qp->need_req_skb = 1;
+		goto exit;
+	}
+
 	skb = init_req_packet(qp, av, wqe, opcode, payload, &pkt);
 	if (unlikely(!skb)) {
 		if (ah)
@@ -818,6 +834,10 @@ int rxe_requester(struct rxe_qp *qp)
 	update_wqe_state(qp, wqe, &pkt);
 	update_wqe_psn(qp, wqe, &pkt, payload);
 	update_state(qp, &pkt);
+	/* Reconcile the admission pre-charge with the PSN advance (a READ
+	 * advances by its full response-packet count).
+	 */
+	tbrxe_unacked_sync(qp);
 
 	/* A non-zero return value will cause rxe_do_task to
 	 * exit its loop and end the work item. A zero return
@@ -832,6 +852,10 @@ err:
 	wqe->state = wqe_state_error;
 	rxe_qp_error(qp);
 exit:
+	/* Return any admission pre-charge whose packet never reached the
+	 * wire (alloc/finish/xmit failure after tbrxe_admit()).
+	 */
+	tbrxe_unacked_sync(qp);
 	ret = -EAGAIN;
 out:
 	return ret;

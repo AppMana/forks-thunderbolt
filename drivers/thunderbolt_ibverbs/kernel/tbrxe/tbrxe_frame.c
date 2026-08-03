@@ -84,6 +84,13 @@ struct tbrxe_link {
 	struct tbframe_link	*tblink;
 	struct tbframe_link_info info;
 	union ib_gid		peer_gid;
+	/* Mode A engine-side admission (wire-spec section 6). All fields
+	 * under tbrxe.lock. gen disambiguates a recycled allocation so a
+	 * stale qp->tbl (link bounced) never charges the successor link.
+	 */
+	u64			gen;
+	u32			unacked;
+	bool			admission_waiters;
 };
 
 /* Lives in the TX shell skb's data area (never in skb->cb: that holds the
@@ -100,6 +107,7 @@ static struct {
 	struct list_head	links;
 	union ib_gid		self_gid;
 	u64			self_eui64;
+	u64			link_gen;
 	const struct tbrxe_transport_ops *ops;
 	bool			registered;
 	/* publication of the ib_device at the first link_up */
@@ -110,6 +118,8 @@ static struct {
 	.links	= LIST_HEAD_INIT(tbrxe.links),
 	.publish_lock = __MUTEX_INITIALIZER(tbrxe.publish_lock),
 };
+
+static void tbrxe_client_tx_released(void *ctx, struct tbframe_link *link);
 
 /* Weak: the production binding in tbrxe_tbframe_glue.c overrides this. */
 const struct tbrxe_transport_ops * __weak tbrxe_builtin_transport(void)
@@ -176,6 +186,141 @@ static bool tbrxe_link_is_registered_locked(struct tbrxe_link *link)
 			return true;
 
 	return false;
+}
+
+/* ---- Mode A engine-side admission (wire-spec section 6) ---------------- */
+
+/*
+ * The tbframe data window only bounds frames the local TX ring has not
+ * completed; local TX completion proves the local NHI consumed the frame,
+ * not the peer. The engine is the layer that sees ACKs, so it enforces the
+ * normative invariant here: the aggregate unacked wire packets charged
+ * against one link never exceed the peer's advertised window, and window
+ * release is correlated with actual peer consumption (the peer reposts the
+ * RX descriptor before its engine emits the ACK, so unacked <= window
+ * implies its RX ring cannot overflow). No credit messages exist.
+ *
+ * Accounting: each RC wire packet pre-charges one slot in tbrxe_admit();
+ * tbrxe_unacked_sync() then reconciles the QP's charge with its live PSN
+ * distance (req.psn - comp.psn), which releases slots as the completer
+ * advances comp.psn (ACK arrival), on retry rewind (req.psn pulled back to
+ * comp.psn -- the rewound packets will be re-sent and re-charged, matching
+ * the descriptors they will re-occupy), and tops up multi-response charges
+ * (a READ advances req.psn by the number of response packets, each of
+ * which lands in OUR ring but is symmetric on the peer for its reads).
+ * QP reset/error/destroy sync with a zero distance, returning everything.
+ *
+ * Transient slack: between the pre-charge and update_wqe_psn the charge
+ * exceeds the PSN distance by one, so a concurrent completer sync can
+ * momentarily release that slot early. The overshoot is bounded by the
+ * number of concurrently-sending QPs and absorbed by the control reserve
+ * the ring is sized with.
+ */
+
+/* Caller holds tbrxe.lock. Validates qp->tbl (pointer, gen) against the
+ * live list; resolves from the QP's primary AV when invalid. Returns NULL
+ * when the destination is local or no link matches (nothing to charge).
+ */
+static struct tbrxe_link *tbrxe_qp_link_locked(struct rxe_qp *qp)
+{
+	struct tbrxe_link *link;
+
+	if (qp->tbl) {
+		list_for_each_entry(link, &tbrxe.links, list)
+			if (link == qp->tbl && link->gen == qp->tbl_gen)
+				return link;
+		/* Link bounced: the old charge died with the old link. */
+		qp->tbl = NULL;
+		qp->tbl_charged = 0;
+	}
+
+	link = tbrxe_find_link_locked(
+		(const union ib_gid *)&qp->pri_av.grh.dgid);
+	if (link) {
+		qp->tbl = link;
+		qp->tbl_gen = link->gen;
+		qp->tbl_charged = 0;
+	}
+	return link;
+}
+
+static u32 tbrxe_link_engine_window(const struct tbrxe_link *link)
+{
+	return link->info.data_window ? : 1;
+}
+
+bool tbrxe_admit(struct rxe_qp *qp)
+{
+	struct tbrxe_link *link;
+	unsigned long flags;
+	bool ok = true;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_qp_link_locked(qp);
+	if (link) {
+		if (link->unacked >= tbrxe_link_engine_window(link)) {
+			link->admission_waiters = true;
+			ok = false;
+		} else {
+			link->unacked++;
+			qp->tbl_charged++;
+		}
+	}
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	return ok;
+}
+
+void tbrxe_unacked_sync(struct rxe_qp *qp)
+{
+	struct tbrxe_link *link;
+	unsigned long flags;
+	bool kick = false;
+	u32 target;
+
+	if (qp_type(qp) != IB_QPT_RC)
+		return;
+
+	/* An errored/reset/destroyed QP will never see further ACKs; its
+	 * in-flight frames are consumed (and their descriptors reposted) by
+	 * the peer regardless of engine progress, so holding window for it
+	 * only starves the link's live QPs. Racy state read is fine: the
+	 * flush paths re-sync, destroy is the backstop.
+	 */
+	if (!qp->valid || qp->attr.qp_state == IB_QPS_ERR ||
+	    qp->attr.qp_state == IB_QPS_RESET)
+		target = 0;
+	else
+		target = (qp->req.psn - qp->comp.psn) & BTH_PSN_MASK;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_qp_link_locked(qp);
+	if (!link) {
+		spin_unlock_irqrestore(&tbrxe.lock, flags);
+		return;
+	}
+	if (qp->tbl_charged > target) {
+		u32 rel = qp->tbl_charged - target;
+
+		link->unacked -= min(rel, link->unacked);
+		qp->tbl_charged = target;
+		if (link->admission_waiters &&
+		    link->unacked < tbrxe_link_engine_window(link)) {
+			link->admission_waiters = false;
+			kick = true;
+		}
+	} else if (qp->tbl_charged < target) {
+		/* Multi-response ops (READ) advance req.psn by more than the
+		 * one packet admitted; top the charge up so release stays
+		 * exact. May transiently overshoot the window; the gate in
+		 * tbrxe_admit() re-closes admission.
+		 */
+		link->unacked += target - qp->tbl_charged;
+		qp->tbl_charged = target;
+	}
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+
+	if (kick)
+		tbrxe_client_tx_released(NULL, NULL);
 }
 
 /*
@@ -605,6 +750,7 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
 	first = list_empty(&tbrxe.links);
+	link->gen = ++tbrxe.link_gen;
 	list_add_tail(&link->list, &tbrxe.links);
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 

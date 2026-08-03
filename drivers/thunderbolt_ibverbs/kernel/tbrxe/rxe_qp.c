@@ -802,6 +802,11 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 	spin_unlock_irqrestore(&qp->state_lock, flags);
 	qp->qp_timeout_jiffies = 0;
 
+	/* Return this QP's link admission charge (qp->valid == 0 forces the
+	 * target to zero) so a torn-down QP never strands window.
+	 */
+	tbrxe_unacked_sync(qp);
+
 	/* In the function timer_setup, .function is initialized. If .function
 	 * is NULL, it indicates the function timer_setup is not called, the
 	 * timer is not initialized. Or else, the timer is initialized.

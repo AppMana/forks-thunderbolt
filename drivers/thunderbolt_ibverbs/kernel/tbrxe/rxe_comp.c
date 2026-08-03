@@ -841,5 +841,10 @@ out:
 	qp->req.again = 0;
 	if (pkt)
 		free_pkt(pkt);
+	/* comp.psn advances above (ACK/NAK progress) release link admission
+	 * window; one reconcile per completer run keeps release prompt
+	 * without touching every psn-update site.
+	 */
+	tbrxe_unacked_sync(qp);
 	return ret;
 }

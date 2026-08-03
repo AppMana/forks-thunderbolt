@@ -271,6 +271,17 @@ struct rxe_qp {
 	atomic_t		skb_out;
 	int			need_req_skb;
 
+	/* Mode A engine-side admission (wire-spec section 6): the link this
+	 * RC QP charges its unacked wire packets against. The pointer is only
+	 * ever dereferenced under the transport lock after revalidating
+	 * (pointer, generation) against the live link list, so a link that
+	 * went down (and was freed) invalidates the charge without a
+	 * use-after-free.
+	 */
+	struct tbrxe_link	*tbl;
+	u64			tbl_gen;
+	u32			tbl_charged;
+
 	/* Timer for retranmitting packet when ACKs have been lost. RC
 	 * only. The requester sets it when it is not already
 	 * started. The responder resets it whenever an ack is
