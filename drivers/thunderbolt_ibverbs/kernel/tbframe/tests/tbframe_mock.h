@@ -33,6 +33,11 @@ struct tbframe_mock {
 	bool		paths_on;
 	bool		enable_seen;
 	int		in_hopid;
+	int		last_alloc_in_hopid;	/* -1 when never allocated */
+	int		last_release_in_hopid;	/* -1 when never released */
+	unsigned int	in_hopid_allocs;
+	unsigned int	in_hopid_releases;
+	int		last_disable_remote_hopid;
 	unsigned int	reannounce_calls;
 	unsigned int	rx_posted_before_enable;
 
@@ -145,6 +150,8 @@ static int tbframe_mock_alloc_in_hopid(void *data, int hopid)
 	struct tbframe_mock *m = data;
 
 	m->in_hopid = hopid;
+	m->last_alloc_in_hopid = hopid;
+	m->in_hopid_allocs++;
 	return hopid;
 }
 
@@ -153,6 +160,8 @@ static void tbframe_mock_release_in_hopid(void *data, int hopid)
 	struct tbframe_mock *m = data;
 
 	m->in_hopid = -1;
+	m->last_release_in_hopid = hopid;
+	m->in_hopid_releases++;
 }
 
 static int tbframe_mock_alloc_rings(void *data, u16 tx_entries,
@@ -252,6 +261,7 @@ static int tbframe_mock_disable_paths(void *data, int local_hopid,
 	struct tbframe_mock *m = data;
 
 	m->paths_on = false;
+	m->last_disable_remote_hopid = remote_hopid;
 	return 0;
 }
 
@@ -387,6 +397,9 @@ static int tbframe_mock_fixture_init(struct kunit *test,
 	INIT_LIST_HEAD(&fx->mock.tx_queue);
 	INIT_LIST_HEAD(&fx->mock.rx_posted);
 	fx->mock.in_hopid = -1;
+	fx->mock.last_alloc_in_hopid = -1;
+	fx->mock.last_release_in_hopid = -1;
+	fx->mock.last_disable_remote_hopid = -1;
 	fx->mock.route = TBFRAME_MOCK_ROUTE;
 	fx->mock.paths_active_ret = 1;
 	fx->mock.peer.proto_version = TBFRAME_WIRE_VERSION;

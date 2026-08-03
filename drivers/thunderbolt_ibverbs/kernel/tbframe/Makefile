@@ -54,6 +54,7 @@ tbframe-$(CONFIG_KUNIT) += tests/session_test.o
 tbframe-$(CONFIG_KUNIT) += tests/supersede_test.o
 tbframe-$(CONFIG_KUNIT) += tests/window_test.o
 tbframe-$(CONFIG_KUNIT) += tests/teardown_test.o
+tbframe-$(CONFIG_KUNIT) += tests/lifecycle_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src)
 
