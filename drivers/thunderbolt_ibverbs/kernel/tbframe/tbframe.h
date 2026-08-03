@@ -119,6 +119,12 @@ enum tbframe_down_reason {
  * @e2e:          hardware E2E credits active on this link (Mode B)
  * @width:        link width (lanes)
  * @speed:        per-lane speed in Gb/s
+ * @remote_uuid:  peer host router UUID (zeros when unknown). Stable
+ *                hardware identity for per-link provisioning (the
+ *                tbv-rdma-addr deterministic ULA scheme hashes the sorted
+ *                endpoint UUID pair).
+ * @remote_name:  peer hostname from the XDomain properties ("" when
+ *                unknown); used for stable netdev naming (tbr-<peer>).
  */
 struct tbframe_link_info {
 	u64	gid_eui64;
@@ -129,6 +135,8 @@ struct tbframe_link_info {
 	bool	e2e;
 	u8	width;
 	u8	speed;
+	u8	remote_uuid[16];
+	char	remote_name[48];
 };
 
 /**

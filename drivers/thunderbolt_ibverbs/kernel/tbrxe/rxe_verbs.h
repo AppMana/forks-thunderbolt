@@ -13,6 +13,8 @@
 #include "rxe_task.h"
 #include "rxe_hw_counters.h"
 
+struct tbrxe_link;
+
 static inline int pkey_match(u16 key1, u16 key2)
 {
 	return (((key1 & 0x7fff) != 0) &&
@@ -271,15 +273,11 @@ struct rxe_qp {
 	atomic_t		skb_out;
 	int			need_req_skb;
 
-	/* Mode A engine-side admission (wire-spec section 6): the link this
-	 * RC QP charges its unacked wire packets against. The pointer is only
-	 * ever dereferenced under the transport lock after revalidating
-	 * (pointer, generation) against the live link list, so a link that
-	 * went down (and was freed) invalidates the charge without a
-	 * use-after-free.
+	/* Mode A engine-side admission (wire-spec section 6): this RC QP's
+	 * live charge against its device's link window. The link record is
+	 * reached through the device (rxe->tbl_link), which outlives every
+	 * QP of the device.
 	 */
-	struct tbrxe_link	*tbl;
-	u64			tbl_gen;
 	u32			tbl_charged;
 
 	/* Timer for retranmitting packet when ACKs have been lost. RC
@@ -448,6 +446,12 @@ struct rxe_dev {
 	atomic64_t		stats_counters[RXE_NUM_OF_COUNTERS];
 
 	struct rxe_port		port;
+
+	/* The tbframe link this device fronts (wire-spec section 8: the
+	 * device IS the link). Set before registration, valid until the
+	 * record is freed after ib_unregister_device() drained all users.
+	 */
+	struct tbrxe_link	*tbl_link;
 };
 
 static inline void rxe_counter_inc(struct rxe_dev *rxe, enum rxe_counters index)
@@ -516,6 +520,7 @@ static inline struct rxe_pd *rxe_mw_pd(struct rxe_mw *mw)
 }
 
 void rxe_init_device(struct rxe_dev *rxe);
-int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name);
+int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
+			struct net_device *ndev);
 
 #endif /* RXE_VERBS_H */

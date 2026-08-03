@@ -89,6 +89,9 @@ struct tbframe_hw_ops {
 	int	(*control_response)(void *hw, const void *resp, size_t len);
 	bool	(*reannounce)(void *hw);
 	void	(*link_attrs)(void *hw, u8 *width, u8 *speed);
+	/* optional: stable peer hardware identity for provisioning/naming */
+	void	(*peer_identity)(void *hw, u8 uuid[16], char *name,
+				 size_t name_len);
 	bool	(*match)(void *hw, const void *token);
 };
 

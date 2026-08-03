@@ -123,7 +123,8 @@ static int tbrxe_test_create_side(struct kunit *test, struct ib_device *dev,
 }
 
 static int tbrxe_test_connect(struct ib_qp *qp, u32 dest_qpn, u32 psn_local,
-			      u32 psn_remote, const union ib_gid *dgid)
+			      u32 psn_remote, const union ib_gid *dgid,
+			      u8 sgid_index)
 {
 	struct ib_qp_attr attr;
 	int err;
@@ -148,7 +149,8 @@ static int tbrxe_test_connect(struct ib_qp *qp, u32 dest_qpn, u32 psn_local,
 	attr.min_rnr_timer = 12;
 	attr.ah_attr.type = rdma_ah_find_type(qp->device, 1);
 	rdma_ah_set_port_num(&attr.ah_attr, 1);
-	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0, 0, 64, 0);
+	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0,
+			sgid_index, 64, 0);
 	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_AV |
 			   IB_QP_PATH_MTU | IB_QP_DEST_QPN | IB_QP_RQ_PSN |
 			   IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER);
@@ -198,27 +200,26 @@ static void tbrxe_rc_send_loopback_smoke(struct kunit *test)
 	struct ib_pd *pd;
 	union ib_gid dgid;
 	struct ib_wc wc;
+	u8 sgid_index = 0;
 	u8 *src, *dst;
 	int err, i;
-
-	rxe = tbrxe_get_dev();
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
-	dev = &rxe->ib_dev;
 
 	atomic_set(&mock_wire_calls, 0);
 	tbrxe_set_transport_ops(&tbrxe_mock_transport);
 
-	/* First link_up publishes the ib_device and pins the self GID from
-	 * the advertised local identity.
+	/* link_up publishes this link's ib_device, bound to its GID-anchor
+	 * netdev (wire-spec section 8).
 	 */
 	tbrxe_test_link_up(&fake_link);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
 
-	/* The loopback target: our own self GID (driver GID table index 0,
-	 * the ULA a peer would derive from our HELLO).
+	/* The loopback target: the identity link-local GID ib_core built
+	 * from the anchor netdev's address.
 	 */
-	err = tbrxe_query_gid(rxe, 0, &dgid);
+	err = tbrxe_test_gid(rxe, &dgid, &sgid_index);
 	KUNIT_ASSERT_EQ(test, err, 0);
-	KUNIT_ASSERT_EQ(test, dgid.raw[0], 0xfd);
 
 	src = kunit_kzalloc(test, TBRXE_TEST_MSG_LEN, GFP_KERNEL);
 	dst = kunit_kzalloc(test, TBRXE_TEST_MSG_LEN, GFP_KERNEL);
@@ -234,9 +235,11 @@ static void tbrxe_rc_send_loopback_smoke(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, tbrxe_test_create_side(test, dev, pd, &b), 0);
 
 	KUNIT_ASSERT_EQ(test, tbrxe_test_connect(a.qp, b.qp->qp_num,
-						 0x100, 0x200, &dgid), 0);
+						 0x100, 0x200, &dgid,
+						 sgid_index), 0);
 	KUNIT_ASSERT_EQ(test, tbrxe_test_connect(b.qp, a.qp->qp_num,
-						 0x200, 0x100, &dgid), 0);
+						 0x200, 0x100, &dgid,
+						 sgid_index), 0);
 
 	/* Receiver side. */
 	rsge.addr = (uintptr_t)dst;

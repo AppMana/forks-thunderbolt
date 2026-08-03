@@ -65,18 +65,6 @@ err_out:
 	return err;
 }
 
-static int rxe_query_gid(struct ib_device *ibdev, u32 port, int idx,
-			 union ib_gid *gid)
-{
-	struct rxe_dev *rxe = to_rdev(ibdev);
-
-	/* tbrxe: driver-managed GID table (the port is IB link layer, so
-	 * ib_core fills its GID cache from this hook). Index 0 is the self
-	 * ULA GID; unused entries read as zero.
-	 */
-	return tbrxe_query_gid(rxe, idx, gid);
-}
-
 static int rxe_query_pkey(struct ib_device *ibdev,
 			  u32 port_num, u16 index, u16 *pkey)
 {
@@ -171,10 +159,10 @@ static enum rdma_link_layer rxe_get_link_layer(struct ib_device *ibdev,
 		goto err_out;
 	}
 
-	/* tbrxe: IB link layer. GID-addressed with driver-managed GIDs; no
-	 * RoCE dmac/neighbour resolution exists without a netdev.
+	/* GID-anchor netdev model (wire-spec section 8): RoCE port whose
+	 * GID table ib_core populates from the bound netdev's addresses.
 	 */
-	return IB_LINK_LAYER_INFINIBAND;
+	return IB_LINK_LAYER_ETHERNET;
 
 err_out:
 	rxe_err_dev(rxe, "returned err = %d\n", err);
@@ -198,17 +186,11 @@ static int rxe_port_immutable(struct ib_device *ibdev, u32 port_num,
 	if (err)
 		goto err_out;
 
-	/* tbrxe: IB protocol WITHOUT the MAD/SMI/CM/SA capability bits
-	 * (RDMA_CORE_PORT_IBA_IB would make ib_mad create an SMI QP this
-	 * driver cannot back). No MADs means max_mad_size stays 0.
-	 * GRH_REQUIRED: the fabric is GID-addressed only (no LIDs), so the
-	 * core must resolve sgid_attr for every AV (see rxe_av.c chk_attr).
-	 */
-	immutable->core_cap_flags = RDMA_CORE_CAP_PROT_IB |
-				    RDMA_CORE_CAP_IB_GRH_REQUIRED;
+	/* Upstream rxe parity: RoCEv2 port, ib_core-managed GID table. */
+	immutable->core_cap_flags = RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP;
 	immutable->pkey_tbl_len = attr.pkey_tbl_len;
 	immutable->gid_tbl_len = attr.gid_tbl_len;
-	immutable->max_mad_size = 0;
+	immutable->max_mad_size = IB_MGMT_MAD_SIZE;
 
 	return 0;
 
@@ -1499,7 +1481,6 @@ static const struct ib_device_ops rxe_dev_ops = {
 	.query_ah = rxe_query_ah,
 	.query_device = rxe_query_device,
 	.query_pkey = rxe_query_pkey,
-	.query_gid = rxe_query_gid,
 	.query_port = rxe_query_port,
 	.query_qp = rxe_query_qp,
 	.query_srq = rxe_query_srq,
@@ -1519,8 +1500,8 @@ static const struct ib_device_ops rxe_dev_ops = {
 
 /*
  * Device-shape setup, run at rxe_add() time so dealloc_driver is wired even
- * if the device is torn down before it was ever published (registration is
- * deferred to the first tbframe link_up, see tbrxe_publish()).
+ * if the device is torn down before it was ever published (registration
+ * happens at the link's first link_up, tbrxe_client_link_up()).
  */
 void rxe_init_device(struct rxe_dev *rxe)
 {
@@ -1538,13 +1519,21 @@ void rxe_init_device(struct rxe_dev *rxe)
 	dev->uverbs_cmd_mask |= BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
 				BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
 
-	/* tbrxe: no ib_device_set_netdev(); the transport is tbframe. */
 	ib_set_device_ops(dev, &rxe_dev_ops);
 }
 
-int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name)
+int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
+			struct net_device *ndev)
 {
 	int err;
+
+	/* GID-anchor binding (wire-spec section 8): ib_core populates this
+	 * device's RoCE GID table from @ndev's addresses and resolves RTR
+	 * over its routes.
+	 */
+	err = ib_device_set_netdev(&rxe->ib_dev, ndev, 1);
+	if (err)
+		return err;
 
 	err = ib_register_device(&rxe->ib_dev, ibdev_name, NULL);
 	if (err)

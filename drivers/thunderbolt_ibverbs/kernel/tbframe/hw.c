@@ -293,6 +293,17 @@ static void tbframe_hw_link_attrs(void *data, u8 *width, u8 *speed)
 	*speed = min_t(unsigned int, hw->xd->link_speed, U8_MAX);
 }
 
+static void tbframe_hw_peer_identity(void *data, u8 uuid[16], char *name,
+				     size_t name_len)
+{
+	struct tbframe_hw *hw = data;
+
+	memset(uuid, 0, 16);
+	if (hw->xd->remote_uuid)
+		memcpy(uuid, hw->xd->remote_uuid->b, 16);
+	strscpy(name, hw->xd->device_name ? : "", name_len);
+}
+
 static bool tbframe_hw_match(void *data, const void *token)
 {
 	struct tbframe_hw *hw = data;
@@ -320,6 +331,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.control_response	= tbframe_hw_control_response,
 	.reannounce		= tbframe_hw_reannounce,
 	.link_attrs		= tbframe_hw_link_attrs,
+	.peer_identity		= tbframe_hw_peer_identity,
 	.match			= tbframe_hw_match,
 };
 

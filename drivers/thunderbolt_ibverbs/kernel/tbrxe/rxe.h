@@ -98,16 +98,11 @@
 
 void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload);
 
-int rxe_add(struct rxe_dev *rxe, unsigned int mtu);
-
-/* Publish (register) the device. Called by the transport at the FIRST
- * tbframe link_up, after it set the self GID from the link's advertised
- * local identity; registration fills the GID cache from rxe_query_gid.
+/* Initialize a freshly ib_alloc_device()d rxe_dev. @mac seeds the node and
+ * port GUIDs (the GID-anchor netdev's identity MAC). Registration happens
+ * separately via rxe_register_device() (tbrxe_frame.c, at link_up).
  */
-int tbrxe_publish(struct rxe_dev *rxe);
-
-/* The module-lifetime scaffold device (NULL before init / after exit). */
-struct rxe_dev *tbrxe_get_dev(void);
+int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const u8 *mac);
 
 void rxe_rcv(struct sk_buff *skb);
 

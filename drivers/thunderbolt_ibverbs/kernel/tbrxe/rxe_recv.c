@@ -109,6 +109,15 @@ static int check_addr(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
 	if (unlikely(pkt->port_num != qp->attr.port_num))
 		return -EINVAL;
 
+	/* tbrxe: the wire carries BTH..ICRC only (no IP addresses, by
+	 * design); a wire frame is validated by ring ownership (the ring
+	 * pair belongs to this device's link), the QP number, the PSN
+	 * machinery and the ICRC. The synthetic header holds diagnostic
+	 * identities, so exact matching applies to loopback only.
+	 */
+	if (!(pkt->mask & RXE_LOOPBACK_MASK))
+		return 0;
+
 	if (skb->protocol == htons(ETH_P_IP)) {
 		struct in_addr *saddr =
 			&qp->pri_av.sgid_addr._sockaddr_in.sin_addr;
@@ -277,21 +286,21 @@ drop:
  * @rxe: rxe device that received packet
  * @skb: the received packet buffer
  *
- * tbrxe adaptation: there is no IP stack and no ib_core-managed RoCE GID
- * table. The dgid rides in the synthetic IPv6 header the transport writes
- * into RX-skb headroom (tbrxe_fill_grh) and is validated against the
- * driver's own local GID table.
+ * tbrxe: wire frames carry no addresses (BTH..ICRC only); arrival on the
+ * device's own ring pair IS the destination check (wire-spec section 8),
+ * so only loopback packets get the exact GID-table match.
  *
- * Accept any loopback packets
+ * Accept any wire packet (ring ownership demuxes)
  * Accept if multicast packet
- * Accept if matches a local GID table entry
+ * Accept if matches an SGID table entry
  */
 static int rxe_chk_dgid(struct rxe_dev *rxe, struct sk_buff *skb)
 {
 	struct rxe_pkt_info *pkt = SKB_TO_PKT(skb);
+	const struct ib_gid_attr *gid_attr;
 	union ib_gid *pdgid;
 
-	if (pkt->mask & RXE_LOOPBACK_MASK)
+	if (!(pkt->mask & RXE_LOOPBACK_MASK))
 		return 0;
 
 	pdgid = (union ib_gid *)&ipv6_hdr(skb)->daddr;
@@ -299,7 +308,14 @@ static int rxe_chk_dgid(struct rxe_dev *rxe, struct sk_buff *skb)
 	if (rdma_is_multicast_addr((struct in6_addr *)pdgid))
 		return 0;
 
-	return tbrxe_gid_is_local(rxe, pdgid) ? 0 : -EINVAL;
+	gid_attr = rdma_find_gid_by_port(&rxe->ib_dev, pdgid,
+					 IB_GID_TYPE_ROCE_UDP_ENCAP,
+					 1, NULL);
+	if (IS_ERR(gid_attr))
+		return PTR_ERR(gid_attr);
+
+	rdma_put_gid_attr(gid_attr);
+	return 0;
 }
 
 /* rxe_rcv is called from the interface driver */

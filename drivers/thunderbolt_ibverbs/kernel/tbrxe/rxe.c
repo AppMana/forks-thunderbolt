@@ -16,15 +16,6 @@ MODULE_LICENSE("Dual BSD/GPL");
 MODULE_VERSION(TBV_PKG_VERSION);
 #endif
 
-/* The single scaffold device (see tbrxe_frame.c on the one-port choice). */
-static struct rxe_dev *tbrxe_dev;
-static bool tbrxe_dev_published;
-
-struct rxe_dev *tbrxe_get_dev(void)
-{
-	return tbrxe_dev;
-}
-
 /* free resources for a rxe device all objects created for this device must
  * have been destroyed
  */
@@ -92,14 +83,6 @@ static void rxe_init_device_param(struct rxe_dev *rxe)
 	rxe->attr.max_fast_reg_page_list_len	= RXE_MAX_FMR_PAGE_LIST_LEN;
 	rxe->attr.max_pkeys			= RXE_MAX_PKEYS;
 	rxe->attr.local_ca_ack_delay		= RXE_LOCAL_CA_ACK_DELAY;
-
-	/*
-	 * There is no netdev underneath a tbrxe device. A per-boot random
-	 * address seeds the node/sys-image GUIDs only; the self GID comes
-	 * from the tbframe-advertised identity at the first link_up
-	 * (tbrxe_client_link_up), never from this address.
-	 */
-	eth_random_addr(rxe->raw_gid);
 
 	addrconf_addr_eui48((unsigned char *)&rxe->attr.sys_image_guid,
 			rxe->raw_gid);
@@ -228,73 +211,34 @@ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload)
 	port->mtu_cap = ib_mtu_enum_to_int(mtu);
 }
 
-/* Create a tbrxe device. The caller should allocate memory for rxe by
- * calling ib_alloc_device. Publication (ib_register_device) is deferred to
- * the first tbframe link_up: the self GID is the identity tbframe
- * advertised in our own HELLO, which does not exist before a link is up.
+/* Initialize a freshly allocated tbrxe device (one per tbframe link,
+ * wire-spec section 8). The caller allocates with ib_alloc_device and
+ * registers with rxe_register_device(); dealloc_driver is wired here so
+ * every unwind path (including registration failure) cleans the pools.
  */
-int rxe_add(struct rxe_dev *rxe, unsigned int mtu)
+int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const u8 *mac)
 {
+	memcpy(rxe->raw_gid, mac, ETH_ALEN);
 	rxe_init(rxe);
 	rxe_set_mtu(rxe, mtu);
 	rxe_init_device(rxe);
-	tbrxe_frame_init(rxe);
 
-	return 0;
-}
-
-/* First-link publication (called from tbrxe_client_link_up with the self
- * GID already set, so the registration-time GID cache fill sees it).
- */
-int tbrxe_publish(struct rxe_dev *rxe)
-{
-	int err;
-
-	if (WARN_ON(rxe != tbrxe_dev || tbrxe_dev_published))
-		return -EINVAL;
-
-	err = rxe_register_device(rxe, "tbrxe%d");
-	if (err)
-		return err;
-
-	tbrxe_dev_published = true;
-	dev_info(&rxe->ib_dev.dev, "published over tbframe\n");
 	return 0;
 }
 
 static int __init rxe_module_init(void)
 {
-	struct rxe_dev *rxe;
 	int err;
 
 	err = rxe_alloc_wq();
 	if (err)
 		return err;
 
-	rxe = ib_alloc_device(rxe_dev, ib_dev);
-	if (!rxe) {
-		rxe_destroy_wq();
-		return -ENOMEM;
-	}
-
-	/* Frame payload budget: eth_mtu_int_to_enum() subtracts the 80-byte
-	 * header allowance, so hand it 2048 + 80 to land on IB_MTU_2048.
+	/* Devices are created per tbframe link at link_up
+	 * (tbrxe_client_link_up); the module owns none of its own.
 	 */
-	err = rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH);
+	err = tbrxe_frame_register();
 	if (err) {
-		ib_dealloc_device(&rxe->ib_dev);
-		rxe_destroy_wq();
-		return err;
-	}
-	tbrxe_dev = rxe;
-
-	err = tbrxe_frame_register(rxe);
-	if (err) {
-		/* Never published (no link_up can have run): dealloc, not
-		 * unregister; dealloc_driver is wired by rxe_init_device().
-		 */
-		ib_dealloc_device(&rxe->ib_dev);
-		tbrxe_dev = NULL;
 		rxe_destroy_wq();
 		return err;
 	}
@@ -305,21 +249,14 @@ static int __init rxe_module_init(void)
 
 static void __exit rxe_module_exit(void)
 {
-	tbrxe_frame_unregister();
-	/*
+	/* Downs every link (CLOSED), which unpublishes every device.
+	 *
 	 * NOT ib_unregister_driver(RDMA_DRIVER_RXE): the driver id is shared
 	 * with the stock rdma_rxe module (so stock librxe binds to us), and
 	 * unregister-by-driver-id would tear down live rdma_rxe devices
 	 * (rxe_lan) too.
 	 */
-	if (tbrxe_dev) {
-		if (tbrxe_dev_published)
-			ib_unregister_device(&tbrxe_dev->ib_dev);
-		else
-			ib_dealloc_device(&tbrxe_dev->ib_dev);
-		tbrxe_dev = NULL;
-		tbrxe_dev_published = false;
-	}
+	tbrxe_frame_unregister();
 	rxe_destroy_wq();
 
 	pr_info("unloaded\n");

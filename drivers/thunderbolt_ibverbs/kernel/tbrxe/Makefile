@@ -52,7 +52,7 @@ endif
 # kernel; run it with tests/run-kunit.sh (the fleet/host kernels lack
 # CONFIG_KUNIT).
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_loopback_test.o
-tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_gid_test.o
+tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_perlink_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_admission_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src)

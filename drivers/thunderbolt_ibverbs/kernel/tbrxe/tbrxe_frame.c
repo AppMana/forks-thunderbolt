@@ -9,9 +9,16 @@
  * Normative wire format: docs/tbframe-tbrxe-wire-spec.md. One frame carries
  * exactly BTH..ICRC; there is no encapsulation header.
  *
- * The engine currency stays struct sk_buff so that rxe_req.c / rxe_resp.c /
- * rxe_comp.c and the rxe_task machinery are untouched (see "The skb seam"
- * below). Everything netdev/UDP/dst-cache related from rxe_net.c is gone.
+ * Addressing model (wire-spec section 8, normative): ONE ib_device PER
+ * tbframe link, published at that link's first link_up and unpublished on
+ * terminal link_down. Each device is bound (ib_device_set_netdev) to a
+ * GID-anchor netdev: IFF_NOARP, xmit drops, carries no data ever. ib_core
+ * populates the RoCE GID table from that netdev's IPv6 addresses -- the
+ * link-local from the per-link identity MAC plus the deterministic
+ * per-cable ULA the userspace tooling (tbv-rdma-addr) assigns -- and RC
+ * modify_qp(RTR) resolves over the netdev's routes. The driver carries no
+ * GID identity of its own and needs no peer table: the device IS the link,
+ * so the transport for any non-loopback packet is the device's link.
  *
  * The skb seam
  * ------------
@@ -24,46 +31,32 @@
  *   they use pkt->hdr exclusively.
  *
  * TX (loopback): a normal skb; pkt->hdr = skb_put(paylen). Chosen when the
- *   AV dgid is one of our own GIDs (or multicast, see tbrxe_dest()).
+ *   AV's dgid equals its sgid (self-addressed) or is multicast.
  *
  * RX: one copy from the tbframe RX frame into a fresh skb inside the rx()
  *   upcall, so the frame can be reposted immediately and the engine owns a
- *   normal skb through its req_pkts/resp_pkts queues (upstream rxe also
- *   copies once per direction; holding frames via tbframe_frame_get_rx is a
- *   later optimization).
+ *   normal skb through its req_pkts/resp_pkts queues.
  *
  * Both RX and loopback skbs carry a synthetic IPv6 header in headroom
- * (saddr = sender GID, daddr = receiver GID, network header set,
- * skb->protocol = ETH_P_IPV6, skb->dev = blackhole_netdev) so the verbatim
- * engine paths that peek at it keep working: the UD GRH copy in
- * rxe_resp.c:execute(), the wc network_hdr_type / is_vlan_dev() code in
- * do_complete(), check_addr() and the mcast dgid extraction in rxe_recv.c.
+ * (network header set, skb->protocol = ETH_P_IPV6, skb->dev =
+ * blackhole_netdev) so the verbatim engine paths that peek at it keep
+ * working. The wire carries no IP addresses (BTH..ICRC only, by design),
+ * so for wire frames the addresses are DIAGNOSTIC link-locals derived from
+ * the session's HELLO identities; ring ownership, the QP number, the PSN
+ * machinery and the ICRC are what validate a wire frame, and rxe_recv.c
+ * skips exact address matching for non-loopback packets accordingly.
+ * Loopback skbs carry the exact AV addresses.
  *
- * Backpressure: tbframe admission (alloc_frame -> -ENOSPC) replaces the
- * upstream skb-destructor / qp->skb_out scheme. On -ENOSPC the transport
- * sets qp->need_req_skb (the existing flag) and rxe_init_packet returns
- * NULL; rxe_requester treats that as "wait" (the one small edit in
- * rxe_req.c). The tx_released upcall then reschedules every QP's tasks
- * (coalesced, so a full pool sweep is acceptable for the scaffold).
- *
- * Addressing (wire-spec section 8): the target is one ib_device port per
- * tbframe link. The rxe core is deeply single-port (struct rxe_port is
- * scalar, port_num==1 is asserted throughout), so this scaffold uses ONE
- * ib_device with ONE port and resolves "which link reaches this GID" purely
- * through the peer table below; per-link ports are an open item. The local
- * GID table holds a single self GID (index 0) set at the FIRST link_up from
- * info->local_gid_eui64 -- the identity tbframe advertised in OUR OWN HELLO
- * on that link -- so the GID a peer derives from our HELLO and the GID we
- * hand to userspace agree end to end (deriving the self GID from any other
- * source made every remote dgid miss the peer table and parked requesters
- * forever). The ib_device itself is published at that same first link_up
- * (the legacy driver's publish-on-rail-ready), because the identity does
- * not exist before a link comes up. All links share the one identity;
- * per-link local ULAs/ports remain an open item.
+ * Backpressure: tbframe admission (alloc_frame -> -ENOSPC) bounds the
+ * local TX ring, and the engine-side Mode A accounting below bounds the
+ * aggregate unacked packets against the peer's advertised window. Both
+ * park the QP via the existing need_req_skb flag; the tx_released upcall
+ * and ACK-driven release reschedule it.
  */
 
+#include <linux/etherdevice.h>
+#include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/hash.h>
 #include <rdma/ib_addr.h>
 
 #include "rxe.h"
@@ -79,16 +72,20 @@
  */
 #define TBRXE_MIN_LINK_PAYLOAD	(RXE_MAX_HDR_LENGTH + 2048 + 3 + RXE_ICRC_SIZE)
 
+/*
+ * One record per tbframe link: the link's ib_device, its GID-anchor netdev
+ * and the Mode A admission state. Created (and the device published) at
+ * the link's first link_up; destroyed (device unpublished) on terminal
+ * link_down. Non-terminal session bounces only toggle the port state.
+ */
 struct tbrxe_link {
 	struct list_head	list;
 	struct tbframe_link	*tblink;
 	struct tbframe_link_info info;
-	union ib_gid		peer_gid;
-	/* Mode A engine-side admission (wire-spec section 6). All fields
-	 * under tbrxe.lock. gen disambiguates a recycled allocation so a
-	 * stale qp->tbl (link bounced) never charges the successor link.
-	 */
-	u64			gen;
+	struct rxe_dev		*rxe;
+	struct net_device	*ndev;
+	bool			session_up;
+	/* Mode A engine-side admission, under tbrxe.lock. */
 	u32			unacked;
 	bool			admission_waiters;
 };
@@ -102,24 +99,19 @@ struct tbrxe_txinfo {
 };
 
 static struct {
-	struct rxe_dev		*rxe;
-	spinlock_t		lock;	/* guards links and ops swaps */
+	spinlock_t		lock;	/* links list, admission counters */
 	struct list_head	links;
-	union ib_gid		self_gid;
-	u64			self_eui64;
-	u64			link_gen;
 	const struct tbrxe_transport_ops *ops;
 	bool			registered;
-	/* publication of the ib_device at the first link_up */
+	/* serializes record create/teardown across link_up/link_down */
 	struct mutex		publish_lock;
-	bool			published;
 } tbrxe = {
 	.lock	= __SPIN_LOCK_UNLOCKED(tbrxe.lock),
 	.links	= LIST_HEAD_INIT(tbrxe.links),
 	.publish_lock = __MUTEX_INITIALIZER(tbrxe.publish_lock),
 };
 
-static void tbrxe_client_tx_released(void *ctx, struct tbframe_link *link);
+static void tbrxe_kick_parked_qps(struct rxe_dev *rxe);
 
 /* Weak: the production binding in tbrxe_tbframe_glue.c overrides this. */
 const struct tbrxe_transport_ops * __weak tbrxe_builtin_transport(void)
@@ -136,41 +128,13 @@ void tbrxe_set_transport_ops(const struct tbrxe_transport_ops *ops)
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 }
 
-/* GID = fd | 56-bit hash(eui64) /64 prefix | eui64 interface id. Both ends
- * derive a peer's GID from that peer's advertised gid_eui64 alone.
- */
-void tbrxe_gid_from_eui64(u64 eui64, union ib_gid *gid)
-{
-	u64 prefix = ((u64)0xfd << 56) | hash_64(eui64, 56);
-
-	gid->global.subnet_prefix = cpu_to_be64(prefix);
-	gid->global.interface_id = cpu_to_be64(eui64);
-}
-
-int tbrxe_query_gid(struct rxe_dev *rxe, int index, union ib_gid *gid)
-{
-	/* Single self GID at index 0; the rest of the table is empty. */
-	if (index == 0 && rxe == tbrxe.rxe)
-		memcpy(gid, &tbrxe.self_gid, sizeof(*gid));
-	else
-		memset(gid, 0, sizeof(*gid));
-
-	return 0;
-}
-
-bool tbrxe_gid_is_local(struct rxe_dev *rxe, const union ib_gid *gid)
-{
-	return rxe == tbrxe.rxe &&
-	       !memcmp(gid, &tbrxe.self_gid, sizeof(*gid));
-}
-
 /* Caller holds tbrxe.lock. */
-static struct tbrxe_link *tbrxe_find_link_locked(const union ib_gid *dgid)
+static struct tbrxe_link *tbrxe_find_record_locked(struct tbframe_link *tblink)
 {
 	struct tbrxe_link *link;
 
 	list_for_each_entry(link, &tbrxe.links, list)
-		if (!memcmp(&link->peer_gid, dgid, sizeof(*dgid)))
+		if (link->tblink == tblink)
 			return link;
 
 	return NULL;
@@ -186,6 +150,20 @@ static bool tbrxe_link_is_registered_locked(struct tbrxe_link *link)
 			return true;
 
 	return false;
+}
+
+struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink)
+{
+	struct tbrxe_link *link;
+	struct rxe_dev *rxe = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_find_record_locked(tblink);
+	if (link)
+		rxe = link->rxe;
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	return rxe;
 }
 
 /* ---- Mode A engine-side admission (wire-spec section 6) ---------------- */
@@ -206,9 +184,12 @@ static bool tbrxe_link_is_registered_locked(struct tbrxe_link *link)
  * advances comp.psn (ACK arrival), on retry rewind (req.psn pulled back to
  * comp.psn -- the rewound packets will be re-sent and re-charged, matching
  * the descriptors they will re-occupy), and tops up multi-response charges
- * (a READ advances req.psn by the number of response packets, each of
- * which lands in OUR ring but is symmetric on the peer for its reads).
- * QP reset/error/destroy sync with a zero distance, returning everything.
+ * (a READ advances req.psn by the number of response packets). QP
+ * reset/error/destroy sync with a zero distance, returning everything.
+ *
+ * The record outlives every QP of its device (teardown unregisters the
+ * ib_device, which drains all QPs, before freeing the record), so
+ * rxe->tbl_link is always safe to dereference from engine context.
  *
  * Transient slack: between the pre-charge and update_wqe_psn the charge
  * exceeds the PSN distance by one, so a concurrent completer sync can
@@ -217,33 +198,6 @@ static bool tbrxe_link_is_registered_locked(struct tbrxe_link *link)
  * the ring is sized with.
  */
 
-/* Caller holds tbrxe.lock. Validates qp->tbl (pointer, gen) against the
- * live list; resolves from the QP's primary AV when invalid. Returns NULL
- * when the destination is local or no link matches (nothing to charge).
- */
-static struct tbrxe_link *tbrxe_qp_link_locked(struct rxe_qp *qp)
-{
-	struct tbrxe_link *link;
-
-	if (qp->tbl) {
-		list_for_each_entry(link, &tbrxe.links, list)
-			if (link == qp->tbl && link->gen == qp->tbl_gen)
-				return link;
-		/* Link bounced: the old charge died with the old link. */
-		qp->tbl = NULL;
-		qp->tbl_charged = 0;
-	}
-
-	link = tbrxe_find_link_locked(
-		(const union ib_gid *)&qp->pri_av.grh.dgid);
-	if (link) {
-		qp->tbl = link;
-		qp->tbl_gen = link->gen;
-		qp->tbl_charged = 0;
-	}
-	return link;
-}
-
 static u32 tbrxe_link_engine_window(const struct tbrxe_link *link)
 {
 	return link->info.data_window ? : 1;
@@ -251,20 +205,20 @@ static u32 tbrxe_link_engine_window(const struct tbrxe_link *link)
 
 bool tbrxe_admit(struct rxe_qp *qp)
 {
-	struct tbrxe_link *link;
+	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
 	unsigned long flags;
 	bool ok = true;
 
+	if (!link)
+		return true;
+
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	link = tbrxe_qp_link_locked(qp);
-	if (link) {
-		if (link->unacked >= tbrxe_link_engine_window(link)) {
-			link->admission_waiters = true;
-			ok = false;
-		} else {
-			link->unacked++;
-			qp->tbl_charged++;
-		}
+	if (link->unacked >= tbrxe_link_engine_window(link)) {
+		link->admission_waiters = true;
+		ok = false;
+	} else {
+		link->unacked++;
+		qp->tbl_charged++;
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 	return ok;
@@ -273,11 +227,17 @@ bool tbrxe_admit(struct rxe_qp *qp)
 void tbrxe_unacked_sync(struct rxe_qp *qp)
 {
 	struct tbrxe_link *link;
+	struct rxe_dev *rxe;
 	unsigned long flags;
 	bool kick = false;
 	u32 target;
 
 	if (qp_type(qp) != IB_QPT_RC)
+		return;
+
+	rxe = to_rdev(qp->ibqp.device);
+	link = rxe->tbl_link;
+	if (!link)
 		return;
 
 	/* An errored/reset/destroyed QP will never see further ACKs; its
@@ -293,11 +253,6 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 		target = (qp->req.psn - qp->comp.psn) & BTH_PSN_MASK;
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	link = tbrxe_qp_link_locked(qp);
-	if (!link) {
-		spin_unlock_irqrestore(&tbrxe.lock, flags);
-		return;
-	}
 	if (qp->tbl_charged > target) {
 		u32 rel = qp->tbl_charged - target;
 
@@ -320,18 +275,143 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
 	if (kick)
-		tbrxe_client_tx_released(NULL, NULL);
+		tbrxe_kick_parked_qps(rxe);
 }
 
+/* ---- GID-anchor netdev ------------------------------------------------- */
+
 /*
- * Local delivery test. Multicast dgids are delivered locally too: the only
- * mcast consumers in the scaffold are self-attached UD groups (rxe_mcast.c);
- * fanning multicast out over tbframe links is an open item.
+ * Per-device virtual netdev whose only job is anchoring the ib_device's
+ * RoCE GID table (ib_core populates GIDs from its IPv6 addresses) and the
+ * routes RTR resolves over. It never carries data: the data path is the
+ * tbframe link. The legacy driver's proven pattern (ibdev.c u4r%d rails):
+ * IFF_NOARP, no queue, xmit drops, left admin-DOWN for udev to rename
+ * (tbr-<peer>) and assign the deterministic per-cable ULA (tbv-rdma-addr).
  */
-static bool tbrxe_dest_is_local(const union ib_gid *dgid)
+
+struct tbrxe_ndev_priv {
+	char	peer_uuid[UUID_STRING_LEN + 1];
+	char	peer_name[sizeof_field(struct tbframe_link_info, remote_name)];
+};
+
+static netdev_tx_t tbrxe_ndev_xmit(struct sk_buff *skb,
+				   struct net_device *ndev)
 {
-	return tbrxe_gid_is_local(tbrxe.rxe, dgid) ||
-	       rdma_is_multicast_addr((struct in6_addr *)dgid);
+	/* GID-anchor only: the data path is the tbframe link. */
+	kfree_skb(skb);
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops tbrxe_ndev_ops = {
+	.ndo_start_xmit	= tbrxe_ndev_xmit,
+};
+
+static void tbrxe_ndev_setup(struct net_device *ndev)
+{
+	ether_setup(ndev);
+	ndev->netdev_ops = &tbrxe_ndev_ops;
+	ndev->flags |= IFF_NOARP;
+	ndev->priv_flags |= IFF_NO_QUEUE;
+}
+
+/* Peer identity attrs consumed by the udev naming/addressing helpers
+ * (tbv-rdma-ifname, tbv-rdma-addr).
+ */
+static ssize_t tbv_peer_uuid_show(struct device *d,
+				  struct device_attribute *a, char *buf)
+{
+	struct tbrxe_ndev_priv *priv = netdev_priv(to_net_dev(d));
+
+	return sysfs_emit(buf, "%s\n", priv->peer_uuid);
+}
+static DEVICE_ATTR_RO(tbv_peer_uuid);
+
+static ssize_t tbv_peer_name_show(struct device *d,
+				  struct device_attribute *a, char *buf)
+{
+	struct tbrxe_ndev_priv *priv = netdev_priv(to_net_dev(d));
+
+	return sysfs_emit(buf, "%s\n", priv->peer_name);
+}
+static DEVICE_ATTR_RO(tbv_peer_name);
+
+static struct attribute *tbrxe_ndev_attrs[] = {
+	&dev_attr_tbv_peer_uuid.attr,
+	&dev_attr_tbv_peer_name.attr,
+	NULL,
+};
+static const struct attribute_group tbrxe_ndev_group = {
+	.attrs = tbrxe_ndev_attrs,
+};
+
+/* The identity MAC behind the advertised EUI-64 (RFC 4291 modified EUI-64
+ * inverted): the netdev's link-local GID then equals the HELLO identity.
+ */
+static void tbrxe_mac_from_eui64(u64 eui64, u8 mac[ETH_ALEN])
+{
+	mac[0] = ((eui64 >> 56) & 0xff) ^ 0x02;
+	mac[1] = eui64 >> 48;
+	mac[2] = eui64 >> 40;
+	mac[3] = eui64 >> 16;
+	mac[4] = eui64 >> 8;
+	mac[5] = eui64;
+}
+
+static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info)
+{
+	struct tbrxe_ndev_priv *priv;
+	struct net_device *ndev;
+	u8 mac[ETH_ALEN];
+	int err;
+
+	ndev = alloc_netdev(sizeof(*priv), "u4r%d", NET_NAME_ENUM,
+			    tbrxe_ndev_setup);
+	if (!ndev)
+		return ERR_PTR(-ENOMEM);
+
+	priv = netdev_priv(ndev);
+	snprintf(priv->peer_uuid, sizeof(priv->peer_uuid), "%pUb",
+		 info->remote_uuid);
+	strscpy(priv->peer_name, info->remote_name, sizeof(priv->peer_name));
+
+	tbrxe_mac_from_eui64(info->local_gid_eui64, mac);
+	eth_hw_addr_set(ndev, mac);
+
+	ndev->sysfs_groups[0] = &tbrxe_ndev_group;
+
+	err = register_netdev(ndev);
+	if (err) {
+		free_netdev(ndev);
+		return ERR_PTR(err);
+	}
+	return ndev;
+}
+
+/* ---- packet paths ------------------------------------------------------ */
+
+/*
+ * Local delivery test: self-addressed (dgid == sgid) or multicast. The
+ * only mcast consumers are self-attached UD groups (rxe_mcast.c); fanning
+ * multicast out over the link is an open item.
+ */
+static bool tbrxe_dest_is_local(const struct rxe_av *av)
+{
+	return rdma_is_multicast_addr(
+		       (struct in6_addr *)&av->grh.dgid) ||
+	       ipv6_addr_equal(&av->sgid_addr._sockaddr_in6.sin6_addr,
+			       &av->dgid_addr._sockaddr_in6.sin6_addr);
+}
+
+/* Diagnostic link-local from a HELLO EUI-64 identity, for the synthetic
+ * IPv6 header on wire-RX skbs. The wire carries no addresses (BTH..ICRC
+ * only); these are for the UD GRH copy and wc fields, never validated.
+ */
+static void tbrxe_diag_addr(u64 eui64, struct in6_addr *addr)
+{
+	memset(addr, 0, sizeof(*addr));
+	addr->s6_addr[0] = 0xfe;
+	addr->s6_addr[1] = 0x80;
+	put_unaligned_be64(eui64, &addr->s6_addr[8]);
 }
 
 /*
@@ -339,8 +419,8 @@ static bool tbrxe_dest_is_local(const union ib_gid *dgid)
  * skb->len stays paylen (== BTH..ICRC), matching what rxe_rcv() expects
  * after the upstream UDP pull.
  */
-static void tbrxe_fill_grh(struct sk_buff *skb, const union ib_gid *sgid,
-			   const union ib_gid *dgid, u16 paylen)
+static void tbrxe_fill_grh(struct sk_buff *skb, const struct in6_addr *saddr,
+			   const struct in6_addr *daddr, u16 paylen)
 {
 	struct ipv6hdr *ip6h;
 
@@ -351,8 +431,8 @@ static void tbrxe_fill_grh(struct sk_buff *skb, const union ib_gid *sgid,
 	ip6h->payload_len = htons(paylen);
 	ip6h->nexthdr = IPPROTO_UDP;
 	ip6h->hop_limit = 0xff;
-	memcpy(&ip6h->saddr, sgid, sizeof(ip6h->saddr));
-	memcpy(&ip6h->daddr, dgid, sizeof(ip6h->daddr));
+	ip6h->saddr = *saddr;
+	ip6h->daddr = *daddr;
 
 	skb->protocol = htons(ETH_P_IPV6);
 	/* Non-NULL, non-VLAN, never unregistered: keeps the verbatim
@@ -379,11 +459,10 @@ static void tbrxe_skb_tx_dtor(struct sk_buff *skb)
 
 /*
  * Downcall 1: allocate a frame with paylen writable bytes for BTH..ICRC.
- * pkt->mask and pkt->qp are already valid here for both the request path
- * (rxe_req.c sets them before init_req_packet) and the ack path (the one
- * reordering edit in rxe_resp.c:prepare_ack_packet). ACK-class packets
- * (RXE_ACK_MASK: acknowledges and read responses) are charged to the
- * tbframe control reserve via is_ctrl.
+ * The transport for any non-loopback packet is the device's own link (the
+ * device IS the link, wire-spec section 8); there is no GID lookup.
+ * ACK-class packets (RXE_ACK_MASK: acknowledges and read responses) are
+ * charged to the tbframe control reserve via is_ctrl.
  */
 struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
 				int paylen, struct rxe_pkt_info *pkt)
@@ -396,22 +475,23 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
 	unsigned long flags;
 	int err;
 
-	if (tbrxe_dest_is_local((const union ib_gid *)&av->grh.dgid)) {
+	if (tbrxe_dest_is_local(av)) {
 		skb = alloc_skb(TBRXE_GRH_BYTES + paylen, GFP_ATOMIC);
 		if (unlikely(!skb))
 			return NULL;
 
 		skb_reserve(skb, TBRXE_GRH_BYTES);
-		tbrxe_fill_grh(skb, (union ib_gid *)&av->sgid_addr._sockaddr_in6.sin6_addr,
-			       (union ib_gid *)&av->dgid_addr._sockaddr_in6.sin6_addr,
+		tbrxe_fill_grh(skb, &av->sgid_addr._sockaddr_in6.sin6_addr,
+			       &av->dgid_addr._sockaddr_in6.sin6_addr,
 			       paylen);
 		pkt->hdr = skb_put(skb, paylen);
 	} else {
+		link = rxe->tbl_link;
+
 		spin_lock_irqsave(&tbrxe.lock, flags);
-		link = tbrxe_find_link_locked((const union ib_gid *)&av->grh.dgid);
-		if (!link || !tbrxe.ops) {
+		if (!link || !tbrxe.ops || !link->session_up) {
 			spin_unlock_irqrestore(&tbrxe.lock, flags);
-			return NULL;	/* unreachable: engine errors the QP */
+			return NULL;	/* down: engine retries / errors */
 		}
 
 		err = tbrxe.ops->alloc_frame(link->tblink, paylen, is_ctrl,
@@ -452,7 +532,7 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
 	return skb;
 }
 
-/* Downcall 2: address the frame; peer-table lookup replaces routing. */
+/* Downcall 2: mark loopback; wire packets ride the device's link. */
 int rxe_prepare(struct rxe_av *av, struct rxe_pkt_info *pkt,
 		struct sk_buff *skb)
 {
@@ -460,7 +540,7 @@ int rxe_prepare(struct rxe_av *av, struct rxe_pkt_info *pkt,
 	unsigned long flags;
 	int err = 0;
 
-	if (tbrxe_dest_is_local((const union ib_gid *)&av->grh.dgid)) {
+	if (tbrxe_dest_is_local(av)) {
 		pkt->mask |= RXE_LOOPBACK_MASK;
 		return 0;
 	}
@@ -468,8 +548,7 @@ int rxe_prepare(struct rxe_av *av, struct rxe_pkt_info *pkt,
 	txi = (struct tbrxe_txinfo *)skb->data;
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	if (!tbrxe_link_is_registered_locked(txi->link) ||
-	    tbrxe_find_link_locked((const union ib_gid *)&av->grh.dgid) != txi->link)
+	if (!tbrxe_link_is_registered_locked(txi->link))
 		err = -EHOSTUNREACH;
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
@@ -564,6 +643,10 @@ done:
 /* Downcall 4: sysfs "parent" attribute. */
 const char *rxe_parent_name(struct rxe_dev *rxe, unsigned int port_num)
 {
+	struct tbrxe_link *link = rxe->tbl_link;
+
+	if (link && tbrxe.ops && tbrxe.ops->link_name)
+		return tbrxe.ops->link_name(link->tblink);
 	return "tbframe";
 }
 
@@ -603,47 +686,40 @@ void rxe_port_down(struct rxe_dev *rxe)
 static void tbrxe_client_rx(void *ctx, struct tbframe_link *tblink,
 			    struct tbframe_frame *frame)
 {
-	struct rxe_dev *rxe = tbrxe.rxe;
-	struct tbrxe_link *link = NULL, *l;
+	struct tbrxe_link *link;
+	struct in6_addr saddr, daddr;
 	struct rxe_pkt_info *pkt;
-	union ib_gid peer_gid;
+	struct rxe_dev *rxe = NULL;
 	struct sk_buff *skb;
 	unsigned long flags;
 	u16 len = frame->len;
 
-	if (!rxe || frame->pdf != TBFRAME_PDF_DATA)
+	if (frame->pdf != TBFRAME_PDF_DATA)
 		return;
 
 	if (len < RXE_BTH_BYTES + RXE_ICRC_SIZE || len > TBFRAME_MAX_FRAME)
 		return;
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	list_for_each_entry(l, &tbrxe.links, list) {
-		if (l->tblink == tblink) {
-			link = l;
-			peer_gid = l->peer_gid;
-			break;
-		}
+	link = tbrxe_find_record_locked(tblink);
+	if (link && ib_device_try_get(&link->rxe->ib_dev)) {
+		rxe = link->rxe;
+		tbrxe_diag_addr(link->info.gid_eui64, &saddr);
+		tbrxe_diag_addr(link->info.local_gid_eui64, &daddr);
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
-	if (!link)
+	if (!rxe)
 		return;
 
 	skb = alloc_skb(TBRXE_GRH_BYTES + len, GFP_ATOMIC);
-	if (unlikely(!skb))
-		return;
-
-	skb_reserve(skb, TBRXE_GRH_BYTES);
-	/* daddr: our single self GID (the first link's advertised local
-	 * identity); per-link local ULAs are an open item.
-	 */
-	tbrxe_fill_grh(skb, &peer_gid, &tbrxe.self_gid, len);
-	memcpy(skb_put(skb, len), frame->data, len);
-
-	if (!ib_device_try_get(&rxe->ib_dev)) {
-		kfree_skb(skb);
+	if (unlikely(!skb)) {
+		ib_device_put(&rxe->ib_dev);
 		return;
 	}
+
+	skb_reserve(skb, TBRXE_GRH_BYTES);
+	tbrxe_fill_grh(skb, &saddr, &daddr, len);
+	memcpy(skb_put(skb, len), frame->data, len);
 
 	pkt = SKB_TO_PKT(skb);
 	pkt->rxe = rxe;
@@ -655,21 +731,12 @@ static void tbrxe_client_rx(void *ctx, struct tbframe_link *tblink,
 	rxe_rcv(skb);
 }
 
-/*
- * tx_released(): the link admission window reopened. Coalesced and rare, so
- * a full QP-pool sweep is acceptable for the scaffold: reschedule the send
- * task of every QP parked by -ENOSPC (need_req_skb) and kick recv tasks so
- * stalled read replies / acks retry too.
- */
-static void tbrxe_client_tx_released(void *ctx, struct tbframe_link *link)
+/* Reschedule every parked QP of one device (window reopened). */
+static void tbrxe_kick_parked_qps(struct rxe_dev *rxe)
 {
-	struct rxe_dev *rxe = tbrxe.rxe;
 	struct rxe_pool_elem *elem;
 	unsigned long index;
 	struct rxe_qp *qp;
-
-	if (!rxe)
-		return;
 
 	xa_for_each(&rxe->qp_pool.xa, index, elem) {
 		qp = rxe_pool_get_index(&rxe->qp_pool, index);
@@ -682,17 +749,43 @@ static void tbrxe_client_tx_released(void *ctx, struct tbframe_link *link)
 	}
 }
 
+/*
+ * tx_released(): the link's tbframe admission window reopened. Kick the
+ * link's own device only.
+ */
+static void tbrxe_client_tx_released(void *ctx, struct tbframe_link *tblink)
+{
+	struct tbrxe_link *link;
+	struct rxe_dev *rxe = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_find_record_locked(tblink);
+	if (link && ib_device_try_get(&link->rxe->ib_dev))
+		rxe = link->rxe;
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	if (!rxe)
+		return;
+
+	tbrxe_kick_parked_qps(rxe);
+	ib_device_put(&rxe->ib_dev);
+}
+
+/*
+ * link_up: first link_up of a tbframe link publishes that link's ib_device
+ * (wire-spec section 8), bound to a fresh GID-anchor netdev; later
+ * link_ups of the same link are session re-establishments and only toggle
+ * the port state. Upcall context is tbframe's workqueue (process context,
+ * no tbframe locks held), so sleeping registration is fine.
+ */
 static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 				 const struct tbframe_link_info *info)
 {
-	struct rxe_dev *rxe = tbrxe.rxe;
 	struct tbrxe_link *link;
+	struct net_device *ndev;
+	struct rxe_dev *rxe;
 	unsigned long flags;
-	bool first;
 	int err;
-
-	if (!rxe)
-		return;
 
 	if (info->max_payload < TBRXE_MIN_LINK_PAYLOAD) {
 		pr_err("tbrxe: link %s max_payload %u below %u needed for IB_MTU_2048, ignoring link\n",
@@ -703,90 +796,125 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 		return;
 	}
 
-	/*
-	 * First link: adopt the identity tbframe advertised in OUR HELLO on
-	 * this link as the device self GID, then publish the ib_device
-	 * (registration fills the GID cache from rxe_query_gid, so the self
-	 * GID must exist before ib_register_device or sgid_index 0 reads
-	 * back -ENODATA at RTR). Upcall context is tbframe's workqueue
-	 * (process context, no tbframe locks held), so sleeping is fine.
-	 */
 	mutex_lock(&tbrxe.publish_lock);
-	if (!tbrxe.published) {
-		tbrxe.self_eui64 = info->local_gid_eui64;
-		tbrxe_gid_from_eui64(tbrxe.self_eui64, &tbrxe.self_gid);
-		err = tbrxe_publish(rxe);
-		if (err) {
-			mutex_unlock(&tbrxe.publish_lock);
-			pr_err("tbrxe: publishing ib_device at link up failed: %d\n",
-			       err);
-			return;
-		}
-		tbrxe.published = true;
-	} else if (info->local_gid_eui64 != tbrxe.self_eui64) {
-		/* Single shared identity per device for now; a second link
-		 * advertising its own per-link ULA cannot be reached through
-		 * the published self GID (per-link ports are an open item).
-		 */
-		pr_warn("tbrxe: link %s advertises local eui64 %016llx but device identity is %016llx; peers on this link will miss\n",
-			tbrxe.ops && tbrxe.ops->link_name ?
-				tbrxe.ops->link_name(tblink) : "?",
-			info->local_gid_eui64, tbrxe.self_eui64);
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_find_record_locked(tblink);
+	if (link) {
+		link->info = *info;
+		link->session_up = true;
+		link->unacked = 0;
+		link->admission_waiters = false;
 	}
-	mutex_unlock(&tbrxe.publish_lock);
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	if (link) {
+		rxe_port_up(link->rxe);
+		mutex_unlock(&tbrxe.publish_lock);
+		return;
+	}
 
 	link = kzalloc(sizeof(*link), GFP_KERNEL);
 	if (!link)
-		return;
-
+		goto out_unlock;
 	link->tblink = tblink;
 	link->info = *info;
-	tbrxe_gid_from_eui64(info->gid_eui64, &link->peer_gid);
 
-	dev_info(&rxe->ib_dev.dev, "link %s up peer_eui64=%016llx local_eui64=%016llx\n",
-		 tbrxe.ops && tbrxe.ops->link_name ?
-			tbrxe.ops->link_name(tblink) : "?",
-		 info->gid_eui64, info->local_gid_eui64);
+	ndev = tbrxe_ndev_create(info);
+	if (IS_ERR(ndev))
+		goto out_free_link;
+	link->ndev = ndev;
 
+	rxe = ib_alloc_device(rxe_dev, ib_dev);
+	if (!rxe)
+		goto out_ndev;
+
+	/* Frame payload budget: eth_mtu_int_to_enum() subtracts the 80-byte
+	 * header allowance, so hand it 2048 + 80 to land on IB_MTU_2048.
+	 */
+	rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH, ndev->dev_addr);
+	rxe->tbl_link = link;
+	link->rxe = rxe;
+
+	err = rxe_register_device(rxe, "usb4_rdma%d", ndev);
+	if (err) {
+		pr_err("tbrxe: publishing ib_device for link %s failed: %d\n",
+		       tbrxe.ops && tbrxe.ops->link_name ?
+				tbrxe.ops->link_name(tblink) : "?", err);
+		/* dealloc_driver is wired: pools are cleaned up too. */
+		ib_dealloc_device(&rxe->ib_dev);
+		goto out_ndev;
+	}
+
+	link->session_up = true;
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	first = list_empty(&tbrxe.links);
-	link->gen = ++tbrxe.link_gen;
 	list_add_tail(&link->list, &tbrxe.links);
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
-	if (first)
-		rxe_port_up(rxe);
-	/* Peer GIDs live in the peer table only; the local GID table is
-	 * unchanged, but poke listeners so caches revalidate.
-	 */
-	rxe_port_event(rxe, IB_EVENT_GID_CHANGE);
+	dev_info(&rxe->ib_dev.dev,
+		 "published for link %s netdev %s peer %s local_eui64=%016llx\n",
+		 tbrxe.ops && tbrxe.ops->link_name ?
+			tbrxe.ops->link_name(tblink) : "?",
+		 netdev_name(ndev),
+		 info->remote_name[0] ? info->remote_name : "?",
+		 info->local_gid_eui64);
+	mutex_unlock(&tbrxe.publish_lock);
+	return;
+
+out_ndev:
+	unregister_netdev(link->ndev);
+	free_netdev(link->ndev);
+out_free_link:
+	kfree(link);
+out_unlock:
+	mutex_unlock(&tbrxe.publish_lock);
 }
 
+/* Session teardown that unpublishes the device on terminal reasons. */
 static void tbrxe_client_link_down(void *ctx, struct tbframe_link *tblink,
 				   enum tbframe_down_reason reason)
 {
-	struct rxe_dev *rxe = tbrxe.rxe;
-	struct tbrxe_link *link = NULL, *l;
+	bool terminal = reason == TBFRAME_DOWN_UNPLUG ||
+			reason == TBFRAME_DOWN_CLOSED ||
+			reason == TBFRAME_DOWN_DEAD_HW;
+	struct tbrxe_link *link;
 	unsigned long flags;
-	bool last = false;
+
+	mutex_lock(&tbrxe.publish_lock);
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	list_for_each_entry(l, &tbrxe.links, list) {
-		if (l->tblink == tblink) {
-			link = l;
-			list_del(&l->list);
-			last = list_empty(&tbrxe.links);
-			break;
-		}
+	link = tbrxe_find_record_locked(tblink);
+	if (link) {
+		link->session_up = false;
+		link->unacked = 0;
+		link->admission_waiters = false;
+		if (terminal)
+			list_del_init(&link->list);
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
-	if (!link)
+	if (!link) {
+		mutex_unlock(&tbrxe.publish_lock);
 		return;
+	}
 
+	if (!terminal) {
+		rxe_port_down(link->rxe);
+		mutex_unlock(&tbrxe.publish_lock);
+		return;
+	}
+
+	/* dealloc_driver is wired, so unregister also frees the rxe_dev
+	 * once every QP/user is drained; the record must outlive that
+	 * drain (engine admission derefs rxe->tbl_link).
+	 */
+	dev_info(&link->rxe->ib_dev.dev, "unpublished (link down %d)\n",
+		 reason);
+	ib_unregister_device(&link->rxe->ib_dev);
+	unregister_netdev(link->ndev);
+	free_netdev(link->ndev);
 	kfree(link);
-	if (rxe && last)
-		rxe_port_down(rxe);
+
+	mutex_unlock(&tbrxe.publish_lock);
 }
 
 static const struct tbframe_client_ops tbrxe_client_ops = {
@@ -806,33 +934,17 @@ const struct tbframe_client_ops *tbrxe_frame_client_ops(void)
 
 /* ---- lifecycle -------------------------------------------------------- */
 
-/*
- * Bind the transport to the (not yet published) device. The self identity
- * is NOT derived here: it is the identity tbframe advertises in our own
- * HELLO, which only exists once a link comes up (tbrxe_client_link_up sets
- * the self GID and publishes the ib_device on the first one).
- */
-void tbrxe_frame_init(struct rxe_dev *rxe)
-{
-	tbrxe.rxe = rxe;
-}
-
-int tbrxe_frame_register(struct rxe_dev *rxe)
+int tbrxe_frame_register(void)
 {
 	int err;
-
-	if (WARN_ON(tbrxe.rxe != rxe))
-		return -EINVAL;
 
 	if (!tbrxe.ops)
 		tbrxe.ops = tbrxe_builtin_transport();
 
 	if (tbrxe.ops && tbrxe.ops->register_client) {
 		err = tbrxe.ops->register_client(&tbrxe_client_ops, NULL);
-		if (err) {
-			tbrxe.rxe = NULL;
+		if (err)
 			return err;
-		}
 		tbrxe.registered = true;
 	}
 
@@ -842,21 +954,24 @@ int tbrxe_frame_register(struct rxe_dev *rxe)
 void tbrxe_frame_unregister(void)
 {
 	struct tbrxe_link *link, *tmp;
-	unsigned long flags;
 
 	if (tbrxe.registered && tbrxe.ops && tbrxe.ops->unregister_client) {
-		/* Delivers link_down(TBFRAME_DOWN_CLOSED) for every link and
-		 * returns only when no upcall can run again.
+		/* Delivers link_down(TBFRAME_DOWN_CLOSED) for every link --
+		 * which unpublishes every device -- and returns only when no
+		 * upcall can run again.
 		 */
 		tbrxe.ops->unregister_client();
 		tbrxe.registered = false;
 	}
 
-	spin_lock_irqsave(&tbrxe.lock, flags);
+	/* Null transport (KUnit without mock teardown): drop leftovers. */
+	mutex_lock(&tbrxe.publish_lock);
 	list_for_each_entry_safe(link, tmp, &tbrxe.links, list) {
-		list_del(&link->list);
+		list_del_init(&link->list);
+		ib_unregister_device(&link->rxe->ib_dev);
+		unregister_netdev(link->ndev);
+		free_netdev(link->ndev);
 		kfree(link);
 	}
-	tbrxe.rxe = NULL;
-	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	mutex_unlock(&tbrxe.publish_lock);
 }

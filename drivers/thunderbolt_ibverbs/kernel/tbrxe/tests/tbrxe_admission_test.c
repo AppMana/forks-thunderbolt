@@ -137,21 +137,6 @@ static const struct tbrxe_transport_ops adm_transport = {
 	.link_info		= adm_link_info,
 };
 
-/* link_up with a tiny advertised data window. */
-static void adm_link_up(void *fake_link, u16 data_window)
-{
-	struct tbframe_link_info info = {
-		.gid_eui64	 = TBRXE_TEST_PEER_EUI64,
-		.local_gid_eui64 = TBRXE_TEST_LOCAL_EUI64,
-		.rx_ring_entries = data_window + TBFRAME_CTRL_RESERVE,
-		.data_window	 = data_window,
-		.max_payload	 = TBFRAME_MAX_FRAME,
-		.width		 = 1,
-		.speed		 = 20,
-	};
-
-	tbrxe_frame_client_ops()->link_up(NULL, fake_link, &info);
-}
 
 /*
  * Craft an RC ACKNOWLEDGE for @qpn covering everything up to @psn and feed
@@ -214,7 +199,7 @@ static int adm_wait_sent(int want)
 }
 
 static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
-		       const union ib_gid *dgid)
+		       const union ib_gid *dgid, u8 sgid_index)
 {
 	struct ib_qp_attr attr;
 	int err;
@@ -238,7 +223,8 @@ static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
 	attr.min_rnr_timer = 12;
 	attr.ah_attr.type = rdma_ah_find_type(qp->device, 1);
 	rdma_ah_set_port_num(&attr.ah_attr, 1);
-	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0, 0, 64, 0);
+	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0,
+			sgid_index, 64, 0);
 	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_AV |
 			   IB_QP_PATH_MTU | IB_QP_DEST_QPN | IB_QP_RQ_PSN |
 			   IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER);
@@ -281,23 +267,23 @@ static void tbrxe_admission_window_bounds_unacked(struct kunit *test)
 	struct ib_sge ssge;
 	struct rxe_dev *rxe;
 	struct ib_device *dev;
-	union ib_gid peer;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
 	struct ib_pd *pd;
 	struct ib_cq *cq;
 	struct ib_qp *qp;
 	u8 *src;
 	int sent, i;
 
-	rxe = tbrxe_get_dev();
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
-	dev = &rxe->ib_dev;
-
 	adm_pool_used = 0;
 	atomic_set(&adm_sent, 0);
 	tbrxe_set_transport_ops(&adm_transport);
-	adm_link_up(&fake_link, ADM_WINDOW);
-
-	tbrxe_gid_from_eui64(TBRXE_TEST_PEER_EUI64, &peer);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
 
 	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
@@ -311,7 +297,7 @@ static void tbrxe_admission_window_bounds_unacked(struct kunit *test)
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
 
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index), 0);
 
 	ssge.addr = (uintptr_t)src;
 	ssge.length = ADM_MSG_LEN;
@@ -375,22 +361,23 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	struct ib_sge ssge;
 	struct rxe_dev *rxe;
 	struct ib_device *dev;
-	union ib_gid peer;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
 	struct ib_pd *pd;
 	struct ib_cq *cq;
 	struct ib_qp *qp;
 	u8 *src;
 	int sent, i;
 
-	rxe = tbrxe_get_dev();
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
-	dev = &rxe->ib_dev;
-
 	adm_pool_used = 0;
 	atomic_set(&adm_sent, 0);
 	tbrxe_set_transport_ops(&adm_transport);
-	adm_link_up(&fake_link, ADM_WINDOW);
-	tbrxe_gid_from_eui64(TBRXE_TEST_PEER_EUI64, &peer);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
 
 	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
@@ -404,7 +391,7 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	/* First QP: fill the window, never ack, destroy. */
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index), 0);
 
 	ssge.addr = (uintptr_t)src;
 	ssge.length = ADM_MSG_LEN;
@@ -425,7 +412,7 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	atomic_set(&adm_sent, 0);
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x43, &peer), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x43, &peer, sgid_index), 0);
 	for (i = 0; i < ADM_WINDOW; i++) {
 		swr.wr_id = i;
 		KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);

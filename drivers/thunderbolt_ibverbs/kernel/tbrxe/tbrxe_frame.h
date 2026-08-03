@@ -8,6 +8,12 @@
  * contract (../tbframe/tbframe.h, the code form of
  * docs/tbframe-tbrxe-wire-spec.md).
  *
+ * Device model (wire-spec section 8, normative): one ib_device per tbframe
+ * link, published at that link's first link_up and unpublished on terminal
+ * link_down, each bound to a GID-anchor netdev whose IPv6 addresses ib_core
+ * turns into the RoCE GID table. The driver carries no GID identity and no
+ * peer table: the device IS the link.
+ *
  * All tbframe_* symbols are reached through struct tbrxe_transport_ops so the
  * KUnit tests can run against a mock/null tbframe. The production binding
  * lives in tbrxe_tbframe_glue.c (compiled out under CONFIG_KUNIT).
@@ -19,7 +25,6 @@
 #include "../tbframe/tbframe.h"
 
 struct rxe_dev;
-union ib_gid;
 
 /*
  * Ops indirection over the tbframe downcall surface. One-to-one with the
@@ -53,25 +58,13 @@ void tbrxe_set_transport_ops(const struct tbrxe_transport_ops *ops);
  */
 const struct tbframe_client_ops *tbrxe_frame_client_ops(void);
 
-/* Client lifecycle, driven from rxe.c module init/exit. The self identity
- * (and with it ib_device publication via tbrxe_publish) is deferred to the
- * first tbframe link_up: the self GID must be the identity tbframe
- * advertised in our own HELLO, so both ends derive the same GID.
+/* The ib_device published for one tbframe link (NULL when none). */
+struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink);
+
+/* Client lifecycle, driven from rxe.c module init/exit. Devices are
+ * created per link at link_up; the module owns none of its own.
  */
-void tbrxe_frame_init(struct rxe_dev *rxe);
-int tbrxe_frame_register(struct rxe_dev *rxe);
+int tbrxe_frame_register(void);
 void tbrxe_frame_unregister(void);
-
-/*
- * GID derivation per wire-spec section 8: a per-link ULA built from an
- * EUI-64. Mirrors the fleet convention (fd-prefixed /64 + EUI-64 interface
- * id, see packaging/udev/tbv-rdma-addr-lib.sh and the legacy kernel/ibdev.c
- * RAIL_EUI64 identity) in FORMAT only; no identity machinery is imported.
- */
-void tbrxe_gid_from_eui64(u64 eui64, union ib_gid *gid);
-
-/* Local (self) GID table backing rxe_query_gid; index 0 is the self GID. */
-int tbrxe_query_gid(struct rxe_dev *rxe, int index, union ib_gid *gid);
-bool tbrxe_gid_is_local(struct rxe_dev *rxe, const union ib_gid *gid);
 
 #endif /* TBRXE_FRAME_H */

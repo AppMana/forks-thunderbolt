@@ -342,6 +342,10 @@ static void tbframe_link_deliver_up(struct tbframe_link *link,
 
 	if (link->ops->link_attrs)
 		link->ops->link_attrs(link->hw, &info->width, &info->speed);
+	if (link->ops->peer_identity)
+		link->ops->peer_identity(link->hw, info->remote_uuid,
+					 info->remote_name,
+					 sizeof(info->remote_name));
 	down_read(&tf->client_rwsem);
 	if (tf->client_ops && tf->client_ops->link_up)
 		tf->client_ops->link_up(tf->client_ctx, link, info);
@@ -1017,6 +1021,10 @@ void tbframe_link_info(const struct tbframe_link *link,
 	spin_unlock_irqrestore(&l->lock, flags);
 	if (l->ops->link_attrs)
 		l->ops->link_attrs(l->hw, &info->width, &info->speed);
+	if (l->ops->peer_identity)
+		l->ops->peer_identity(l->hw, info->remote_uuid,
+				      info->remote_name,
+				      sizeof(info->remote_name));
 }
 EXPORT_SYMBOL_GPL(tbframe_link_info);
 
