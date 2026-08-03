@@ -22,4 +22,8 @@
     name = "usb4-xdomain-pin-protocol-handler-owner";
     patch = ./0008-thunderbolt-xdomain-pin-protocol-handler-owner.patch;
   }
+  {
+    name = "usb4-xdomain-serialize-handler-dispatch";
+    patch = ./0009-thunderbolt-xdomain-serialize-handler-dispatch-again.patch;
+  }
 ]

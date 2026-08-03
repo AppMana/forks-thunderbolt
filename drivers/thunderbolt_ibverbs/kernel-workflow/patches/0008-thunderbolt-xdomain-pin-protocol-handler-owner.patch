@@ -15,50 +15,58 @@ field to struct tb_protocol_handler and take a temporary module reference
 while dispatching. In-flight handlers then make rmmod fail cleanly instead
 of letting module memory disappear underneath the callback.
 
+Like ->callback_xd, ->owner lies past the end of the stock struct, so it
+is appended last and only read for registrants that left ->callback NULL
+(which therefore provide the extended struct).
+
 Signed-off-by: georgewhewell <georgerw@gmail.com>
 ---
- drivers/thunderbolt/xdomain.c | 6 ++++++
- include/linux/thunderbolt.h   | 5 +++++
- 2 files changed, 11 insertions(+)
 
 diff --git a/drivers/thunderbolt/xdomain.c b/drivers/thunderbolt/xdomain.c
-index d1d11f256ee1..d45f03207804 100644
+index d20b14e..d368042 100644
 --- a/drivers/thunderbolt/xdomain.c
 +++ b/drivers/thunderbolt/xdomain.c
-@@ -2627,6 +2627,9 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+@@ -2446,6 +2446,15 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
  			continue;
  
  		matched = true;
-+		if (handler->owner && !try_module_get(handler->owner))
++		/*
++		 * ->owner (like ->callback_xd) lies past the stock struct;
++		 * only a registrant that left ->callback NULL is known to
++		 * provide it.
++		 */
++		if (!handler->callback && handler->owner &&
++		    !try_module_get(handler->owner))
 +			continue;
 +
  		mutex_unlock(&xdomain_lock);
- 		if (handler->callback_xd)
- 			ret = handler->callback_xd(source_xd, buf, size,
-@@ -2635,6 +2638,9 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
- 			ret = handler->callback(buf, size, handler->data);
+ 		/*
+ 		 * ->callback first: a registrant that set it may be built
+@@ -2461,6 +2470,9 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+ 						   handler->data);
  		mutex_lock(&xdomain_lock);
  
-+		if (handler->owner)
++		if (!handler->callback && handler->owner)
 +			module_put(handler->owner);
 +
  		if (ret)
  			break;
  	}
 diff --git a/include/linux/thunderbolt.h b/include/linux/thunderbolt.h
-index f98f2c337918..46984409d5de 100644
+index 7aeae29..2696f2d 100644
 --- a/include/linux/thunderbolt.h
 +++ b/include/linux/thunderbolt.h
-@@ -370,6 +370,8 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
-  *	      by this handler and should not be forwared to other
-  *	      handlers.
-  * @callback_xd: Like @callback, but also receives the source XDomain.
-+ * @owner: Optional module that owns the callback. If set, XDomain core
-+ *	   pins it while dispatching to avoid unload races.
-  * @data: Data passed with the callback
-  * @list: Handlers are linked using this
+@@ -368,6 +368,9 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
+  *	Appended after @list so every stock member keeps its stock offset:
+  *	a registrant built against an unpatched header still interoperates,
+  *	and the core reads @callback_xd only when @callback is NULL.
++ * @owner: Optional module that owns @callback_xd. If set, XDomain core
++ *	pins it while dispatching to avoid unload races. Appended after
++ *	@callback_xd and read under the same @callback-is-NULL rule.
   *
-@@ -382,11 +384,14 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
+  * Thunderbolt services can hook into incoming XDomain requests by
+  * registering protocol handler. Only limitation is that the XDomain
+@@ -378,6 +381,8 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
   * directed to the service the driver implements.
   */
  #define TB_PROTOCOL_HANDLER_HAS_XDOMAIN 1
@@ -67,12 +75,14 @@ index f98f2c337918..46984409d5de 100644
  struct tb_protocol_handler {
  	const uuid_t *uuid;
  	int (*callback)(const void *buf, size_t size, void *data);
+@@ -385,6 +390,7 @@ struct tb_protocol_handler {
+ 	struct list_head list;
  	int (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,
  			   void *data);
 +	struct module *owner;
- 	void *data;
- 	struct list_head list;
  };
+ 
+ int tb_register_protocol_handler(struct tb_protocol_handler *handler);
 -- 
 2.53.0
 

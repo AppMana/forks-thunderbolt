@@ -12,21 +12,25 @@ the same remote route value, and a source-blind handler can dispatch
 HELLO/READY traffic to the wrong local service state.
 
 Add an optional source-aware protocol callback that receives the
-tb_xdomain resolved from the packet route on the local domain. Existing
-handlers keep using the legacy callback and are not affected. New
-handlers can opt in by filling callback_xd instead of callback.
+tb_xdomain resolved from the packet route on the local domain.
+
+The new member is APPENDED after ->list, never inserted mid-struct, and
+dispatch reads it only when ->callback is NULL: a registrant compiled
+against an unpatched header lays out uuid/callback/data/list at the
+stock offsets and its storage ends at ->list, yet can load against this
+core when its CRCs come from a provided Module.symvers. The original
+mid-struct insertion shifted ->data onto the offset the core read as
+->callback_xd and sent the dispatch walk through the registrant data
+pointer (appmana-025 NX-execute panic, kdump 202608031305).
 
 Signed-off-by: georgewhewell <georgerw@gmail.com>
 ---
- drivers/thunderbolt/xdomain.c | 16 ++++++++++++++--
- include/linux/thunderbolt.h   |  8 ++++++--
- 2 files changed, 20 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/thunderbolt/xdomain.c b/drivers/thunderbolt/xdomain.c
-index 322e243fa7d9..d1d11f256ee1 100644
+index 091afda..d20b14e 100644
 --- a/drivers/thunderbolt/xdomain.c
 +++ b/drivers/thunderbolt/xdomain.c
-@@ -613,7 +613,7 @@ static int tb_xdp_link_state_change_response(struct tb_ctl *ctl, u64 route,
+@@ -616,7 +616,7 @@ static int tb_xdp_link_state_change_response(struct tb_ctl *ctl, u64 route,
   */
  int tb_register_protocol_handler(struct tb_protocol_handler *handler)
  {
@@ -35,7 +39,7 @@ index 322e243fa7d9..d1d11f256ee1 100644
  		return -EINVAL;
  	if (uuid_equal(handler->uuid, &tb_xdp_uuid))
  		return -EINVAL;
-@@ -2593,8 +2593,10 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+@@ -2412,8 +2412,10 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
  {
  	const struct tb_protocol_handler *handler, *tmp;
  	const struct tb_xdp_header *hdr = buf;
@@ -46,7 +50,7 @@ index 322e243fa7d9..d1d11f256ee1 100644
  	int ret = 0;
  
  	/* We expect the packet is at least size of the header */
-@@ -2615,6 +2617,10 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+@@ -2434,6 +2436,10 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
  		return false;
  	}
  
@@ -57,20 +61,27 @@ index 322e243fa7d9..d1d11f256ee1 100644
  	mutex_lock(&xdomain_lock);
  	list_for_each_entry_safe(handler, tmp, &protocol_handlers, list) {
  		if (!uuid_equal(&hdr->uuid, handler->uuid))
-@@ -2622,7 +2628,11 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+@@ -2441,7 +2447,18 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
  
  		matched = true;
  		mutex_unlock(&xdomain_lock);
 -		ret = handler->callback(buf, size, handler->data);
-+		if (handler->callback_xd)
++		/*
++		 * ->callback first: a registrant that set it may be built
++		 * against a header without the extension, whose struct ends
++		 * at ->list -- ->callback_xd may only be read once
++		 * ->callback is known to be NULL (a source-aware registrant,
++		 * which always provides the extended struct).
++		 */
++		if (handler->callback)
++			ret = handler->callback(buf, size, handler->data);
++		else if (handler->callback_xd)
 +			ret = handler->callback_xd(source_xd, buf, size,
 +						   handler->data);
-+		else if (handler->callback)
-+			ret = handler->callback(buf, size, handler->data);
  		mutex_lock(&xdomain_lock);
  
  		if (ret)
-@@ -2642,6 +2652,8 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+@@ -2461,6 +2478,8 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
  				    n > 6 ? w[6] : 0, n > 7 ? w[7] : 0);
  	}
  
@@ -80,18 +91,20 @@ index 322e243fa7d9..d1d11f256ee1 100644
  }
  
 diff --git a/include/linux/thunderbolt.h b/include/linux/thunderbolt.h
-index e074919d4d07..f98f2c337918 100644
+index 7524748..7aeae29 100644
 --- a/include/linux/thunderbolt.h
 +++ b/include/linux/thunderbolt.h
-@@ -369,6 +369,7 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
-  *	      here tells the XDomain core that the message was handled
-  *	      by this handler and should not be forwared to other
+@@ -364,20 +364,27 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
   *	      handlers.
-+ * @callback_xd: Like @callback, but also receives the source XDomain.
   * @data: Data passed with the callback
   * @list: Handlers are linked using this
++ * @callback_xd: Like @callback, but also receives the source XDomain.
++ *	Appended after @list so every stock member keeps its stock offset:
++ *	a registrant built against an unpatched header still interoperates,
++ *	and the core reads @callback_xd only when @callback is NULL.
   *
-@@ -377,12 +378,15 @@ int tb_xdomain_request(struct tb_xdomain *xd, const void *request,
+  * Thunderbolt services can hook into incoming XDomain requests by
+  * registering protocol handler. Only limitation is that the XDomain
   * discovery protocol UUID cannot be registered since it is handled by
   * the core XDomain code.
   *
@@ -104,11 +117,13 @@ index e074919d4d07..f98f2c337918 100644
  struct tb_protocol_handler {
  	const uuid_t *uuid;
  	int (*callback)(const void *buf, size_t size, void *data);
-+	int (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,
-+			   void *data);
  	void *data;
  	struct list_head list;
++	int (*callback_xd)(struct tb_xdomain *xd, const void *buf, size_t size,
++			   void *data);
  };
+ 
+ int tb_register_protocol_handler(struct tb_protocol_handler *handler);
 -- 
 2.53.0
 

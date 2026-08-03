@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: doctorpangloss <2229300+doctorpangloss@users.noreply.github.com>
+Date: Mon, 3 Aug 2026 00:00:00 +0200
+Subject: [PATCH] thunderbolt: xdomain: serialize handler dispatch against
+ unregistration
+
+tb_unregister_protocol_handler() only delisted the handler under
+xdomain_lock, but the dispatch walk in tb_xdomain_handle_request() drops
+that lock around the handler callback. A service module reload could
+therefore return from unregistration (and free its handler or unload)
+while its callback was still executing, and the walk resumed through a
+cached next pointer that unregistration had just delisted.
+
+Hold a dedicated dispatch mutex across the whole walk including the
+callbacks and take it in tb_unregister_protocol_handler(), so
+unregistration returning guarantees no callback of that handler is
+running or can run again. Registration still needs only xdomain_lock and
+may safely happen from within a callback; unregistration must not be
+called from one.
+
+Signed-off-by: doctorpangloss <2229300+doctorpangloss@users.noreply.github.com>
+---
+
+diff --git a/drivers/thunderbolt/xdomain.c b/drivers/thunderbolt/xdomain.c
+index d368042..cb5a647 100644
+--- a/drivers/thunderbolt/xdomain.c
++++ b/drivers/thunderbolt/xdomain.c
+@@ -69,6 +69,20 @@ MODULE_PARM_DESC(xdomain, "allow XDomain protocol (default: true)");
+  */
+ static DEFINE_MUTEX(xdomain_lock);
+ 
++/*
++ * Serializes the protocol handler dispatch walk against unregistration.
++ * Held across the whole walk in tb_xdomain_handle_request() INCLUDING the
++ * handler callbacks (xdomain_lock alone cannot do this: it must be dropped
++ * around the callback, which may itself register handlers or property
++ * directories). Because tb_unregister_protocol_handler() takes this lock,
++ * its return guarantees no callback of that handler is running or can run
++ * again, so a service module may free the handler and unload immediately
++ * afterwards. Consequently a handler callback must never call
++ * tb_unregister_protocol_handler() itself. Lock order:
++ * xdomain_dispatch_lock -> xdomain_lock.
++ */
++static DEFINE_MUTEX(xdomain_dispatch_lock);
++
+ /* Properties exposed to the remote domains */
+ static struct tb_property_dir *xdomain_property_dir;
+ static u32 xdomain_property_block_gen;
+@@ -637,9 +651,16 @@ EXPORT_SYMBOL_GPL(tb_register_protocol_handler);
+  */
+ void tb_unregister_protocol_handler(struct tb_protocol_handler *handler)
+ {
++	/*
++	 * The dispatch lock waits out a walk currently inside a handler
++	 * callback; once held, no walk can observe the handler again. Must
++	 * not be called from a handler callback.
++	 */
++	mutex_lock(&xdomain_dispatch_lock);
+ 	mutex_lock(&xdomain_lock);
+ 	list_del_init(&handler->list);
+ 	mutex_unlock(&xdomain_lock);
++	mutex_unlock(&xdomain_dispatch_lock);
+ }
+ EXPORT_SYMBOL_GPL(tb_unregister_protocol_handler);
+ 
+@@ -2410,7 +2431,7 @@ EXPORT_SYMBOL_GPL(tb_xdomain_find_by_route);
+ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+ 			       const void *buf, size_t size)
+ {
+-	const struct tb_protocol_handler *handler, *tmp;
++	const struct tb_protocol_handler *handler;
+ 	const struct tb_xdp_header *hdr = buf;
+ 	struct tb_xdomain *source_xd = NULL;
+ 	unsigned int length;
+@@ -2440,8 +2461,18 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+ 		~BIT_ULL(63);
+ 	source_xd = tb_xdomain_find_by_route_locked(tb, route);
+ 
++	/*
++	 * The dispatch lock is held across the whole walk including the
++	 * callbacks, so tb_unregister_protocol_handler() (which takes it)
++	 * cannot delist or free a handler this walk is about to call, and
++	 * dropping xdomain_lock around the callback can no longer leave the
++	 * cached next pointer dangling. Only registration (xdomain_lock
++	 * alone) may run during a callback, and list_add_tail keeps the walk
++	 * cursor valid.
++	 */
++	mutex_lock(&xdomain_dispatch_lock);
+ 	mutex_lock(&xdomain_lock);
+-	list_for_each_entry_safe(handler, tmp, &protocol_handlers, list) {
++	list_for_each_entry(handler, &protocol_handlers, list) {
+ 		if (!uuid_equal(&hdr->uuid, handler->uuid))
+ 			continue;
+ 
+@@ -2477,6 +2508,7 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+ 			break;
+ 	}
+ 	mutex_unlock(&xdomain_lock);
++	mutex_unlock(&xdomain_dispatch_lock);
+ 
+ 	if (!matched) {
+ 		const u32 *w = buf;
+-- 
+2.53.0
+
