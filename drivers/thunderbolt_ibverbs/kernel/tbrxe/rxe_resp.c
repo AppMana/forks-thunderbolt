@@ -794,15 +794,22 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
 	pad = (-payload) & 0x3;
 	paylen = rxe_opcode[opcode].length + payload + pad + RXE_ICRC_SIZE;
 
-	skb = rxe_init_packet(rxe, &qp->pri_av, paylen, ack);
-	if (!skb)
-		return NULL;
-
+	/* tbrxe seam: fill the pkt info BEFORE rxe_init_packet so the
+	 * transport can see qp and mask -- it charges RXE_ACK_MASK packets
+	 * (acks and read responses) to the tbframe control reserve
+	 * (is_ctrl) and parks the QP on admission-window backpressure.
+	 * Upstream initialized these after; nothing below depends on the
+	 * order (rxe_init_packet only ORs RXE_GRH_MASK into mask).
+	 */
 	ack->qp = qp;
 	ack->opcode = opcode;
 	ack->mask = rxe_opcode[opcode].mask;
 	ack->paylen = paylen;
 	ack->psn = psn;
+
+	skb = rxe_init_packet(rxe, &qp->pri_av, paylen, ack);
+	if (!skb)
+		return NULL;
 
 	bth_init(ack, opcode, 0, 0, pad, IB_DEFAULT_PKEY_FULL,
 		 qp->attr.dest_qp_num, 0, psn);

@@ -241,19 +241,10 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 	/* if we don't finish qp create make sure queue is valid */
 	skb_queue_head_init(&qp->req_pkts);
 
-	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
-	if (err < 0)
-		return err;
-	qp->sk->sk->sk_user_data = qp;
-
-	/* pick a source UDP port number for this QP based on
-	 * the source QPN. this spreads traffic for different QPs
-	 * across different NIC RX queues (while using a single
-	 * flow for a given QP to maintain packet order).
-	 * the port number must be in the Dynamic Ports range
-	 * (0xc000 - 0xffff).
+	/* tbrxe: no per-QP kernel socket. Upstream used it for the dst
+	 * cache and skb-destructor accounting; the tbframe transport has
+	 * neither (peer-table lookup + admission window instead).
 	 */
-	qp->src_port = RXE_ROCE_V2_SPORT + (hash_32(qp_num(qp), 14) & 0x3fff);
 
 	err = rxe_init_sq(qp, init, udata, uresp);
 	if (err)
@@ -857,14 +848,6 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 		rxe_put(qp->resp.mr);
 
 	free_rd_atomic_resources(qp);
-
-	if (qp->sk) {
-		if (qp_type(qp) == IB_QPT_RC)
-			sk_dst_reset(qp->sk->sk);
-
-		kernel_sock_shutdown(qp->sk, SHUT_RDWR);
-		sock_release(qp->sk);
-	}
 }
 
 /* called when the last reference to the qp is dropped */

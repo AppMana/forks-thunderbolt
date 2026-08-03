@@ -24,66 +24,37 @@ static __be32 rxe_crc32(struct rxe_dev *rxe, __be32 crc, void *next, size_t len)
 }
 
 /**
- * rxe_icrc_hdr() - Compute the partial ICRC for the network and transport
- *		  headers of a packet.
- * @skb: packet buffer
+ * rxe_icrc_hdr() - Compute the partial ICRC for the transport headers of a
+ *		  packet.
+ * @skb: packet buffer (unused; kept so the call sites stay verbatim)
  * @pkt: packet information
+ *
+ * tbrxe deviation from upstream rxe, per tbframe-tbrxe-wire-spec.md
+ * section 4: the IP/UDP pseudo-header is removed entirely. Nothing mutates
+ * a frame in flight on a single-hop Thunderbolt link, so the masked
+ * pseudo-header existed only to tolerate router mutation. The seed and the
+ * masked-BTH coverage are unchanged.
  *
  * Return: the partial ICRC
  */
 static __be32 rxe_icrc_hdr(struct sk_buff *skb, struct rxe_pkt_info *pkt)
 {
-	unsigned int bth_offset = 0;
-	struct iphdr *ip4h = NULL;
-	struct ipv6hdr *ip6h = NULL;
-	struct udphdr *udph;
+	u8 pshdr[RXE_BTH_BYTES];
 	struct rxe_bth *bth;
 	__be32 crc;
-	int length;
-	int hdr_size = sizeof(struct udphdr) +
-		(skb->protocol == htons(ETH_P_IP) ?
-		sizeof(struct iphdr) : sizeof(struct ipv6hdr));
-	/* pseudo header buffer size is calculate using ipv6 header size since
-	 * it is bigger than ipv4
-	 */
-	u8 pshdr[sizeof(struct udphdr) +
-		sizeof(struct ipv6hdr) +
-		RXE_BTH_BYTES];
 
 	/* This seed is the result of computing a CRC with a seed of
-	 * 0xfffffff and 8 bytes of 0xff representing a masked LRH.
+	 * 0xffffffff and 8 bytes of 0xff representing a masked LRH.
 	 */
 	crc = (__force __be32)0xdebb20e3;
 
-	if (skb->protocol == htons(ETH_P_IP)) { /* IPv4 */
-		memcpy(pshdr, ip_hdr(skb), hdr_size);
-		ip4h = (struct iphdr *)pshdr;
-		udph = (struct udphdr *)(ip4h + 1);
-
-		ip4h->ttl = 0xff;
-		ip4h->check = CSUM_MANGLED_0;
-		ip4h->tos = 0xff;
-	} else {				/* IPv6 */
-		memcpy(pshdr, ipv6_hdr(skb), hdr_size);
-		ip6h = (struct ipv6hdr *)pshdr;
-		udph = (struct udphdr *)(ip6h + 1);
-
-		memset(ip6h->flow_lbl, 0xff, sizeof(ip6h->flow_lbl));
-		ip6h->priority = 0xf;
-		ip6h->hop_limit = 0xff;
-	}
-	udph->check = CSUM_MANGLED_0;
-
-	bth_offset += hdr_size;
-
-	memcpy(&pshdr[bth_offset], pkt->hdr, RXE_BTH_BYTES);
-	bth = (struct rxe_bth *)&pshdr[bth_offset];
+	memcpy(pshdr, pkt->hdr, RXE_BTH_BYTES);
+	bth = (struct rxe_bth *)pshdr;
 
 	/* exclude bth.resv8a */
 	bth->qpn |= cpu_to_be32(~BTH_QPN_MASK);
 
-	length = hdr_size + RXE_BTH_BYTES;
-	crc = rxe_crc32(pkt->rxe, crc, pshdr, length);
+	crc = rxe_crc32(pkt->rxe, crc, pshdr, RXE_BTH_BYTES);
 
 	/* And finish to compute the CRC on the remainder of the headers. */
 	crc = rxe_crc32(pkt->rxe, crc, pkt->hdr + RXE_BTH_BYTES,

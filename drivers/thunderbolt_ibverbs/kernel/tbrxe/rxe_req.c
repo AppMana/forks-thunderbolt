@@ -779,10 +779,17 @@ int rxe_requester(struct rxe_qp *qp)
 
 	skb = init_req_packet(qp, av, wqe, opcode, payload, &pkt);
 	if (unlikely(!skb)) {
-		rxe_dbg_qp(qp, "Failed allocating skb\n");
-		wqe->status = IB_WC_LOC_QP_OP_ERR;
 		if (ah)
 			rxe_put(ah);
+		/* tbrxe seam: the transport sets need_req_skb when the
+		 * tbframe admission window is closed (-ENOSPC from
+		 * tbframe_alloc_frame). That is backpressure, not an error;
+		 * the tx_released upcall reschedules this task.
+		 */
+		if (qp->need_req_skb)
+			goto exit;
+		rxe_dbg_qp(qp, "Failed allocating skb\n");
+		wqe->status = IB_WC_LOC_QP_OP_ERR;
 		goto err;
 	}
 
