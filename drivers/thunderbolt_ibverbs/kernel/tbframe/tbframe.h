@@ -34,9 +34,20 @@ struct tbframe_link;
  * PDF (sof/eof) nibble values. The NHI filters RX frames by these masks;
  * a frame type is a PDF value, never a header field. 0x1/0x2 are tbnet's,
  * 0xf is the control channel convention; both are deliberately avoided.
+ *
+ * On the wire a frame is segmented into transport packets; the TX
+ * descriptor's SOF PDF marks the first packet and the EOF PDF the last,
+ * and the receiving NHI closes a frame on any packet whose PDF matches the
+ * RX ring's eof_mask. The SOF marker therefore MUST be distinct from every
+ * frame-type (EOF) value or multi-packet frames are chopped at the first
+ * packet boundary (the tbnet FRAME_START/FRAME_END split exists for the
+ * same reason). The frame type rides in the EOF PDF: single-packet frames
+ * carry only that nibble, and the RX descriptor reports only the closing
+ * PDF (sof reads back 0).
  */
-#define TBFRAME_PDF_DATA	0x4	/* client payload frame            */
-#define TBFRAME_PDF_KEEPALIVE	0x5	/* 8-byte session-cookie probe     */
+#define TBFRAME_PDF_DATA	0x4	/* client payload frame (EOF)      */
+#define TBFRAME_PDF_KEEPALIVE	0x5	/* 8-byte session-cookie probe (EOF) */
+#define TBFRAME_PDF_SOF		0x6	/* start-of-frame marker, wire only */
 
 /*
  * Mode A flow control: the per-link admission window is the peer's

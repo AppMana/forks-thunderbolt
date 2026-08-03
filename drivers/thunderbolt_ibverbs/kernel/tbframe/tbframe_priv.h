@@ -23,9 +23,11 @@
 #include "tbframe.h"
 #include "tbframe_wire.h"
 
-/* RX PDF masks: only the tbframe nibbles pass the NHI filter (spec §2). */
-#define TBFRAME_SOF_MASK	(BIT(TBFRAME_PDF_DATA) | BIT(TBFRAME_PDF_KEEPALIVE))
-#define TBFRAME_EOF_MASK	TBFRAME_SOF_MASK
+/* RX PDF masks (spec §2): frames open on the SOF marker and close on a
+ * frame-type nibble. The masks MUST be disjoint (see tbframe.h).
+ */
+#define TBFRAME_SOF_MASK	BIT(TBFRAME_PDF_SOF)
+#define TBFRAME_EOF_MASK	(BIT(TBFRAME_PDF_DATA) | BIT(TBFRAME_PDF_KEEPALIVE))
 
 #define TBFRAME_HELLO_TIMEOUT_MS	1000
 #define TBFRAME_RETRY_DELAY_MS		200

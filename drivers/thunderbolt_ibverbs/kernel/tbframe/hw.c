@@ -169,7 +169,10 @@ static void tbframe_hw_rx_callback(struct tb_ring *ring,
 	if (!canceled)
 		dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
 					TBFRAME_MAX_FRAME, DMA_FROM_DEVICE);
-	tbframe_core_rx_complete(f, canceled, rf->size, rf->sof, bad);
+	/* The NHI writes the received frame's PDF into the descriptor's EOF
+	 * field; the RX descriptor's SOF reads back 0 (tbnet reads eof too).
+	 */
+	tbframe_core_rx_complete(f, canceled, rf->size, rf->eof, bad);
 }
 
 static int tbframe_hw_post_rx(void *data, struct tbframe_frame_priv *f)
@@ -196,7 +199,12 @@ static int tbframe_hw_ring_tx(void *data, struct tbframe_frame_priv *f)
 	f->rf.buffer_phy = f->dma;
 	f->rf.callback = tbframe_hw_tx_callback;
 	f->rf.size = f->frame.len;
-	f->rf.sof = f->frame.pdf;
+	/* SOF is the frame-start marker, the frame type rides in EOF; equal
+	 * sof/eof made the peer's NHI close every multi-packet frame at the
+	 * first transport-packet boundary (two CRC-flagged part-frames per
+	 * frame, nothing above ~252 bytes ever delivered).
+	 */
+	f->rf.sof = TBFRAME_PDF_SOF;
 	f->rf.eof = f->frame.pdf;
 	return tb_ring_tx(hw->tx_ring, &f->rf);
 }

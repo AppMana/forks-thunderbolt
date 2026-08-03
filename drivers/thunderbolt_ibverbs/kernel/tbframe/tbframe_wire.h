@@ -15,7 +15,10 @@
 #include <linux/types.h>
 
 #define TBFRAME_WIRE_MAGIC		0x31464254u /* "TBF1" little-endian */
-#define TBFRAME_WIRE_VERSION		1u
+/* v2: distinct SOF marker PDF (0x6) on the data path; v1 peers chop
+ * multi-packet frames, so mixed versions must refuse the session.
+ */
+#define TBFRAME_WIRE_VERSION		2u
 #define TBFRAME_WIRE_XDOMAIN_HDR_SIZE	32u
 #define TBFRAME_WIRE_HDR_SIZE		16u
 #define TBFRAME_WIRE_HELLO_SIZE		28u
