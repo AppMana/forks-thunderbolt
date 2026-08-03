@@ -1,0 +1,465 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Mock ring layer + client recorder for the tbframe KUnit contract tests.
+ * Implements every tbframe_hw_ops hook in software: control requests are
+ * answered from a configurable peer HELLO, rings are lists, and
+ * stop_rings() cancels in-flight frames through the real completion
+ * entry points exactly like tb_ring_stop() (unless never_cancel models
+ * dead hardware). Included by each test file; everything is file-local.
+ */
+#ifndef TBFRAME_TESTS_MOCK_H
+#define TBFRAME_TESTS_MOCK_H
+
+#include <kunit/test.h>
+#include <linux/slab.h>
+
+#include "../tbframe_priv.h"
+
+#define TBFRAME_MOCK_MAX_REQS	16
+#define TBFRAME_MOCK_MAX_EVENTS	32
+
+struct tbframe_mock {
+	/* peer identity used to answer HELLO/READY requests */
+	struct tbframe_wire_hello peer;
+	u64		route;
+	int		control_err;	/* fail every control request */
+	bool		fail_ready;	/* fail only READY requests */
+	bool		never_cancel;	/* dead hw: stop_rings returns nothing */
+	int		paths_active_ret;
+
+	bool		rings_alloced;
+	bool		rings_started;
+	bool		rings_e2e;
+	bool		paths_on;
+	bool		enable_seen;
+	int		in_hopid;
+	unsigned int	reannounce_calls;
+	unsigned int	rx_posted_before_enable;
+
+	struct list_head tx_queue;	/* ring_frame.list of queued TX */
+	struct list_head rx_posted;	/* ring_frame.list of posted RX */
+	unsigned int	tx_queued;
+	unsigned int	rx_posted_count;
+
+	u8		last_response[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	bool		have_response;
+	u16		req_ops[TBFRAME_MOCK_MAX_REQS];
+	unsigned int	req_count;
+};
+
+enum tbframe_mock_ev {
+	TBFRAME_EV_UP = 1,
+	TBFRAME_EV_DOWN,
+	TBFRAME_EV_RX,
+	TBFRAME_EV_TX_RELEASED,
+};
+
+struct tbframe_mock_client {
+	spinlock_t	lock;
+	u8		events[TBFRAME_MOCK_MAX_EVENTS];
+	int		reasons[TBFRAME_MOCK_MAX_EVENTS];
+	unsigned int	count;
+	unsigned int	up_count;
+	unsigned int	down_count;
+	unsigned int	rx_count;
+	unsigned int	tx_released_count;
+	struct tbframe_link_info last_info;
+	u16		last_rx_len;
+	u8		last_rx_pdf;
+};
+
+static void tbframe_mock_client_event(struct tbframe_mock_client *c, u8 ev,
+				      int reason)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&c->lock, flags);
+	if (c->count < TBFRAME_MOCK_MAX_EVENTS) {
+		c->events[c->count] = ev;
+		c->reasons[c->count] = reason;
+		c->count++;
+	}
+	spin_unlock_irqrestore(&c->lock, flags);
+}
+
+static void tbframe_mock_client_rx(void *ctx, struct tbframe_link *link,
+				   struct tbframe_frame *frame)
+{
+	struct tbframe_mock_client *c = ctx;
+
+	c->last_rx_len = frame->len;
+	c->last_rx_pdf = frame->pdf;
+	c->rx_count++;
+	tbframe_mock_client_event(c, TBFRAME_EV_RX, 0);
+}
+
+static void tbframe_mock_client_tx_released(void *ctx,
+					    struct tbframe_link *link)
+{
+	struct tbframe_mock_client *c = ctx;
+
+	c->tx_released_count++;
+	tbframe_mock_client_event(c, TBFRAME_EV_TX_RELEASED, 0);
+}
+
+static void tbframe_mock_client_link_up(void *ctx, struct tbframe_link *link,
+					const struct tbframe_link_info *info)
+{
+	struct tbframe_mock_client *c = ctx;
+
+	c->last_info = *info;
+	c->up_count++;
+	tbframe_mock_client_event(c, TBFRAME_EV_UP, 0);
+}
+
+static void tbframe_mock_client_link_down(void *ctx,
+					  struct tbframe_link *link,
+					  enum tbframe_down_reason reason)
+{
+	struct tbframe_mock_client *c = ctx;
+
+	c->down_count++;
+	tbframe_mock_client_event(c, TBFRAME_EV_DOWN, reason);
+}
+
+static const struct tbframe_client_ops tbframe_mock_client_ops = {
+	.rx		= tbframe_mock_client_rx,
+	.tx_released	= tbframe_mock_client_tx_released,
+	.link_up	= tbframe_mock_client_link_up,
+	.link_down	= tbframe_mock_client_link_down,
+};
+
+/* hw ops */
+
+static int tbframe_mock_alloc_out_hopid(void *data)
+{
+	return 8;
+}
+
+static void tbframe_mock_release_out_hopid(void *data, int hopid)
+{
+}
+
+static int tbframe_mock_alloc_in_hopid(void *data, int hopid)
+{
+	struct tbframe_mock *m = data;
+
+	m->in_hopid = hopid;
+	return hopid;
+}
+
+static void tbframe_mock_release_in_hopid(void *data, int hopid)
+{
+	struct tbframe_mock *m = data;
+
+	m->in_hopid = -1;
+}
+
+static int tbframe_mock_alloc_rings(void *data, u16 tx_entries,
+				    u16 rx_entries, bool e2e)
+{
+	struct tbframe_mock *m = data;
+
+	m->rings_alloced = true;
+	m->rings_e2e = e2e;
+	return 0;
+}
+
+static void tbframe_mock_start_rings(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	m->rings_started = true;
+}
+
+static void tbframe_mock_stop_rings(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	m->rings_started = false;
+	if (m->never_cancel)
+		return;
+
+	while (!list_empty(&m->rx_posted)) {
+		struct ring_frame *rf = list_first_entry(&m->rx_posted,
+							 struct ring_frame,
+							 list);
+		struct tbframe_frame_priv *f =
+			container_of(rf, struct tbframe_frame_priv, rf);
+
+		list_del_init(&rf->list);
+		m->rx_posted_count--;
+		tbframe_core_rx_complete(f, true, 0, 0, false);
+	}
+	while (!list_empty(&m->tx_queue)) {
+		struct ring_frame *rf = list_first_entry(&m->tx_queue,
+							 struct ring_frame,
+							 list);
+		struct tbframe_frame_priv *f =
+			container_of(rf, struct tbframe_frame_priv, rf);
+
+		list_del_init(&rf->list);
+		tbframe_core_tx_complete(f, true);
+	}
+}
+
+static void tbframe_mock_free_rings(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	m->rings_alloced = false;
+}
+
+static int tbframe_mock_post_rx(void *data, struct tbframe_frame_priv *f)
+{
+	struct tbframe_mock *m = data;
+
+	if (!m->rings_alloced)
+		return -ESHUTDOWN;
+	if (!m->enable_seen)
+		m->rx_posted_before_enable++;
+	INIT_LIST_HEAD(&f->rf.list);
+	list_add_tail(&f->rf.list, &m->rx_posted);
+	m->rx_posted_count++;
+	return 0;
+}
+
+static int tbframe_mock_ring_tx(void *data, struct tbframe_frame_priv *f)
+{
+	struct tbframe_mock *m = data;
+
+	if (!m->rings_started)
+		return -ESHUTDOWN;
+	INIT_LIST_HEAD(&f->rf.list);
+	list_add_tail(&f->rf.list, &m->tx_queue);
+	m->tx_queued++;
+	return 0;
+}
+
+static int tbframe_mock_enable_paths(void *data, int local_hopid,
+				     int remote_hopid)
+{
+	struct tbframe_mock *m = data;
+
+	m->enable_seen = true;
+	m->paths_on = true;
+	return 0;
+}
+
+static int tbframe_mock_disable_paths(void *data, int local_hopid,
+				      int remote_hopid)
+{
+	struct tbframe_mock *m = data;
+
+	m->paths_on = false;
+	return 0;
+}
+
+static int tbframe_mock_paths_active(void *data, int local_hopid,
+				     int remote_hopid)
+{
+	struct tbframe_mock *m = data;
+
+	return m->paths_active_ret;
+}
+
+static int tbframe_mock_control_request(void *data, const void *req,
+					size_t req_len, void *resp,
+					size_t resp_len,
+					unsigned int timeout_ms)
+{
+	struct tbframe_mock *m = data;
+	struct tbframe_wire_hello local;
+	struct tbframe_wire_info info;
+	u16 ack_op;
+	int ret;
+
+	ret = tbframe_wire_parse_hello(req, req_len, &local, &info);
+	if (ret)
+		return ret;
+	if (m->req_count < TBFRAME_MOCK_MAX_REQS)
+		m->req_ops[m->req_count++] = info.op;
+
+	if (m->control_err)
+		return m->control_err;
+	if (m->fail_ready && info.op == TBFRAME_WIRE_OP_READY)
+		return -ETIMEDOUT;
+
+	switch (info.op) {
+	case TBFRAME_WIRE_OP_HELLO:
+		ack_op = TBFRAME_WIRE_OP_HELLO_ACK;
+		break;
+	case TBFRAME_WIRE_OP_READY:
+		ack_op = TBFRAME_WIRE_OP_READY_ACK;
+		break;
+	default:
+		return -EPROTO;
+	}
+	ret = tbframe_wire_build_hello(resp, resp_len, &m->peer, ack_op,
+				       info.seq, m->route,
+				       info.xdomain_sequence);
+	return ret < 0 ? ret : 0;
+}
+
+static int tbframe_mock_control_response(void *data, const void *resp,
+					 size_t len)
+{
+	struct tbframe_mock *m = data;
+
+	if (len > sizeof(m->last_response))
+		return -EINVAL;
+	memcpy(m->last_response, resp, len);
+	m->have_response = true;
+	return 0;
+}
+
+static bool tbframe_mock_reannounce(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	m->reannounce_calls++;
+	return true;
+}
+
+static void tbframe_mock_link_attrs(void *data, u8 *width, u8 *speed)
+{
+	*width = 2;
+	*speed = 20;
+}
+
+static bool tbframe_mock_match(void *data, const void *token)
+{
+	return true;
+}
+
+static const struct tbframe_hw_ops tbframe_mock_ops = {
+	.alloc_out_hopid	= tbframe_mock_alloc_out_hopid,
+	.release_out_hopid	= tbframe_mock_release_out_hopid,
+	.alloc_in_hopid		= tbframe_mock_alloc_in_hopid,
+	.release_in_hopid	= tbframe_mock_release_in_hopid,
+	.alloc_rings		= tbframe_mock_alloc_rings,
+	.start_rings		= tbframe_mock_start_rings,
+	.stop_rings		= tbframe_mock_stop_rings,
+	.free_rings		= tbframe_mock_free_rings,
+	.post_rx		= tbframe_mock_post_rx,
+	.ring_tx		= tbframe_mock_ring_tx,
+	.enable_paths		= tbframe_mock_enable_paths,
+	.disable_paths		= tbframe_mock_disable_paths,
+	.paths_active		= tbframe_mock_paths_active,
+	.control_request	= tbframe_mock_control_request,
+	.control_response	= tbframe_mock_control_response,
+	.reannounce		= tbframe_mock_reannounce,
+	.link_attrs		= tbframe_mock_link_attrs,
+	.match			= tbframe_mock_match,
+};
+
+/* fixture */
+
+struct tbframe_mock_fixture {
+	struct tbframe		tf;
+	struct tbframe_mock	mock;
+	struct tbframe_mock_client client;
+	struct tbframe_link	*link;
+	bool			link_destroyed;
+};
+
+#define TBFRAME_MOCK_ROUTE	0x301ull
+#define TBFRAME_MOCK_RING	256
+
+static int tbframe_mock_fixture_init(struct kunit *test,
+				     struct tbframe_mock_fixture *fx)
+{
+	memset(fx, 0, sizeof(*fx));
+	tbframe_state_init(&fx->tf);
+	fx->tf.ring_entries = TBFRAME_MOCK_RING;
+	fx->tf.e2e = false;
+	fx->tf.keepalive = true;
+	fx->tf.verify_ms = 5000;
+	fx->tf.xmit_drain_ms = 200;
+	fx->tf.teardown_warn_ms = 50;
+	fx->tf.teardown_force_ms = 100;
+	fx->tf.wq = alloc_workqueue("tbframe-kunit",
+				    WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+	if (!fx->tf.wq)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&fx->mock.tx_queue);
+	INIT_LIST_HEAD(&fx->mock.rx_posted);
+	fx->mock.in_hopid = -1;
+	fx->mock.route = TBFRAME_MOCK_ROUTE;
+	fx->mock.paths_active_ret = 1;
+	fx->mock.peer.proto_version = TBFRAME_WIRE_VERSION;
+	fx->mock.peer.transmit_hopid = 9;
+	fx->mock.peer.rx_ring_entries = TBFRAME_MOCK_RING;
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	fx->mock.peer.gid_eui64 = 0xabcdef0102030405ull;
+	fx->mock.peer.session_cookie = 0x1111222233334444ull;
+
+	spin_lock_init(&fx->client.lock);
+	fx->tf.client_ops = &tbframe_mock_client_ops;
+	fx->tf.client_ctx = &fx->client;
+
+	fx->link = tbframe_link_create(&fx->tf, &tbframe_mock_ops, &fx->mock,
+				       TBFRAME_MOCK_ROUTE, 0xfedcba0908070605ull,
+				       false);
+	if (IS_ERR(fx->link)) {
+		destroy_workqueue(fx->tf.wq);
+		return PTR_ERR(fx->link);
+	}
+	return 0;
+}
+
+static void tbframe_mock_fixture_exit(struct kunit *test,
+				      struct tbframe_mock_fixture *fx)
+{
+	if (!fx->link_destroyed)
+		tbframe_link_destroy(fx->link, TBFRAME_DOWN_CLOSED);
+	destroy_workqueue(fx->tf.wq);
+}
+
+/* Drive one full session pass; with a healthy mock this reaches UP. */
+static void tbframe_mock_link_up(struct kunit *test,
+				 struct tbframe_mock_fixture *fx)
+{
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.up_count);
+}
+
+/* Pop one posted RX descriptor for direct injection into the core. */
+static __maybe_unused struct tbframe_frame_priv *
+tbframe_mock_pop_rx(struct tbframe_mock_fixture *fx)
+{
+	struct ring_frame *rf;
+
+	if (list_empty(&fx->mock.rx_posted))
+		return NULL;
+	rf = list_first_entry(&fx->mock.rx_posted, struct ring_frame, list);
+	list_del_init(&rf->list);
+	fx->mock.rx_posted_count--;
+	return container_of(rf, struct tbframe_frame_priv, rf);
+}
+
+/* Complete the oldest queued TX frame as the hardware would. */
+static __maybe_unused bool
+tbframe_mock_complete_tx(struct tbframe_mock_fixture *fx)
+{
+	struct ring_frame *rf;
+
+	if (list_empty(&fx->mock.tx_queue))
+		return false;
+	rf = list_first_entry(&fx->mock.tx_queue, struct ring_frame, list);
+	list_del_init(&rf->list);
+	tbframe_core_tx_complete(container_of(rf, struct tbframe_frame_priv,
+					      rf), false);
+	return true;
+}
+
+static __maybe_unused int
+tbframe_mock_build_peer_msg(struct tbframe_mock_fixture *fx,
+			    u16 op, u8 *buf, size_t size)
+{
+	return tbframe_wire_build_hello(buf, size, &fx->mock.peer, op, 0,
+					TBFRAME_MOCK_ROUTE, 0);
+}
+
+#endif /* TBFRAME_TESTS_MOCK_H */
