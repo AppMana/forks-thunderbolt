@@ -55,9 +55,25 @@ static void tbv_initial_send_capacity_preserves_qp_fifo(struct kunit *test)
 			    "the next WR was not released after the head was fully admitted");
 }
 
+static void tbv_local_packet_pressure_does_not_complete_wr(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ_MSG(test,
+			    tbv_test_path_packetize_unwind_status(-ENOMEM), 0,
+			    "local path packet pressure poisoned an accepted verbs WR");
+	KUNIT_EXPECT_EQ_MSG(test,
+			    tbv_test_path_packetize_unwind_status(-ENOTCONN),
+			    -ENOTCONN,
+			    "a disconnected path was incorrectly hidden as backpressure");
+	KUNIT_EXPECT_EQ_MSG(test,
+			    tbv_test_path_packetize_unwind_status(-EINVAL),
+			    -EINVAL,
+			    "invalid packetization was incorrectly hidden as backpressure");
+}
+
 static struct kunit_case tbv_send_capacity_defer_cases[] = {
 	KUNIT_CASE(tbv_initial_send_capacity_is_deferred),
 	KUNIT_CASE(tbv_initial_send_capacity_preserves_qp_fifo),
+	KUNIT_CASE(tbv_local_packet_pressure_does_not_complete_wr),
 	{}
 };
 

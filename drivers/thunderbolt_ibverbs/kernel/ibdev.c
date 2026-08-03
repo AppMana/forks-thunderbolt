@@ -405,6 +405,8 @@ enum tbv_send_post_reason {
 	 * exhaustion, the NAK only accelerates recovery.
 	 */
 	TBV_SEND_POST_RETRY_NAK,
+	/* Timeout liveness probe; no payload is replayed. */
+	TBV_SEND_POST_RETRY_QUERY,
 };
 
 struct tbv_send_ctx;
@@ -831,6 +833,9 @@ static int tbv_send_ack(struct tbv_qp *tqp, u32 dest_qp, u32 src_qp,
 static int tbv_send_ack_on_path(struct tbv_qp *tqp,
 				struct tbv_path *rx_path, u32 dest_qp,
 				u32 src_qp, u32 psn, int status);
+static int tbv_send_control_frame_on_qp(struct tbv_qp *tqp,
+					struct tbv_path *rx_path,
+					const void *frame, u32 len);
 static int tbv_send_read_ack_on_path(struct tbv_qp *tqp,
 				     struct tbv_path *rx_path, u32 dest_qp,
 				     u32 src_qp, u32 psn, int status);
@@ -1393,6 +1398,22 @@ unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
 
 	t = base_jiffies << min_t(unsigned int, retries, 16);
 	return min(t, qp_timeout);
+}
+
+/*
+ * Avoid congestion collapse from a spurious timeout on a large operation.
+ * An ACK_QUERY-capable responder can answer a tiny control probe from its ACK
+ * history, or NAK the first missing range. Probe twice before falling back to
+ * the legacy payload replay in case the query or its answer was itself lost.
+ * ACK_QUERY without NAK is not sufficient: an incomplete responder would have
+ * no bounded way to identify the data that actually needs retransmission.
+ */
+bool tbv_send_timeout_should_query(u32 peer_caps, u8 retries)
+{
+	u32 required = TBV_NATIVE_WIRE_CAP_ACK_QUERY |
+		       TBV_NATIVE_WIRE_CAP_NAK;
+
+	return (peer_caps & required) == required && retries < 2;
 }
 
 /*
@@ -5092,8 +5113,15 @@ static bool tbv_qp_timeout_reap_tx(struct tbv_qp *tqp,
 		    !atomic_read(&send->tx_pending) &&
 		    send->retries < max_retries &&
 		    !tqp->closing && tqp->state != IB_QPS_ERR) {
+			u32 peer_caps = tqp->rail && tqp->rail->peer ?
+				READ_ONCE(tqp->rail->peer->remote_caps) : 0;
+
 			send->retrying = true;
-			send->retry_reason = TBV_SEND_POST_RETRY_TIMEOUT;
+			send->retry_reason =
+				tbv_send_timeout_should_query(peer_caps,
+							      send->retries) ?
+				TBV_SEND_POST_RETRY_QUERY :
+				TBV_SEND_POST_RETRY_TIMEOUT;
 			tbv_send_ctx_get(send);
 			list_add_tail(&send->retry_node, retry_sends);
 			continue;
@@ -5716,6 +5744,14 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 		}
 		send->enomem_retries = 0;
 		tbv_send_mark_queued(send, now);
+		/*
+		 * Payload attempts clear retrying from their final TX callback.
+		 * ACK_QUERY is a control-only frame with no send-context callback,
+		 * so leaving it busy here permanently suppresses the second probe
+		 * and makes the next deadline fail the WR outright.
+		 */
+		if (reason == TBV_SEND_POST_RETRY_QUERY)
+			send->retrying = false;
 		return TBV_SEND_RETRY_REARM;
 	}
 	if (pending && ret == -ENOMEM) {
@@ -5774,6 +5810,50 @@ tbv_send_apply_retry_result_locked(struct tbv_qp *tqp,
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
+int tbv_test_ack_query_retry_result(bool *retrying_out, u8 *retries_out)
+{
+	LIST_HEAD(completed_sends);
+	struct tbv_send_ctx *send;
+	struct tbv_qp *tqp;
+	unsigned long flags;
+	int ret = -ENOMEM;
+
+	if (!retrying_out || !retries_out)
+		return -EINVAL;
+	send = kzalloc(sizeof(*send), GFP_KERNEL);
+	tqp = kzalloc(sizeof(*tqp), GFP_KERNEL);
+	if (!send || !tqp)
+		goto out;
+
+	spin_lock_init(&tqp->lock);
+	INIT_LIST_HEAD(&tqp->pending_sends);
+	tqp->state = IB_QPS_RTS;
+
+	INIT_LIST_HEAD(&send->node);
+	INIT_LIST_HEAD(&send->retry_node);
+	send->tqp = tqp;
+	send->pending = true;
+	send->retryable = true;
+	send->retrying = true;
+	send->max_retries = 7;
+	list_add_tail(&send->node, &tqp->pending_sends);
+
+	spin_lock_irqsave(&tqp->lock, flags);
+	tbv_send_apply_retry_result_locked(tqp, send,
+					   TBV_SEND_POST_RETRY_QUERY, 0,
+					   jiffies ?: 1, &completed_sends);
+	spin_unlock_irqrestore(&tqp->lock, flags);
+
+	*retrying_out = send->retrying;
+	*retries_out = send->retries;
+	list_del_init(&send->node);
+	ret = 0;
+out:
+	kfree(tqp);
+	kfree(send);
+	return ret;
+}
+
 /*
  * KUnit hook (tests/retry_enomem_bound_test.c). Runs the real reap ->
  * post -> apply-result cycle of the timeout work against a path TX queue
@@ -7198,6 +7278,26 @@ static int tbv_native_send_ctx_post_frames(struct tbv_send_ctx *ctx,
 
 	for (list_idx = 0; list_idx < ARRAY_SIZE(packet_lists); list_idx++)
 		INIT_LIST_HEAD(&packet_lists[list_idx]);
+
+	if (reason == TBV_SEND_POST_RETRY_QUERY) {
+		struct tbv_native_data_header query = {};
+		u8 frame[TBV_NATIVE_DATA_HDR_SIZE];
+		int len;
+
+		query.opcode = TBV_NATIVE_DATA_OP_ACK_QUERY;
+		query.dest_qp = tqp->attr.dest_qp_num;
+		query.src_qp = tqp->base.qp_num;
+		query.psn = ctx->psn;
+		len = tbv_native_data_build_header(frame, sizeof(frame), &query);
+		if (len < 0)
+			return len;
+		ret = tbv_send_control_frame_on_qp(tqp, NULL, frame, len);
+		if (ret)
+			atomic64_inc(&tqp->owner->data_tx_ack_query_error);
+		else
+			atomic64_inc(&tqp->owner->data_tx_ack_query);
+		return ret;
+	}
 
 	if (reason != TBV_SEND_POST_INITIAL) {
 		unsigned long age_ms = ctx->queued_jiffies ?
@@ -12436,6 +12536,7 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 	case TBV_NATIVE_DATA_OP_RDMA_WRITE_IMM:
 	case TBV_NATIVE_DATA_OP_MAD:
 	case TBV_NATIVE_DATA_OP_NAK:
+	case TBV_NATIVE_DATA_OP_ACK_QUERY:
 		break;
 	default:
 		atomic64_inc(&state->data_rx_bad_header);
@@ -12606,6 +12707,49 @@ void tbv_ibdev_rx_native_frame(struct tbv_state *state,
 			atomic64_inc(&state->data_rx_nak_matched);
 		else
 			atomic64_inc(&state->data_rx_nak_miss);
+		tbv_qp_put(tqp);
+		return;
+	}
+
+	if (hdr->opcode == TBV_NATIVE_DATA_OP_ACK_QUERY) {
+		u32 psn = hdr->psn & TBV_PSN_MASK;
+		s32 delta;
+
+		atomic64_inc(&state->data_rx_ack_query);
+		if (!tbv_native_data_valid_ack_query(hdr)) {
+			atomic64_inc(&state->data_rx_bad_header);
+			tbv_qp_put(tqp);
+			return;
+		}
+
+		/*
+		 * Query under the receive lock so expected_psn, active receive
+		 * state, and ACK history form one snapshot. A completed operation
+		 * is re-ACKed from history; an incomplete/missing operation gets a
+		 * NAK, which drives the existing selective retransmit path.
+		 */
+		tbv_qp_rx_lock(tqp);
+		delta = tbv_psn_delta(psn, tqp->rx_expected_psn);
+		if (delta < 0) {
+			tbv_rx_reack_duplicate_locked(state, tqp, rx_path,
+						      hdr->src_qp,
+						      hdr->dest_qp, psn);
+		} else if (delta > 0) {
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+					      tqp->rx_expected_psn, 0, 0);
+		} else if (tqp->rx_write.active &&
+			   tqp->rx_write.psn == psn) {
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+					      psn, tqp->rx_write.received, 0);
+		} else if (tqp->rx_msg.active && tqp->rx_msg.psn == psn) {
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+					      psn, tqp->rx_msg.received, 0);
+		} else {
+			/* No first fragment reached us, or it is reorder-buffered. */
+			tbv_rx_maybe_send_nak(state, tqp, rx_path, hdr->src_qp,
+					      psn, 0, 0);
+		}
+		tbv_qp_rx_unlock(tqp);
 		tbv_qp_put(tqp);
 		return;
 	}

@@ -49,7 +49,16 @@ enum tbv_native_data_op {
 	 * shortfall from any single later frame.
 	 */
 	TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC = 13,
-	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_PATH_CREDIT_SYNC,
+	/*
+	 * Lightweight status request for an unacknowledged SEND/WRITE. The
+	 * requester identifies the operation with (dest_qp, src_qp, psn); every
+	 * other field is reserved zero. A completed responder returns the existing
+	 * SEND_ACK, while an incomplete responder returns the existing NAK naming
+	 * its first hole. Capability-gated by ACK_QUERY so older peers never see
+	 * the new opcode.
+	 */
+	TBV_NATIVE_DATA_OP_ACK_QUERY = 14,
+	TBV_NATIVE_DATA_OP_MAX = TBV_NATIVE_DATA_OP_ACK_QUERY,
 };
 
 enum tbv_native_data_flag {
@@ -420,6 +429,18 @@ tbv_native_data_valid_nak(const struct tbv_native_data_header *hdr)
 	       !hdr->length &&
 	       !hdr->remote_addr &&
 	       !hdr->rkey;
+}
+
+static inline bool
+tbv_native_data_valid_ack_query(const struct tbv_native_data_header *hdr)
+{
+	return hdr->opcode == TBV_NATIVE_DATA_OP_ACK_QUERY &&
+	       !hdr->flags &&
+	       !hdr->length &&
+	       !hdr->imm_data &&
+	       !hdr->remote_addr &&
+	       !hdr->rkey &&
+	       !hdr->frag_offset;
 }
 
 static inline int

@@ -213,9 +213,9 @@ struct tbv_path {
 	u32 tx_remote_data_credit_max;
 	u32 rx_data_credit_pending;
 	/*
-	 * The peer's HELLO path flag. Software data credits are bypassed only
-	 * when local and remote rings both use hardware E2E and the peer
-	 * advertised TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT.
+	 * The peer's HELLO path flag. Hardware E2E state is negotiated per path;
+	 * software data credits remain enabled independently as the transport
+	 * admission window.
 	 */
 	bool remote_e2e;
 	/*
@@ -840,6 +840,9 @@ struct tbv_state {
 	atomic64_t data_rx_ack_rnr;
 	atomic64_t data_rx_duplicate_ack;
 	atomic64_t data_rx_ack_history_miss;
+	atomic64_t data_tx_ack_query;
+	atomic64_t data_tx_ack_query_error;
+	atomic64_t data_rx_ack_query;
 	atomic64_t data_tx_nak;
 	atomic64_t data_tx_nak_send_error;
 	atomic64_t data_rx_nak;
@@ -1162,6 +1165,7 @@ int tbv_test_reap_tx_stalled_tx_pending_head(u32 passes, u32 *passes_used_out,
 int tbv_test_retry_enomem_bounded(u32 passes, u32 *passes_used_out,
 				  u32 *posts_out, bool *failed_out,
 				  u32 *retries_out);
+int tbv_test_ack_query_retry_result(bool *retrying_out, u8 *retries_out);
 /*
  * Runs the reap TX walk up to @passes times against a send parked in RNR with
  * recv_credit_required and infinite rnr_retry, with @credits remote recv
@@ -1242,6 +1246,7 @@ int tbv_test_path_credit_mode(bool local_e2e, bool remote_e2e,
 			      u32 remote_caps, u32 *credits_out, u32 *max_out);
 int tbv_test_path_inline_prepare(u32 len, u32 *fill_calls_out,
 				 bool *inline_out, bool *data_match_out);
+int tbv_test_path_packetize_unwind_status(int ret);
 int tbv_test_read_complete_wc(bool signaled, int status, u32 *pushed_out,
 			      int *wc_status_out);
 /*
@@ -1566,6 +1571,7 @@ unsigned long tbv_send_retry_backoff_jiffies(unsigned long qp_timeout,
 					     u8 retries,
 					     unsigned long base_jiffies,
 					     u8 max_retries);
+bool tbv_send_timeout_should_query(u32 peer_caps, u8 retries);
 /*
  * Deadline-aware timeout-work arming. The reap work only CHECKS deadlines when
  * it runs; scheduling it at the flat min3 interval quantized every loss

@@ -36,17 +36,21 @@ static u32 tbv_native_control_caps(const struct tbv_state *state,
 	if (peer->nr_rails > 1)
 		caps |= TBV_NATIVE_WIRE_CAP_MULTI_RAIL;
 	/*
-	 * Receive-side support for all four is unconditional in this module:
+	 * Receive-side support for these additive features is unconditional:
 	 * split-base raw streams, inbound NAKs and inbound absolute credit
-	 * resyncs, and negotiated hardware-E2E-only flow control need no
-	 * per-node state. The peer gates its own TX on these bits, which matters
+	 * resyncs, and padded full-stream headers need no per-node state. The peer
+	 * gates its own TX on these bits, which matters
 	 * for the resync because an older peer rejects the opcode as a bad
 	 * header.
+	 *
+	 * Do not advertise E2E_NO_SW_CREDIT. Hardware E2E and PATH_CREDIT solve
+	 * different queues; a mixed-version peer that honors this deprecated bit
+	 * would otherwise disable the admission window on one direction.
 	 */
 	caps |= TBV_NATIVE_WIRE_CAP_SPLIT_DATA | TBV_NATIVE_WIRE_CAP_NAK |
 		TBV_NATIVE_WIRE_CAP_CREDIT_SYNC |
-		TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT |
-		TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER;
+		TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER |
+		TBV_NATIVE_WIRE_CAP_ACK_QUERY;
 
 	return caps;
 }

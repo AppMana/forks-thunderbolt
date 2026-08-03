@@ -313,6 +313,12 @@ static int tbv_debugfs_summary_show(struct seq_file *s, void *unused)
 		   atomic64_read(&state->data_rx_duplicate_ack));
 	seq_printf(s, "data_rx_ack_history_miss: %lld\n",
 		   atomic64_read(&state->data_rx_ack_history_miss));
+	seq_printf(s, "data_tx_ack_query: %lld\n",
+		   atomic64_read(&state->data_tx_ack_query));
+	seq_printf(s, "data_tx_ack_query_error: %lld\n",
+		   atomic64_read(&state->data_tx_ack_query_error));
+	seq_printf(s, "data_rx_ack_query: %lld\n",
+		   atomic64_read(&state->data_rx_ack_query));
 	seq_printf(s, "data_tx_nak: %lld\n",
 		   atomic64_read(&state->data_tx_nak));
 	seq_printf(s, "data_tx_nak_send_error: %lld\n",

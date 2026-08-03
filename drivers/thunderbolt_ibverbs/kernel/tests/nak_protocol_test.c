@@ -37,6 +37,84 @@
 #include "../../proto/native_wire.h"
 #include "../tbv.h"
 
+/*
+ * RED scaffold: the production policy replaces this weak fallback. Keeping
+ * the fallback in the test object yields an assertion failure, rather than a
+ * build/link failure, before the timeout policy exists.
+ */
+bool __weak tbv_send_timeout_should_query(u32 peer_caps, u8 retries)
+{
+	return false;
+}
+
+/*
+ * A timeout must be able to ask the responder for the status of one PSN
+ * without replaying the entire payload.  The query is endpoint-scoped and
+ * carries only (dest_qp, src_qp, psn); the responder answers with the existing
+ * SEND_ACK or NAK frame.  Pin the wire parser first: before ACK_QUERY exists,
+ * build_header() rejects opcode 14 with -EINVAL.
+ */
+static void tbv_ack_query_wire_format(struct kunit *test)
+{
+	struct tbv_native_data_header hdr = {};
+	struct tbv_native_data_header parsed;
+	u8 frame[TBV_NATIVE_DATA_HDR_SIZE];
+
+	hdr.opcode = TBV_NATIVE_DATA_OP_ACK_QUERY;
+	hdr.dest_qp = 0x901;
+	hdr.src_qp = 0x902;
+	hdr.psn = 77;
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_native_data_build_header(frame, sizeof(frame), &hdr),
+		(int)TBV_NATIVE_DATA_HDR_SIZE);
+	KUNIT_ASSERT_EQ(test,
+		tbv_native_data_parse_header(frame, sizeof(frame), &parsed), 0);
+	KUNIT_EXPECT_EQ(test, parsed.opcode,
+			(u8)TBV_NATIVE_DATA_OP_ACK_QUERY);
+	KUNIT_EXPECT_EQ(test, parsed.dest_qp, 0x901u);
+	KUNIT_EXPECT_EQ(test, parsed.src_qp, 0x902u);
+	KUNIT_EXPECT_EQ(test, parsed.psn, 77u);
+	KUNIT_EXPECT_EQ(test, parsed.length, 0u);
+	KUNIT_EXPECT_EQ(test, parsed.imm_data, 0u);
+	KUNIT_EXPECT_EQ(test, parsed.remote_addr, 0ull);
+	KUNIT_EXPECT_EQ(test, parsed.rkey, 0u);
+	KUNIT_EXPECT_EQ(test, parsed.frag_offset, 0u);
+	KUNIT_EXPECT_TRUE(test, tbv_native_data_valid_ack_query(&parsed));
+
+	parsed.imm_data = 1;
+	KUNIT_EXPECT_FALSE(test, tbv_native_data_valid_ack_query(&parsed));
+}
+
+static void tbv_timeout_queries_before_payload_replay(struct kunit *test)
+{
+	u32 capable = TBV_NATIVE_WIRE_CAP_ACK_QUERY |
+		      TBV_NATIVE_WIRE_CAP_NAK;
+
+	/* Two cheap status probes absorb delayed/lost ACKs under congestion. */
+	KUNIT_EXPECT_TRUE(test, tbv_send_timeout_should_query(capable, 0));
+	KUNIT_EXPECT_TRUE(test, tbv_send_timeout_should_query(capable, 1));
+	/* If both probes disappear, fall back to the payload retry. */
+	KUNIT_EXPECT_FALSE(test, tbv_send_timeout_should_query(capable, 2));
+	/* Mixed-version peers retain the existing full retransmit behavior. */
+	KUNIT_EXPECT_FALSE(test,
+		tbv_send_timeout_should_query(TBV_NATIVE_WIRE_CAP_NAK, 0));
+	KUNIT_EXPECT_FALSE(test,
+		tbv_send_timeout_should_query(TBV_NATIVE_WIRE_CAP_ACK_QUERY, 0));
+}
+
+static void tbv_ack_query_rearms_without_staying_busy(struct kunit *test)
+{
+	bool retrying = false;
+	u8 retries = 0;
+
+	KUNIT_ASSERT_EQ(test,
+		tbv_test_ack_query_retry_result(&retrying, &retries), 0);
+	KUNIT_EXPECT_FALSE_MSG(test, retrying,
+		"a control-only query has no TX callback that can clear retrying");
+	KUNIT_EXPECT_EQ(test, retries, (u8)1);
+}
+
 static void tbv_nak_wire_format(struct kunit *test)
 {
 	struct tbv_native_data_header hdr = {};
@@ -226,6 +304,9 @@ static void tbv_nak_recovery_simulation(struct kunit *test)
 }
 
 static struct kunit_case tbv_nak_protocol_cases[] = {
+	KUNIT_CASE(tbv_ack_query_wire_format),
+	KUNIT_CASE(tbv_timeout_queries_before_payload_replay),
+	KUNIT_CASE(tbv_ack_query_rearms_without_staying_busy),
 	KUNIT_CASE(tbv_nak_wire_format),
 	KUNIT_CASE(tbv_nak_emission_gating),
 	KUNIT_CASE(tbv_nak_sender_retry_range),

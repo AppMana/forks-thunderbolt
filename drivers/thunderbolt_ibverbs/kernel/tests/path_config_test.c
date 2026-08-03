@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KUnit: native rings use the NHI's hardware end-to-end credit path.
+ * KUnit: native rings use hardware E2E and software admission together.
  *
- * E2E ring credits prevent the NHI/router FIFO from overrunning the peer under
- * bidirectional load. New peers use that hardware mechanism directly; the
- * software PATH_CREDIT window remains only for mixed-version/non-E2E paths.
+ * E2E prevents the NHI/router FIFO from overrunning the peer, but completion
+ * only means the local NHI accepted a descriptor. Without the bounded software
+ * PATH_CREDIT window, a deep verbs SQ can queue seconds of data behind E2E and
+ * every later WR times out and retransmits before its ACK can return. Hardware
+ * E2E is fabric safety; software credits are transport admission. They are not
+ * substitutes for one another.
  */
 #include <kunit/test.h>
 #include "../../proto/native_data.h"
@@ -35,10 +38,10 @@ static void tbv_native_path_defaults_to_low_latency_pacing(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, TBV_DATA_TX_MAX_INFLIGHT_DEFAULT, 1U);
 }
 
-static void tbv_e2e_peers_bypass_software_credits(struct kunit *test)
+static void tbv_e2e_peers_keep_software_credits(struct kunit *test)
 {
-	u32 credits = U32_MAX;
-	u32 max = U32_MAX;
+	u32 credits = 0;
+	u32 max = 0;
 	int ret;
 
 	ret = tbv_test_path_credit_mode(
@@ -46,8 +49,9 @@ static void tbv_e2e_peers_bypass_software_credits(struct kunit *test)
 		&credits, &max);
 
 	KUNIT_ASSERT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, credits, 0u);
-	KUNIT_EXPECT_EQ(test, max, 0u);
+	KUNIT_EXPECT_GT_MSG(test, max, 0u,
+		"hardware E2E incorrectly disabled software path admission");
+	KUNIT_EXPECT_EQ(test, credits, max);
 }
 
 static void tbv_old_peer_keeps_software_credits(struct kunit *test)
@@ -113,7 +117,7 @@ static void tbv_copied_packet_owns_inline_payload(struct kunit *test)
 static struct kunit_case tbv_path_config_cases[] = {
 	KUNIT_CASE(tbv_native_path_defaults_to_software_credits),
 	KUNIT_CASE(tbv_native_path_defaults_to_low_latency_pacing),
-	KUNIT_CASE(tbv_e2e_peers_bypass_software_credits),
+	KUNIT_CASE(tbv_e2e_peers_keep_software_credits),
 	KUNIT_CASE(tbv_old_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_peer_keeps_software_credits),
 	KUNIT_CASE(tbv_non_e2e_local_keeps_software_credits),

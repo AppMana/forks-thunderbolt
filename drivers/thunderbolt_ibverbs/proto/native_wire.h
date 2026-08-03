@@ -99,10 +99,11 @@ enum tbv_native_wire_cap {
 	 */
 	TBV_NATIVE_WIRE_CAP_CREDIT_SYNC = 1u << 6,
 	/*
-	 * Peer understands that PATH_CREDIT is redundant when both ends
-	 * advertise hardware E2E for the native path. A sender may bypass the
-	 * software window only when this bit and the peer's E2E path flag are
-	 * both present; mixed-version and non-E2E paths retain PATH_CREDIT.
+	 * Deprecated. Older releases interpreted this as permission to bypass
+	 * PATH_CREDIT when both ends enabled hardware E2E. That is unsafe: E2E
+	 * protects the ICM path, while PATH_CREDIT bounds transport admission
+	 * before descriptors accumulate behind that path. Kept only so the wire
+	 * bit remains reserved and old HELLOs can be decoded.
 	 */
 	TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT = 1u << 7,
 	/*
@@ -113,6 +114,12 @@ enum tbv_native_wire_cap {
 	 * payload into the metadata frame.
 	 */
 	TBV_NATIVE_WIRE_CAP_FULL_RAW_HEADER = 1u << 8,
+	/*
+	 * Peer accepts TBV_NATIVE_DATA_OP_ACK_QUERY and answers it with the
+	 * existing SEND_ACK/NAK state. This lets a timeout test liveness with one
+	 * control frame instead of blindly replaying a multi-megabyte operation.
+	 */
+	TBV_NATIVE_WIRE_CAP_ACK_QUERY = 1u << 9,
 };
 
 enum tbv_native_wire_path_flag {

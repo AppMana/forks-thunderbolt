@@ -21,12 +21,19 @@ static void tbv_max_message_fits_bounded_path_queue(struct kunit *test)
 }
 
 /*
- * The production NCCL/perftest shape keeps 32 QPs at depth 128 with 256 KiB
- * WRs.  If the bounded path queue cannot hold that legal verbs working set,
- * every QP falls into the 10 ms timeout-worker capacity poll and the live
- * link drops from ~30 Gb/s to ~3.5 Gb/s despite having credits available.
+ * The production NCCL/perftest shape keeps 32 QPs at depth 128.  Those WQEs
+ * belong on the verbs SQ as lightweight send contexts; they must not all be
+ * expanded into hundreds of path packets before the hardware can consume
+ * them.  Besides making queue memory scale with a userspace working set, that
+ * design exhausted the path queue at QP 9--10 when the payload grew from the
+ * old 256 KiB test shape to 1 MiB.  The local -ENOMEM then escaped as a fatal
+ * post_send error.
+ *
+ * A bounded path queue must fit one advertised maximum-size message (covered
+ * above), while the full qps32/depth128 working set must remain larger and be
+ * handled by deferred packetization/backpressure.
  */
-static void tbv_qps32_write_working_set_fits_path_queue(struct kunit *test)
+static void tbv_qps32_write_working_set_is_deferred(struct kunit *test)
 {
 	u32 required = 0;
 	u32 limit = 0;
@@ -34,14 +41,14 @@ static void tbv_qps32_write_working_set_fits_path_queue(struct kunit *test)
 	KUNIT_ASSERT_EQ(test,
 			tbv_test_qps32_write_queue_capacity(&required, &limit),
 			0);
-	KUNIT_EXPECT_GE_MSG(test, limit, required,
-			    "qps32/depth128/256KiB needs %u frame slots but the path has %u; deferred QPs will poll capacity on their retransmit timers",
+	KUNIT_EXPECT_GT_MSG(test, required, limit,
+			    "path queue pre-packetizes the entire qps32/depth128 working set (%u frames in %u slots) instead of applying bounded backpressure",
 			    required, limit);
 }
 
 static struct kunit_case tbv_max_message_capacity_cases[] = {
 	KUNIT_CASE(tbv_max_message_fits_bounded_path_queue),
-	KUNIT_CASE(tbv_qps32_write_working_set_fits_path_queue),
+	KUNIT_CASE(tbv_qps32_write_working_set_is_deferred),
 	{}
 };
 

@@ -50,15 +50,15 @@ MODULE_PARM_DESC(data_tx_max_inflight,
 #define TBV_RX_SUPP_POLL_DELAY_MS 1
 #define TBV_RX_SUPP_POLL_WINDOW_MS 16
 /*
- * Raw-stream zcopy serializes each DMA path, so QPs sharing a rail can queue a
- * full verbs working set behind one active stream. The production NCCL shape
- * is qps=32/TX-depth=128/256 KiB WRITE: 266240 frame descriptors at the native
- * 4048-byte reservation unit. Keep a small recovery margin above that instead
- * of sending most QPs through the 10 ms capacity-poll timeout worker. The
- * bound limits queued metadata; hardware/software credits still bound frames
- * submitted to the NHI ring.
+ * Keep only a small hardware-facing packet window.  The verbs SQ owns the
+ * qps*depth working set as lightweight send contexts; expanding every legal
+ * WQE into path packets made kernel memory scale with a userspace choice and
+ * exhausted the queue around QP 9--10 for 1 MiB NCCL writes.  Four ringfuls
+ * still cover many maximum-size messages on the production 1024-entry ring,
+ * while the max(TBV_NATIVE_DATA_MAX_FRAGS) floor below guarantees that one
+ * advertised maximum-size copied WR can always be packetized atomically.
  */
-#define TBV_DATA_QUEUE_MULTIPLIER 272
+#define TBV_DATA_QUEUE_MULTIPLIER 4
 #define TBV_DATA_PACKET_POOL_LIMIT 1024
 
 typedef int (*tbv_ring_throttling_fn)(struct tb_ring *ring,
@@ -520,19 +520,19 @@ static u32 tbv_path_data_credit_window(u32 rx_ring_size)
 
 static bool tbv_path_uses_software_credits(const struct tbv_path *path)
 {
-	const struct tbv_peer *peer;
-
-	if (!path->cfg.e2e || !READ_ONCE(path->remote_e2e))
-		return true;
-	if (!path->rail || !path->rail->peer)
-		return true;
-
-	peer = path->rail->peer;
-	if (peer->backend != TBV_BACKEND_NATIVE)
-		return true;
-
-	return !(READ_ONCE(peer->remote_caps) &
-		 TBV_NATIVE_WIRE_CAP_E2E_NO_SW_CREDIT);
+	(void)path;
+	/*
+	 * Hardware E2E protects the ICM path, but a local TX completion only
+	 * means the NHI accepted the descriptor. It does not bound how much of a
+	 * deep verbs SQ can accumulate behind the hardware credit boundary.
+	 *
+	 * Keep the software window as the transport admission layer even when
+	 * both ends use E2E. Disabling it let qps32 queue seconds of data inside
+	 * the fabric; every WR then expired and retransmitted before its ACK could
+	 * return, producing a self-sustaining duplicate storm. The old
+	 * E2E_NO_SW_CREDIT capability is retained on the wire for decoding only.
+	 */
+	return true;
 }
 
 void tbv_path_set_remote_rx_capacity(struct tbv_path *path, u32 rx_ring_size)
@@ -3075,6 +3075,17 @@ static void tbv_path_release_packet_list(struct list_head *packets, int status)
 	}
 }
 
+/*
+ * Packet construction happens before a path queue owns the packets. Local
+ * allocation/queue pressure must unwind ownership without reporting a failed
+ * wire operation to the send callback; the verbs SQ retains the WQE and
+ * retries packetization. Other errors remain real completions.
+ */
+static int tbv_path_packetize_unwind_status(int ret)
+{
+	return ret == -ENOMEM ? 0 : ret;
+}
+
 static void tbv_path_release_packet_list_silent(struct list_head *packets,
 						int status)
 {
@@ -3383,9 +3394,19 @@ have_packet:
 	return 0;
 
 err_release:
+	/*
+	 * -ENOMEM here is local packetization backpressure, not a transport
+	 * completion.  The caller keeps the accepted WQE on its verbs SQ and
+	 * retries initial packetization after the bounded path queue drains.
+	 * Unwind the temporary packet callbacks successfully so they release DMA,
+	 * stream and send references without marking the QP erroneous; still
+	 * return -ENOMEM to select the deferred-admission path.
+	 */
 	if (!packet_count && meta_done)
-		meta_done(meta_done_ctx, ret);
-	tbv_path_release_packet_list(&packets, ret);
+		meta_done(meta_done_ctx,
+			  tbv_path_packetize_unwind_status(ret));
+	tbv_path_release_packet_list(
+		&packets, tbv_path_packetize_unwind_status(ret));
 	return ret;
 
 err_meta_done:
@@ -3703,6 +3724,11 @@ int tbv_test_path_reload_order(u8 *steps, u32 capacity, u32 *count)
 bool tbv_test_path_scheduler_wake(enum tbv_path_state state)
 {
 	return tbv_path_scheduler_wake_needed(state);
+}
+
+int tbv_test_path_packetize_unwind_status(int ret)
+{
+	return tbv_path_packetize_unwind_status(ret);
 }
 #endif
 
