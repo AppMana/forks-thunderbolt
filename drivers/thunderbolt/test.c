@@ -3015,6 +3015,7 @@ struct icm_fw_model {
 	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
 	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
 	bool responsive; /* ICM message loop alive (a wedged ICM keeps ICM_EN) */
+	bool cfg_open;	/* config space served (only after DRIVER_READY) */
 };
 
 /* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
@@ -3023,6 +3024,7 @@ static void icm_fw_cold_boot(struct icm_fw_model *fw)
 	fw->icm_en = true;
 	fw->authed = true;
 	fw->responsive = true;
+	fw->cfg_open = false;
 }
 
 /*
@@ -3052,7 +3054,21 @@ static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
 /* ICM_DRIVER_READY succeeds only if running AND authenticated AND alive. */
 static bool icm_fw_driver_ready(struct icm_fw_model *fw)
 {
-	return fw->icm_en && fw->authed && fw->responsive;
+	if (!(fw->icm_en && fw->authed && fw->responsive))
+		return false;
+	/* Seeing DRIVER_READY is what makes the firmware serve config space. */
+	fw->cfg_open = true;
+	return true;
+}
+
+/*
+ * Can the host read router config space over ring 0? With no firmware
+ * resident the routers answer directly; a resident ICM serves (proxies)
+ * config access only after it has seen DRIVER_READY.
+ */
+static bool icm_fw_cfg_space_open(struct icm_fw_model *fw)
+{
+	return !fw->icm_en || fw->cfg_open;
 }
 
 static void tb_test_icm_warm_restart_reauth(struct kunit *test)
@@ -3207,6 +3223,62 @@ static void tb_test_cm_select_forced_software(struct kunit *test)
 	/* Poisoned NHI is not "firmware running": falls back to software. */
 	KUNIT_EXPECT_TRUE(test,
 		cm_model_selects_software(false, false, ~0U, false));
+}
+
+/*
+ * Regression: the first forced-software boot on the X570 Creator failed
+ * probe with -ETIMEDOUT because the software CM read the root switch
+ * config space while the resident ICM -- which serves config access only
+ * after DRIVER_READY -- had never been sent one. The forced takeover must
+ * therefore send DRIVER_READY before the first read
+ * (tb.c tb_driver_ready() -> icm_unlock_config_space()), while boards
+ * with no resident firmware need nothing.
+ */
+/*
+ * Model of the software CM takeover as tb.c's driver_ready hook performs
+ * it (tb_driver_ready() -> icm_unlock_config_space()): with firmware
+ * resident, send DRIVER_READY and report whether the config space opened;
+ * with no firmware there is nothing to do. Kept in lockstep with the
+ * driver -- the pre-fix driver sent nothing, which is the red state of
+ * this test and the -ETIMEDOUT probe observed on the X570 Creator.
+ */
+static bool cm_model_forced_takeover(struct icm_fw_model *fw)
+{
+	if (!fw->icm_en)
+		return true;
+	if (!icm_fw_driver_ready(fw))
+		return false;
+	return icm_fw_cfg_space_open(fw);
+}
+
+static void tb_test_cm_forced_takeover_unlocks_config(struct kunit *test)
+{
+	struct icm_fw_model fw;
+
+	/*
+	 * Resident healthy ICM: config space is shut until DRIVER_READY,
+	 * so the takeover must send it -- reading first is the regression.
+	 */
+	icm_fw_cold_boot(&fw);
+	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
+	KUNIT_EXPECT_TRUE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+
+	/* No resident firmware (Apple boot): nothing to unlock. */
+	icm_fw_cold_boot(&fw);
+	fw.icm_en = false;
+	KUNIT_EXPECT_TRUE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+
+	/*
+	 * Wedged resident ICM: DRIVER_READY fails and the config space
+	 * stays shut -- the takeover must report the error (probe fails
+	 * loudly) instead of reading into a timeout per dword.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+	KUNIT_EXPECT_FALSE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
 }
 
 /*
@@ -3756,6 +3828,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
+	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

@@ -2565,6 +2565,77 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	return -ETIMEDOUT;
 }
 
+/**
+ * icm_unlock_config_space() - Make a resident ICM open the config space
+ * @tb: Domain (owned by the software CM, NOT the firmware CM)
+ *
+ * Called from the software CM's driver_ready hook when it takes over a
+ * domain whose broken ICM firmware is left resident (force_sw_cm). Until
+ * the firmware has seen DRIVER_READY it does not serve config space
+ * access, so the software CM's very first root switch read times out and
+ * the whole probe fails with -ETIMEDOUT. Send the generic DRIVER_READY
+ * (same header across FR/AR/TR) and wait for the root switch config
+ * space to become readable, the same recipe as __icm_driver_ready().
+ * The response payload is generation-specific and deliberately ignored.
+ *
+ * No-op when no ICM firmware is running (Apple boots, or the poisoned
+ * all-ones NHI). Cannot use icm_request(): tb_priv() of this domain is
+ * the software CM's data, not struct icm.
+ */
+int icm_unlock_config_space(struct tb *tb)
+{
+	struct icm_pkg_driver_ready request = {
+		.hdr.code = ICM_DRIVER_READY,
+	};
+	struct icm_tr_pkg_driver_ready_response reply;
+	unsigned int retries = 50;
+	struct tb_cfg_request *req;
+	struct tb_cfg_result res;
+
+	if (!icm_firmware_running(tb->nhi))
+		return 0;
+
+	memset(&reply, 0, sizeof(reply));
+	req = tb_cfg_request_alloc();
+	if (!req)
+		return -ENOMEM;
+
+	req->match = icm_match;
+	req->copy = icm_copy;
+	req->request = &request;
+	req->request_size = sizeof(request);
+	req->request_type = TB_CFG_PKG_ICM_CMD;
+	req->response = &reply;
+	req->npackets = 1;
+	req->response_size = sizeof(reply);
+	req->response_type = TB_CFG_PKG_ICM_RESP;
+
+	res = tb_cfg_request_sync(tb->ctl, req, ICM_TIMEOUT);
+	tb_cfg_request_put(req);
+
+	if (res.err) {
+		tb_err(tb, "resident ICM did not answer DRIVER_READY: %d\n",
+		       res.err == 1 ? -EIO : res.err);
+		return res.err == 1 ? -EIO : res.err;
+	}
+
+	do {
+		u32 tmp;
+
+		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
+				      0, 1, 100);
+		if (!res.err) {
+			tb_dbg(tb, "resident ICM opened the config space\n");
+			return 0;
+		}
+
+		msleep(50);
+	} while (--retries);
+
+	tb_err(tb, "resident ICM answered DRIVER_READY but never opened the config space\n");
+	return -ETIMEDOUT;
+}
+
 static int icm_firmware_reset(struct tb *tb, struct tb_nhi *nhi)
 {
 	struct icm *icm = tb_priv(tb);

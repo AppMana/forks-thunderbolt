@@ -3509,7 +3509,21 @@ static int tb_runtime_resume(struct tb *tb)
 	return 0;
 }
 
+/*
+ * Only does anything under force_sw_cm: a resident (broken) ICM serves
+ * config space only after it has seen DRIVER_READY, so send it before
+ * tb_start() reads the root switch. Without this the first read times
+ * out and the whole NHI probe fails with -ETIMEDOUT.
+ */
+static int tb_driver_ready(struct tb *tb)
+{
+	if (!tb_force_sw_cm)
+		return 0;
+	return icm_unlock_config_space(tb);
+}
+
 static const struct tb_cm_ops tb_cm_ops = {
+	.driver_ready = tb_driver_ready,
 	.start = tb_start,
 	.stop = tb_stop,
 	.deinit = tb_deinit,
