@@ -154,6 +154,22 @@ static inline bool tb_icm_fw_sts_running(u32 fw_sts)
 	return fw_sts != (u32)~0U && (fw_sts & REG_FW_STS_ICM_EN);
 }
 
+/*
+ * Must nhi_select_cm() hand the domain straight to the software connection
+ * manager, without trying the firmware one? Single source for
+ * nhi_select_cm() and the KUnit model (tb_test_cm_select_forced_software).
+ *
+ * The forced case deliberately takes no firmware state: the operator forces
+ * the software CM precisely when a resident ICM is broken (trains links but
+ * never sends device-connected -- ASRock X570 Creator, Titan Ridge NVM 45.0)
+ * and cannot be stopped without losing NVM authentication (see icm_stop()).
+ * Selection must therefore not depend on anything the firmware advertises.
+ */
+static inline bool tb_nhi_use_software_cm(bool force_sw_cm, bool acpi_native)
+{
+	return force_sw_cm || acpi_native;
+}
+
 /* ICL NHI VSEC registers */
 
 /* FW ready */

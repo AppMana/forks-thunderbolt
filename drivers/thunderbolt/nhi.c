@@ -50,6 +50,11 @@ static bool host_reset = true;
 module_param(host_reset, bool, 0444);
 MODULE_PARM_DESC(host_reset, "reset USB4 host router (default: true)");
 
+static bool force_sw_cm;
+module_param(force_sw_cm, bool, 0444);
+MODULE_PARM_DESC(force_sw_cm,
+		 "use the software connection manager even if ICM firmware is running (default: false)");
+
 int tb_ring_throttling(struct tb_ring *ring, unsigned int interval_nsec);
 
 /*
@@ -1571,11 +1576,29 @@ static struct tb *nhi_select_cm(struct tb_nhi *nhi)
 	struct tb *tb;
 
 	/*
-	 * USB4 case is simple. If we got control of any of the
-	 * capabilities, we use software CM.
+	 * force_sw_cm is the operator override for boards whose resident ICM
+	 * is broken (ASRock X570 Creator, Titan Ridge NVM 45.0: links train
+	 * but the firmware never emits device-connected notifications, so
+	 * nothing is ever enumerated). The firmware is deliberately left
+	 * running: on Alpine/Titan Ridge it cannot be stopped at runtime
+	 * without losing NVM authentication (see icm_stop()). The software CM
+	 * does not depend on the firmware forwarding hot events -- it
+	 * enumerates by scanning and the lane-state reconcile loop
+	 * synthesizes lost edges.
+	 *
+	 * The USB4 native case is simple: if we got control of any of the
+	 * capabilities, we use the software CM.
 	 */
-	if (tb_acpi_is_native())
+	if (tb_nhi_use_software_cm(force_sw_cm, tb_acpi_is_native())) {
+		if (force_sw_cm) {
+			u32 val = nhi_read(nhi, nhi->iobase + REG_FW_STS);
+
+			dev_info(&nhi->pdev->dev,
+				 "forcing software connection manager (ICM firmware %srunning)\n",
+				 tb_icm_fw_sts_running(val) ? "" : "not ");
+		}
 		return tb_probe(nhi);
+	}
 
 	/*
 	 * Either firmware based CM is running (we did not get control

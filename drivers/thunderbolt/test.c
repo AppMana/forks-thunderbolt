@@ -3143,6 +3143,73 @@ static void tb_test_icm_wedged_running(struct kunit *test)
 }
 
 /*
+ * Model of the connection-manager selection pipeline: nhi_select_cm()'s
+ * gate (tb_nhi_use_software_cm()) composed with the firmware gate of
+ * icm_ar_is_supported() (icm_firmware_running() || start_icm). Built on the
+ * same two shared predicates the driver uses, so the model cannot drift
+ * from the code on the decision itself. Returns true when the domain ends
+ * up with the software CM.
+ */
+static bool cm_model_selects_software(bool force_sw_cm, bool acpi_native,
+				      u32 fw_sts, bool start_icm)
+{
+	if (tb_nhi_use_software_cm(force_sw_cm, acpi_native))
+		return true;
+	/* icm_probe(): AR/TR is_supported gate */
+	if (tb_icm_fw_sts_running(fw_sts))
+		return false;
+	if (start_icm)
+		return false;
+	/* icm_probe() declined -> nhi_select_cm() falls back to tb_probe() */
+	return true;
+}
+
+/*
+ * A board can boot with ICM firmware resident (UEFI starts it pre-boot)
+ * yet broken: links train, but the firmware never emits
+ * device-connected, so nothing is ever enumerated (ASRock X570 Creator,
+ * Titan Ridge NVM 45.0 -- unfixable: no NVM update exists and the resident
+ * firmware cannot be stopped, see tb_test_icm_warm_restart_reauth). Without
+ * an override, ICM_EN routes such a board into the firmware CM forever.
+ * force_sw_cm must win over EVERY firmware state, including the poisoned
+ * all-ones NHI; the unforced behavior must be unchanged.
+ */
+static void tb_test_cm_select_forced_software(struct kunit *test)
+{
+	static const u32 fw_states[] = { 0, REG_FW_STS_ICM_EN, ~0U };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(fw_states); i++) {
+		u32 fw_sts = fw_states[i];
+
+		/* Forced: software CM regardless of firmware state. */
+		KUNIT_EXPECT_TRUE(test,
+			cm_model_selects_software(true, false, fw_sts, false));
+		KUNIT_EXPECT_TRUE(test,
+			cm_model_selects_software(true, false, fw_sts, true));
+		KUNIT_EXPECT_TRUE(test,
+			cm_model_selects_software(true, true, fw_sts, false));
+
+		/* Native USB4 control: software CM, force not needed. */
+		KUNIT_EXPECT_TRUE(test,
+			cm_model_selects_software(false, true, fw_sts, false));
+	}
+
+	/* Unforced, non-native: running firmware still wins (stock behavior). */
+	KUNIT_EXPECT_FALSE(test,
+		cm_model_selects_software(false, false, REG_FW_STS_ICM_EN, false));
+	/* start_icm still routes to the firmware CM when nothing is running. */
+	KUNIT_EXPECT_FALSE(test,
+		cm_model_selects_software(false, false, 0, true));
+	/* No firmware, no start_icm: fallback to the software CM. */
+	KUNIT_EXPECT_TRUE(test,
+		cm_model_selects_software(false, false, 0, false));
+	/* Poisoned NHI is not "firmware running": falls back to software. */
+	KUNIT_EXPECT_TRUE(test,
+		cm_model_selects_software(false, false, ~0U, false));
+}
+
+/*
  * Reproduces the 2026-07-09/10 appmana-019<->008 stranding: the survivor gets
  * NO unplug event when its neighbour's link drops (008's kernel log is silent
  * across 019's reboot while the lane adapter reads UNPLUGGED), and a plug
@@ -3688,6 +3755,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
+	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
