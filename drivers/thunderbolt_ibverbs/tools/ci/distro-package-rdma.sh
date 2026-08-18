@@ -139,18 +139,26 @@ build_provider() {
 	# Our patches were generated against v62.0 but apply (with offset/fuzz) to
 	# older rdma-core down to at least v39 (Ubuntu 22.04). Patch 1 only adds
 	# new files; 2 and 3 absorb hunk drift automatically.
+	#
+	# 0004 patches the in-tree rxe provider in place and serves the
+	# full-distro-rebuild path only. The standalone package ships the
+	# dedicated tbrxe provider from 0005 instead, leaving the build's librxe
+	# stock (it is not packaged either way).
 	for p in "$repo_root/packaging/rdma-core-patches"/*.patch; do
+		[[ "$(basename "$p")" == 0004-* ]] && continue
 		( cd "$src" && patch --silent -p1 < "$p" )
 	done
 
 	# The patch series is a distributable snapshot of the canonical provider
 	# sources. Refuse to package if it has drifted; otherwise a syntactically
 	# valid stale patch can quietly build a useless provider.
-	if ! diff -ru "$repo_root/userspace/usb4_rdma" \
-			"$src/providers/usb4_rdma"; then
-		printf 'error: rdma-core provider patch is stale; run packaging/regen-rdma-core-patches.sh\n' >&2
-		exit 1
-	fi
+	for provider in usb4_rdma tbrxe; do
+		if ! diff -ru "$repo_root/userspace/$provider" \
+				"$src/providers/$provider"; then
+			printf 'error: rdma-core provider patch is stale; run packaging/regen-rdma-core-patches.sh\n' >&2
+			exit 1
+		fi
+	done
 
 	rm -rf "$build"
 	mkdir "$build"
@@ -160,20 +168,31 @@ build_provider() {
 	( cd "$build" && cmake -GNinja -DNO_PYVERBS=1 -DNO_MAN_PAGES=1 .. >/dev/null && ninja )
 
 	local so
-	so="$(find "$build/lib" -maxdepth 1 -name 'libusb4_rdma-rdmav*.so' -print -quit)"
-	[[ -n "$so" ]] || { printf 'error: provider .so not produced\n' >&2; exit 1; }
-	if ! nm "$so" | awk '$3 == "verbs_provider_usb4_rdma" { found = 1 }
-			END { exit !found }'; then
-		printf 'error: provider registration symbol missing from %s\n' "$so" >&2
-		exit 1
-	fi
+	for provider in usb4_rdma tbrxe; do
+		so="$(find "$build/lib" -maxdepth 1 -name "lib${provider}-rdmav*.so" -print -quit)"
+		[[ -n "$so" ]] || { printf 'error: %s provider .so not produced\n' "$provider" >&2; exit 1; }
+		if ! nm "$so" | awk -v sym="verbs_provider_${provider}" \
+				'$3 == sym { found = 1 } END { exit !found }'; then
+			printf 'error: provider registration symbol missing from %s\n' "$so" >&2
+			exit 1
+		fi
 
-	# CMake embeds the build dir as RUNPATH so libibverbs can run from the
-	# build tree without installing. For packaging we want a clean .so with no
-	# build-host paths leaked — strip the RUNPATH.
-	patchelf --remove-rpath "$so"
+		# CMake embeds the build dir as RUNPATH so libibverbs can run from
+		# the build tree without installing. For packaging we want a clean
+		# .so with no build-host paths leaked — strip the RUNPATH.
+		patchelf --remove-rpath "$so"
 
-	printf '==> Built provider: %s\n' "$(basename "$so")"
+		printf '==> Built provider: %s\n' "$(basename "$so")"
+	done
+
+	# Both .sos must carry the same PABI suffix or libibverbs would refuse
+	# to load one of them.
+	local pabis
+	pabis="$(find "$build/lib" -maxdepth 1 \
+			\( -name 'libusb4_rdma-rdmav*.so' -o -name 'libtbrxe-rdmav*.so' \) |
+		sed 's/.*-rdmav\([0-9]*\)\.so/\1/' | sort -u)"
+	[[ "$(wc -l <<<"$pabis")" -eq 1 ]] ||
+		{ printf 'error: provider PABI mismatch: %s\n' "$pabis" >&2; exit 1; }
 }
 
 stage_provider_files() {
@@ -183,15 +202,18 @@ stage_provider_files() {
 
 	install -d -m 0755 "$stage"
 
-	local so
-	so="$(find "$build/lib" -maxdepth 1 -name 'libusb4_rdma-rdmav*.so' -print -quit)"
-	[[ -n "$so" ]] || { printf 'error: provider .so not in build tree\n' >&2; exit 1; }
+	local provider so
+	for provider in usb4_rdma tbrxe; do
+		so="$(find "$build/lib" -maxdepth 1 -name "lib${provider}-rdmav*.so" -print -quit)"
+		[[ -n "$so" ]] || { printf 'error: %s provider .so not in build tree\n' "$provider" >&2; exit 1; }
 
-	cp "$so" "$stage/"
-	# The .driver file emitted by rdma-core's build tree embeds the absolute
-	# build-tree path so libibverbs can run from the build dir without install.
-	# For packaging, write the plain installed-tree form: `driver <name>`.
-	printf 'driver usb4_rdma\n' > "$stage/usb4_rdma.driver"
+		cp "$so" "$stage/"
+		# The .driver file emitted by rdma-core's build tree embeds the
+		# absolute build-tree path so libibverbs can run from the build dir
+		# without install. For packaging, write the plain installed-tree
+		# form: `driver <name>`.
+		printf 'driver %s\n' "$provider" > "$stage/${provider}.driver"
+	done
 }
 
 substitute() {
@@ -210,10 +232,12 @@ build_deb() {
 	local files="$work_dir/files"
 	stage_provider_files "$files"
 
-	install -m 0644 "$files"/libusb4_rdma-rdmav*.so \
+	install -m 0644 "$files"/libusb4_rdma-rdmav*.so "$files"/libtbrxe-rdmav*.so \
 		"$deb_stage/usr/lib/$arch/libibverbs/"
 	install -m 0644 "$files/usb4_rdma.driver" \
 		"$deb_stage/etc/libibverbs.d/usb4_rdma.driver"
+	install -m 0644 "$files/tbrxe.driver" \
+		"$deb_stage/etc/libibverbs.d/tbrxe.driver"
 
 	substitute "$repo_root/packaging/debian/control-rdma" "$deb_stage/DEBIAN/control"
 

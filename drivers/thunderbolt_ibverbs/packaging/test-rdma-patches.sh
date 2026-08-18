@@ -69,13 +69,18 @@ $DOCKER run --rm \
         ninja
 
         echo ""
-        echo "=== Verify our provider was built ==="
-        ls -l lib/libusb4_rdma-rdmav*.so
-        nm lib/libusb4_rdma-rdmav*.so |
-            awk '\''$3 == "verbs_provider_usb4_rdma" { found = 1 }
-                END { exit !found }'\''
-        ls -l etc/libibverbs.d/usb4_rdma.driver
-        cat etc/libibverbs.d/usb4_rdma.driver
+        echo "=== Verify our providers were built ==="
+        for provider in usb4_rdma tbrxe; do
+            ls -l lib/lib${provider}-rdmav*.so
+            nm lib/lib${provider}-rdmav*.so |
+                awk -v sym="verbs_provider_${provider}" '\''$3 == sym { found = 1 }
+                    END { exit !found }'\''
+            ls -l etc/libibverbs.d/${provider}.driver
+            cat etc/libibverbs.d/${provider}.driver
+        done
+        # tbrxe must carry the private USB4 driver id in its match table
+        # (0x55534234 little-endian reads "4BSU").
+        strings lib/libtbrxe-rdmav*.so | grep -q 4BSU
 
         echo "==> rdma-core+patches build OK on $(grep PRETTY_NAME /etc/os-release | cut -d= -f2)"
     '

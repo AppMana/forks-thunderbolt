@@ -2,9 +2,12 @@
 # Regenerate the rdma-core patches that ship our libibverbs provider.
 #
 # Pulls a clean rdma-core source tarball (the version nixpkgs is pinned
-# to), checks in our provider's source files, and writes three numbered
-# patches into ./packaging/rdma-core-patches/ that any rdma-core build
-# can apply. Run this after touching userspace/usb4_rdma/ files.
+# to), checks in our provider sources, and rewrites the numbered patches
+# in ./packaging/rdma-core-patches/ that any rdma-core build can apply:
+# 0001-0003 from userspace/usb4_rdma/, 0005 from userspace/tbrxe/. 0004
+# is hand-maintained (it edits upstream providers/rxe files) and is only
+# re-applied here so 0005 is generated on the series packagers use. Run
+# this after touching userspace/usb4_rdma/ or userspace/tbrxe/ files.
 
 set -euo pipefail
 
@@ -62,9 +65,37 @@ Required for the static-archive build path (libibverbs/all_providers.c)
 to compile when ENABLE_STATIC=1 is on, which is the default on Debian
 and most distros."
 
+# Re-apply the hand-maintained rxe patch so the tbrxe commit sits on the
+# same series consumers apply. The 0004 file itself is not regenerated.
+git am "$OUT"/0004-*.patch
+
+# Drop the tbrxe provider source in and wire it into the build. tbrxe is
+# the stock rxe provider compiled under a different identity (see
+# userspace/tbrxe/tbrxe.c); the standalone-package path ships it instead
+# of the 0004-patched librxe.
+mkdir -p providers/tbrxe
+cp -r "$REPO_ROOT/userspace/tbrxe/." providers/tbrxe/
+git add providers/tbrxe
+sed -i '/add_subdirectory(providers\/usb4_rdma)/a add_subdirectory(providers/tbrxe)' CMakeLists.txt
+git add CMakeLists.txt
+git commit -qF - <<'MSG'
+providers/tbrxe: dedicated provider for tbrxe (usb4_rdma*) devices
+
+tbrxe.ko speaks the stock rxe uverbs ABI under a private driver id
+(0x55534234, "USB4"). Compile the stock rxe provider sources a second
+time under the tbrxe name, with the match table reduced to that driver
+id alone and the id stamped into the uverbs ioctl headers.
+
+Unlike patching providers/rxe (0004), the resulting libtbrxe ships as a
+standalone package alongside the distro's untouched librxe: the two
+providers never contend for a device because each matches a disjoint
+driver id.
+MSG
+
 mkdir -p "$OUT"
-rm -f "$OUT"/*.patch
-git format-patch -o "$OUT" HEAD~3
+find "$OUT" -name '*.patch' ! -name '0004-*' -delete
+git format-patch -o "$OUT" HEAD~5..HEAD~2
+git format-patch -o "$OUT" --start-number 5 -1 HEAD
 
 echo ""
 echo "Regenerated patches in $OUT:"
