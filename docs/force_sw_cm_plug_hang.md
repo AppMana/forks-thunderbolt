@@ -16,11 +16,11 @@ push/tag v2.37 (8892a0e) until the plug path is proven safe.
 - Plugging the dock froze the whole machine instantly. Not one thunderbolt
   message survived to the journal between the last idle entry (11:11:11,
   unrelated umip spam) and the freeze.
-- The next boot started 11:13:12 — 2m01s after the last journal entry. That
-  is the SP5100 TCO watchdog timeout (systemd pets it with a 2 min budget).
-  **The "hard hang" was a genuine full-CPU freeze terminated by the hardware
-  watchdog**: systemd stopped petting, the board auto-reset. Worst case of a
-  repeat is a ~2-minute outage plus auto-reboot.
+- Recovery was a MANUAL power-cycle (operator statement). The 2m01s gap to
+  the next boot is just human + POST time, not a watchdog: at freeze time
+  this machine had NO hardware watchdog at all (no /dev/watchdog,
+  RuntimeWatchdogSec=off). Nothing bounds a repeat freeze unless one is
+  armed first — which has now been done, see below.
 - The absence of log output is NOT evidence the driver never ran: journald
   loses the final seconds before a hard freeze (disk flush). The evidence
   channel was missing, so the mechanism (firmware wedge stalling a host MMIO
@@ -47,6 +47,7 @@ push/tag v2.37 (8892a0e) until the plug path is proven safe.
 | console loglevel 8 | `/etc/sysctl.d/99-tbdebug-printk.conf` — the `thunderbolt.dyndbg=+p` firehose reaches netconsole |
 | capture sink | transient unit `netconsole-capture-appmana-001` on appmana-019 → `/var/tmp/appmana-001-netconsole.log` (socat; restart-always, dies if 019 reboots — re-run before testing) |
 | hard-lockup naming | NMI watchdog already on (`nmi_watchdog=1`, `hardlockup_panic=0`); a stalled-MMIO core produces "hard LOCKUP" + backtrace on another CPU, which netconsole ships out |
+| hardware watchdog | SP5100 TCO, armed 2026-08-18: `/etc/modules-load.d/sp5100-tco-tbdebug.conf` + `/etc/systemd/system.conf.d/90-tbdebug-watchdog.conf` (RuntimeWatchdogSec=2min, systemd petting verified live). NOTE: reset-on-expiry has never fired on this board — treat auto-recovery as hoped-for, not proven |
 | armed boot | GRUB entry `Ubuntu (tb force_sw_cm one-shot)` (`/etc/grub.d/40_custom`), selected for exactly one boot with `grub-reboot`; the disarmed entry stays default; `GRUB_RECORDFAIL_TIMEOUT=5` so a watchdog reset never strands the menu |
 
 The end of `icm_unlock_config_space()`'s "opened the config space" message is
@@ -61,8 +62,10 @@ the marker that the armed boot took over correctly.
    then reboot **with the dock unplugged**.
 3. After boot, verify from any other host that the 019 log carries the
    netconsole marker and "resident ICM opened the config space".
-4. Plug the dock. If the machine freezes, wait out the 2-minute watchdog;
-   it reboots into the disarmed default entry on its own.
+4. Plug the dock. If the machine freezes, give the newly armed SP5100
+   watchdog ~3 minutes to reset the board; if it does not fire (its
+   reset-on-expiry is unproven here), power-cycle manually as before.
+   Either way the reboot lands on the disarmed default entry.
 5. Read `/var/tmp/appmana-001-netconsole.log` on appmana-019. The tail is
    the evidence journald could never keep:
    - thunderbolt dyndbg lines → the software CM's hotplug path ran; the last
