@@ -44,6 +44,25 @@ static struct tbframe_frame adm_pool_frame[ADM_POOL];
 static unsigned long adm_pool_used;
 static DEFINE_SPINLOCK(adm_pool_lock);
 
+/* Simulated local TX-ring capacity: <0 = unlimited, 0 = exhausted (alloc
+ * refuses, parking the requester on need_req_skb without erroring the QP),
+ * >0 = that many allocations before exhaustion.
+ */
+static atomic_t adm_alloc_budget = ATOMIC_INIT(-1);
+
+static bool adm_alloc_take_budget(void)
+{
+	int v = atomic_read(&adm_alloc_budget);
+
+	do {
+		if (v < 0)
+			return true;
+		if (v == 0)
+			return false;
+	} while (!atomic_try_cmpxchg(&adm_alloc_budget, &v, v - 1));
+	return true;
+}
+
 /* Wire capture: PSN of every DATA (non-ack-class) packet xmitted. */
 static u32 adm_sent_psn[ADM_POOL];
 static atomic_t adm_sent;
@@ -65,6 +84,9 @@ static int adm_alloc_frame(struct tbframe_link *link, u16 len, bool is_ctrl,
 
 	if (len > ADM_FRAME_BYTES)
 		return -EINVAL;
+
+	if (!adm_alloc_take_budget())
+		return -ENOSPC;
 
 	spin_lock_irqsave(&adm_pool_lock, flags);
 	i = find_first_zero_bit(&adm_pool_used, ADM_POOL);
@@ -139,10 +161,11 @@ static const struct tbrxe_transport_ops adm_transport = {
 
 
 /*
- * Craft an RC ACKNOWLEDGE for @qpn covering everything up to @psn and feed
- * it through the client rx upcall as a wire frame from the fake peer.
+ * Craft an RC ACKNOWLEDGE (@syn = AETH_ACK_UNLIMITED) or NAK for @qpn at
+ * @psn and feed it through the client rx upcall as a wire frame from the
+ * fake peer.
  */
-static void adm_inject_ack(void *fake_link, u32 qpn, u32 psn)
+static void adm_inject_aeth(void *fake_link, u32 qpn, u32 psn, u8 syn)
 {
 	static u8 buf[RXE_BTH_BYTES + RXE_AETH_BYTES + RXE_ICRC_SIZE];
 	static struct tbframe_frame frame;
@@ -157,7 +180,7 @@ static void adm_inject_ack(void *fake_link, u32 qpn, u32 psn)
 
 	bth_init(&pkt, IB_OPCODE_RC_ACKNOWLEDGE, 0, 0, 0, 0xffff,
 		 qpn, 0, pkt.psn);
-	aeth_set_syn(&pkt, AETH_ACK_UNLIMITED);
+	aeth_set_syn(&pkt, syn);
 	aeth_set_msn(&pkt, 0);
 	rxe_icrc_generate(NULL, &pkt);
 
@@ -166,6 +189,11 @@ static void adm_inject_ack(void *fake_link, u32 qpn, u32 psn)
 	frame.pdf = TBFRAME_PDF_DATA;
 	frame.is_ctrl = false;
 	tbrxe_frame_client_ops()->rx(NULL, fake_link, &frame);
+}
+
+static void adm_inject_ack(void *fake_link, u32 qpn, u32 psn)
+{
+	adm_inject_aeth(fake_link, qpn, psn, AETH_ACK_UNLIMITED);
 }
 
 /* Wait until the data-packet xmit count stops changing, then return it. */
@@ -198,8 +226,9 @@ static int adm_wait_sent(int want)
 	return adm_settled_sent();
 }
 
-static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
-		       const union ib_gid *dgid, u8 sgid_index)
+static int adm_connect_mtu(struct ib_qp *qp, u32 dest_qpn,
+			   const union ib_gid *dgid, u8 sgid_index,
+			   u8 timeout, enum ib_mtu mtu)
 {
 	struct ib_qp_attr attr;
 	int err;
@@ -216,7 +245,7 @@ static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
 
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IB_QPS_RTR;
-	attr.path_mtu = IB_MTU_2048;
+	attr.path_mtu = mtu;
 	attr.dest_qp_num = dest_qpn;
 	attr.rq_psn = 0x300;
 	attr.max_dest_rd_atomic = 1;
@@ -234,14 +263,23 @@ static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IB_QPS_RTS;
 	attr.sq_psn = ADM_SQ_PSN;
-	/* timeout 31 = longest retransmit timer: no retries inside the test */
-	attr.timeout = 31;
+	/* 31 = longest retransmit timer (no retries inside the test); the
+	 * rewind test passes a short one to force a timeout retry.
+	 */
+	attr.timeout = timeout;
 	attr.retry_cnt = 7;
 	attr.rnr_retry = 7;
 	attr.max_rd_atomic = 1;
 	return ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_SQ_PSN |
 			    IB_QP_TIMEOUT | IB_QP_RETRY_CNT |
 			    IB_QP_RNR_RETRY | IB_QP_MAX_QP_RD_ATOMIC);
+}
+
+static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
+		       const union ib_gid *dgid, u8 sgid_index, u8 timeout)
+{
+	return adm_connect_mtu(qp, dest_qpn, dgid, sgid_index, timeout,
+			       IB_MTU_2048);
 }
 
 /*
@@ -297,7 +335,7 @@ static void tbrxe_admission_window_bounds_unacked(struct kunit *test)
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
 
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index, 31), 0);
 
 	ssge.addr = (uintptr_t)src;
 	ssge.length = ADM_MSG_LEN;
@@ -391,7 +429,7 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	/* First QP: fill the window, never ack, destroy. */
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer, sgid_index, 31), 0);
 
 	ssge.addr = (uintptr_t)src;
 	ssge.length = ADM_MSG_LEN;
@@ -412,7 +450,7 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	atomic_set(&adm_sent, 0);
 	qp = ib_create_qp(pd, &qp_init);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
-	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x43, &peer, sgid_index), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x43, &peer, sgid_index, 31), 0);
 	for (i = 0; i < ADM_WINDOW; i++) {
 		swr.wr_id = i;
 		KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
@@ -427,9 +465,148 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 	tbrxe_set_transport_ops(NULL);
 }
 
+/*
+ * comp.psn AHEAD of req.psn is a state the engine reaches on its own: a
+ * PSN-sequence-error NAK "implicitly acks all packets with psns before"
+ * (rxe_comp.c), so a straggler NAK carrying the peer's pre-rewind e_psn,
+ * processed after a timeout retry rewound req.psn, sets comp.psn past
+ * req.psn. Every engine path handles that via the signed psn_compare();
+ * the admission reconcile must too: read the negative PSN distance as
+ * "nothing unacked", not as a ~2^24 masked distance. Charging the wrap
+ * poisons the link window and admission then refuses every future packet
+ * -- and no rewind ever repairs it, because the completer only sets
+ * need_retry while psn_compare(req.psn, comp.psn) > 0. This is the qps32
+ * permanent-stall root cause on the appmana-023/025 canaries (2026-08-18:
+ * link->unacked pinned at 16777165 = 2^24 - 51 with idle rings, exactly a
+ * negative distance of 51).
+ *
+ * Deterministic reproduction: one 8-packet SEND (IB_MTU_256) against a
+ * window of 8; a timeout retry rewinds it; a transport budget of one frame
+ * lets exactly the first packet of the retry out (wqe pending, req.psn one
+ * past the rewound base); then the straggler NAK for the pre-rewind flight
+ * lands: comp.psn jumps 4 past req.psn.
+ */
+static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr	= 4,
+			.max_recv_wr	= 2,
+			.max_send_sge	= 1,
+			.max_recv_sge	= 1,
+		},
+		.sq_sig_type	= IB_SIGNAL_ALL_WR,
+		.qp_type	= IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	int sent, i;
+	u8 *src;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, 8);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, 2048, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+
+	/* Short retransmit timeout (14 ~ 67ms): timeout retries are the
+	 * scenario; 256-byte MTU makes the one SEND an 8-packet WQE
+	 * (PSNs 0x100..0x107).
+	 */
+	KUNIT_ASSERT_EQ(test, adm_connect_mtu(qp, 0x42, &peer, sgid_index,
+					      14, IB_MTU_256), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = 2048;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	swr.wr_id = 0;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+
+	/* The full flight reaches the wire (timeout retries may repeat it). */
+	sent = adm_wait_sent(8);
+	KUNIT_ASSERT_GE(test, sent, 8);
+
+	/*
+	 * One frame of transport budget: the next timeout retry rewinds
+	 * req.psn to 0x100, re-sends exactly the first packet (wqe back to
+	 * pending, req.psn = 0x101, one slot charged) and parks. Grant the
+	 * budget again if a racing in-flight burst swallowed it.
+	 */
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		if (tbrxe_link_unacked(rxe) == 1)
+			break;
+		if ((i % 50) == 49)
+			atomic_set(&adm_alloc_budget, 1);
+		msleep(ADM_POLL_MS);
+	}
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 1u);
+
+	/*
+	 * Straggler NAK from the pre-rewind flight: the peer's e_psn of
+	 * 0x105 implicitly acks 0x100..0x104 -- comp.psn jumps to 0x105,
+	 * four ahead of the rewound req.psn.
+	 */
+	adm_inject_aeth(&fake_link, qp->qp_num, ADM_SQ_PSN + 5,
+			AETH_NAK_PSN_SEQ_ERROR);
+	msleep(100);
+
+	/* The reconcile must not have charged the ~2^24 masked distance. */
+	KUNIT_EXPECT_LE(test, tbrxe_link_unacked(rxe), 8u);
+
+	/* The link must remain usable: with transport capacity restored, a
+	 * kick makes the pending flight (and this new WR) reach the wire.
+	 * A poisoned window refuses admission forever instead.
+	 */
+	atomic_set(&adm_alloc_budget, -1);
+	sent = atomic_read(&adm_sent);
+	ssge.length = ADM_MSG_LEN;
+	swr.wr_id = 1;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+	for (i = 0; i < ADM_POLL_TRIES && atomic_read(&adm_sent) == sent; i++)
+		msleep(ADM_POLL_MS);
+	KUNIT_EXPECT_GT(test, atomic_read(&adm_sent), sent);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE(tbrxe_admission_window_bounds_unacked),
 	KUNIT_CASE(tbrxe_admission_charge_released_on_destroy),
+	KUNIT_CASE_SLOW(tbrxe_admission_rewind_ack_race_no_poison),
 	{}
 };
 

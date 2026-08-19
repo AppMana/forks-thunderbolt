@@ -61,6 +61,11 @@ const struct tbframe_client_ops *tbrxe_frame_client_ops(void);
 /* The ib_device published for one tbframe link (NULL when none). */
 struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink);
 
+#ifdef CONFIG_KUNIT
+/* Test observability: the link's live aggregate admission charge. */
+u32 tbrxe_link_unacked(struct rxe_dev *rxe);
+#endif
+
 /*
  * dealloc_driver tail: release the link record and GID-anchor netdev that
  * belong to @rxe. Called from rxe_dealloc(), the last op ib_core invokes on

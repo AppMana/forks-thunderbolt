@@ -268,6 +268,17 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 	else
 		target = (qp->req.psn - qp->comp.psn) & BTH_PSN_MASK;
 
+	/*
+	 * comp.psn AHEAD of req.psn is a state the engine tolerates
+	 * everywhere through the signed psn_compare() (e.g. a late ACK
+	 * landing after a timeout retry rewound req.psn): the masked
+	 * distance then reads as ~2^24, and charging that poisons the
+	 * link's window -- admission refuses every future packet on the
+	 * link. Negative distance means nothing of this QP is unacked.
+	 */
+	if (target > (BTH_PSN_MASK >> 1))
+		target = 0;
+
 	spin_lock_irqsave(&tbrxe.lock, flags);
 	if (qp->tbl_charged > target) {
 		u32 rel = qp->tbl_charged - target;
@@ -293,6 +304,24 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 	if (kick)
 		tbrxe_kick_parked_qps(rxe);
 }
+
+#ifdef CONFIG_KUNIT
+/* Test observability: the link's live aggregate admission charge. */
+u32 tbrxe_link_unacked(struct rxe_dev *rxe)
+{
+	struct tbrxe_link *link = rxe->tbl_link;
+	unsigned long flags;
+	u32 val = 0;
+
+	if (!link)
+		return 0;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	val = link->unacked;
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	return val;
+}
+#endif
 
 /* ---- GID-anchor netdev ------------------------------------------------- */
 
