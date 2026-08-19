@@ -48,17 +48,20 @@ static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
 }
 
 /*
- * Orderly teardown must quiesce the peer FIRST: a BYE goes out while this
- * side's rings are still up (so the peer's in-flight frames still land in
- * real descriptors), and only then does the hardware teardown run. Without
- * it the peer keeps streaming into hop entries this side is disabling, and
- * its router egress wedges persistently (canary validation cycle 6:
- * surviving transmitter frozen at zero TX consumption, reboot-only).
+ * Orderly teardown sequence: drain our own TX into the still-programmed
+ * fabric (quiesce_tx), THEN tell the peer (BYE, while our rings still
+ * absorb its residue), and only then stop rings and tear paths down.
+ * Both misorders wedged a canary router egress until reboot: teardown
+ * without any BYE left the surviving peer streaming into disabling hop
+ * entries (validation cycle 6), and BYE before the local drain let the
+ * peer kill its ingress while this side's ring still held the storm
+ * backlog (validation cycle 3).
  */
-static void tbframe_teardown_sends_bye_while_rings_up(struct kunit *test)
+static void tbframe_teardown_quiesces_then_byes_then_stops(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	unsigned long flags;
+	int quiesce, stop;
 
 	tbframe_mock_link_up(test, fx);
 	KUNIT_ASSERT_EQ(test, 0u, fx->mock.bye_count);
@@ -70,7 +73,16 @@ static void tbframe_teardown_sends_bye_while_rings_up(struct kunit *test)
 	tbframe_link_session_step(fx->link);
 
 	KUNIT_EXPECT_EQ(test, 1u, fx->mock.bye_count);
+	/* Rings not yet stopped when BYE left: peer residue still lands. */
 	KUNIT_EXPECT_TRUE(test, fx->mock.bye_rings_started);
+
+	quiesce = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_QUIESCE_TX, 0);
+	stop = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_STOP_RINGS, 0);
+	KUNIT_ASSERT_GE(test, quiesce, 0);
+	KUNIT_ASSERT_GE(test, stop, 0);
+	/* quiesce -> BYE -> stop */
+	KUNIT_EXPECT_LT(test, quiesce, (int)fx->mock.bye_hw_calls_at);
+	KUNIT_EXPECT_GE(test, stop, (int)fx->mock.bye_hw_calls_at);
 }
 
 /*
@@ -229,7 +241,7 @@ static void tbframe_teardown_test_exit(struct kunit *test)
 
 static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
-	KUNIT_CASE(tbframe_teardown_sends_bye_while_rings_up),
+	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),

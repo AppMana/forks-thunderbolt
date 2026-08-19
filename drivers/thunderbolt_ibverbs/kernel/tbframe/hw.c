@@ -142,21 +142,24 @@ static void tbframe_hw_start_rings(void *data)
 	tb_ring_start(hw->rx_ring);
 }
 
-static void tbframe_hw_stop_rings(void *data)
+/*
+ * Bounded TX drain into the still-programmed fabric, ahead of the BYE
+ * quiesce handshake (see down_session): the backlog must leave while both
+ * ends' paths exist, or it strands on the router egress (reset-only wedge).
+ * Best-effort: a wedged fabric just burns the bound and stop_rings cancels
+ * the rest (the loss model brackets it with link_down).
+ */
+static void tbframe_hw_quiesce_tx(void *data)
 {
 	struct tbframe_hw *hw = data;
 
-	/*
-	 * Bounded TX drain before the stop: give the fabric a chance to
-	 * consume what is already posted so tb_ring_stop() does not truncate
-	 * a frame mid-DMA into the router, stranding packets on the egress
-	 * path that the following hop-entry deactivation then cannot flush.
-	 * Best-effort and bounded: a wedged egress just burns the timeout,
-	 * and the stop cancels whatever remains (the loss model brackets it
-	 * with link_down). tb_ring_flush() only waits, never blocks the stop.
-	 */
 	if (hw->tx_ring)
 		tb_ring_flush(hw->tx_ring, 100);
+}
+
+static void tbframe_hw_stop_rings(void *data)
+{
+	struct tbframe_hw *hw = data;
 
 	/* Cancels every enqueued frame (callback canceled=true) and returns
 	 * only after all callbacks finished. */
@@ -374,6 +377,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.release_in_hopid	= tbframe_hw_release_in_hopid,
 	.alloc_rings		= tbframe_hw_alloc_rings,
 	.start_rings		= tbframe_hw_start_rings,
+	.quiesce_tx		= tbframe_hw_quiesce_tx,
 	.stop_rings		= tbframe_hw_stop_rings,
 	.free_rings		= tbframe_hw_free_rings,
 	.map_frame		= tbframe_hw_map_frame,

@@ -59,6 +59,7 @@ struct tbframe_mock {
 	unsigned int	req_count;
 	unsigned int	bye_count;
 	bool		bye_rings_started;
+	unsigned int	bye_hw_calls_at;
 
 	/* teardown call order (enum tbframe_mock_hw_call tokens) */
 	u8		hw_calls[TBFRAME_MOCK_MAX_EVENTS];
@@ -66,6 +67,7 @@ struct tbframe_mock {
 };
 
 enum tbframe_mock_hw_call {
+	TBFRAME_HW_QUIESCE_TX = 5,
 	TBFRAME_HW_STOP_RINGS = 1,
 	TBFRAME_HW_FREE_RINGS,
 	TBFRAME_HW_DISABLE_PATHS,
@@ -227,6 +229,13 @@ static void tbframe_mock_start_rings(void *data)
 	m->rings_started = true;
 }
 
+static void tbframe_mock_quiesce_tx(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	tbframe_mock_hw_call(m, TBFRAME_HW_QUIESCE_TX);
+}
+
 static void tbframe_mock_stop_rings(void *data)
 {
 	struct tbframe_mock *m = data;
@@ -353,9 +362,11 @@ static int tbframe_mock_control_request(void *data, const void *req,
 		ack_op = TBFRAME_WIRE_OP_READY_ACK;
 		break;
 	case TBFRAME_WIRE_OP_BYE:
-		/* The quiesce contract: BYE must go out while this side's
-		 * rings still absorb the peer's in-flight frames. */
+		/* Quiesce contract: BYE leaves after our TX drained but
+		 * before any ring stop or path teardown, so the receiving
+		 * side's rings still absorb our residue and ours theirs. */
 		m->bye_rings_started = m->rings_started;
+		m->bye_hw_calls_at = m->hw_call_count;
 		m->bye_count++;
 		ack_op = TBFRAME_WIRE_OP_BYE_ACK;
 		break;
@@ -406,6 +417,7 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.release_in_hopid	= tbframe_mock_release_in_hopid,
 	.alloc_rings		= tbframe_mock_alloc_rings,
 	.start_rings		= tbframe_mock_start_rings,
+	.quiesce_tx		= tbframe_mock_quiesce_tx,
 	.stop_rings		= tbframe_mock_stop_rings,
 	.free_rings		= tbframe_mock_free_rings,
 	.post_rx		= tbframe_mock_post_rx,

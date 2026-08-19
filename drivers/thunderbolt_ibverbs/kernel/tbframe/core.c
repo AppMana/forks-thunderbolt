@@ -290,6 +290,7 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 
 	spin_lock_irqsave(&link->lock, flags);
 	link->rings_up = true;
+	link->tx_quiesced = false;
 	link->paths_enabled = true;
 	link->e2e_active = e2e;
 	link->data_window = tbframe_link_window(link);
@@ -509,20 +510,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	timer_delete_sync(&link->verify_timer);
 
 	/*
-	 * Quiesce the peer before touching any hardware: it must stop
-	 * transmitting into paths this teardown is about to disable, or its
-	 * router egress wedges (see tbframe_link_bye()). Only for downs the
-	 * peer cannot already know about (local close, dead-path verify):
-	 * on SUPERSEDE and LOGOUT the peer initiated, on UNPLUG the control
-	 * channel is gone, and DEAD_HW is assigned after this point.
-	 * Our own admission is closed above, so nothing new flows from this
-	 * side during the wait.
-	 */
-	if (was_up && (reason == TBFRAME_DOWN_CLOSED ||
-		       reason == TBFRAME_DOWN_VERIFY))
-		tbframe_link_bye(link);
-
-	/*
 	 * Admission is closed above; wait out the publishers that already
 	 * passed their state check and are inside ring_tx()/post_rx().
 	 * Bounded: hardware that wedges a publisher poisons the link.
@@ -539,13 +526,42 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	}
 
 	/*
+	 * Drain our TX into the still fully-programmed fabric FIRST -- both
+	 * paths and the peer's ingress are untouched at this point, so the
+	 * backlog has somewhere to go -- and only then mark this side
+	 * quiesced and tell the peer. Ordering is the whole point: a router
+	 * left holding frames for a path that loses its far end wedges its
+	 * egress until a reset (canary cycle 3: the receiver acked BYE and
+	 * killed its ingress while the sender's ring still held the storm
+	 * backlog; the flush then had nowhere to drain).
+	 */
+	if (had_rings && link->ops->quiesce_tx)
+		link->ops->quiesce_tx(link->hw);
+	spin_lock_irqsave(&link->lock, flags);
+	link->tx_quiesced = true;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	/*
+	 * BYE after our own quiesce (the ack contract is symmetric: each
+	 * side certifies its TX is silent), before any path teardown. Only
+	 * for downs the peer cannot already know about (local close,
+	 * dead-path verify): SUPERSEDE and LOGOUT are peer-initiated, on
+	 * UNPLUG the control channel is gone, and a DEAD_HW-poisoned link
+	 * skips it. The peer downs its session on BYE and acks once its own
+	 * TX is quiesced; only after that (or the bounded budget) do we
+	 * disable the paths its flush drains into.
+	 */
+	if (was_up && (reason == TBFRAME_DOWN_CLOSED ||
+		       reason == TBFRAME_DOWN_VERIFY))
+		tbframe_link_bye(link);
+
+	/*
 	 * Quiesce the NHI before touching the fabric, the tbnet_tear_down()
-	 * order: stop the rings first (the backend flushes what the fabric
-	 * will still accept, then cancels the rest), and only then disable
-	 * the hop entries. The old order deactivated the egress hop entry
-	 * under a still actively-DMAing TX ring -- the local half of the
-	 * rapid-disable-of-an-active-path pattern implicated in the
-	 * router-level egress HopID wedge.
+	 * order: stop the rings (cancelling whatever the flush above could
+	 * not drain), and only then disable the hop entries. The old order
+	 * deactivated the egress hop entry under a still actively-DMAing TX
+	 * ring -- the local half of the rapid-disable-of-an-active-path
+	 * pattern behind the router-level egress wedge.
 	 */
 	if (had_rings)
 		/* Cancels all in-flight frames through the completion path. */
@@ -951,7 +967,7 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		 * torn down; the peer retries BYE (bounded) and the retry
 		 * lands after our down has run.
 		 */
-		quiesced = link->state != TBFRAME_STATE_UP && !link->rings_up;
+		quiesced = link->state != TBFRAME_STATE_UP && link->tx_quiesced;
 		spin_unlock_irqrestore(&link->lock, flags);
 		if (!quiesced)
 			return 1;
@@ -1412,6 +1428,7 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	init_completion(&link->refs_zero);
 	atomic_set(&link->hw_active, 0);
 	link->state = TBFRAME_STATE_INIT;
+	link->tx_quiesced = true;
 	tb_xdomain_handshake_reset(&link->hs);
 
 	ret = ops->alloc_out_hopid(hw);

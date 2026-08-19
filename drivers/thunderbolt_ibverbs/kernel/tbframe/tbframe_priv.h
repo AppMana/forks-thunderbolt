@@ -34,8 +34,8 @@
 #define TBFRAME_HELLO_RETRIES		5
 #define TBFRAME_READY_RETRIES		10
 #define TBFRAME_KEEPALIVE_LEN		8
-#define TBFRAME_BYE_TIMEOUT_MS		300
-#define TBFRAME_BYE_RETRIES		3
+#define TBFRAME_BYE_TIMEOUT_MS		1000
+#define TBFRAME_BYE_RETRIES		4
 /* Min spacing between property re-announces (control-channel thrash guard). */
 #define TBFRAME_REANNOUNCE_MIN_MS	10000
 
@@ -75,6 +75,13 @@ struct tbframe_hw_ops {
 	int	(*alloc_rings)(void *hw, u16 tx_entries, u16 rx_entries,
 			       bool e2e);
 	void	(*start_rings)(void *hw);
+	/*
+	 * Bounded wait for the TX ring to drain into the (still fully
+	 * programmed) fabric. Runs before the BYE quiesce so the wire is
+	 * empty of our frames before the peer is allowed to tear its
+	 * ingress down; never fails, a wedged fabric just burns the bound.
+	 */
+	void	(*quiesce_tx)(void *hw);
 	void	(*stop_rings)(void *hw);
 	void	(*free_rings)(void *hw);
 	int	(*map_frame)(void *hw, struct tbframe_frame_priv *f, bool tx);
@@ -143,6 +150,16 @@ struct tbframe_link {
 	bool			rings_up;
 	bool			paths_enabled;
 	bool			in_hopid_held;
+	/*
+	 * True once this side's TX ring has been drained/cancelled for the
+	 * current teardown (down_session past its quiesce point), false
+	 * while a session's rings are live. Gates the BYE_ACK: the ack
+	 * certifies "no more frames from this side", so it must never be
+	 * sent while our own TX can still emit (the cycle-3 wedge: receiver
+	 * acked and killed its ingress while the sender's ring still held
+	 * the storm backlog).
+	 */
+	bool			tx_quiesced;
 	/*
 	 * The remote HopID the CURRENT session actually allocated its in-HopID
 	 * with and enabled its paths on. An inbound HELLO rewrites
