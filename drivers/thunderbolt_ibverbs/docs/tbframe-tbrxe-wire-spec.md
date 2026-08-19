@@ -1,9 +1,12 @@
 # tbframe / tbrxe wire and contract specification
 
-Status: draft for review. Companion to the approved restructuring plan
-(rxe-derived IB engine over a lossless Thunderbolt frame service). This
-document is normative for the new stack; where it conflicts with the legacy
-`proto/native_data.h` protocol, that protocol is being retired.
+Status: normative and deployed. Wire v3 (the section 5 MTU-4096 deviation)
+is what the appmana-023/025 canaries run as of 2026-08-18; mixed wire
+versions refuse the session at HELLO. Companion to the approved
+restructuring plan (rxe-derived IB engine over a lossless Thunderbolt frame
+service). Where this document conflicts with the legacy
+`proto/native_data.h` protocol, that protocol is being retired. Consumer
+overview: top-level `README.md`, "Two RDMA engines".
 
 ## 1. Scope and layering
 

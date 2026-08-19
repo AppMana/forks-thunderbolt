@@ -4,15 +4,28 @@
 
 ## AppMana alpha build
 
-This AppMana fork is published from:
+This tree now lives inside the `AppMana/forks-thunderbolt` monorepo
+(`drivers/thunderbolt_ibverbs/`); the old standalone
+`AppMana/forks-thunderbolt-ibverbs` repo is historical. AppMana packages are
+alpha/pre-release software.
 
-```text
-https://github.com/AppMana/forks-thunderbolt-ibverbs
-```
+Current versions (2026-08-19): `thunderbolt-ibverbs-dkms` and
+`usb4-rdma-provider` are cut from `dkms.conf`'s `PACKAGE_VERSION` (`0.2.70`);
+the AppMana apt repo has `0.2.66` published, and the `0.2.70` provider debs
+ride the `forks-thunderbolt` `v2.39` GitHub release.
 
-AppMana packages are alpha/pre-release software. The Debian package version is
-`0.2.1~appmana2`, which sorts below a future stable `0.2.1` in apt. GitHub
-Releases for this fork should be marked **Pre-release**.
+**Two engines.** This directory contains the legacy `thunderbolt_ibverbs`
+engine (this README) *and* its successor, the `tbframe` + `tbrxe` stack
+(`kernel/tbframe/`, `kernel/tbrxe/`, spec in
+`docs/tbframe-tbrxe-wire-spec.md`). Both expose `usb4_rdma*` ib_devices.
+tbrxe registers under its own RDMA driver id (`RDMA_DRIVER_USB4_RDMA`,
+`0x55534234`), so userspace needs the `libtbrxe` provider shipped by
+`usb4-rdma-provider >= 0.2.70`; stock `librxe` cannot bind it. Engine
+comparison, migration state, deploy rules, measured performance, the lane
+bonding verdict, and the NCCL consumption recipe are in the top-level
+[`README.md`](../../README.md) ("Two RDMA engines"); packaging mechanics are
+in [`packaging/rdma-core-patches/README.md`](packaging/rdma-core-patches/README.md)
+and [`docs/provider_version_matching.md`](docs/provider_version_matching.md).
 
 *** WARNING ***
 
@@ -83,7 +96,7 @@ DMA tunnel gets deactivated. See the top-level README for the post-mortem.
 
 ## run inside a stock pytorch / vllm / llama.cpp container
 
-the kernel module stays on the host. inside the container you just need our libibverbs provider so the stock `libibverbs.so` enumerates the device. drop the .deb in for your container's ubuntu codename:
+the kernel modules stay on the host. inside the container you just need our libibverbs providers so the stock `libibverbs.so` enumerates the device. drop the .deb in for your container's ubuntu codename:
 
 ```sh
 docker run --rm -it \
@@ -91,9 +104,12 @@ docker run --rm -it \
     --cap-add=IPC_LOCK --ulimit memlock=-1 \
     pytorch/pytorch:latest bash
 
-# inside the container — pick .jammy for ubuntu 22.04, .noble for 24.04:
-apt install -y ibverbs-utils \
-    https://github.com/hellas-ai/thunderbolt-ibverbs/releases/latest/download/usb4-rdma-provider_0.2.1.jammy_amd64.deb
+# inside the container — pick .jammy for ubuntu 22.04, .noble for 24.04.
+# AppMana fleet builds ship on the forks-thunderbolt release tags:
+apt install -y ibverbs-utils curl ca-certificates
+curl -fsSLo /tmp/provider.deb \
+    https://github.com/AppMana/forks-thunderbolt/releases/download/v2.39/usb4-rdma-provider_0.2.70.noble_amd64.deb
+apt install -y /tmp/provider.deb
 
 ibv_devices
 # device          	   node GUID
@@ -101,7 +117,14 @@ ibv_devices
 # usb4_rdma0      	...
 ```
 
-NCCL / UCX / perftest inside the container then see `usb4_rdma*` as a normal IB device.
+NCCL / UCX / perftest inside the container then see `usb4_rdma*` as a normal
+IB device. The `0.2.70+` deb carries providers for **both** engines
+(`libusb4_rdma` for the legacy module, `libtbrxe` for `tbrxe.ko`); against a
+legacy host the container provider version must exactly match the host's
+kernel module version (private verb ABI — see
+`docs/provider_version_matching.md`). One NCCL caveat: if your image carries
+an external NCCL net plugin (HPC-X does), set `NCCL_NET_PLUGIN=none` — the
+plugin segfaults probing the PCI path of these PCI-less HCAs.
 
 if you want a batteries-included image with vllm / llama.cpp / rdma-core-usb4 / perftest already baked in (heavier — a few GB), use the ibverbs-enabled docker images from [github.com/hellas-ai/nix-strix-halo](https://github.com/hellas-ai/nix-strix-halo).
 
