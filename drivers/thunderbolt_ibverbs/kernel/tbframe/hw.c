@@ -31,10 +31,10 @@ struct tbframe_hw {
  * ring allocation. Resolved via symbol_get like the legacy driver so
  * tbframe still loads on a core without the export.
  */
-static int data_ring_throttle_ns = -1;
+static int data_ring_throttle_ns;
 module_param(data_ring_throttle_ns, int, 0644);
 MODULE_PARM_DESC(data_ring_throttle_ns,
-		 "Data-ring MSI-X interrupt moderation in ns (-1 = leave NHI default, 0 = disable)");
+		 "Data-ring MSI-X interrupt moderation in ns (0 = disable, default; -1 = leave NHI default)");
 
 extern int tb_ring_throttling(struct tb_ring *ring, unsigned int interval_nsec);
 
