@@ -56,7 +56,16 @@ tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_perlink_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_admission_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_lifecycle_test.o
 
-ccflags-y := -Wall -Wextra -Wno-unused-parameter -DDEBUG -I$(src)
+ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
+
+# pr_debug sites stay compiled in and runtime-enableable through dynamic debug
+# (DYNAMIC_DEBUG_MODULE covers CONFIG_DYNAMIC_DEBUG_CORE-only kernels), but
+# default OFF: the old unconditional -DDEBUG force-enabled all sites at load
+# and silently ruined performance measurements. `make DEBUG=1` restores it.
+ccflags-y += -DDYNAMIC_DEBUG_MODULE
+ifeq ($(DEBUG),1)
+ccflags-y += -DDEBUG
+endif
 
 ifneq ($(TBV_PKG_VERSION),)
 ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
