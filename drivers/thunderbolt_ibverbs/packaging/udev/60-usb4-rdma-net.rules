@@ -7,4 +7,8 @@ SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", PROGRAM="/usr/lib/thunderbolt-i
 # Assign the deterministic per-link routable /64 (shared by both ends of the
 # cabled link) so the rail gets an honest RoCE GID the kernel RTR backstop and
 # the rdmaroute NCCL plugin can sense. Pure derivation in tbv-rdma-addr-lib.sh.
-SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", RUN+="/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr %k"
+# Matched on the tbv_peer_uuid attr (not the u4r* kernel name): the rename in
+# the rule above changes the kernel name, so a replayed add event (udevadm
+# trigger, package postinst) arrives as tbr-* and must still re-apply the
+# address after a device republish (module reload, peer reboot).
+SUBSYSTEM=="net", ACTION=="add", ATTR{tbv_peer_uuid}=="?*", RUN+="/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr %k"

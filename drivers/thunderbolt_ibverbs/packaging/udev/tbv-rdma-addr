@@ -29,6 +29,15 @@ fi
 
 remote="$(cat "/sys/class/net/${ifc}/tbv_peer_uuid" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$remote" ] || exit 0			# not a tbv rail netdev
+# The tbframe_link_info contract publishes an all-zeros remote_uuid while the
+# peer identity is unknown. No honest per-link /64 exists yet -- deriving one
+# from zeros would desync the two ends. Leave the rail unaddressed; the
+# boot/periodic tbv-rail-gids re-run (and the udev replay on republish) picks
+# it up once the peer identity is known.
+case "$remote" in
+*[!0-]*) ;;
+*) exit 0 ;;				# zero/placeholder peer UUID
+esac
 
 # local host-router UUID (identical for every rail on this host)
 local="$(cat /sys/bus/thunderbolt/devices/0-0/unique_id 2>/dev/null | tr -d '[:space:]')"
