@@ -1,0 +1,55 @@
+M4 DiffusionPipe training gate over tbrxe, 2026-08-19, appmana-023 (rank0) <-> appmana-025 (rank1)
+Stack: tbfix 2.39 core, tbframe/tbrxe pub/tbfix-v6.17 4892702 (MTU-4096 wire v3 +
+retransmit backoff), provider 0.2.70 (host, bind-mounted into the container).
+
+== How it ran (pragmatic path chosen: bare-metal containerd, NO k8s, nodes stayed cordoned)
+Image ghcr.io/appmana/forks-diffusion-pipe-prod:75e90b1 (newest published tag; has the
+multinode TCP cache-queue fix) run per node via `k0s ctr run` with:
+  nvidia-container-runtime binary (--runc-binary /usr/local/nvidia/toolkit/...),
+  --net-host, --device /dev/infiniband, --cap-add CAP_IPC_LOCK,
+  host provider bind-mounts (/usr/lib/x86_64-linux-gnu/libibverbs/libtbrxe-rdmav34.so
+  + /etc/libibverbs.d/tbrxe.driver), HF_HOME/latent-cache/outputs on host dirs,
+  DIFFUSION_PIPE_{NUM_NODES,NODE_RANK,NODE_IPS,MASTER_ADDR} for `diffusion-pipe launch`
+  (deepspeed --no_ssh), webhook-equivalent NCCL env + NCCL_NET_PLUGIN=none.
+Script: /var/lib/diffusion-pipe/m4-run/run-node.sh on both nodes.
+Config: krea2 rank-32 LoRA, PP=2 (one stage per 3090), GA=4, 512 res, pokemon dataset,
+max_steps=60. Weights seeded from the workstation HF cache (krea2_raw_bf16 26.3G +
+qwen3vl_4b 8.9G + qwen vae). Latent/text-embedding cache built once single-node
+(--cache_only, pipeline_stages=1) and tar-synced to 025 - multi-node caching from a
+cold cache is broken by design (nested AF_UNIX proxies in the caching task stream;
+the k8s runs relied on a warm shared RWX PVC).
+
+== GATE RESULT: PASSED
+- 60/60 optimizer steps completed (log: step=1..step=60), ~5.32 s/step
+  (0.188 steps/s, 0.75 samples/s at GA=4) - vs the 1-GPU baseline 9.3 s/step
+  (blocks_to_swap=8). A prior 20-step run also completed all steps.
+- NCCL on usb4_rdma0 with NET/IB, zero NET/Socket lines in either rank's log:
+  "NET/IB : Using [0]usb4_rdma0:1/RoCE", "Using network IB", all channels via
+  NET/IB, QPs at mtu 5 (the M1 IB_MTU_4096 deviation live in the training path),
+  GID 1 = the per-link ULA.
+- Loss decreasing (train/loss TB series, 60 points): first-third mean 0.0640 ->
+  last-third mean 0.0606 (-5.3%); noisy per-step as expected for diffusion loss.
+  The 20-step run showed the same direction (0.0603 -> 0.0587).
+- Counters moved and stayed clean (per-side deltas across the 60-step run incl
+  model load): sent/rcvd ~930-943k pkts each way; completer_retry 12/2,
+  seq_err 6/0, dup 6/7 - proportional to the ~e-6 CRC loss, no storms, and the
+  M2 backoff kept every retransmit cheap. Steady-state during steps: ~2.9k
+  pkts/s per direction (~94 Mb/s) - PP boundary activations for a 512-res LoRA
+  are small; the link is <1% utilized and the run is GPU-bound (measured truth:
+  transport is nowhere near the limiter at this model size).
+- No wedges: post-run ib_send_lat 14.96us typ BOTH directions; NHI rings healthy.
+- Thermal guard: tctl-watch armed (92C abort); max Tctl on 023 during the run
+  78.5C.
+
+== Deviations / infra findings (not transport failures)
+1. The image's HPC-X NCCL net plugin segfaults in nccl_p2p_ib_pci_path on the
+   PCI-less usb4_rdma device - NCCL_NET_PLUGIN=none is mandatory (the runbook
+   already says so; tag 430e058+ bakes it, my env sets it explicitly).
+2. The image sets HF offline mode; HF_HUB_OFFLINE=0 override needed for the
+   dataset fetch (weights were cache-seeded).
+3. End-of-run model save assumes a SHARED /outputs (RWX PVC in k8s): rank1
+   torch.save into rank0's timestamped run dir + transient step60/tmp staging
+   dir fails cross-node on local dirs (RuntimeError: Parent directory ... does
+   not exist) AFTER step 60 completed. Checkpoint/LoRA persistence therefore
+   needs shared outputs storage outside k8s; the training itself is unaffected.
+Logs archived: m4-rank0.log/m4-rank1.log (60-step run), events.out.tfevents (loss).

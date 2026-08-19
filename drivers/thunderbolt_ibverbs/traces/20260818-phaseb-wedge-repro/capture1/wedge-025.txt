@@ -1,0 +1,264 @@
+===== rings (all hops 0..7, TX+RX)
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 0
+  TX desc_phys=0x0000000193af9000 count_reg=0x0000000a
+  TX prod/cons raw=0x00090009 driver_head=9 nhi_tail=9 outstanding=0
+  TX options=0xc0000000 [ENABLE|RAW]
+  RX desc_phys=0x0000000193af7000 count_reg=0x0100000a
+  RX prod/cons raw=0x00020001 driver_head=1 nhi_tail=2 outstanding=65535
+  RX options=0xc0000000 [ENABLE|RAW]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 1
+  TX desc_phys=0x0000000413458000 count_reg=0x00000800
+  TX prod/cons raw=0x07ff0000 driver_head=2047 nhi_tail=0 outstanding=2047
+  TX options=0x80000000 [ENABLE]
+  RX desc_phys=0x00000004129f8000 count_reg=0x00000800
+  RX prod/cons raw=0x02150213 driver_head=531 nhi_tail=533 outstanding=65534
+  RX options=0x80000000 [ENABLE]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 2
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 3
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 4
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 5
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 6
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 7
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+===== hop entries (all, incl disabled)
+== 0-0/port1
+  in_hop    0 -> out_port  0 next_hop    1 credits   2 prio 0 weight  1 [E-i--] raw 0x80040001 0x21000001
+  in_hop    8 -> out_port  7 next_hop    2 credits  14 prio 5 weight  0 [--i--] raw 0x001c3802 0x01800500
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port12
+  in_hop    8 -> out_port  0 next_hop    0 credits   2 prio 0 weight  0 [--i--] raw 0x00040000 0x01000000
+== 0-0/port13
+  in_hop    8 -> out_port  0 next_hop    0 credits   2 prio 0 weight  0 [--i--] raw 0x00040000 0x01000000
+== 0-0/port2
+  in_hop    0 -> out_port  0 next_hop    2 credits   2 prio 0 weight  1 [E-i--] raw 0x80040002 0x21000001
+  in_hop    8 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port3
+  in_hop    0 -> out_port  0 next_hop    3 credits   2 prio 0 weight  1 [E-i--] raw 0x80040003 0x21000001
+  in_hop    8 -> out_port  7 next_hop    1 credits  14 prio 5 weight  1 [E-i--] raw 0x801c3801 0x01800501
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port4
+  in_hop    0 -> out_port  0 next_hop    4 credits   2 prio 0 weight  1 [E-i--] raw 0x80040004 0x21000001
+  in_hop    8 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port5
+  in_hop    8 -> out_port  0 next_hop    0 credits   3 prio 0 weight  0 [--i--] raw 0x00060000 0x01000000
+  in_hop    9 -> out_port  0 next_hop    0 credits  13 prio 0 weight  0 [-----] raw 0x001a0000 0x00000000
+== 0-0/port6
+  in_hop    8 -> out_port  0 next_hop    0 credits   3 prio 0 weight  0 [--i--] raw 0x00060000 0x01000000
+  in_hop    9 -> out_port  0 next_hop    0 credits  13 prio 0 weight  0 [-----] raw 0x001a0000 0x00000000
+== 0-0/port8
+  in_hop    8 -> out_port  0 next_hop    0 credits   7 prio 0 weight  0 [--i--] raw 0x000e0000 0x01000000
+== 0-0/port9
+  in_hop    8 -> out_port  0 next_hop    0 credits   7 prio 0 weight  0 [--i--] raw 0x000e0000 0x01000000
+===== per-port counters
+-- /sys/kernel/debug/thunderbolt/*/port*/counters
+===== rxe hw_counters
+ack_deferred:0
+completer_retry_err:16
+duplicate_request:16899
+lifespan:10
+link_downed:0
+out_of_seq_request:0
+rcvd_pkts:17028
+rcvd_rnr_err:0
+rcvd_seq_err:0
+rdma_recvs:0
+rdma_sends:0
+retry_exceeded_err:0
+retry_rnr_exceeded_err:0
+send_err:0
+send_rnr_err:0
+sent_pkts:2044
+===== tbframe dmesg tail
+[ 2912.594993] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.594997] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595002] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595006] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595011] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595015] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595020] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595024] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595028] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595033] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595037] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595042] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595046] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595050] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595055] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595059] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595063] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595068] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595072] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595076] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595081] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595085] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595089] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595094] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595098] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595103] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595107] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595111] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595115] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595120] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595124] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595129] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595133] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595137] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595142] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595147] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595151] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595155] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595159] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595164] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595169] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595173] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595177] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595181] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595186] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595190] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595195] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595199] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595203] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595208] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595212] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595216] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595221] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595225] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595229] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595234] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595238] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595242] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595247] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595251] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595256] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595260] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595264] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595268] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595273] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595278] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595282] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595286] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595290] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595295] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595299] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595304] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595308] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595312] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595317] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595321] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595325] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595330] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595334] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595338] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595343] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595347] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595351] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595356] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595360] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595365] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595369] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595373] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595377] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595382] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595387] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595391] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595395] usb4_rdma0: qp#18 rxe_receiver: state = CHK_PSN
+[ 2912.595399] usb4_rdma0: qp#18 rxe_receiver: state = DUPLICATE_REQUEST
+[ 2912.595404] usb4_rdma0: qp#18 rxe_receiver: state = CLEANUP
+[ 2912.595408] usb4_rdma0: qp#18 rxe_receiver: state = DONE
+[ 2912.595413] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595417] usb4_rdma0: qp#18 rxe_receiver: state = EXIT
+[ 2912.595421] usb4_rdma0: qp#18 rxe_receiver: state = GET_REQ
+[ 2912.595425] usb4_rdma0: qp#18 rxe_receiver: state = EXIT

@@ -1,0 +1,5 @@
+=== cycle 1 target=appmana-025 port=19601 20:37:02
+reload-ok
+cycle 1 dev023=usb4_rdma0 dev025=usb4_rdma0 dir_025to023=124 dir_023to025=124
+WEDGE CANDIDATE at cycle 1 (target was appmana-025)
+exit 42

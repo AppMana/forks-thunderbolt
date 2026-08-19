@@ -1,0 +1,99 @@
+Egress-wedge repro + fix validation, 2026-08-18, appmana-023 <-> appmana-025
+
+Repro (OLD stack, pre-fix modules of tbv-ko-20260818): reload storm =
+qps32 bidir ib_write_bw running, then on the target node pkill perftest +
+rmmod tbrxe + insmod tbrxe (client unregister -> local CLOSED, peer
+SUPERSEDE). WEDGED ON CYCLE 1 (target 025). Capture (capture1/):
+  - 025 TX ring hop1: ENABLE, driver_head=2047, nhi_tail=0 (zero consumption)
+  - 023 RX ring hop1: ENABLE, 2047 descriptors posted, nhi_tail=0 (nothing arrives)
+  - control ring hop0 and 023->025 direction healthy
+  - ALL visible hop entries programmed+enabled with initial credits
+    (025 ingress port3 in_hop8 -> ring1 [E]; 023 ingress port1 in_hop8 [E];
+    verify/paths_active passes on both ends, no zombie)
+  - sessions re-negotiated cleanly and reused local/remote hopid 8
+  - no "hop deactivation failed" / drain-timeout warnings in dmesg
+-> poison is invisible to config space: router egress state on the
+   transmitting node's cable port (credit/buffer accounting), reset-only.
+
+HopID-rotation experiment (rotation build on 025): next session came up on
+transmit hopid 9 -- direction STAYED DEAD. Reboot of 025 cleared it (same
+hopid 8 afterwards). => poison keyed to the PORT/link, not the HopID.
+Rotation also destabilized re-negotiation (023 ingress on stale id while
+025 transmitted on the rotated one -- stable-but-dead session both sides UP)
+and even re-poisoned 025's egress by streaming into the credit-less void.
+Rotation reverted (commit 7e81cd4); prevention = READY-ack gate during a
+pending supersede + stop_rings/tb_ring_flush before disable_paths
+(commit 06de265).
+
+Second poisoning mode observed: transmitting toward a hopid with no
+credit-granting ingress (the mismatch episode) wedges the local egress the
+same way. Any code path that lets data flow while the peer ingress hop for
+that id is absent/disabled is a poisoning hazard.
+
+Validation (FIXED stack both nodes, static hopids): reload storm re-run,
+alternating target node, 12 cycles -- see storm-fixedstack.log.
+
+== Fix iteration log (all on canaries, capture before every recovery)
+v1 (READY gate + stop/flush-before-disable + [rotation, later reverted]):
+  storm-fixedstack.log -- clean cycles 1-5, WEDGED cycle 6 (023 reloading,
+  SURVIVING transmitter 025 froze). Remaining window: the peer that keeps
+  streaming during an orderly teardown. -> BYE needed (tbnet LOGOUT analog).
+v2 (BYE sent before local teardown, 3x300ms):
+  storm-bye-v1.log -- WEDGED cycle 3. dmesg: "BYE unacknowledged" after
+  0.9s while the peer's dispatch+LOGOUT-down under storm took ~1.1s; worse,
+  the ordering was backwards: the receiver killed its ingress while the
+  sender's TX ring still held the storm backlog, so the sender's own flush
+  had nowhere to go. The BYE handshake itself must certify TX silence.
+v3 (quiesce_tx flush BEFORE BYE, BYE_ACK gated on receiver's tx_quiesced,
+  budget 4x1000ms): storm-v3.log below.
+v3 result (storm-bye-v3.log): WEDGED cycle 1 (025 reload). New mechanism
+isolated from dmesg timeline: the parked sender's dispatch still answered
+HELLO, so the BYE receiver (downed by the first BYE, auto-re-handshaking
+after 200ms) completed a ONE-SIDED bring_up whose path endpoint sat
+unmatched for the sender's whole 4s BYE budget; the rebuild also cleared
+the receiver's quiesced state, so the BYE was never acked. The
+eventually-paired session was born dead -- same asymmetric-endpoint
+poison as the rotation mismatch. Unifying rule: a data-path endpoint
+(re)programmed while its far end is absent for a long window comes up
+credit-dead when finally paired, and the state survives everything but a
+router/PHY reset (a reboot of EITHER end bounces the link and clears it).
+v4 (parked/mid-teardown links refuse HELLO/READY; LOGOUT re-handshake
+settles 5s past the peer's BYE budget; tx_quiesced clears at UP):
+storm-v4.log below.
+v4 (storm-v4.log): WEDGED cycle 2 -- clean mutual BYE teardown, but the
+5s LOGOUT settle could not be preempted (queue_delayed_work no-op on a
+pending item), 4.7s one-sided paths-enable, born-dead pairing.
+v5 (mod_delayed_work earliest-wins kick; storm-v5.log): WEDGED cycle 1 --
+timeline shows clean mutual teardown AND aligned (~30ms) re-enables, and
+the reloading side's egress STILL came up dead. Alignment alone is not
+sufficient.
+v6 (terminal link_down after non-terminal down): fixes a REAL side bug
+found during diagnosis -- destroy after a BYE/LOGOUT down skipped the
+terminal upcall, tbrxe leaked a stale usb4_rdmaN, and post-reboot probes
+against the corpse faked "reboot did not recover" twice. Reboots DID
+recover the hardware every time.
+v7 (BYE = hold: receiver keeps rings/paths, deferred teardown at the
+returning peer's HELLO; storm-v7.log): WEDGED cycle 1.
+
+CONCLUSION: the reload-under-saturation wedge survives every software
+ordering (v0..v7). All seven iterations produced real, KUnit-pinned
+hygiene fixes (READY gate, quiesce ordering, BYE handshake, dispatch
+fences, kick semantics, device-leak fix), but the trigger is below
+software: tearing down a SATURATED session on this Maple Ridge pair
+sometimes leaves the reloading side's router egress permanently
+credit-dead -- same phenomenology as the known Intel "passes a saturated
+run then wedges newly created rings" behavior (spec s6) that motivated
+keeping hardware E2E off. Discriminators run while wedged: fresh HopID
+(dead), fresh NHI ring index via a ring-holder module (dead), full
+hop-entry/ring re-programming (dead), either-end reboot / PHY bounce
+(alive). No deactivation-timeout or config-space evidence exists; the
+state is invisible to software.
+
+Operational guidance: never hot-reload tbrxe/tbframe while RDMA traffic
+is running (quiesce clients first -- idle reloads have been consistently
+safe all day); a wedge is cleared by rebooting the node whose TX ring
+shows posted-but-unconsumed descriptors (tools/nhi-ring-regs.py).
+Next diagnostic steps if the class must die completely: NHI register
+diff via the tbdma tooling across a wedge, testing whether a
+tb_switch_reset / lane retrain clears it without reboot, and asking
+Intel about post-saturation credit teardown on Maple Ridge.

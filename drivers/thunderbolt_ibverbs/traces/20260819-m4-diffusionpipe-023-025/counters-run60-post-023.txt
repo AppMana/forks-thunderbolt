@@ -1,0 +1,16 @@
+ack_deferred 75122
+completer_retry_err 16
+duplicate_request 6
+lifespan 10
+link_downed 0
+out_of_seq_request 2
+rcvd_pkts 1238631
+rcvd_rnr_err 0
+rcvd_seq_err 8
+rdma_recvs 37328
+rdma_sends 1000
+retry_exceeded_err 0
+retry_rnr_exceeded_err 0
+send_err 0
+send_rnr_err 0
+sent_pkts 1260061

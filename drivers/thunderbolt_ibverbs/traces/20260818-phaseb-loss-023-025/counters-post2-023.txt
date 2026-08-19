@@ -1,0 +1,17 @@
+ack_deferred:1047863
+completer_retry_err:1327
+duplicate_request:4128
+lifespan:10
+link_downed:0
+out_of_seq_request:1523
+rcvd_pkts:64759299
+rcvd_rnr_err:0
+rcvd_seq_err:1229
+rdma_recvs:42310
+rdma_sends:1000
+retry_exceeded_err:0
+retry_rnr_exceeded_err:0
+send_err:0
+send_rnr_err:0
+sent_pkts:64852126
+  tbloss_rcv                                           8322066               0

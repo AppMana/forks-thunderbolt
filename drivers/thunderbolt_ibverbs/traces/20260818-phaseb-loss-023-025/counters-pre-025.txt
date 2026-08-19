@@ -1,0 +1,16 @@
+ack_deferred:789544
+completer_retry_err:1222
+duplicate_request:2043
+lifespan:10
+link_downed:0
+out_of_seq_request:1092
+rcvd_pkts:48196326
+rcvd_rnr_err:0
+rcvd_seq_err:1147
+rdma_recvs:42310
+rdma_sends:1000
+retry_exceeded_err:0
+retry_rnr_exceeded_err:0
+send_err:0
+send_rnr_err:0
+sent_pkts:48098413

@@ -1,0 +1,65 @@
+Phase B live-link measurements, 2026-08-18, appmana-023 (4.0 GHz cap) <-> appmana-025
+Stack: tbfix 2.36 core; tbframe/tbrxe as of pub/tbfix-v6.17 073f6a4 (baselines)
+Link: TB3 Maple Ridge, 2 lanes @ 20 Gb/s, e2e=0, ring_entries=2048, MTU 2048 (spec s5)
+
+== Loss attribution (qps32 bidir ib_write_bw 1MiB, ~8.3M pkts/direction)
+bpftrace probes: tbframe_core_rx_complete(bad/cancel), tbframe_hw_rx_callback
+(ring_frame.flags CRC/overrun split), tbrxe_client_rx, tbframe_alloc_frame
+retval, tbframe_core_tx_complete. Files: lossprobe2-*.txt, counters-pre2/post2.
+  023: rx_ok 8322077  rx_bad 30  hw_crc 30  hw_overrun 0  nospc_ctrl 0  nospc_data 0
+  025: rx_ok 8321098  rx_bad 19  hw_crc 19  hw_overrun 0  nospc_ctrl 0  nospc_data 0
+  rxe deltas 023: dup +129 oos +36 seq_err +22 completer_retry +22 (unprobed run1: dup +516/+1806)
+  -> ALL hardware drops are link CRC errors (2-4e-6/frame); zero ring overruns,
+     zero admission/control-reserve exhaustion, zero skb-alloc drops,
+     clirx == rcvd_pkts (no engine-side drop). The dup/oos/seq counters are the
+     PSN machinery recovering genuine CRC loss; no reorder evidence beyond loss
+     gaps. The "sporadic 100x-slow iteration" = RC retransmit timeout stall per
+     CRC drop (stock rxe timeout; legacy capped it in 0.2.17).
+
+== Latency (ib_send_lat 64B, gid 1)
+baseline: t_min 53.7-56.3, t_typ 65-142 (bimodal), t_avg 99-111, 99% ~146-150 us
+Per-stage budget (tbrxe-lat-timeline --events + analyzer, lat-events-*.txt):
+  all software stages single-digit us (post->sender ~3-4, sender->xmit ~2,
+  xmit->enq ~0.3, rxirq->work ~3, work->clirx ~0.7, clirx->receiver ~2.4-2.9,
+  recv->ackxmit ~1.6-1.9, cq->post ~1-2)
+  enq_to_txirq med 20-74 us p99 132 us  <- MSI-X moderation, direct measurement
+  recv_to_cq p99 163 us                 <- same moderation on the completion side
+NHI throttle regs: 128 us on ALL 16 vectors both nodes (nhi_enable_int_throttling).
+Legacy driver wrote 0 (nhi_interrupt_throttle_ns default 0 via tb_ring_throttling).
+Legacy committed record: bench/results/strix-2p-noiommu-2x40g (2026-05-27):
+  ib_write_lat 7.41 us typ, ib_send_lat 8.34 us typ, ib_read_lat 15.37 us (64B).
+Attribution: 2-3 interrupt-moderated crossings/RTT at up to 128 us each explain
+essentially the whole legacy-vs-now delta; software budget sums ~25-35 us/RTT.
+
+== Bandwidth matrix (ib_write_bw 1MiB, BW average Gb/s, unprobed)
+  q1  uni    8.13      q32 uni    8.60
+  q1  bidir 11.56      q8  bidir 15.53   q16 bidir 12.98   q32 bidir 12.21
+Owner reference: single-QP 1MiB write 973 MB/s = 8.14 Gb/s (matches q1-uni).
+CPU: no core saturated (max per-cpu 44% busy); rxe_wq spread over many workers.
+Frame-rate ceiling: 8.6 Gb/s / 2048 B = ~525k frames/s unidirectional regardless
+of QP count; legacy 16 Gb/s uni at 4 KiB frames = ~500k frames/s. The NHI/fabric
+moves ~0.5M frames/s per direction independent of frame size; bytes/frame is the
+lever, not QPs and not CPU.
+
+== Ranked levers (bandwidth/latency)
+1. data_ring_throttle_ns=0 (new tbframe knob; legacy parity). Predicted: RTT
+   typ from ~65-142 us to ~15-30 us; possible q1 bw gain via ACK RTT; expected
+   ~no change to q32 uni (frame-rate ceiling) -- the A/B discriminates.
+2. IB_MTU_4096 deviation (spec s5 documented lever): 4012 B payload/frame at
+   ~500k frames/s -> ~16-17 Gb/s uni predicted. Code change in tbrxe (report
+   MTU 4096, fragment at 4012); both ends fork-consistent.
+3. RC retransmit-timeout cap (legacy 0.2.17 analog) for the CRC-loss tail
+   (100x iterations); does not raise average bw.
+4. rxe_wq wakeup chain (~10-15 us/RTT across 3 hops) - pinning/inline; only
+   after 1-2 land.
+
+== Throttle A/B (single lever, applied via data_ring_throttle_ns=0)
+ib_send_lat 64B: t_min 14.29 t_typ 15.27 t_avg 15.36 stdev 0.46
+                 99% 17.54 99.9% 24.47 us   (baseline: typ 65-142, avg ~110)
+ib_write_bw 1MiB Gb/s (baseline -> throttle0):
+  q1 uni    8.13 -> 10.30    q1 bidir 11.56 -> 13.44
+  q8 bidir 15.53 -> 14.69    q32 bidir 12.21 -> 12.11
+  q32 uni   8.60 ->  9.40
+Verdict: ~7x latency improvement to the owner's ~15us legacy reference,
++27% single-QP uni; saturated multi-QP unchanged (frame-rate ceiling).
+Default flipped to 0 in commit 18c990c. Files: *-throttle0.txt.

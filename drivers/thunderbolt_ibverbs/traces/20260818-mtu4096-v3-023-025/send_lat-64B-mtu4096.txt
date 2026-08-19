@@ -1,0 +1,23 @@
+---------------------------------------------------------------------------------------
+                    Send Latency Test
+ Dual-port       : OFF		Device         : usb4_rdma0
+ Number of qps   : 1		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : OFF
+ TX depth        : 1
+ Mtu             : 4096[B]
+ Link type       : Ethernet
+ GID index       : 1
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x0012 PSN 0x67dc49
+ GID: 253:61:188:141:38:196:74:35:00:00:00:00:00:00:00:02
+ remote address: LID 0000 QPN 0x0012 PSN 0xb25cc4
+ GID: 253:61:188:141:38:196:74:35:00:00:00:00:00:00:00:01
+---------------------------------------------------------------------------------------
+ #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]   99% percentile[usec]   99.9% percentile[usec] 
+ 64      3000          15.69          37.08        18.17    	       18.27       	0.75   		22.03   		29.28  
+---------------------------------------------------------------------------------------

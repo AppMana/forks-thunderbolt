@@ -1,0 +1,177 @@
+===== rings (all hops 0..7, TX+RX)
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 0
+  TX desc_phys=0x000000018fcf0000 count_reg=0x0000000a
+  TX prod/cons raw=0x00070007 driver_head=7 nhi_tail=7 outstanding=0
+  TX options=0xc0000000 [ENABLE|RAW]
+  RX desc_phys=0x000000018fcee000 count_reg=0x0100000a
+  RX prod/cons raw=0x00070006 driver_head=6 nhi_tail=7 outstanding=65535
+  RX options=0xc0000000 [ENABLE|RAW]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 1
+  TX desc_phys=0x000000057a4b8000 count_reg=0x00000800
+  TX prod/cons raw=0x02a502a5 driver_head=677 nhi_tail=677 outstanding=0
+  TX options=0x80000000 [ENABLE]
+  RX desc_phys=0x0000000561778000 count_reg=0x00000800
+  RX prod/cons raw=0x000007ff driver_head=2047 nhi_tail=0 outstanding=2047
+  RX options=0x80000000 [ENABLE]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 2
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 3
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 4
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 5
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 6
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+NHI 0000:06:00.0 bar0 size=0x40000
+
+== hop 7
+  TX desc_phys=0x0000000000000000 count_reg=0x00000000
+  TX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  TX options=0x00000000 [none]
+  RX desc_phys=0x0000000000000000 count_reg=0x00000000
+  RX prod/cons raw=0x00000000 driver_head=0 nhi_tail=0 outstanding=0
+  RX options=0x00000000 [none]
+===== hop entries (all, incl disabled)
+== 0-0/port1
+  in_hop    0 -> out_port  0 next_hop    1 credits   2 prio 0 weight  1 [E-i--] raw 0x80040001 0x21000001
+  in_hop    8 -> out_port  7 next_hop    1 credits  14 prio 5 weight  1 [E-i--] raw 0x801c3801 0x01800501
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port12
+  in_hop    8 -> out_port  0 next_hop    0 credits   2 prio 0 weight  0 [--i--] raw 0x00040000 0x01000000
+== 0-0/port13
+  in_hop    8 -> out_port  0 next_hop    0 credits   2 prio 0 weight  0 [--i--] raw 0x00040000 0x01000000
+== 0-0/port2
+  in_hop    0 -> out_port  0 next_hop    2 credits   2 prio 0 weight  1 [E-i--] raw 0x80040002 0x21000001
+  in_hop    8 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port3
+  in_hop    0 -> out_port  0 next_hop    3 credits   2 prio 0 weight  1 [E-i--] raw 0x80040003 0x21000001
+  in_hop    8 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port4
+  in_hop    0 -> out_port  0 next_hop    4 credits   2 prio 0 weight  1 [E-i--] raw 0x80040004 0x21000001
+  in_hop    8 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop    9 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   10 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   11 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   12 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   13 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   14 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   15 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   16 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   17 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   18 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+  in_hop   19 -> out_port  0 next_hop    0 credits   0 prio 0 weight  0 [-----] raw 0x00000000 0x00000000
+== 0-0/port5
+  in_hop    8 -> out_port  0 next_hop    0 credits   3 prio 0 weight  0 [--i--] raw 0x00060000 0x01000000
+  in_hop    9 -> out_port  0 next_hop    0 credits  13 prio 0 weight  0 [-----] raw 0x001a0000 0x00000000
+== 0-0/port6
+  in_hop    8 -> out_port  0 next_hop    0 credits   3 prio 0 weight  0 [--i--] raw 0x00060000 0x01000000
+  in_hop    9 -> out_port  0 next_hop    0 credits  13 prio 0 weight  0 [-----] raw 0x001a0000 0x00000000
+== 0-0/port8
+  in_hop    8 -> out_port  0 next_hop    0 credits   7 prio 0 weight  0 [--i--] raw 0x000e0000 0x01000000
+== 0-0/port9
+  in_hop    8 -> out_port  0 next_hop    0 credits   7 prio 0 weight  0 [--i--] raw 0x000e0000 0x01000000
+===== per-port counters
+-- /sys/kernel/debug/thunderbolt/*/port*/counters
+===== rxe hw_counters
+ack_deferred:1500226
+completer_retry_err:15088
+duplicate_request:5547
+lifespan:10
+link_downed:1
+out_of_seq_request:2567
+rcvd_pkts:115767841
+rcvd_rnr_err:0
+rcvd_seq_err:1859
+rdma_recvs:47310
+rdma_sends:6000
+retry_exceeded_err:0
+retry_rnr_exceeded_err:0
+send_err:0
+send_rnr_err:0
+sent_pkts:95139378
+===== tbframe dmesg tail
+[ 7243.013162] netconsole: network logging has already stopped
+[ 7243.013184] netconsole: network logging has already stopped
+[ 7243.014343] netconsole: network logging has already stopped
+[ 7243.014359] netconsole: network logging has already stopped
+[ 7243.015453] netconsole: network logging has already stopped
+[ 7243.015469] netconsole: network logging has already stopped
+[ 7299.240822] tbframe: tbframe0x1: link down (2)
+[ 7299.240841] infiniband usb4_rdma0: set down
+[ 7299.242542] tbframe: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[ 7299.259147] tbframe: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[ 7299.261495] tbframe: tbframe0x1: READY confirmed
+[ 7299.261507] tbframe: tbframe0x1: link up
+[ 7299.261518] infiniband usb4_rdma0: set active

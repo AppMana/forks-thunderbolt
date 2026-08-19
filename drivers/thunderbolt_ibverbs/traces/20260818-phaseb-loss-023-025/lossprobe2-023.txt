@@ -1,0 +1,14 @@
+Attaching 7 probes...
+
+
+
+@clirx: 8322066
+@hw_crc: 30
+
+
+
+@rx_bad: 30
+
+@rx_ok: 8322077
+
+@tx_ok: 8321124

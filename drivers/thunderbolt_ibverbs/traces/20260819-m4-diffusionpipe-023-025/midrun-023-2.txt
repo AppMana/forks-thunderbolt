@@ -1,0 +1,3 @@
+/sys/class/infiniband/usb4_rdma0/ports/1/hw_counters/sent_pkts:186889
+/sys/class/infiniband/usb4_rdma0/ports/1/hw_counters/rcvd_pkts:180115
+1787119623.553598442

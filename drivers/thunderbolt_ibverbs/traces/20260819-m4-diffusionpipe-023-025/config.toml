@@ -1,0 +1,69 @@
+# Krea 2 rank-32 LoRA across two 24 GB GPUs with one pipeline stage per node.
+# Block swap is incompatible with pipeline_stages > 1, so it is disabled.
+# Pipeline occupancy: bubble = (PP-1)/(GA+PP-1) = 1/5 at GA=4.
+output_dir = '/outputs/krea2-pp2-gate'
+dataset = 'dataset.toml'
+
+epochs = 1
+max_steps = 20
+micro_batch_size_per_gpu = 1
+pipeline_stages = 2
+gradient_accumulation_steps = 4
+gradient_clipping = 1
+
+eval_before_first_step = false
+eval_every_n_epochs = 0
+save_every_n_steps = 20
+# Frequent checkpoints limit lost work after eviction or restart.
+checkpoint_every_n_minutes = 120
+activation_checkpointing = true
+partition_method = 'parameters'
+save_dtype = 'bfloat16'
+caching_batch_size = 1
+steps_per_print = 1
+
+[model]
+type = 'krea2'
+# Filled in by [model.hf_components.*] below.
+diffusion_model = ''
+vae = ''
+dtype = 'bfloat16'
+diffusion_model_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+huber_delta = 1.0
+
+[[model.text_encoders]]
+path = ''
+type = 'krea2'
+
+[model.hf_components.diffusion_model]
+model_id = 'Comfy-Org/Krea-2'
+file_pattern = 'diffusion_models/krea2_raw_bf16.safetensors'
+subpath = 'diffusion_models/krea2_raw_bf16.safetensors'
+target_key = 'diffusion_model'
+
+[model.hf_components.vae]
+model_id = 'Comfy-Org/Qwen-Image_ComfyUI'
+file_pattern = 'split_files/vae/qwen_image_vae.safetensors'
+subpath = 'split_files/vae/qwen_image_vae.safetensors'
+target_key = 'vae'
+
+[model.hf_components.text_encoder]
+model_id = 'Comfy-Org/Qwen3-VL'
+file_pattern = 'text_encoders/qwen3vl_4b_bf16.safetensors'
+subpath = 'text_encoders/qwen3vl_4b_bf16.safetensors'
+target_key = 'text_encoders.0.path'
+
+[adapter]
+type = 'lora'
+rank = 32
+dtype = 'bfloat16'
+
+[optimizer]
+type = 'AdamW8bitKahan'
+lr = 2e-5
+betas = [0.9, 0.99]
+weight_decay = 0.01
+
+[monitoring]
+enable_mlflow = false

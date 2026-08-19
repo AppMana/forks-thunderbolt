@@ -1,0 +1,788 @@
+bash: line 1: ulimit: max locked memory: cannot modify limit: Operation not permitted
+    device          	   node GUID
+    ------          	----------------
+    rxe_lan         	5a1122fffeb4d1b0
+    usb4_rdma0      	00e4f9fffe13aaf5
+df: /root/.triton/autotune: No such file or directory
+[2026-08-19 06:19:38,217] [INFO] [runner.py:630:main] cmd = /usr/bin/python -u -m deepspeed.launcher.launch --world_info=eyIxMC4yLjAuNjEiOiBbMF0sICIxMC4yLjAuNjciOiBbMF19 --master_addr=10.2.0.61 --master_port=29517 --node_rank=0 --module --enable_each_rank_log=None --log_level=info diffusion_pipe.cli train --deepspeed --config /work/config.toml
+[2026-08-19 06:19:43,066] [INFO] [launch.py:155:main] 0 NCCL_IB_MERGE_NICS=0
+[2026-08-19 06:19:43,066] [INFO] [launch.py:155:main] 0 NCCL_ALGO=Ring
+[2026-08-19 06:19:43,066] [INFO] [launch.py:155:main] 0 NCCL_NET_PLUGIN=none
+[2026-08-19 06:19:43,066] [INFO] [launch.py:155:main] 0 NCCL_VERSION=2.25.1
+[2026-08-19 06:19:43,066] [INFO] [launch.py:155:main] 0 NCCL_SOCKET_IFNAME=enp110s0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_NET_GDR_LEVEL=0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_DEBUG_SUBSYS=INIT,NET
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 TORCH_NCCL_USE_COMM_NONBLOCKING=0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_DEBUG=INFO
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_IB_HCA=usb4_rdma
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_PROTO=Simple
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_NET_MERGE_LEVEL=LOC
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 AWS_OFI_NCCL_VERSION=1.12.1
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_IB_ADDR_FAMILY=AF_INET6
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_IB_SUBNET_AWARE_ROUTING=prefer_hca[usb4_rdma\d*]
+[2026-08-19 06:19:43,067] [INFO] [launch.py:155:main] 0 NCCL_IB_DISABLE=0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:162:main] WORLD INFO DICT: {'10.2.0.61': [0], '10.2.0.67': [0]}
+[2026-08-19 06:19:43,067] [INFO] [launch.py:168:main] nnodes=2, num_local_procs=1, node_rank=0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:179:main] global_rank_mapping=defaultdict(<class 'list'>, {'10.2.0.61': [0], '10.2.0.67': [1]})
+[2026-08-19 06:19:43,067] [INFO] [launch.py:180:main] dist_world_size=2
+[2026-08-19 06:19:43,067] [INFO] [launch.py:184:main] Setting CUDA_VISIBLE_DEVICES=0
+[2026-08-19 06:19:43,067] [INFO] [launch.py:272:main] process 385 spawned with command: ['/usr/bin/python', '-u', '-m', 'diffusion_pipe.cli', '--local_rank=0', 'train', '--deepspeed', '--config', '/work/config.toml']
+[32m[INFO][0m Set vram state to: NORMAL_VRAM
+[2026-08-19 06:19:51,051] [WARNING] [patches.py:446:apply_patches] Multi-node run detected: sending tensors by value instead of by shared-memory handle.
+appmana-023:385:385 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+appmana-023:385:385 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+appmana-023:385:385 [0] NCCL INFO NCCL_SOCKET_IFNAME set to enp110s0
+appmana-023:385:385 [0] NCCL INFO cudaDriverVersion 13030
+appmana-023:385:385 [0] NCCL INFO NCCL version 2.30.7+cuda12.8
+appmana-023:385:385 [0] NCCL INFO NCCL git version HEAD railroute-dsv4-30.5toks-2026-07-13
+appmana-023:385:385 [0] NCCL INFO NCCL_NET_PLUGIN set by environment to none
+appmana-023:385:385 [0] NCCL INFO dlvsym failed on mlx5dv_get_data_direct_sysfs_path - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_get_data_direct_sysfs_path, version MLX5_1.25 version MLX5_1.25
+appmana-023:385:385 [0] NCCL INFO dlvsym failed on mlx5dv_reg_dmabuf_mr - /lib/x86_64-linux-gnu/libmlx5.so: undefined symbol: mlx5dv_reg_dmabuf_mr, version MLX5_1.25 version MLX5_1.25
+appmana-023:385:385 [0] NCCL INFO NCCL_IB_HCA set to usb4_rdma
+
+[2026-08-19 06:19:52] appmana-023:385:385 [0] transport/net_ib/init.cc:67 (ncclIbGetPciPath) NCCL WARN Could not find real path of usb4_rdma0 (/sys/class/infiniband/usb4_rdma0/device)
+appmana-023:385:385 [0] NCCL INFO NET/IB: [1] usb4_rdma0:uverbs1:1/RoCE provider=None speed=2500 context=0x202ecbc0 pciPath=(null) ar=0 oooRqSize=0
+appmana-023:385:385 [0] NCCL INFO NET/IB : Made virtual device [0] name=usb4_rdma0 speed=2500 ndevs=1 rail=-1 plane=-1
+appmana-023:385:385 [0] NCCL INFO NET/IB : Using [0]usb4_rdma0:1/RoCE [RO]; OOB enp110s0:10.2.0.61<0>
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO ncclOsDlopen(libnccl-rma.so) failed: libnccl-rma.so: cannot open shared object file: No such file or directory
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to load external plugin libnccl-rma.so, dlHandle: (nil), ncclRma: (nil)
+appmana-023:385:385 [0] NCCL INFO Unable to use GIN: Peermem is not supported, nor DMA-BUF.
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to load external plugin libnccl-gin.so, dlHandle: (nil), ncclGin: (nil)
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+appmana-023:385:385 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x1bea8620 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0x85480c1acc648bd5 - Init START
+appmana-023:385:385 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x1bea8620 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+appmana-023:385:385 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:662 [0] NCCL INFO [Proxy Service] Device 0 CPU core 9
+appmana-023:385:663 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 20
+appmana-023:385:662 [0] NCCL INFO proxy listening socket at 10.2.0.61<39467>
+appmana-023:385:385 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+appmana-023:385:385 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommInitRankConfig comm 0x1bea8620 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0x85480c1acc648bd5 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.20 (kernels 0.15, alloc 0.03, bootstrap 0.00, allgathers 0.01, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+[2026-08-19 06:19:52,435] [INFO] [comm.py:821:init_distributed] cdb=None
+Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 27594.11it/s]appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:666 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 15
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x728048010000)
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=44 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:662 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 44 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0x8beb ctsFifoLkey=0x8beb
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x728048054000)
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x72804809c000)
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x7280480e0000)
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=45 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=46 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:662 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 46 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0x8f67 ctsFifoLkey=0x8f67
+appmana-023:385:662 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=47 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:385 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+
+Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 5216.80it/s]
+Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 5833.52it/s]
+using video_clip_mode=single_beginning
+using framerate=16
+Grouped metadata is not cached. Computing ungrouped metadata and then grouping.
+Intermediate metadata is not cached. Enumerating Hugging Face dataset rows.
+  0%|          | 0/833 [00:00<?, ?it/s]  4%|▍         | 32/833 [00:00<00:02, 307.38it/s]  8%|▊         | 63/833 [00:00<00:02, 276.57it/s] 11%|█         | 91/833 [00:00<00:03, 229.92it/s] 14%|█▍        | 115/833 [00:00<00:03, 216.41it/s] 17%|█▋        | 142/833 [00:00<00:02, 231.21it/s] 20%|██        | 169/833 [00:00<00:02, 242.65it/s] 23%|██▎       | 194/833 [00:00<00:02, 217.30it/s] 26%|██▌       | 217/833 [00:00<00:02, 214.99it/s] 29%|██▊       | 239/833 [00:01<00:02, 212.79it/s] 31%|███▏      | 261/833 [00:01<00:02, 214.35it/s] 35%|███▍      | 290/833 [00:01<00:02, 231.21it/s] 40%|████      | 336/833 [00:01<00:01, 296.43it/s] 44%|████▍     | 367/833 [00:01<00:01, 234.47it/s] 47%|████▋     | 393/833 [00:01<00:01, 221.54it/s] 51%|█████     | 422/833 [00:01<00:01, 238.06it/s] 54%|█████▍    | 448/833 [00:01<00:01, 224.34it/s] 57%|█████▋    | 472/833 [00:02<00:01, 219.62it/s] 59%|█████▉    | 495/833 [00:02<00:01, 208.14it/s] 62%|██████▏   | 517/833 [00:02<00:01, 201.46it/s] 65%|██████▍   | 538/833 [00:02<00:01, 193.55it/s] 67%|██████▋   | 558/833 [00:02<00:01, 183.33it/s] 69%|██████▉   | 577/833 [00:02<00:01, 174.80it/s] 72%|███████▏  | 597/833 [00:02<00:01, 180.42it/s] 74%|███████▍  | 616/833 [00:02<00:01, 180.40it/s] 76%|███████▌  | 635/833 [00:02<00:01, 181.57it/s] 80%|███████▉  | 664/833 [00:03<00:00, 210.92it/s] 82%|████████▏ | 686/833 [00:03<00:00, 208.43it/s] 85%|████████▍ | 708/833 [00:03<00:00, 205.93it/s] 89%|████████▉ | 741/833 [00:03<00:00, 239.04it/s] 92%|█████████▏| 766/833 [00:03<00:00, 227.03it/s] 96%|█████████▌| 796/833 [00:03<00:00, 241.11it/s] 99%|█████████▊| 822/833 [00:03<00:00, 244.11it/s]100%|██████████| 833/833 [00:03<00:00, 221.12it/s]Saving intermediate metadata dataset.
+
+Saving the dataset (0/1 shards):   0%|          | 0/833 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 189204.77 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 179688.09 examples/s]Loading intermediate metadata dataset.
+Caching ungrouped metadata.
+
+Map (num_proc=8):   0%|          | 0/833 [00:00<?, ? examples/s]Map (num_proc=8):   0%|          | 4/833 [00:00<01:01, 13.38 examples/s]Map (num_proc=8):  14%|█▍        | 116/833 [00:00<00:01, 360.20 examples/s]Map (num_proc=8):  27%|██▋       | 225/833 [00:00<00:01, 575.86 examples/s]Map (num_proc=8):  41%|████▏     | 345/833 [00:00<00:00, 751.76 examples/s]Map (num_proc=8):  58%|█████▊    | 479/833 [00:00<00:00, 889.38 examples/s]Map (num_proc=8):  73%|███████▎  | 608/833 [00:00<00:00, 996.53 examples/s]Map (num_proc=8):  87%|████████▋ | 725/833 [00:00<00:00, 1007.92 examples/s]Map (num_proc=8): 100%|██████████| 833/833 [00:01<00:00, 994.55 examples/s] Map (num_proc=8): 100%|██████████| 833/833 [00:01<00:00, 658.61 examples/s]
+Grouping examples:   0%|          | 0/833 [00:00<?, ?it/s]Grouping examples: 100%|██████████| 833/833 [00:00<00:00, 34410.01it/s]
+Saving the dataset (0/1 shards):   0%|          | 0/833 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 239108.63 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 230040.51 examples/s]Loading grouped metadata with grouping key (1.0, 1)
+caching latents: /cache/diffusion-pipe/hf-metadata/krea2/77f5458d10003791
+caching latents: (1.0, 1)
+
+Adding size bucket:   0%|          | 0/833 [00:00<?, ? examples/s]Adding size bucket: 100%|██████████| 833/833 [00:00<00:00, 37597.04 examples/s]caching latents: (1.0, 512, 512, 1)
+[CACHE] Initializing
+[CACHE] Existing cache has fingerprint b1403b227cb18b80
+[CACHE] Existing cache length: 833
+Building iteration order
+
+Saving the dataset (0/1 shards):   0%|          | 0/833 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 406309.48 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 833/833 [00:00<00:00, 391249.19 examples/s]caching text embeddings: /cache/diffusion-pipe/hf-metadata/krea2/77f5458d10003791
+caching text embeddings: (1.0, 1)
+
+Map:   0%|          | 0/833 [00:00<?, ? examples/s]Map: 100%|██████████| 833/833 [00:00<00:00, 87254.76 examples/s][CACHE] Initializing
+[CACHE] Existing cache has fingerprint 68bdda58f67f8a82
+[CACHE] Existing cache length: 833
+[CACHE] Initializing
+[CACHE] Existing cache has fingerprint b072e77f045c8ad1
+[CACHE] Existing cache length: 1
+
+Found grouped metadata cache. Directly loading it.
+Loading grouped metadata with grouping key [1.0, 1]
+caching latents: /cache/diffusion-pipe/hf-metadata/krea2/77f5458d10003791
+caching latents: [1.0, 1]
+caching latents: (1.0, 512, 512, 1)
+[CACHE] Initializing
+[CACHE] Existing cache has fingerprint b1403b227cb18b80
+[CACHE] Existing cache length: 833
+caching text embeddings: /cache/diffusion-pipe/hf-metadata/krea2/77f5458d10003791
+caching text embeddings: [1.0, 1]
+Map:   0%|          | 0/833 [00:00<?, ? examples/s]Map: 100%|██████████| 833/833 [00:00<00:00, 64179.27 examples/s]
+[32m[INFO][0m model dtype torch.bfloat16, manual cast: None
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x63199bd0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 1 color 2130503744 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x63199bd0 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:781 [0] NCCL INFO [Proxy Service] Device 0 CPU core 11
+appmana-023:385:782 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 20
+appmana-023:385:781 [0] NCCL INFO proxy listening socket at 10.2.0.61<45461>
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x63199bd0 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 1 color 2130503744 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 2 total 0.01 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.00)
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x35e02e50 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 2 color 2130503744 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x35e02e50 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:785 [0] NCCL INFO [Proxy Service] Device 0 CPU core 3
+appmana-023:385:786 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 13
+appmana-023:385:785 [0] NCCL INFO proxy listening socket at 10.2.0.61<60337>
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x35e02e50 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 2 color 2130503744 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 2 total 0.01 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.00)
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x35f27ce0 rank 0 nranks 1 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 3 color 59908776 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x35f27ce0 rank 0 nRanks 1 nNodes 1 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 01/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 02/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 03/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 04/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 05/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 06/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 07/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 08/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 09/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 10/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 11/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 12/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 13/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 14/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 15/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 16/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 17/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 18/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 19/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 20/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 21/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 22/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 23/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 24/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 25/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 26/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 27/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 28/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 29/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 30/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 31/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 32/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 33/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 34/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 35/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 36/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 37/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 38/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 39/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 40/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 41/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 42/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 43/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 44/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 45/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 46/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 47/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 48/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 49/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 50/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 51/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 52/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 53/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 54/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 55/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 56/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 57/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 58/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 59/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 60/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 61/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 62/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 63/64 : 0
+appmana-023:385:385 [0] NCCL INFO Trees [0] -1/-1/-1->0->-1 [1] -1/-1/-1->0->-1 [2] -1/-1/-1->0->-1 [3] -1/-1/-1->0->-1 [4] -1/-1/-1->0->-1 [5] -1/-1/-1->0->-1 [6] -1/-1/-1->0->-1 [7] -1/-1/-1->0->-1 [8] -1/-1/-1->0->-1 [9] -1/-1/-1->0->-1 [10] -1/-1/-1->0->-1 [11] -1/-1/-1->0->-1 [12] -1/-1/-1->0->-1 [13] -1/-1/-1->0->-1 [14] -1/-1/-1->0->-1 [15] -1/-1/-1->0->-1 [16] -1/-1/-1->0->-1 [17] -1/-1/-1->0->-1 [18] -1/-1/-1->0->-1 [19] -1/-1/-1->0->-1 [20] -1/-1/-1->0->-1 [21] -1/-1/-1->0->-1 [22] -1/-1/-1->0->-1 [23] -1/-1/-1->0->-1 [24] -1/-1/-1->0->-1 [25] -1/-1/-1->0->-1 [26] -1/-1/-1->0->-1 [27] -1/-1/-1->0->-1 [28] -1/-1/-1->0->-1 [29] -1/-1/-1->0->-1 [30] -1/-1/-1->0->-1 [31] -1/-1/-1->0->-1 [32] -1/-1/-1->0->-1 [33] -1/-1/-1->0->-1 [34] -1/-1/-1->0->-1 [35] -1/-1/-1->0->-1 [36] -1/-1/-1->0->-1 [37] -1/-1/-1->0->-1 [38] -1/-1/-1->0->-1 [39] -1/-1/-1->0->-1 [40] -1/-1/-1->0->-1 [41] -1/-1/-1->0->-1 [42] -1/-1/-1->0->-1 [43] -1/-1/-1->0->-1 [44] -1/-1/-1->0->-1 [45] -1/-1/-1->0->-1 [46] -1/-1/-1->0->-1 [47] -1/-1/-1->0->-1 [48] -1/-1/-1->0->-1 [4
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 524288
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:789 [0] NCCL INFO [Proxy Service] Device 0 CPU core 9
+appmana-023:385:790 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 20
+appmana-023:385:789 [0] NCCL INFO proxy listening socket at 10.2.0.61<55703>
+appmana-023:385:385 [0] NCCL INFO 64 coll channels, 64 collnet channels, 0 nvls channels, 64 p2p channels, 64 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x35f27ce0 rank 0 nranks 1 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 3 color 59908776 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 1 total 0.02 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.01, rest 0.00)
+appmana-023:385:385 [0] NCCL INFO Rank 0 has color with NCCL_SPLIT_NOCOLOR, not creating a new communicator
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x3604cb70 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 5 color 2130503744 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x3604cb70 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:793 [0] NCCL INFO [Proxy Service] Device 0 CPU core 15
+appmana-023:385:793 [0] NCCL INFO proxy listening socket at 10.2.0.61<37615>
+appmana-023:385:794 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 6
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x3604cb70 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 5 color 2130503744 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 2 total 0.02 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.01)
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x391d9e90 rank 0 nranks 1 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 6 color 59908776 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x391d9e90 rank 0 nRanks 1 nNodes 1 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 01/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 02/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 03/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 04/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 05/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 06/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 07/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 08/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 09/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 10/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 11/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 12/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 13/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 14/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 15/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 16/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 17/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 18/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 19/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 20/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 21/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 22/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 23/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 24/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 25/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 26/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 27/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 28/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 29/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 30/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 31/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 32/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 33/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 34/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 35/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 36/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 37/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 38/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 39/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 40/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 41/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 42/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 43/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 44/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 45/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 46/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 47/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 48/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 49/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 50/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 51/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 52/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 53/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 54/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 55/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 56/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 57/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 58/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 59/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 60/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 61/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 62/64 : 0
+appmana-023:385:385 [0] NCCL INFO Channel 63/64 : 0
+appmana-023:385:385 [0] NCCL INFO Trees [0] -1/-1/-1->0->-1 [1] -1/-1/-1->0->-1 [2] -1/-1/-1->0->-1 [3] -1/-1/-1->0->-1 [4] -1/-1/-1->0->-1 [5] -1/-1/-1->0->-1 [6] -1/-1/-1->0->-1 [7] -1/-1/-1->0->-1 [8] -1/-1/-1->0->-1 [9] -1/-1/-1->0->-1 [10] -1/-1/-1->0->-1 [11] -1/-1/-1->0->-1 [12] -1/-1/-1->0->-1 [13] -1/-1/-1->0->-1 [14] -1/-1/-1->0->-1 [15] -1/-1/-1->0->-1 [16] -1/-1/-1->0->-1 [17] -1/-1/-1->0->-1 [18] -1/-1/-1->0->-1 [19] -1/-1/-1->0->-1 [20] -1/-1/-1->0->-1 [21] -1/-1/-1->0->-1 [22] -1/-1/-1->0->-1 [23] -1/-1/-1->0->-1 [24] -1/-1/-1->0->-1 [25] -1/-1/-1->0->-1 [26] -1/-1/-1->0->-1 [27] -1/-1/-1->0->-1 [28] -1/-1/-1->0->-1 [29] -1/-1/-1->0->-1 [30] -1/-1/-1->0->-1 [31] -1/-1/-1->0->-1 [32] -1/-1/-1->0->-1 [33] -1/-1/-1->0->-1 [34] -1/-1/-1->0->-1 [35] -1/-1/-1->0->-1 [36] -1/-1/-1->0->-1 [37] -1/-1/-1->0->-1 [38] -1/-1/-1->0->-1 [39] -1/-1/-1->0->-1 [40] -1/-1/-1->0->-1 [41] -1/-1/-1->0->-1 [42] -1/-1/-1->0->-1 [43] -1/-1/-1->0->-1 [44] -1/-1/-1->0->-1 [45] -1/-1/-1->0->-1 [46] -1/-1/-1->0->-1 [47] -1/-1/-1->0->-1 [48] -1/-1/-1->0->-1 [4
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 524288
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:797 [0] NCCL INFO [Proxy Service] Device 0 CPU core 17
+appmana-023:385:798 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 9
+appmana-023:385:797 [0] NCCL INFO proxy listening socket at 10.2.0.61<58713>
+appmana-023:385:385 [0] NCCL INFO 64 coll channels, 64 collnet channels, 0 nvls channels, 64 p2p channels, 64 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x391d9e90 rank 0 nranks 1 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 6 color 59908776 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 1 total 0.02 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.01, rest 0.00)
+appmana-023:385:385 [0] NCCL INFO Rank 0 has color with NCCL_SPLIT_NOCOLOR, not creating a new communicator
+[2026-08-19 06:20:09,507] [INFO] [module.py:398:_partition_layers] Partitioning pipeline stages with method parameters
+[2026-08-19 06:20:10,236] [INFO] [logging.py:123:log_dist] [Rank 0] DeepSpeed info: version=0.18.4, git-hash=unknown, git-branch=unknown
+[2026-08-19 06:20:10,237] [INFO] [config.py:687:__init__] Config mesh_device None world_size = 1
+[2026-08-19 06:20:10,248] [INFO] [engine.py:1415:_configure_distributed_model] ********** distributed groups summary **********
+	 self.dp_world_size=1
+	 self.mp_world_size=2
+	 self.seq_dp_world_size=1
+	 self.sequence_parallel_size=1
+***********************************************
+[2026-08-19 06:20:10,255] [INFO] [logging.py:123:log_dist] [Rank 0] DeepSpeed Flops Profiler Enabled: False
+[2026-08-19 06:20:10,258] [INFO] [logging.py:123:log_dist] [Rank 0] [TorchCheckpointEngine] Initialized with serialization = True
+[2026-08-19 06:20:10,259] [INFO] [config.py:958:print] DeepSpeedEngine configuration:
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   activation_checkpointing_config  {
+    "partition_activations": false, 
+    "contiguous_memory_optimization": false, 
+    "cpu_checkpointing": false, 
+    "number_checkpoints": null, 
+    "synchronize_checkpoint_boundary": false, 
+    "profile": false
+}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   aio_config ................... {'block_size': 1048576, 'queue_depth': 8, 'intra_op_parallelism': 1, 'single_submit': False, 'overlap_events': True, 'use_gds': False}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   amp_enabled .................. False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   amp_params ................... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   autotuning_config ............ {
+    "enabled": false, 
+    "start_step": null, 
+    "end_step": null, 
+    "metric_path": null, 
+    "arg_mappings": null, 
+    "metric": "throughput", 
+    "model_info": null, 
+    "results_dir": "autotuning_results", 
+    "exps_dir": "autotuning_exps", 
+    "overwrite": true, 
+    "fast": true, 
+    "start_profile_step": 3, 
+    "end_profile_step": 5, 
+    "tuner_type": "gridsearch", 
+    "tuner_early_stopping": 5, 
+    "tuner_num_trials": 50, 
+    "model_info_path": null, 
+    "mp_size": 1, 
+    "max_train_batch_size": null, 
+    "min_train_batch_size": 1, 
+    "max_train_micro_batch_size_per_gpu": 1.024000e+03, 
+    "min_train_micro_batch_size_per_gpu": 1, 
+    "num_tuning_micro_batch_sizes": 3
+}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   bfloat16_config .............. enabled=False immediate_grad_update=False check_grad_overflow=False bf16_master_weights_and_grads=False bf16_optimizer_states=False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   checkpoint_config ............ {'tag_validation': 'WARN', 'checkpoint_serialization': True, 'writer': None}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   checkpoint_parallel_write_pipeline  False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   checkpoint_tag_validation_enabled  True
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   checkpoint_tag_validation_fail  False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   comms_config ................. <deepspeed.comm.config.DeepSpeedCommsConfig object at 0x7282e6d40d40>
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   communication_data_type ...... None
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   compile_config ............... deepcompile=False free_activation=False free_activation_threshold=10485760 offload_activation=False offload_opt_states=False double_buffer=True symmetric_memory=False debug_log=False offload_parameters=False sync_before_reduce=False sync_after_reduce=False sync_before_allgather=False sync_after_allgather=False keep_int_input_tensors=True keep_all_input_tensors=False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   compression_config ........... {'weight_quantization': {'shared_parameters': {'enabled': False, 'quantizer_kernel': False, 'schedule_offset': 0, 'quantize_groups': 1, 'quantize_verbose': False, 'quantization_type': 'symmetric', 'quantize_weight_in_forward': False, 'rounding': 'nearest', 'fp16_mixed_quantize': False, 'quantize_change_ratio': 0.001}, 'different_groups': {}}, 'activation_quantization': {'shared_parameters': {'enabled': False, 'quantization_type': 'symmetric', 'range_calibration': 'dynamic', 'schedule_offset': 1000}, 'different_groups': {}}, 'sparse_pruning': {'shared_parameters': {'enabled': False, 'method': 'l1', 'schedule_offset': 1000}, 'different_groups': {}}, 'row_pruning': {'shared_parameters': {'enabled': False, 'method': 'l1', 'schedule_offset': 1000}, 'different_groups': {}}, 'head_pruning': {'shared_parameters': {'enabled': False, 'method': 'topk', 'schedule_offset': 1000}, 'different_groups': {}}, 'channel_pruning': {'shared_parameters': {'enabled': False, 'method': 'l1', 'schedule_offset': 1000}, 'different_groups': {}}, 'layer_reduction': {'enabled': False}}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   curriculum_enabled_legacy .... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   curriculum_params_legacy ..... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   data_efficiency_config ....... {'enabled': False, 'seed': 1234, 'data_sampling': {'enabled': False, 'num_epochs': 1000, 'num_workers': 0, 'pin_memory': False, 'curriculum_learning': {'enabled': False}, 'dynamic_batching': {'enabled': False, 'lr_scaling_method': 'linear', 'min_batch_size': 1, 'max_batch_size': None, 'sequence_picking_order': 'dataloader', 'verbose': False}}, 'data_routing': {'enabled': False, 'random_ltd': {'enabled': False, 'layer_token_lr_schedule': {'enabled': False}}}}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   data_efficiency_enabled ...... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   dataloader_drop_last ......... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   datastates_config ............ {
+    "enabled": false, 
+    "config": null
+}
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   disable_allgather ............ False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   dump_state ................... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_enabled ........... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_gas_boundary_resolution  1
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_layer_name ........ bert.encoder.layer
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_layer_num ......... 0
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_max_iter .......... 100
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_stability ......... 1e-06
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_tol ............... 0.01
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   eigenvalue_verbose ........... False
+[2026-08-19 06:20:10,259] [INFO] [config.py:962:print]   elasticity_enabled ........... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   float16_config ............... enabled=False auto_cast=False loss_scale=0.0 initial_scale_power=16 loss_scale_window=1000 hysteresis=2 consecutive_hysteresis=False min_loss_scale=1 fp16_master_weights_and_grads=False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   flops_profiler_config ........ {
+    "enabled": false, 
+    "recompute_fwd_factor": 0.0, 
+    "profile_step": 1, 
+    "module_depth": -1, 
+    "top_modules": 1, 
+    "detailed": true, 
+    "output_file": null
+}
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   global_rank .................. 0
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   grad_accum_dtype ............. None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   gradient_accumulation_steps .. 4
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   gradient_clipping ............ 1
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   gradient_predivide_factor .... 1.0
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   graph_harvesting ............. False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   hybrid_engine ................ enabled=False max_out_tokens=512 inference_tp_size=1 release_inference_cache=False pin_parameters=True tp_gather_partition_size=8
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   load_universal_checkpoint .... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   memory_breakdown ............. False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   mics_hierarchial_params_gather  False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   mics_shard_size .............. -1
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   monitor_config ............... tensorboard=TensorBoardConfig(enabled=False, output_path='', job_name='DeepSpeedJobName') comet=CometConfig(enabled=False, samples_log_interval=100, project=None, workspace=None, api_key=None, experiment_name=None, experiment_key=None, online=None, mode=None) wandb=WandbConfig(enabled=False, group=None, team=None, project='deepspeed') csv_monitor=CSVConfig(enabled=False, output_path='', job_name='DeepSpeedJobName')
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   nebula_config ................ {
+    "enabled": false, 
+    "persistent_storage_path": null, 
+    "persistent_time_interval": 100, 
+    "num_of_version_in_retention": 2, 
+    "enable_nebula_load": true, 
+    "load_path": null
+}
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   optimizer_legacy_fusion ...... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   optimizer_name ............... None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   optimizer_params ............. None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   pipeline ..................... {'stages': 'auto', 'partition': 'best', 'seed_layers': False, 'activation_checkpoint_interval': 0, 'pipe_partitioned': True, 'grad_partitioned': True}
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   pld_enabled .................. False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   pld_params ................... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   prescale_gradients ........... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   scheduler_name ............... None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   scheduler_params ............. None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   seq_parallel_communication_data_type  torch.float32
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   sparse_attention ............. None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   sparse_gradients_enabled ..... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   steps_per_print .............. 1
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   tensor_parallel_config ....... dtype=torch.float16 autotp_size=0 tp_overlap_comm=False tensor_parallel=TPConfig(tp_size=1, tp_grain_size=1, mpu=None, tp_group=None) injection_policy_tuple=None keep_module_on_host=False replace_with_kernel_inject=False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   timers_config ................ enabled=True synchronized=True
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   torch_autocast_dtype ......... None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   torch_autocast_enabled ....... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   torch_autocast_lower_precision_safe_modules  None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   train_batch_size ............. 4
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   train_micro_batch_size_per_gpu  1
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   use_data_before_expert_parallel_  False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   use_node_local_storage ....... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   wall_clock_breakdown ......... False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   weight_quantization_config ... None
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   world_size ................... 1
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   zero_allow_untested_optimizer  False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   zero_config .................. stage=0 contiguous_gradients=True reduce_scatter=True reduce_bucket_size=500000000 use_multi_rank_bucket_allreduce=True allgather_partitions=True allgather_bucket_size=500000000 overlap_comm=False load_from_fp32_weights=True elastic_checkpoint=False offload_param=None offload_optimizer=None zenflow=None sub_group_size=1000000000 cpu_offload_param=None cpu_offload_use_pin_memory=None cpu_offload=None prefetch_bucket_size=50000000 param_persistence_threshold=100000 model_persistence_threshold=9223372036854775807 max_live_parameters=1000000000 max_reuse_distance=1000000000 gather_16bit_weights_on_model_save=False module_granularity_threshold=0 use_all_reduce_for_fetch_params=False stage3_gather_fp16_weights_on_model_save=False ignore_unused_parameters=True legacy_stage1=False round_robin_gradients=False zero_hpz_partition_size=1 zero_quantized_weights=False zero_quantized_nontrainable_weights=False zero_quantized_gradients=False zeropp_loco_param=None mics_shard_size=-1 mics_hierarchical_params_gather=False memory_efficient_linear=True pipeline_loading_checkpoint=False override_module_apply=True log_trace_cache_warnings=False enable_sanity_checks=False leaf_module=DeepSpeedZeroLeafModuleConfig(classes=['transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock', 'transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock', 'transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock'], names=[], name_suffixes=[])
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   zero_enabled ................. False
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   zero_force_ds_cpu_optimizer .. True
+[2026-08-19 06:20:10,260] [INFO] [config.py:962:print]   zero_optimization_stage ...... 0
+[2026-08-19 06:20:10,260] [INFO] [config.py:948:print_user_config]   json = {
+    "train_micro_batch_size_per_gpu": 1, 
+    "gradient_accumulation_steps": 4, 
+    "gradient_clipping": 1, 
+    "steps_per_print": 1
+}
+[2026-08-19 06:20:10,260] [INFO] [engine.py:104:__init__] CONFIG: micro_batches=4 micro_batch_size=1
+[2026-08-19 06:20:10,261] [INFO] [engine.py:145:__init__] is_pipe_partitioned= False is_grad_partitioned= False
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:799 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 31
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x727d18010000)
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=48 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:785 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 48 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0xa164 ctsFifoLkey=0xa164
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x727d18054000)
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x727d1809c000)
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=49 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=50 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:785 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 50 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0xa571 ctsFifoLkey=0xa571
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x727d180e0000)
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:785 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=51 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:385 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+[2026-08-19 06:20:10,349] [INFO] [engine.py:164:__init__] RANK=0 STAGE=0 LAYERS=14 [0, 14) STAGE_PARAMS=57426336 (57.426M) TOTAL_PARAMS=114934176 (114.934M) UNIQUE_PARAMS=114934176 (114.934M)
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x3de90c80 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0x88a51fe36409d185 - Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x3de90c80 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:801 [0] NCCL INFO [Proxy Service] Device 0 CPU core 28
+appmana-023:385:801 [0] NCCL INFO proxy listening socket at 10.2.0.61<42793>
+appmana-023:385:802 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 4
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommInitRankConfig comm 0x3de90c80 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 commId 0x88a51fe36409d185 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.01 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.00)
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 1 -> netDev 0 (netId 0x0) graph=0
+appmana-023:385:803 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 25
+appmana-023:385:385 [0] NCCL INFO Channel 01/1 : 0[0] -> 1[0] [send] via NET/IB/0/Shared
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x727fe0010000)
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=52 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:801 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 52 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0xb7b3 ctsFifoLkey=0xb7b3
+[2026-08-19 06:20:10,553] [INFO] [logging.py:123:log_dist] [Rank 0] Using client callable to create basic optimizer
+[2026-08-19 06:20:10,553] [INFO] [logging.py:123:log_dist] [Rank 0] Removing param_group that has no 'params' in the basic Optimizer
+[2026-08-19 06:20:10,562] [INFO] [logging.py:123:log_dist] [Rank 0] DeepSpeed Basic Optimizer = AdamW8bitKahan
+[2026-08-19 06:20:10,562] [INFO] [logging.py:123:log_dist] [Rank 0] DeepSpeed Final Optimizer = AdamW8bitKahan
+appmana-023:385:385 [0] NCCL INFO Initialized NET plugin IB
+appmana-023:385:385 [0] NCCL INFO Assigned NET plugin IB to comm
+appmana-023:385:385 [0] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+appmana-023:385:385 [0] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+appmana-023:385:385 [0] NCCL INFO Using network IB
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x62330400 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 8 color 2130503744 key 0- Init START
+appmana-023:385:385 [0] NCCL INFO NET/IB : GPU Direct RDMA Disabled for HCA 0 'usb4_rdma0'
+appmana-023:385:385 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 0 is empty, ignoring. (GPU affinity =  ; CPU affinity = 0-31).
+appmana-023:385:385 [0] NCCL INFO Rank 0: 1 Net devices
+appmana-023:385:385 [0] NCCL INFO Rank 0: 0 CollNet devices
+appmana-023:385:385 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+appmana-023:385:385 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+appmana-023:385:385 [0] NCCL INFO comm 0x62330400 rank 0 nRanks 2 nNodes 2 localRanks 1 localRank 0 MNNVL 0
+appmana-023:385:385 [0] NCCL INFO Channel 00/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Channel 01/02 : 0 1
+appmana-023:385:385 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1
+appmana-023:385:385 [0] NCCL INFO P2P Chunksize set to 131072
+appmana-023:385:385 [0] NCCL INFO Tuning P2P operations with maxP2pPeers = 2
+appmana-023:385:385 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+appmana-023:385:806 [0] NCCL INFO [Proxy Service] Device 0 CPU core 27
+appmana-023:385:807 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 20
+appmana-023:385:806 [0] NCCL INFO proxy listening socket at 10.2.0.61<52787>
+appmana-023:385:385 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+appmana-023:385:385 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 1 p2p channels per peer
+appmana-023:385:385 [0] NCCL INFO Symmetric memory is not supported. cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 0
+appmana-023:385:385 [0] NCCL INFO CC Off, workFifoBytes 1048576
+appmana-023:385:385 [0] NCCL INFO ncclCommSplit comm 0x62330400 rank 0 nranks 2 cudaDev 0 nvmlDev 0 busId 1000 parent 0x1bea8620 childCount 8 color 2130503744 key 0 - Init COMPLETE
+appmana-023:385:385 [0] NCCL INFO Init timings - ncclCommSplit: rank 0 nranks 2 total 0.01 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.00, graphs 0.00, connections 0.00, rest 0.00)
+[CACHE] Initializing
+[CACHE] Existing cache has fingerprint 68bdda58f67f8a82
+[CACHE] Existing cache length: 833
+[CACHE] Initializing
+[CACHE] Existing cache has fingerprint b072e77f045c8ad1
+[CACHE] Existing cache length: 1
+trainable params: 114,934,176 || all params: 12,935,007,212 || trainable%: 0.8886
+SEED_LAYERS=False BASE_SEED=1234 SEED_FN=None
+Using topology: {ProcessCoord(pipe=0, data=0): 0, ProcessCoord(pipe=1, data=0): 1}
+stage=0 layers=14
+     0: InitialLayer
+     1: TransformerLayer
+     2: TransformerLayer
+     3: TransformerLayer
+     4: TransformerLayer
+     5: TransformerLayer
+     6: TransformerLayer
+     7: TransformerLayer
+     8: TransformerLayer
+     9: TransformerLayer
+    10: TransformerLayer
+    11: TransformerLayer
+    12: TransformerLayer
+    13: TransformerLayer
+stage=1 layers=16
+    14: TransformerLayer
+    15: TransformerLayer
+    16: TransformerLayer
+    17: TransformerLayer
+    18: TransformerLayer
+    19: TransformerLayer
+    20: TransformerLayer
+    21: TransformerLayer
+    22: TransformerLayer
+    23: TransformerLayer
+    24: TransformerLayer
+    25: TransformerLayer
+    26: TransformerLayer
+    27: TransformerLayer
+    28: TransformerLayer
+    29: FinalLayer
+  loss: loss_fn
+Global batch size = 4
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 1 -> netDev 0 (netId 0x0) graph=0
+appmana-023:385:385 [0] NCCL INFO Channel 01/1 : 1[0] -> 0[0] [receive] via NET/IB/0/Shared
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x727fe0051000)
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:801 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=53 pkey=0 pd=0x72804800cd60 oooRq=0
+[2026-08-19 06:20:17,879] [INFO] [logging.py:123:log_dist] [Rank 0] step=1, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:815 [0] NCCL INFO [Proxy Progress] Device 0 CPU core 21
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 0 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 1[0] -> 0[0] [receive] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 0 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:385 [0] NCCL INFO RRTRACE ncclTopoGetNetDev: rank 0 peer 1 ch 1 -> netDev 0 (netId 0x0) graph=1
+appmana-023:385:385 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[0] [send] via NET/IB/0
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x727cf8010000)
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=54 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:793 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 54 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0xbec2 ctsFifoLkey=0xbec2
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x727cf8054000)
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the send communicator (comm=0x727cf809c000)
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=55 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbSenderQpsCreate: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=56 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:793 [0] NCCL INFO Call to ibv_query_ece not supported
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbConnectImpl: NCCL Dev 0 IbDev 0 Port 1 qp_num 56 mtu 5 GID 1 (234AC4268DBC3DFD/100000000000000) ctsFifoRkey=0xc25b ctsFifoLkey=0xc25b
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbResiliencyInit: Resiliency is disabled on the recv communicator (comm=0x727cf80e0000)
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbRecvCommInit: Receive work requests will be posted on-demand
+appmana-023:385:793 [0] NCCL INFO NET/IB: ncclIbReceiverQpsCreateToRts: QP created: port=1 dev=0 devName=usb4_rdma0 ndevs=1 nmdevs=1 qp_num=57 pkey=0 pd=0x72804800cd60 oooRq=0
+appmana-023:385:385 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 0
+appmana-023:385:385 [0] NCCL INFO Symmetric VA size=24GB
+[2026-08-19 06:20:23,228] [INFO] [logging.py:123:log_dist] [Rank 0] step=2, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:28,490] [INFO] [logging.py:123:log_dist] [Rank 0] step=3, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:33,762] [INFO] [logging.py:123:log_dist] [Rank 0] step=4, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:39,048] [INFO] [logging.py:123:log_dist] [Rank 0] step=5, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:44,349] [INFO] [logging.py:123:log_dist] [Rank 0] step=6, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:49,654] [INFO] [logging.py:123:log_dist] [Rank 0] step=7, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:20:54,964] [INFO] [logging.py:123:log_dist] [Rank 0] step=8, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:00,281] [INFO] [logging.py:123:log_dist] [Rank 0] step=9, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:05,609] [INFO] [logging.py:123:log_dist] [Rank 0] step=10, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:10,937] [INFO] [logging.py:123:log_dist] [Rank 0] step=11, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:16,257] [INFO] [logging.py:123:log_dist] [Rank 0] step=12, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:21,587] [INFO] [logging.py:123:log_dist] [Rank 0] step=13, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:26,906] [INFO] [logging.py:123:log_dist] [Rank 0] step=14, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:32,228] [INFO] [logging.py:123:log_dist] [Rank 0] step=15, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:37,557] [INFO] [logging.py:123:log_dist] [Rank 0] step=16, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:42,885] [INFO] [logging.py:123:log_dist] [Rank 0] step=17, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:48,211] [INFO] [logging.py:123:log_dist] [Rank 0] step=18, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:53,534] [INFO] [logging.py:123:log_dist] [Rank 0] step=19, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:21:58,983] [INFO] [logging.py:123:log_dist] [Rank 0] step=20, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:04,314] [INFO] [logging.py:123:log_dist] [Rank 0] step=21, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:09,644] [INFO] [logging.py:123:log_dist] [Rank 0] step=22, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:14,981] [INFO] [logging.py:123:log_dist] [Rank 0] step=23, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:20,317] [INFO] [logging.py:123:log_dist] [Rank 0] step=24, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:25,647] [INFO] [logging.py:123:log_dist] [Rank 0] step=25, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:30,985] [INFO] [logging.py:123:log_dist] [Rank 0] step=26, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:36,328] [INFO] [logging.py:123:log_dist] [Rank 0] step=27, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:41,667] [INFO] [logging.py:123:log_dist] [Rank 0] step=28, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:47,004] [INFO] [logging.py:123:log_dist] [Rank 0] step=29, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:52,341] [INFO] [logging.py:123:log_dist] [Rank 0] step=30, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:22:57,683] [INFO] [logging.py:123:log_dist] [Rank 0] step=31, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:03,019] [INFO] [logging.py:123:log_dist] [Rank 0] step=32, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:08,353] [INFO] [logging.py:123:log_dist] [Rank 0] step=33, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:13,681] [INFO] [logging.py:123:log_dist] [Rank 0] step=34, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:19,013] [INFO] [logging.py:123:log_dist] [Rank 0] step=35, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:24,345] [INFO] [logging.py:123:log_dist] [Rank 0] step=36, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:29,687] [INFO] [logging.py:123:log_dist] [Rank 0] step=37, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:35,021] [INFO] [logging.py:123:log_dist] [Rank 0] step=38, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:40,363] [INFO] [logging.py:123:log_dist] [Rank 0] step=39, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:45,743] [INFO] [logging.py:123:log_dist] [Rank 0] step=40, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:51,080] [INFO] [logging.py:123:log_dist] [Rank 0] step=41, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:23:56,412] [INFO] [logging.py:123:log_dist] [Rank 0] step=42, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:01,748] [INFO] [logging.py:123:log_dist] [Rank 0] step=43, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:07,089] [INFO] [logging.py:123:log_dist] [Rank 0] step=44, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:12,429] [INFO] [logging.py:123:log_dist] [Rank 0] step=45, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:17,773] [INFO] [logging.py:123:log_dist] [Rank 0] step=46, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:23,111] [INFO] [logging.py:123:log_dist] [Rank 0] step=47, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:28,452] [INFO] [logging.py:123:log_dist] [Rank 0] step=48, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:33,790] [INFO] [logging.py:123:log_dist] [Rank 0] step=49, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:39,131] [INFO] [logging.py:123:log_dist] [Rank 0] step=50, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:44,470] [INFO] [logging.py:123:log_dist] [Rank 0] step=51, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:49,817] [INFO] [logging.py:123:log_dist] [Rank 0] step=52, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:24:55,165] [INFO] [logging.py:123:log_dist] [Rank 0] step=53, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:00,505] [INFO] [logging.py:123:log_dist] [Rank 0] step=54, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:05,853] [INFO] [logging.py:123:log_dist] [Rank 0] step=55, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:11,199] [INFO] [logging.py:123:log_dist] [Rank 0] step=56, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:16,539] [INFO] [logging.py:123:log_dist] [Rank 0] step=57, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:22,015] [INFO] [logging.py:123:log_dist] [Rank 0] step=58, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:27,354] [INFO] [logging.py:123:log_dist] [Rank 0] step=59, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]
+[2026-08-19 06:25:32,697] [INFO] [logging.py:123:log_dist] [Rank 0] step=60, skipped=0, lr=[2e-05], mom=[[0.9, 0.99]]

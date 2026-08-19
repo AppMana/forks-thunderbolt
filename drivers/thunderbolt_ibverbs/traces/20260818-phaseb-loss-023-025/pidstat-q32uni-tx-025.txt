@@ -1,0 +1,12 @@
+Average:        0    155771         -    0.00   24.18    0.00    1.14   24.18     -  kworker/u130:29+rxe_wq
+Average:        0         -    155771    0.00   24.18    0.00    1.14   24.18     -  |__kworker/u130:29-rxe_wq
+Average:        0    155770         -    0.00   25.16    0.00    1.14   25.16     -  kworker/u130:28-rxe_wq
+Average:        0         -    155770    0.00   25.16    0.00    1.14   25.16     -  |__kworker/u130:28-rxe_wq
+Average:        0    155769         -    0.00   25.16    0.00    1.14   25.16     -  kworker/u130:27-events_unbound
+Average:        0         -    155769    0.00   25.16    0.00    1.14   25.16     -  |__kworker/u130:27-events_unbound
+Average:        0    155768         -    0.00   24.35    0.00    1.14   24.35     -  kworker/u130:26+rxe_wq
+Average:        0         -    155768    0.00   24.35    0.00    1.14   24.35     -  |__kworker/u130:26-rxe_wq
+Average:        0    148379         -    0.00   24.51    0.00    1.14   24.51     -  kworker/u130:19-rxe_wq
+Average:        0         -    148379    0.00   24.51    0.00    1.14   24.51     -  |__kworker/u130:19-rxe_wq
+Average:        0    148345         -    0.00   24.35    0.00    1.14   24.35     -  kworker/u130:11+rxe_wq
+Average:        0         -    148345    0.00   24.35    0.00    1.14   24.35     -  |__kworker/u130:11-rxe_wq

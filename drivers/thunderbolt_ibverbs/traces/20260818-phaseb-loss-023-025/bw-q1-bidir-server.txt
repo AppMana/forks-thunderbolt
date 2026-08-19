@@ -1,0 +1,21 @@
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 1048576    2000             11.85              11.56  		   0.001378
+---------------------------------------------------------------------------------------
+---threads
+%CPU COMMAND
+28.6 spegel
+22.9 containerd
+17.9 kubelet
+11.1 promtail
+ 4.8 calico-node
+ 3.3 kworker/u130:24-btrfs-delalloc
+ 3.3 kworker/u130:23-events_unbound
+ 3.1 containerd-shim
+ 3.1 systemd
+ 2.8 kworker/u130:16-btrfs-endio-write
+ 2.8 kworker/u129:17-btrfs-delalloc
+---mpstat
+06:46:51 PM  all    7.94    0.00    7.88    0.70    0.00    0.03    0.00    0.00    0.00   83.44
+06:46:52 PM  all    6.43    0.00    6.08    0.19    0.00    0.03    0.00    0.00    0.00   87.27
+06:46:53 PM  all    6.03    0.00    5.78    1.05    0.00    0.00    0.00    0.00    0.00   87.15

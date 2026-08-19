@@ -1,0 +1,21 @@
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 1048576    8000             13.12              12.98  		   0.001548
+---------------------------------------------------------------------------------------
+---threads
+%CPU COMMAND
+50.0 calico-ipam
+28.5 spegel
+22.9 containerd
+17.9 kubelet
+13.3 calico
+11.1 promtail
+ 7.8 calico-ipam
+ 4.8 calico-node
+ 3.2 kworker/u130:6-btrfs-endio-write
+ 3.2 kworker/u130:24-rxe_wq
+ 3.1 kworker/u130:23-rxe_wq
+---mpstat
+06:47:13 PM  all    4.83    0.00   16.21    0.19    0.00    0.00    0.00    0.00    0.00   78.76
+06:47:14 PM  all    4.38    0.00   13.31    0.00    0.00    0.03    0.00    0.00    0.00   82.28
+Average:     all    4.87    0.00   12.51    0.34    0.00    0.03    0.00    0.00    0.00   82.24

@@ -1,0 +1,43 @@
+MTU-4096 deviation (wire v3) measurements, 2026-08-18, appmana-023 (4.0 GHz cap) <-> appmana-025
+Stack: tbfix 2.36 core; tbframe/tbrxe pub/tbfix-v6.17 0029057 (7d2cc98 MTU deviation + 0029057 wire v3)
+Change under test: IB_MTU_4096 in verbs, engine packetizes at 4012 B (spec s5); wire v3 refuses v2.
+Method identical to 20260818-phaseb-loss-023-025 (ib_send_lat 64B n3000, ib_write_bw 1MiB n2000
+gid index 1, server 023 / client 025; NCCL sweeps via ~/nccl-gate mpirun recipe).
+
+== Before (Phase B throttle0, MTU 2048) -> After (MTU 4096/4012)
+ib_send_lat 64B typ     15.27 us      -> 18.17 cold / 17.75 warm (avg 16.68, min 12.20)
+                                         ~+2 us typ vs the single Phase B sample; expected
+                                         unchanged (64B = ONLY packets); within run-to-run
+                                         drift of a session renegotiation + fresh boot, but
+                                         recorded honestly as slightly worse, not better.
+ib_write_bw q1 uni      10.30 Gb/s    -> 17.28 Gb/s   (+68%; prediction was 16-17)
+ib_write_bw q1 bidir    13.44 Gb/s    -> 28.83 Gb/s agg
+ib_write_bw q32 uni      9.40 Gb/s    -> 16.92 Gb/s
+ib_write_bw q32 bidir   12.11-13.4    -> 23.83 / 23.64 / 23.75 Gb/s agg (3 rounds)
+NCCL all_reduce busbw   1.03-1.06 GB/s-> 1.71-1.77 GB/s (large sizes)
+NCCL all_gather busbw   ~1.0 GB/s     -> 1.63-1.66 GB/s (large sizes)
+Frame-rate check: 17.28 Gb/s / 4012 B = ~538k frames/s -- same ~0.5M frames/s NHI ceiling
+as Phase B (8.6 Gb/s / 2048 B = 525k); bytes/frame was indeed the lever.
+
+== Loss profile (counters across 3x q32 bidir rounds, 51M pkts/side)
+023: seq_err +110  oos +98   dup +5418  completer_retry +155
+025: seq_err +97   oos +114  dup +5289  completer_retry +140
+-> CRC loss rate unchanged (~2e-6/frame), retransmits proportional, no storm.
+Tail stalls persist (e.g. all_reduce 268MB iteration 392ms vs 157ms median;
+all_gather 268MB 523ms vs 82ms) -- that is the Milestone 2 retransmit-timeout target.
+Tctl max on 023 during sweeps: 63-64C (cap 92C, far clear).
+
+== Incident during deploy (both fully diagnosed)
+1) First post-reload bench wedged: 025 TX ring hop 1 driver_head=2033 nhi_tail=0
+   (the known Intel wedge signature; 023->025 direction stayed healthy, 025 RX fine).
+   Idle reload had preceded it; per campaign rule 025 alone was rebooted -> clean.
+2) appmana-023 hung_task PANIC (kdump 202608182121, vmcore incomplete but dmesg good):
+   ib-unreg-wq / ib_unregister_work blocked >122 s in ib_uverbs_remove_one waiting
+   for a stale ib_send_lat process (left from the wedged bench) to close its verbs FD;
+   kernel.hung_task_panic=1 (X670 watchdog rig) turned the deliberate wait into a panic.
+   tbrxe has no disassociate_ucontext (untracked remap_vmalloc_range mmaps, same as
+   upstream rxe/siw), so device unregister legitimately waits for userspace FDs.
+   OPERATIONAL RULE derived: never leave verbs-FD holders running across a link
+   teardown on these nodes; every bench now runs under timeout(1) and is pkilled.
+   3) 023 netconsole rig was found dead (boot-time service raced enp110s0; configfs
+   target absent) -- rebuilt by hand, verified delivering to 019:16668.

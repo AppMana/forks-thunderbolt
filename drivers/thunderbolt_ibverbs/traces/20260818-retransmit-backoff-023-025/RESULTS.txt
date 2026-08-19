@@ -1,0 +1,34 @@
+Retransmit exponential backoff (retransmit_base_ms=10) validation, 2026-08-18, 023<->025
+Stack: tbfix 2.36 core; tbframe/tbrxe pub/tbfix-v6.17 be8f0df (M1 MTU-4096 + M2 backoff)
+Change under test: RC retry timer armed at base<<consecutive-timeouts (10ms default)
+capped at the verbs ack_timeout, reset by any peer response (rxe_qp_retrans_delay).
+
+== Tail collapse (NCCL sweeps, 20 iters/size, RING/Simple, usb4_rdma0)
+Before (MTU-4096 stack, stock timeout): sporadic 100x iterations dragged size averages:
+  all_reduce 268MB: 156868us col vs 392594us col (0.68 GB/s); Phase B: 365ms/689ms rows
+  all_gather 268MB: 523124us (0.26 GB/s) vs 82434us
+After (backoff): NO degraded rows at any size, both columns clean:
+  all_reduce: 1.72-1.75 GB/s at 16MB-268MB (268MB: 153774us/153970us, matched columns)
+  all_gather: 1.68-1.71 GB/s at 32MB-268MB (268MB: 80087us/80059us)
+ib_send_lat 64B: 12.89/12.83 us typ (best of the campaign; baseline 15.27).
+
+== No retransmit storm (counters across both NCCL sweeps, ~9.3M pkts/side)
+023: seq_err +149  completer_retry +206  dup +710   oos +38
+025: seq_err +10   completer_retry +53   dup +129   oos +195
+-> retries remain proportional to genuine CRC loss (~1e-5..e-6/frame); duplicate
+   counts two orders below the Phase-B qps32 baseline rates. Tctl max 62.8C.
+
+== NCCL timeout math (recorded for the commit)
+NCCL passes qp attr timeout=18 -> 4.096us * 2^18 = 1.07 s first retransmit (stock);
+perftest 14 -> 67 ms. Link RTT ~15us. Backoff floor 10 ms clears the worst genuine
+ACK latency under a full 1984-frame admission window (~4 ms drain at ~0.5M frames/s).
+
+== Ring-wedge finding (operational, repeated 3x today)
+Ring teardown/re-create WITHOUT a reboot (tbrxe/tbframe reload, or the peer
+rebooting) wedges one side's NHI TX ring (driver_head advances, nhi_tail stays 0)
+roughly every other event: 21:12 both-reload -> 025 wedged; 21:40 tbrxe-only
+reloads -> BOTH wedged (023's discovered later); 22:0x 023 reboot -> 025 wedged.
+This is the router-egress credit wedge class (reset-only recovery) the BYE/READY_ACK
+spec work targets. Operational rule adopted for the campaign: deploys and recoveries
+go via reboot (one node at a time), and every link re-establishment is verified
+bidirectionally (ib_send_lat both ways or counters) before any workload.

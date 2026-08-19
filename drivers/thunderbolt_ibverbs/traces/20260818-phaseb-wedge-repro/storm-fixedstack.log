@@ -1,0 +1,20 @@
+=== cycle 1 target=appmana-025 port=19601 19:18:54
+reload-ok
+cycle 1 dir_025to023=0 dir_023to025=0
+=== cycle 2 target=appmana-023 port=19602 19:19:16
+reload-ok
+cycle 2 dir_025to023=0 dir_023to025=0
+=== cycle 3 target=appmana-025 port=19603 19:19:38
+reload-ok
+cycle 3 dir_025to023=0 dir_023to025=0
+=== cycle 4 target=appmana-023 port=19604 19:20:00
+reload-ok
+cycle 4 dir_025to023=0 dir_023to025=0
+=== cycle 5 target=appmana-025 port=19605 19:20:22
+reload-ok
+cycle 5 dir_025to023=0 dir_023to025=0
+=== cycle 6 target=appmana-023 port=19606 19:20:44
+reload-ok
+cycle 6 dir_025to023=124 dir_023to025=124
+WEDGE CANDIDATE at cycle 6 (target was appmana-023)
+exit 42
