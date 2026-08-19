@@ -132,6 +132,18 @@ err_free_binding:
 static void tbframe_service_remove(struct tb_service *svc)
 {
 	struct tbframe_service_binding *binding = tb_service_get_drvdata(svc);
+	struct tb_xdomain *xd = tb_service_parent(svc);
+	/*
+	 * Service remove runs both for a real cable unplug and for a driver
+	 * unbind (module unload) with the peer still cabled and running.
+	 * The distinction decides whether the BYE quiesce can and must be
+	 * sent: on a true unplug the control channel is gone and BYE would
+	 * only burn its retry budget; on an unbind the peer is alive and
+	 * WILL keep streaming into the teardown unless told to stop -- the
+	 * original "full tbframe reload on both ends" incident shape.
+	 */
+	enum tbframe_down_reason reason = xd->is_unplugged ?
+		TBFRAME_DOWN_UNPLUG : TBFRAME_DOWN_CLOSED;
 
 	if (binding) {
 		/*
@@ -139,7 +151,7 @@ static void tbframe_service_remove(struct tb_service *svc)
 		 * context from its leaked frames; leak the hw context too
 		 * rather than hand those frames a dangling pointer.
 		 */
-		if (tbframe_link_destroy(binding->link, TBFRAME_DOWN_UNPLUG))
+		if (tbframe_link_destroy(binding->link, reason))
 			pr_err("leaking hw context after forced link teardown\n");
 		else
 			tbframe_hw_destroy(binding->hw);
