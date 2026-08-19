@@ -144,15 +144,21 @@ this fork; cross-implementation interop is a non-goal.
 
 ## 5. MTU and packetization
 
-- Initial: strict `IB_MTU_2048`. Worst-case transport unit =
+- Baseline rule: strict `IB_MTU_2048`. Worst-case transport unit =
   80 (header budget, `RXE_MAX_HDR_LENGTH`) + 2048 + pad + 4 <= 4096. All
   rxe packetization grammar applies unchanged (FIRST/MIDDLE exactly MTU,
-  LAST in (0, MTU], ONLY <= MTU).
-- Measured lever (only if frames/sec is the demonstrated bottleneck):
-  report `IB_MTU_4096` in verbs while fragmenting at `4096 - 80 - 4`
-  aligned down to 4 = 4012-byte payload ceiling. Wire-consistent because
-  both ends derive the ceiling from this spec; documented as a fork
-  deviation from IBA MTU enums.
+  LAST in (0, MTU], ONLY <= MTU). Links whose frame payload budget cannot
+  carry the deviated transport unit below stay on this rule.
+- MTU-4096 deviation (in effect since wire v3; frames/sec was measured as
+  the bandwidth ceiling on the 023/025 canaries): report `IB_MTU_4096` in
+  verbs while fragmenting at `4096 - 80 - 4` aligned down to 4 = 4012-byte
+  payload ceiling. The packetization grammar is unchanged in shape with
+  the effective MTU being 4012 (FIRST/MIDDLE exactly 4012, pad-free by
+  4-alignment); worst-case transport unit = 80 + 4012 + 4 = 4096.
+  Wire-consistent because both ends derive the ceiling from this spec;
+  documented as a fork deviation from IBA MTU enums. Mixed wire versions
+  refuse the session at HELLO (a v2 responder would NAK every 4012-byte
+  FIRST/MIDDLE as "not mtu").
 
 ## 6. Flow control
 

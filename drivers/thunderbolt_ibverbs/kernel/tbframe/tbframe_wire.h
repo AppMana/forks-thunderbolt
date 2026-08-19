@@ -17,8 +17,13 @@
 #define TBFRAME_WIRE_MAGIC		0x31464254u /* "TBF1" little-endian */
 /* v2: distinct SOF marker PDF (0x6) on the data path; v1 peers chop
  * multi-packet frames, so mixed versions must refuse the session.
+ * v3: the client engine's MTU-4096 deviation (wire-spec section 5) is in
+ * effect: data frames carry payloads packetized at the 4012-byte ceiling,
+ * so worst-case frames grow from 2135 to 4096 bytes. A v2 responder would
+ * NAK every FIRST/MIDDLE packet ("not mtu"), a stalemate rather than a
+ * clean refusal, so mixed versions refuse the session at HELLO.
  */
-#define TBFRAME_WIRE_VERSION		2u
+#define TBFRAME_WIRE_VERSION		3u
 #define TBFRAME_WIRE_XDOMAIN_HDR_SIZE	32u
 #define TBFRAME_WIRE_HDR_SIZE		16u
 #define TBFRAME_WIRE_HELLO_SIZE		28u
