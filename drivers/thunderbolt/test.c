@@ -3825,6 +3825,28 @@ static void tb_test_xdomain_handler_unregister_waits_for_dispatch(struct kunit *
 	tb_unregister_protocol_handler(new_inst);
 }
 
+/*
+ * With two active XDomains on one controller (023: one port to 025, one to
+ * an unresponsive 022), a TB_CFG_PKG_ERROR generated on the DEAD port's
+ * route must not complete a pending XDP request addressed to the LIVE
+ * peer. It did: tb_xdomain_match accepted any error packet uncondition-
+ * ally, so the sibling port's error traffic poisoned the 023<->025
+ * lane-bonding negotiation (link-status failed in ~2 ms with the peer
+ * never receiving the request; observed 2026-08-18 on the canaries).
+ * Same-route errors must still complete the request (that is how a
+ * genuinely dead peer fails fast).
+ */
+static void tb_test_xdomain_error_match_is_route_checked(struct kunit *test)
+{
+	/* Error from the request's own route: completes it. */
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_error_pkg_matches(0x1, 0x1));
+	/* Error from a different route (the sibling port's dead peer):
+	 * must NOT complete it.
+	 */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_error_pkg_matches(0x1, 0x3));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_error_pkg_matches(0x3, 0x1));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -3839,6 +3861,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_recovers_boot_skew),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_bounded_and_safe),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_predicates),
+	KUNIT_CASE(tb_test_xdomain_error_match_is_route_checked),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),
 	KUNIT_CASE(tb_test_xdomain_handler_dispatch_source_blind_registrant),

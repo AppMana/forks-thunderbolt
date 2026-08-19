@@ -39,6 +39,7 @@ bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool bonding_possible,
 					       bool bonded);
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
+bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);

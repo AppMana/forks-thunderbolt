@@ -167,8 +167,28 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 			     const struct ctl_pkg *pkg)
 {
 	switch (pkg->frame.eof) {
-	case TB_CFG_PKG_ERROR:
-		return true;
+	case TB_CFG_PKG_ERROR: {
+		const struct tb_cfg_header *err_hdr = pkg->buffer;
+		const struct tb_xdp_header *req_hdr = req->request;
+		u64 req_route;
+
+		/*
+		 * An error completes only the request addressed to ITS
+		 * route. With two active XDomains on one controller, the
+		 * old match-any behavior let a dead sibling port's error
+		 * traffic complete requests bound for the healthy peer
+		 * (the 023<->025 lane-bonding negotiation failed in ~2 ms
+		 * with the peer never seeing the request, 2026-08-18).
+		 * A malformed short error still matches (old behavior)
+		 * rather than lingering to the timeout.
+		 */
+		if (pkg->frame.size < sizeof(*err_hdr))
+			return true;
+
+		req_route = ((u64)(req_hdr->xd_hdr.route_hi & ~BIT(31)) << 32) |
+			    req_hdr->xd_hdr.route_lo;
+		return (tb_cfg_get_route(err_hdr) & ~BIT_ULL(63)) == req_route;
+	}
 
 	case TB_CFG_PKG_XDOMAIN_RESP: {
 		const struct tb_xdp_header *res_hdr = pkg->buffer;
@@ -2409,6 +2429,32 @@ bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void)
 {
 	return false;
+}
+
+/*
+ * Response matching for XDomain control requests: does a TB_CFG_PKG_ERROR
+ * from @err_route complete a pending XDP request addressed to @req_route?
+ * Builds the real structures and calls the real match function, so the test
+ * pins the exact demux behavior tb_ctl uses.
+ */
+bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route)
+{
+	struct tb_xdp_header req_hdr = {};
+	struct cfg_error_pkg err = {};
+	struct tb_cfg_request req = {};
+	struct ctl_pkg pkg = {};
+
+	req_hdr.xd_hdr.route_hi = upper_32_bits(req_route);
+	req_hdr.xd_hdr.route_lo = lower_32_bits(req_route);
+	req.request = &req_hdr;
+	req.response_size = sizeof(struct tb_xdp_header);
+
+	err.header = tb_cfg_make_header(err_route);
+	pkg.buffer = &err;
+	pkg.frame.eof = TB_CFG_PKG_ERROR;
+	pkg.frame.size = sizeof(err);
+
+	return tb_xdomain_match(&req, &pkg);
 }
 
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
