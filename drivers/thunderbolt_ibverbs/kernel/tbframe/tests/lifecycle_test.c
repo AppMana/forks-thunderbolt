@@ -198,19 +198,18 @@ static void tbframe_lifecycle_hopid_release_matches_alloc(struct kunit *test)
 }
 
 /*
- * A new session must never reuse the previous session's transmit HopID.
+ * The transmit HopID is stable across sessions -- pinned deliberately.
  *
- * The router keeps per-HopID egress state (queues, credit counters) that no
- * hop-entry rewrite resets: an abrupt peer teardown that strands packets on
- * the egress leaves that HopID wedged at the router until a power cycle
- * (023/025 incident: fresh sessions on the same HopID were born dead, TX
- * ring fully posted with zero consumption, across full module reloads on
- * both ends). Recovery must stop at session re-handshake, so each
- * re-handshake allocates a fresh out-HopID (alloc before release, the ida
- * never hands back the held one) and advertises it in the new HELLO; a
- * poisoned egress HopID is then simply never used again.
+ * Per-session rotation was tried and measured on the 023/025 canaries
+ * (2026-08-18): it does not recover the router egress wedge (per-port
+ * poison, reset-only) and it destabilizes re-negotiation -- a peer that
+ * rotates in its down_session lands the new HopID after this side's
+ * bring_up snapshot, yielding a stable-but-dead session with the ingress
+ * hop on the stale id. Static ids make every re-negotiation converge, so
+ * a session cycle must advertise the same HopID and neither allocate nor
+ * release anything; the single release belongs to destroy.
  */
-static void tbframe_lifecycle_session_rotates_out_hopid(struct kunit *test)
+static void tbframe_lifecycle_out_hopid_stable_across_sessions(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	int first;
@@ -218,6 +217,7 @@ static void tbframe_lifecycle_session_rotates_out_hopid(struct kunit *test)
 	tbframe_mock_link_up(test, fx);
 	first = fx->mock.last_request_tx_hopid;
 	KUNIT_ASSERT_EQ(test, fx->link->local_hopid, first);
+	KUNIT_ASSERT_EQ(test, 1u, fx->mock.out_hopid_allocs);
 
 	/* Peer reboots and re-HELLOs: supersede, full re-handshake. */
 	fx->mock.peer.session_cookie ^= 0xffull;
@@ -227,18 +227,15 @@ static void tbframe_lifecycle_session_rotates_out_hopid(struct kunit *test)
 	flush_workqueue(fx->tf.wq);
 	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
 
-	/* The re-handshake advertised a fresh HopID and freed the old one. */
-	KUNIT_EXPECT_NE(test, first, fx->mock.last_request_tx_hopid);
-	KUNIT_EXPECT_EQ(test, fx->link->local_hopid,
-			fx->mock.last_request_tx_hopid);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_releases);
-	KUNIT_EXPECT_EQ(test, first, fx->mock.last_release_out_hopid);
+	KUNIT_EXPECT_EQ(test, first, fx->mock.last_request_tx_hopid);
+	KUNIT_EXPECT_EQ(test, first, fx->link->local_hopid);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.out_hopid_releases);
 
-	/* Destroy releases exactly the live HopID, no double free. */
 	tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
 	fx->link_destroyed = true;
-	KUNIT_EXPECT_EQ(test, fx->mock.out_hopid_allocs,
-			fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_EQ(test, first, fx->mock.last_release_out_hopid);
 }
 
 /*
@@ -297,7 +294,7 @@ static struct kunit_case tbframe_lifecycle_cases[] = {
 	KUNIT_CASE(tbframe_lifecycle_reregister_after_unregister),
 	KUNIT_CASE(tbframe_lifecycle_double_register_refused),
 	KUNIT_CASE(tbframe_lifecycle_hopid_release_matches_alloc),
-	KUNIT_CASE(tbframe_lifecycle_session_rotates_out_hopid),
+	KUNIT_CASE(tbframe_lifecycle_out_hopid_stable_across_sessions),
 	KUNIT_CASE(tbframe_lifecycle_destroy_dead_hw_under_dispatch),
 	{}
 };

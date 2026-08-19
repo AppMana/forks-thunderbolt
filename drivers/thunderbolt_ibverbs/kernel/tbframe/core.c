@@ -112,15 +112,10 @@ static void tbframe_link_fill_local_hello(struct tbframe_link *link,
 					  struct tbframe_wire_hello *hello)
 {
 	struct tbframe *tf = link->tf;
-	unsigned long flags;
 
 	memset(hello, 0, sizeof(*hello));
 	hello->proto_version = TBFRAME_WIRE_VERSION;
-	/* Under the lock: down_session rotates ->local_hopid per session and
-	 * this runs from the dispatch context too (HELLO_ACK build). */
-	spin_lock_irqsave(&link->lock, flags);
 	hello->transmit_hopid = link->local_hopid;
-	spin_unlock_irqrestore(&link->lock, flags);
 	hello->rx_ring_entries = tf->ring_entries;
 	if (tf->e2e)
 		hello->capabilities |= TBFRAME_WIRE_CAP_E2E;
@@ -506,46 +501,20 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 		link->ops->release_in_hopid(link->hw, remote_hopid);
 
 	/*
-	 * Rotate the transmit HopID so the next session never reuses this
-	 * one: a session torn down with frames stranded on the egress can
-	 * leave per-HopID router state behind, and the ida hands the lowest
-	 * free id straight back, so every following session would be born
-	 * onto whatever the last one left. Protocol hygiene, not a recovery
-	 * mechanism: the 2026-08-18 023/025 egress wedge (TX ring fully
-	 * posted, zero consumed) was reproduced under capture and did NOT
-	 * clear when the next session rotated to a fresh HopID -- that
-	 * poison is per-port/link (egress credit state at the lane adapter),
-	 * survives every hop-entry and ring re-program, and only a router
-	 * reset clears it. Prevention therefore lives in the READY gate and
-	 * the quiesce-before-disable teardown order above; rotation just
-	 * keeps sessions from inheriting stale per-HopID state.
-	 * Alloc before release so the ida cannot return the id being
-	 * abandoned; on alloc failure keep the old id rather than dying.
-	 * Serialization: rotation runs under session_lock like every other
-	 * writer of the session's identity; the dispatch context reads
-	 * ->local_hopid under link->lock (tbframe_link_fill_local_hello), so
-	 * a concurrently built HELLO_ACK sees old or new, never garbage --
-	 * a peer that acts on the old id gets superseded by our next HELLO.
-	 * Skipped on destroy: the final release in link_destroy() covers the
-	 * live id.
+	 * The transmit HopID is deliberately NOT rotated across sessions.
+	 * Rotation was tried as hygiene against per-HopID router leftovers
+	 * and measured on the 023/025 canaries (2026-08-18): it does not
+	 * recover the egress wedge -- the poison is per-port/link (lane
+	 * adapter egress credit state, cleared only by a router reset), a
+	 * session on a fresh HopID stayed just as dead -- and it
+	 * destabilizes re-negotiation: a peer whose down_session rotates
+	 * mid-handshake lands its new HopID AFTER this side's bring_up
+	 * snapshot, producing a stable-but-dead session (our ingress on the
+	 * old id, peer transmitting on the new one). Static per-link ids
+	 * make every re-negotiation converge trivially; prevention of the
+	 * wedge lives in the READY gate and the quiesce-before-disable
+	 * order above.
 	 */
-	spin_lock_irqsave(&link->lock, flags);
-	if (!link->removing) {
-		int hopid;
-
-		spin_unlock_irqrestore(&link->lock, flags);
-		hopid = link->ops->alloc_out_hopid(link->hw);
-		if (hopid >= 0) {
-			int old = link->local_hopid;
-
-			spin_lock_irqsave(&link->lock, flags);
-			link->local_hopid = hopid;
-			spin_unlock_irqrestore(&link->lock, flags);
-			link->ops->release_out_hopid(link->hw, old);
-		}
-	} else {
-		spin_unlock_irqrestore(&link->lock, flags);
-	}
 
 	if (was_up) {
 		pr_info("%s: link down (%d)\n", link->name, reason);
