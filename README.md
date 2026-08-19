@@ -21,7 +21,7 @@ overlaid v6.17 tree, x86_64 qemu; the fleet/host kernels lack `CONFIG_KUNIT`).
 ```
 upstream  = git://git.kernel.org/pub/scm/linux/kernel/git/westeri/thunderbolt.git
 origin    = git@github.com:AppMana/forks-thunderbolt.git
-branch    = pub/tbfix-v6.17    (deployed on the AppMana fleet)
+branch    = pub/tbfix-v6.17
 base      = v6.17 + 3 backports already in linux-hwe-6.17
 ```
 
@@ -68,8 +68,8 @@ Read `docs/thunderbolt_fix.md` in the parent `appmana` repo. It covers:
 ## Two RDMA engines: legacy `thunderbolt_ibverbs` and `tbrxe` + `tbframe`
 
 The repo now carries **two** host-to-host RDMA engines. Both publish ib_devices
-named `usb4_rdma*`, so consumers (NCCL, perftest, the tb-chain webhook's HCA
-patterns) see the same device names either way.
+named `usb4_rdma*`, so consumers (NCCL, perftest) see the same device names
+either way.
 
 | | legacy `thunderbolt_ibverbs` | `tbrxe` + `tbframe` (successor) |
 |---|---|---|
@@ -79,16 +79,10 @@ patterns) see the same device names either way.
 | Provider package | `usb4-rdma-provider` (any) | `usb4-rdma-provider >= 0.2.70` |
 | Wire protocol | `proto/native_data.h` (being retired) | wire v3 per `docs/tbframe-tbrxe-wire-spec.md` |
 
-**Migration state (2026-08-19).** The production fleet runs the legacy engine
-from the AppMana apt repo (tbfix 2.30 + thunderbolt-ibverbs/provider 0.2.66
-published; the Ansible role installs the newest published versions). The
-cordoned canary pair appmana-023 ↔ appmana-025 has the legacy packages
-uninstalled and runs tbfix 2.39 + tbframe + tbrxe with provider 0.2.70 from
-the `v2.39` GitHub release. The tbrxe stack has passed its M4 gate — a real
-two-rank DiffusionPipe training run over NCCL NET/IB on `usb4_rdma0`
-(60/60 steps, loss decreasing, counters clean; see
+**Status (2026-08-19).** The tbrxe stack has passed a real two-rank
+pipeline-parallel training gate over NCCL `NET/IB` on `usb4_rdma0`
+(60/60 steps, loss decreasing, clean counters; evidence in
 `drivers/thunderbolt_ibverbs/traces/20260819-m4-diffusionpipe-023-025/`).
-Fleet-wide rollout has not happened yet.
 
 ### tbrxe's driver id and the provider requirement
 
@@ -111,8 +105,8 @@ containers. The 0.2.70 deb ships both provider families
 tbfix core, tbframe and tbrxe are **lockstep-built**: tbframe links against
 the tbfix core's `Module.symvers` (private `tb_*` exports) and the generated
 `<linux/thunderbolt.h>` header shim (`dkms/tbfix-gen-thunderbolt-header.sh`
-— building source-blind against the stock header caused the appmana-025
-NX-execute panic, kdump 202608031305); tbrxe links against tbframe's
+— building source-blind against the stock header causes an NX-execute
+panic on first inbound traffic); tbrxe links against tbframe's
 `Module.symvers`. Never mix builds from different revisions.
 
 tbframe.ko/tbrxe.ko are **not yet packaged** (no dkms/deb). The current
@@ -120,14 +114,14 @@ procedure is: build in `drivers/thunderbolt_ibverbs/kernel/tbframe/` then
 `kernel/tbrxe/` (the Makefiles find the tbfix symvers and header shim from
 the installed thunderbolt-tbfix-dkms), stage the two `.ko` on the node, and
 `insmod tbframe.ko` then `insmod tbrxe.ko`. Closing this packaging gap is a
-prerequisite for rollout beyond the canaries.
+prerequisite for production rollout.
 
 Deploys go via **reboot, one node at a time**, with bidirectional link
 verification (`ib_send_lat` both ways or counter deltas) before any
 workload. Never reload the modules under active RDMA traffic — that is the
 silicon-wedge class. Even idle ring teardown/re-create without a reboot has
 wedged an NHI TX ring (`driver_head` advances, `nhi_tail` stuck at 0)
-roughly every other event on the canaries (2026-08-18); the BYE/READY_ACK
+roughly every other event in testing (2026-08-18); the BYE/READY_ACK
 spec work narrows the windows but reboot remains the deploy path.
 
 ### Wire and behavior summary (normative spec: `docs/tbframe-tbrxe-wire-spec.md`)
@@ -150,7 +144,7 @@ spec work narrows the windows but reboot remains the deploy path.
   are never silently lost while the link is UP; loss windows are bracketed
   by link_down/link_up.
 
-### Measured performance (appmana-023 ↔ appmana-025, TB3 Maple Ridge x1, 2026-08-18/19)
+### Measured performance (two-node Maple Ridge x1 test pair, 2026-08-18/19)
 
 - `ib_send_lat` 64 B: ~15 us typical (best of campaign 12.89 us; legacy
   Strix record 8.3 us).
@@ -168,13 +162,13 @@ Evidence: `drivers/thunderbolt_ibverbs/traces/20260818-*/RESULTS.txt` and
 
 ### Lane bonding verdict (2026-08-19)
 
-**Negotiated (XDP) lane bonding cannot work on the Maple Ridge fleet.** The
+**Negotiated (XDP) lane bonding cannot work on Maple Ridge hosts.** The
 resident ICM firmware intercepts the link-state XDP requests and NAKs them
 (`ERROR_NOT_SUPPORTED`) before the peer OS ever sees them — measured by
-packet trace on the canaries; driver version and scheduling are irrelevant
+packet trace; driver version and scheduling are irrelevant
 (`traces/20260818-bonding-rearm-023-025/RESULTS.txt`). The bounded re-arm
 (tbfix 2.38, `78a7bbd`) and route-checked XDP error matching (`b042f53`)
-are correct and stay, but fleet x2 requires **direct bonding** (both ends
+are correct and stay, but x2 requires **direct bonding** (both ends
 arm lane 1 + bonding bit themselves), which is designed but not yet
 enabled. Strix-class integrated hosts bond natively — the committed
 `bench/results/strix-2p-noiommu-2x40g/` results are 2 lanes @ 20 Gb/s per
@@ -183,45 +177,58 @@ cable (40 Gb/s aggregate) without any of this.
 ### Component inventory for a working vLLM deployment (example)
 
 Every lib/component in the path, whether it is forked, and how it reaches a
-node or container. "webhook" = the tb-chain admission webhook, the single
-owner of NCCL env policy (images stay env-policy-free).
+node or container. Environment policy (the NCCL env below) belongs to the
+deployment's orchestration layer, not to images.
 
 | Component | Forked? | Source | Bundled / installed how |
 |---|---|---|---|
-| Linux kernel (6.17 HWE) | no | Ubuntu | host apt |
-| `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (v2.39 release assets; apt repo still at 2.30 — publication pending). Core bumps are cold-boot-only |
-| `tbframe.ko` (frame/session layer) | new (this repo, `kernel/tbframe`) | this repo | **not yet packaged** — staged insmod from `~/tbv-ko-fixed/` after boot; lockstep-built with the core (symvers + header shim) |
-| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` (`kernel/tbrxe`) | this repo | same as tbframe — lockstep, staged insmod; packaging is the rollout prerequisite |
-| `rdma_rxe` (`rxe_lan` fallback device) | ~stock (one fail-fast patch in the tbfix payload) | kernel / this repo | module in tbfix deb; device provisioned by `rxe-lan.service` (Ansible) |
-| rdma-core / `libibverbs` | no | Ubuntu 50.0 (noble, PABI 34) | host + container apt stock |
-| `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA tooling) | patches, not a fork (`packaging/rdma-core-patches/` applied to distro rdma-core) | this repo | host: deb >= 0.2.70 (v2.39 assets). container: currently baked into the vLLM/training images at 0.2.70; planned: webhook hostPath injection so host/container match by construction (requires matching PABI, asserted via image label) |
-| NCCL | **yes** | `forks-nccl-rdma-routing` (`appmana/rdma-routing`, 2.30.7 @ 22355b6 rail routing) | baked into the image (`LD_PRELOAD` selection; the `rail routing` .rodata string is the provenance check) |
-| NCCL net plugin | n/a — disabled | — | `NCCL_NET_PLUGIN=none` injected by the webhook (HPC-X segfaults on PCI-less HCAs) |
-| NCCL env (HCA order `usb4_rdma,rxe_lan`, AF_INET6, `prefer_hca`, Ring/Simple) | policy | `appmana-cluster` webhook | injected at admission; bare-metal runs must set it themselves |
-| vLLM | **yes** | `forks-vllm-consumer-nvidia-platforms` | the serving image itself |
-| perftest / nccl-tests | no | upstream | validation tooling only, on hosts or in `~/nccl-gate/` |
+| Linux kernel (6.17 HWE) | no | Ubuntu | host package manager |
+| `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (release assets). Core bumps are cold-boot-only |
+| `tbframe.ko` (frame/session layer) | new | this repo (`kernel/tbframe`) | host: DKMS deb (lockstep with the core: symvers + header shim) |
+| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`kernel/tbrxe`) | same deb as tbframe, built lockstep |
+| `rdma_rxe` (ethernet soft-RoCE fallback device) | ~stock (one fail-fast patch) | kernel / this repo | module in the tbfix deb; device created via `rdma link add ... type rxe` |
+| rdma-core / `libibverbs` | no | distro (noble = v50, PABI 34) | host + container, stock |
+| `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA addressing) | patches, not a fork (`packaging/rdma-core-patches/`) | this repo | host: deb >= 0.2.70. container: same deb baked in, or injected from the host at runtime (PABI must match the container's rdma-core) |
+| NCCL | **yes** | rail-routing fork (2.30.7 base) | baked into the image; required for correct multi-HCA rail selection |
+| NCCL net plugin | n/a — disabled | — | `NCCL_NET_PLUGIN=none` via deployment env (external plugins crash on PCI-less HCAs and bypass the fork's routing) |
+| NCCL env | policy | deployment | injected by the orchestration layer; see the env list below |
+| vLLM | **yes** | serving fork | the serving image |
+| perftest / nccl-tests | no | upstream | validation tooling only |
 
 ### Consuming the stack from NCCL (either engine)
 
-- Use the AppMana NCCL fork (`AppMana/forks-nccl-rdma-routing`, branch
-  `appmana/rdma-routing`, 2.30.7 base, commit `22355b6` or newer): it
-  advertises all device GIDs in the listen handle and self-selects the
-  usb4_rdma rail per peer with `rxe_lan` as the ordered fallback.
-- On the Kubernetes chain, the tb-chain webhook owns the NCCL env
-  (`NCCL_IB_HCA=usb4_rdma,rxe_lan`, `NCCL_IB_ADDR_FAMILY=AF_INET6`,
-  `NCCL_IB_SUBNET_AWARE_ROUTING=prefer_hca[usb4_rdma\d*,rxe_lan\d*]`,
-  `NCCL_ALGO=Ring`, `NCCL_PROTO=Simple`) and rejects partial overrides.
-  Do not hardcode HCA lists in images or job specs.
-- `NCCL_NET_PLUGIN=none` is mandatory in any image that carries an external
-  NCCL net plugin: the HPC-X plugin segfaults in `nccl_p2p_ib_pci_path` on
-  these PCI-less HCAs. Routing lives in the fork's internal NET/IB path.
-- Ring-only collectives on the chain: the linear topology has adjacent
-  usb4_rdma rails only; default tree graphs create non-adjacent edges no
-  rank-local HCA can reach.
-- Containers need the matching `usb4-rdma-provider` deb baked in (>= 0.2.70
-  for tbrxe hosts; exactly the host's version for legacy hosts — see
-  `drivers/thunderbolt_ibverbs/docs/provider_version_matching.md`),
-  `/dev/infiniband`, `IPC_LOCK`/memlock, and adequate `/dev/shm`.
+Use the rail-routing NCCL fork (2.30.7 base): it advertises all device GIDs
+in the listen handle and selects the `usb4_rdma` rail that shares a /64 with
+the peer, with `rxe_lan` as the ordered fallback. Stock NCCL cannot do this
+on multi-HCA hosts (each rail reaches a different neighbor; a wrong pick is
+unroutable, not just slow).
+
+Environment to set (per process/deployment):
+
+```sh
+NCCL_IB_DISABLE=0
+NCCL_IB_HCA=usb4_rdma,rxe_lan     # ordered preference; ==usb4_rdma0 pins exactly
+NCCL_IB_ADDR_FAMILY=AF_INET6      # rail GIDs are IPv6 ULAs
+NCCL_IB_SUBNET_AWARE_ROUTING='prefer_hca[usb4_rdma\d*,rxe_lan\d*]'
+NCCL_ALGO=Ring                    # linear topologies: adjacent rails only;
+NCCL_PROTO=Simple                 # tree graphs create unreachable edges
+NCCL_NET_PLUGIN=none              # see below
+NCCL_SOCKET_IFNAME=<bootstrap-if> # TCP bootstrap; data rides the rails
+NCCL_NET_GDR_LEVEL=0
+NCCL_IB_MERGE_NICS=0
+NCCL_NET_MERGE_LEVEL=LOC
+```
+
+`NCCL_NET_PLUGIN=none` is mandatory wherever an external NCCL net plugin is
+installed (e.g. HPC-X in NGC images): the plugin loads in preference to
+NCCL's builtin IB transport, derives topology from each device's PCI path
+and segfaults on these PCI-less HCAs (`nccl_p2p_ib_pci_path`) — and even a
+non-crashing plugin would bypass the fork's rail routing entirely.
+
+Containers additionally need the matching `usb4-rdma-provider` (>= 0.2.70
+for tbrxe hosts; exactly the host's version for legacy hosts — see
+`drivers/thunderbolt_ibverbs/docs/provider_version_matching.md`),
+`/dev/infiniband`, `IPC_LOCK`/unlimited memlock, and adequate `/dev/shm`.
 
 ## Who owns the link: `usb4_rdma` vs `thunderbolt_net`
 
@@ -480,7 +487,7 @@ storage hotplug changes should not.
   and the WMI `force_power` toggle **all fail**. `systemctl poweroff` to S5
   followed by power-on clears it every time. Arm Wake-on-LAN first
   (`ethtool -s <if> wol g`) or the node needs a physical power button press —
-  some boards (appmana-002, appmana-020) ignore WoL from S5 regardless.
+  some boards ignore WoL from S5 regardless.
 - **Never live-reload the modules on a chain node.** `rmmod`/`modprobe` of
   `thunderbolt_ibverbs` under traffic wedges the ICM. The deploy path is
   `dpkg -i` then `rmmod` the module *before* rebooting (a warm reboot with
