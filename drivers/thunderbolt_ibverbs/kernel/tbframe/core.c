@@ -290,7 +290,6 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 
 	spin_lock_irqsave(&link->lock, flags);
 	link->rings_up = true;
-	link->tx_quiesced = false;
 	link->paths_enabled = true;
 	link->e2e_active = e2e;
 	link->data_window = tbframe_link_window(link);
@@ -442,6 +441,12 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
 	    tb_xdomain_handshake_complete(&link->hs)) {
 		link->state = TBFRAME_STATE_UP;
 		link->hs.established = true;
+		/*
+		 * Data can flow from here on; until now the READY gate kept
+		 * the fresh rings silent, so a BYE_ACK (which certifies TX
+		 * silence) stays legitimate through bring_up and handshake.
+		 */
+		link->tx_quiesced = false;
 		link->tx_blocked = false;
 		link->announce_pending = false;
 		tbframe_link_fill_info_locked(link, &info);
@@ -598,10 +603,18 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 		up_read(&tf->client_rwsem);
 	}
 
-	/* Automatic re-handshake for every reason but the terminal ones. */
+	/*
+	 * Automatic re-handshake for every reason but the terminal ones.
+	 * After a LOGOUT (peer's BYE) the peer is mid-teardown for up to its
+	 * whole BYE budget: re-handshaking into that window produces the
+	 * one-sided bring_up above. Wait it out; if the peer comes back
+	 * sooner its fresh HELLO kicks this session immediately anyway.
+	 */
 	if (reason != TBFRAME_DOWN_CLOSED && reason != TBFRAME_DOWN_DEAD_HW &&
 	    reason != TBFRAME_DOWN_UNPLUG)
-		tbframe_link_kick(link, msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
+		tbframe_link_kick(link, msecs_to_jiffies(
+			reason == TBFRAME_DOWN_LOGOUT ?
+			TBFRAME_BYE_SETTLE_MS : TBFRAME_RETRY_DELAY_MS));
 }
 
 static void __tbframe_link_session_step(struct tbframe_link *link)
@@ -853,6 +866,21 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 	 */
 	spin_lock_irqsave(&link->lock, flags);
 	ret = link->removing || link->state == TBFRAME_STATE_DEAD;
+	/*
+	 * A parked or mid-teardown session must not negotiate either:
+	 * answering HELLO/READY from it lets the peer run a one-sided
+	 * bring_up against a session that is being dismantled, leaving its
+	 * freshly-programmed path endpoint unmatched for seconds (v3 storm
+	 * cycle 1: the receiver's post-BYE rebuild HELLOed the parked
+	 * sender's dispatch, sat one-sided through the sender's whole BYE
+	 * budget, and the eventually-paired session was born dead). Refuse;
+	 * the peer's retry lands after this side settles. BYE and the ack
+	 * ops stay handled: teardown is exactly when they matter.
+	 */
+	if (!ret && (link->parked || link->needs_down) &&
+	    (info.op == TBFRAME_WIRE_OP_HELLO ||
+	     info.op == TBFRAME_WIRE_OP_READY))
+		ret = 1;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (ret)
 		return 0;

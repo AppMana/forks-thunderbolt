@@ -36,6 +36,8 @@
 #define TBFRAME_KEEPALIVE_LEN		8
 #define TBFRAME_BYE_TIMEOUT_MS		1000
 #define TBFRAME_BYE_RETRIES		4
+/* LOGOUT re-handshake settle: outlast the peer's whole BYE budget. */
+#define TBFRAME_BYE_SETTLE_MS		5000
 /* Min spacing between property re-announces (control-channel thrash guard). */
 #define TBFRAME_REANNOUNCE_MIN_MS	10000
 

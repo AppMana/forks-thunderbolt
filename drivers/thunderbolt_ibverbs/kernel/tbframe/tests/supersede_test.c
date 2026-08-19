@@ -91,17 +91,16 @@ static void tbframe_ready_ack_withheld_during_pending_supersede(struct kunit *te
 	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
 	fx->mock.have_response = false;
 
-	/* Peer's READY lands while our down is still queued. */
+	/* Peer's READY lands while our down is still queued: refused
+	 * outright (a mid-teardown session does not negotiate), so no
+	 * READY_ACK can certify the stale paths the teardown is about to
+	 * remove.
+	 */
 	KUNIT_ASSERT_GE(test,
 			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
 						    msg, sizeof(msg)), 0);
-	KUNIT_EXPECT_EQ(test, 1,
+	KUNIT_EXPECT_EQ(test, 0,
 			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
-
-	/*
-	 * No READY_ACK may certify the stale paths: the entries it vouches
-	 * for are scheduled for teardown.
-	 */
 	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
 
 	mutex_unlock(&fx->link->session_lock);

@@ -198,6 +198,40 @@ static void tbframe_lifecycle_hopid_release_matches_alloc(struct kunit *test)
 }
 
 /*
+ * A parked link does not negotiate. The dispatch fence used to cover only
+ * removing/DEAD, so a parked link's dispatch still answered HELLO: during
+ * a client reload the peer completed a one-sided bring_up against the
+ * parked session and its freshly-programmed path endpoint sat unmatched
+ * for the whole teardown budget -- the eventually-paired session came up
+ * born dead at the router level (v3 storm cycle 1). Refuse HELLO/READY
+ * while parked or mid-teardown; the peer's retry lands once we're back.
+ */
+static void tbframe_lifecycle_parked_refuses_negotiation(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+
+	tbframe_mock_link_up(test, fx);
+	tbframe_unregister_client_tf(&fx->tf);
+	KUNIT_ASSERT_TRUE(test, fx->link->parked);
+	fx->mock.have_response = false;
+
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_lifecycle_inject(fx, TBFRAME_WIRE_OP_HELLO));
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_lifecycle_inject(fx, TBFRAME_WIRE_OP_READY));
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+
+	/* Unparked, negotiation resumes normally. */
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_register_client_tf(&fx->tf,
+						   &tbframe_mock_client_ops,
+						   &fx->client));
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_lifecycle_inject(fx, TBFRAME_WIRE_OP_HELLO));
+	KUNIT_EXPECT_TRUE(test, fx->mock.have_response);
+}
+
+/*
  * The transmit HopID is stable across sessions -- pinned deliberately.
  *
  * Per-session rotation was tried and measured on the 023/025 canaries
@@ -294,6 +328,7 @@ static struct kunit_case tbframe_lifecycle_cases[] = {
 	KUNIT_CASE(tbframe_lifecycle_reregister_after_unregister),
 	KUNIT_CASE(tbframe_lifecycle_double_register_refused),
 	KUNIT_CASE(tbframe_lifecycle_hopid_release_matches_alloc),
+	KUNIT_CASE(tbframe_lifecycle_parked_refuses_negotiation),
 	KUNIT_CASE(tbframe_lifecycle_out_hopid_stable_across_sessions),
 	KUNIT_CASE(tbframe_lifecycle_destroy_dead_hw_under_dispatch),
 	{}
