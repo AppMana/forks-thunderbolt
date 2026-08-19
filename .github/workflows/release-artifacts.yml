@@ -49,6 +49,28 @@ jobs:
             ubuntu:24.04 \
             bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
 
+      - name: Build tbrxe DKMS deb
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e TBFIX_LINT=1 \
+            ubuntu:24.04 \
+            bash tools/ci/distro-package-tbrxe.sh ubuntu
+          (cd dist && sha256sum -c thunderbolt-tbrxe-dkms_*.deb.sha256)
+          ls -la dist/
+
+      - name: Verify tbrxe DKMS deb builds (noble HWE 6.17 headers)
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e TBFIX_VERIFY_DKMS_BUILD=1 \
+            ubuntu:24.04 \
+            bash tools/ci/distro-install-tbrxe.sh \
+              'dist/thunderbolt-tbfix-dkms_*.deb' \
+              'dist/thunderbolt-tbrxe-dkms_*.deb'
+
       - name: Build ibverbs DKMS and reproduction-tools debs
         run: |
           docker run --rm \

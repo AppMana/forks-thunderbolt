@@ -40,14 +40,19 @@ drivers/thunderbolt_ibverbs/    legacy usb4_rdma RDMA driver, userspace provider
   kernel/tbrxe/                 rxe-derived IB engine over tbframe
   userspace/tbrxe/              libtbrxe provider source (rdma-core patch 0005)
   docs/tbframe-tbrxe-wire-spec.md   normative wire/contract spec for the new stack
-dkms/                           DKMS scaffolding (dkms.conf, Makefile)
-packaging/debian/           Debian package metadata for thunderbolt-tbfix-dkms
+dkms/                           DKMS scaffolding for thunderbolt-tbfix-dkms
+  tbrxe/                        DKMS scaffolding for thunderbolt-tbrxe-dkms
+                                (tbframe.ko + tbrxe.ko in one package)
+packaging/debian/           Debian package metadata (thunderbolt-tbfix-dkms
+                            unsuffixed; *-tbrxe for thunderbolt-tbrxe-dkms)
 scripts/
   oot-build.sh              fast iteration: stage at ~/src/tb-oot, build, hot-swap
   export-dkms-payload.sh    write byte-identical DKMS bundle into the appmana repo
 tools/ci/
   distro-package.sh         build thunderbolt-tbfix-dkms_<version>_all.deb
-  distro-install.sh         verify the .deb can build through DKMS
+  distro-package-tbrxe.sh   build thunderbolt-tbrxe-dkms_<version>_all.deb
+  distro-install.sh         verify the tbfix .deb can build through DKMS
+  distro-install-tbrxe.sh   verify the tbrxe .deb can build through DKMS
 tests/
   run-smoke.sh              60-s NCCL hostnet sweep on the 3-node chain
   run-durability.sh         192 GiB allreduce reproducer (~30 min, the wedge gate)
@@ -73,7 +78,7 @@ either way.
 
 | | legacy `thunderbolt_ibverbs` | `tbrxe` + `tbframe` (successor) |
 |---|---|---|
-| Kernel modules | `thunderbolt_ibverbs.ko` (dkms, `0.2.6x`) | `tbframe.ko` + `tbrxe.ko` (not yet packaged) |
+| Kernel modules | `thunderbolt_ibverbs.ko` (dkms, `0.2.6x`) | `tbframe.ko` + `tbrxe.ko` (`thunderbolt-tbrxe-dkms`, tbfix version stream) |
 | Verbs ABI | private (provider must match version exactly) | stock rxe uverbs ABI under a private driver id |
 | Userspace provider | `libusb4_rdma` | `libtbrxe` (rdma-core patch 0005) |
 | Provider package | `usb4-rdma-provider` (any) | `usb4-rdma-provider >= 0.2.70` |
@@ -100,7 +105,7 @@ containers. The 0.2.70 deb ships both provider families
 `tbv-rdma-addr`). `tbrxe.ko` and the provider deb must roll together. See
 `drivers/thunderbolt_ibverbs/packaging/rdma-core-patches/README.md`.
 
-### Build coupling and the deploy procedure (honest state)
+### Build coupling and the deploy procedure
 
 tbfix core, tbframe and tbrxe are **lockstep-built**: tbframe links against
 the tbfix core's `Module.symvers` (private `tb_*` exports) and the generated
@@ -109,12 +114,27 @@ the tbfix core's `Module.symvers` (private `tb_*` exports) and the generated
 panic on first inbound traffic); tbrxe links against tbframe's
 `Module.symvers`. Never mix builds from different revisions.
 
-tbframe.ko/tbrxe.ko are **not yet packaged** (no dkms/deb). The current
-procedure is: build in `drivers/thunderbolt_ibverbs/kernel/tbframe/` then
-`kernel/tbrxe/` (the Makefiles find the tbfix symvers and header shim from
-the installed thunderbolt-tbfix-dkms), stage the two `.ko` on the node, and
-`insmod tbframe.ko` then `insmod tbrxe.ko`. Closing this packaging gap is a
-prerequisite for production rollout.
+The packaging enforces that coupling. `thunderbolt-tbrxe-dkms` ships BOTH
+modules in one DKMS package (`dkms/tbrxe/`): its build makes tbframe first
+and feeds tbframe's freshly written `Module.symvers` to tbrxe within the
+same pass, resolves the tbfix core symbols from the per-kernel
+`/var/lib/dkms/thunderbolt-tbfix/...` table, and hard-fails (instead of
+building source-blind) when the tbfix header-shim script or symvers is
+missing. At the package level the version rides the tbfix stream and the
+deb pins `Depends: thunderbolt-tbfix-dkms (= <version>)`; it also
+`Conflicts/Replaces: thunderbolt-ibverbs-dkms` — a node runs ONE RDMA
+engine, and both engines claim the `usb4_rdma*` device names.
+
+The package installs **no autoload** (no `modules-load.d`). Loading is a
+deliberate act after boot:
+
+```sh
+modprobe tbrxe       # depmod dependency pulls in tbframe first
+```
+
+(Before the deb existed, the two `.ko` were built by hand from
+`drivers/thunderbolt_ibverbs/kernel/{tbframe,tbrxe}/` and insmod'd from a
+staged directory; that development-era procedure is retired.)
 
 Deploys go via **reboot, one node at a time**, with bidirectional link
 verification (`ib_send_lat` both ways or counter deltas) before any
@@ -184,8 +204,8 @@ deployment's orchestration layer, not to images.
 |---|---|---|---|
 | Linux kernel (6.17 HWE) | no | Ubuntu | host package manager |
 | `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (release assets). Core bumps are cold-boot-only |
-| `tbframe.ko` (frame/session layer) | new | this repo (`kernel/tbframe`) | host: DKMS deb (lockstep with the core: symvers + header shim) |
-| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`kernel/tbrxe`) | same deb as tbframe, built lockstep |
+| `tbframe.ko` (frame/session layer) | new | this repo (`kernel/tbframe`) | host: `thunderbolt-tbrxe-dkms` deb (lockstep with the core: symvers + header shim); loaded via `modprobe tbrxe`, never autoloaded |
+| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`kernel/tbrxe`) | same `thunderbolt-tbrxe-dkms` deb, built lockstep in the same DKMS pass |
 | `rdma_rxe` (ethernet soft-RoCE fallback device) | ~stock (one fail-fast patch) | kernel / this repo | module in the tbfix deb; device created via `rdma link add ... type rxe` |
 | rdma-core / `libibverbs` | no | distro (noble = v50, PABI 34) | host + container, stock |
 | `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA addressing) | patches, not a fork (`packaging/rdma-core-patches/`) | this repo | host: deb >= 0.2.70. container: same deb baked in, or injected from the host at runtime (PABI must match the container's rdma-core) |
@@ -310,6 +330,10 @@ echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/appmana-archive-keyring.gpg]
 
 sudo apt update
 sudo apt install thunderbolt-tbfix-dkms
+
+# tbframe/tbrxe engine (optional; version-locked to thunderbolt-tbfix-dkms,
+# conflicts with the legacy thunderbolt-ibverbs-dkms):
+sudo apt install thunderbolt-tbrxe-dkms usb4-rdma-provider
 ```
 
 ### From GitHub Releases
@@ -330,8 +354,14 @@ dkms status -m thunderbolt-tbfix
 
 The package stages source under `/usr/src/thunderbolt-tbfix-<version>` and
 runs `dkms autoinstall`. It intentionally does not reload `thunderbolt` or
-`thunderbolt_net`; fleet reload ordering remains owned by Ansible or an
-explicit maintenance command.
+`thunderbolt_net`; reload ordering remains owned by the deployment's
+maintenance procedure.
+
+`thunderbolt-tbrxe-dkms_<version>_all.deb` (same release, same version)
+installs the tbframe/tbrxe engine the same way: source under
+`/usr/src/thunderbolt-tbrxe-<version>`, both modules built through DKMS in
+one pass. It never loads the modules — after the deploy reboot, run
+`modprobe tbrxe` and verify the link bidirectionally before any workload.
 
 The split-package build also emits `rdma-rxe-appmana_<version>_all.deb`.
 That package installs an override `rdma_rxe.ko` which does not advertise
@@ -351,16 +381,19 @@ stock `/kernel/drivers/...` tree.
 
 ## Build a Debian package
 
-Build the DKMS `.deb` locally:
+Build the DKMS `.deb`s locally:
 
 ```bash
-tools/ci/distro-package.sh ubuntu
+tools/ci/distro-package.sh ubuntu        # thunderbolt-tbfix-dkms
+tools/ci/distro-package-tbrxe.sh ubuntu  # thunderbolt-tbrxe-dkms (tbframe+tbrxe)
 ```
 
-The artifact is written to `dist/thunderbolt-tbfix-dkms_<version>_all.deb`.
-Tags matching `v*` publish the `.deb` and its `.sha256` file to GitHub
-Releases in `AppMana/thunderbolt-tbfix`. The public apt repository in
-`AppMana/apt` consumes those release assets.
+The artifacts are written to `dist/thunderbolt-tbfix-dkms_<version>_all.deb`
+and `dist/thunderbolt-tbrxe-dkms_<version>_all.deb` (with `.sha256` files;
+both carry the same version — the tbrxe deb depends on the exact tbfix
+version). Tags matching `v*` publish the `.deb`s and their `.sha256` files
+to GitHub Releases in `AppMana/thunderbolt-tbfix`. The public apt
+repository in `AppMana/apt` consumes those release assets.
 
 ## Development process
 
