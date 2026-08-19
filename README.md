@@ -180,6 +180,27 @@ enabled. Strix-class integrated hosts bond natively — the committed
 `bench/results/strix-2p-noiommu-2x40g/` results are 2 lanes @ 20 Gb/s per
 cable (40 Gb/s aggregate) without any of this.
 
+### Component inventory for a working vLLM deployment (example)
+
+Every lib/component in the path, whether it is forked, and how it reaches a
+node or container. "webhook" = the tb-chain admission webhook, the single
+owner of NCCL env policy (images stay env-policy-free).
+
+| Component | Forked? | Source | Bundled / installed how |
+|---|---|---|---|
+| Linux kernel (6.17 HWE) | no | Ubuntu | host apt |
+| `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (v2.39 release assets; apt repo still at 2.30 — publication pending). Core bumps are cold-boot-only |
+| `tbframe.ko` (frame/session layer) | new (this repo, `kernel/tbframe`) | this repo | **not yet packaged** — staged insmod from `~/tbv-ko-fixed/` after boot; lockstep-built with the core (symvers + header shim) |
+| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` (`kernel/tbrxe`) | this repo | same as tbframe — lockstep, staged insmod; packaging is the rollout prerequisite |
+| `rdma_rxe` (`rxe_lan` fallback device) | ~stock (one fail-fast patch in the tbfix payload) | kernel / this repo | module in tbfix deb; device provisioned by `rxe-lan.service` (Ansible) |
+| rdma-core / `libibverbs` | no | Ubuntu 50.0 (noble, PABI 34) | host + container apt stock |
+| `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA tooling) | patches, not a fork (`packaging/rdma-core-patches/` applied to distro rdma-core) | this repo | host: deb >= 0.2.70 (v2.39 assets). container: currently baked into the vLLM/training images at 0.2.70; planned: webhook hostPath injection so host/container match by construction (requires matching PABI, asserted via image label) |
+| NCCL | **yes** | `forks-nccl-rdma-routing` (`appmana/rdma-routing`, 2.30.7 @ 22355b6 rail routing) | baked into the image (`LD_PRELOAD` selection; the `rail routing` .rodata string is the provenance check) |
+| NCCL net plugin | n/a — disabled | — | `NCCL_NET_PLUGIN=none` injected by the webhook (HPC-X segfaults on PCI-less HCAs) |
+| NCCL env (HCA order `usb4_rdma,rxe_lan`, AF_INET6, `prefer_hca`, Ring/Simple) | policy | `appmana-cluster` webhook | injected at admission; bare-metal runs must set it themselves |
+| vLLM | **yes** | `forks-vllm-consumer-nvidia-platforms` | the serving image itself |
+| perftest / nccl-tests | no | upstream | validation tooling only, on hosts or in `~/nccl-gate/` |
+
 ### Consuming the stack from NCCL (either engine)
 
 - Use the AppMana NCCL fork (`AppMana/forks-nccl-rdma-routing`, branch
