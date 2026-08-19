@@ -60,8 +60,23 @@ static void tbframe_link_kick_locked(struct tbframe_link *link,
 				     unsigned long delay)
 {
 	lockdep_assert_held(&link->lock);
-	if (!link->removing && !link->parked &&
-	    link->state != TBFRAME_STATE_DEAD)
+	if (link->removing || link->parked ||
+	    link->state == TBFRAME_STATE_DEAD)
+		return;
+	/*
+	 * Earliest deadline wins. queue_delayed_work() is a no-op on a
+	 * pending item, so an immediate kick (inbound HELLO from a peer
+	 * that just came back) could not preempt a long-armed retry --
+	 * measured on the canaries as the LOGOUT settle holding through a
+	 * returning peer's HELLO, a 4.7 s one-sided paths-enable window,
+	 * and a born-dead session (the late enabler's egress never gets
+	 * credits). mod_delayed_work() for delay 0 pulls the work forward;
+	 * non-zero kicks keep the no-op-if-pending semantics so a retry
+	 * can never push an imminent run back.
+	 */
+	if (!delay)
+		mod_delayed_work(link->tf->wq, &link->session_work, 0);
+	else
 		queue_delayed_work(link->tf->wq, &link->session_work, delay);
 }
 

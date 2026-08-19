@@ -124,8 +124,19 @@ static void tbframe_teardown_inbound_bye_quiesces_then_acks(struct kunit *test)
 						 &reply, &info));
 	KUNIT_EXPECT_EQ(test, TBFRAME_WIRE_OP_BYE_ACK, info.op);
 
-	/* LOGOUT re-handshakes automatically once the peer returns. */
-	tbframe_link_session_step(fx->link);
+	/*
+	 * The LOGOUT re-handshake is armed with the long settle delay so the
+	 * peer's teardown can finish undisturbed -- but the returning peer's
+	 * fresh HELLO must collapse it IMMEDIATELY, or this side's bring_up
+	 * lags the peer's by the settle and the session pairs asymmetrically
+	 * (born-dead egress for the late enabler, v4 storm cycle 2). The
+	 * inbound-HELLO kick must therefore preempt the armed delay.
+	 */
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
 	flush_workqueue(fx->tf.wq);
 	KUNIT_EXPECT_EQ(test, 2u, fx->client.up_count);
 }
