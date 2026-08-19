@@ -55,6 +55,7 @@ tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_loopback_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_perlink_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_admission_test.o
 tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_lifecycle_test.o
+tbrxe-$(CONFIG_KUNIT) += tests/tbrxe_mtu_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 

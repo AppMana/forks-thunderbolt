@@ -35,6 +35,32 @@ static inline enum ib_mtu eth_mtu_int_to_enum(int mtu)
 	return rxe_mtu_int_to_enum(mtu);
 }
 
+/*
+ * Wire-spec section 5 deviation: IB_MTU_4096 is reported in verbs while
+ * the engine fragments at the largest 4-aligned payload whose worst-case
+ * transport unit (RXE_MAX_HDR_LENGTH + payload + pad + ICRC) still fits
+ * one 4096-byte tbframe frame:
+ *
+ *	floor((4096 - 80 - 4) / 4) * 4 = 4012 bytes
+ *
+ * Both endpoints derive the ceiling from the spec, so the wire stays
+ * consistent; the rxe packetization grammar is unchanged in shape
+ * (FIRST/MIDDLE exactly "MTU") with the effective MTU being 4012. The
+ * 4-alignment keeps full-MTU FIRST/MIDDLE packets pad-free, which the
+ * responder's RDMA WRITE length check (pktlen == mtu && !bth_pad) relies
+ * on.
+ */
+#define TBRXE_FRAME_CEILING	4096
+#define TBRXE_MTU4096_PAYLOAD \
+	(((TBRXE_FRAME_CEILING - RXE_MAX_HDR_LENGTH - RXE_ICRC_SIZE) / 4) * 4)
+
+/* Engine byte ceiling for a verbs MTU enum, deviation included. */
+static inline int tbrxe_mtu_enum_to_int(enum ib_mtu mtu)
+{
+	return mtu == IB_MTU_4096 ? TBRXE_MTU4096_PAYLOAD
+				  : ib_mtu_enum_to_int(mtu);
+}
+
 /* default/initial rxe device parameter settings */
 enum rxe_device_param {
 	RXE_MAX_MR_SIZE			= -1ull,

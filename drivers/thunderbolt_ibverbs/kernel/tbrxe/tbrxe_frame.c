@@ -943,10 +943,12 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 	if (!rxe)
 		goto out_ndev;
 
-	/* Frame payload budget: eth_mtu_int_to_enum() subtracts the 80-byte
-	 * header allowance, so hand it 2048 + 80 to land on IB_MTU_2048.
+	/* The link's frame payload budget decides the verbs MTU:
+	 * a full 4096-byte budget carries the deviated IB_MTU_4096
+	 * (engine ceiling TBRXE_MTU4096_PAYLOAD), anything smaller falls
+	 * back to the strict IB_MTU_2048 rule (rxe_set_mtu()).
 	 */
-	rxe_add(rxe, 2048 + RXE_MAX_HDR_LENGTH, ndev->dev_addr);
+	rxe_add(rxe, info->max_payload, ndev->dev_addr);
 	rxe->tbl_link = link;
 	link->rxe = rxe;
 

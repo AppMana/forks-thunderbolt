@@ -128,7 +128,10 @@ static void rxe_init_port_param(struct rxe_port *port)
 	 * IB_EVENT_PORT_ACTIVE/PORT_ERR (tbrxe_frame.c).
 	 */
 	port->attr.state		= IB_PORT_ACTIVE;
-	/* Strict IB_MTU_2048 per tbframe-tbrxe-wire-spec.md section 5. */
+	/* Placeholder; rxe_set_mtu() derives the real ceiling per
+	 * tbframe-tbrxe-wire-spec.md section 5 from the link's frame
+	 * payload budget.
+	 */
 	port->attr.max_mtu		= IB_MTU_2048;
 	port->attr.active_mtu		= IB_MTU_2048;
 	port->attr.gid_tbl_len		= RXE_PORT_GID_TBL_LEN;
@@ -203,18 +206,28 @@ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int frame_payload)
 	struct rxe_port *port = &rxe->port;
 	enum ib_mtu mtu;
 
-	mtu = eth_mtu_int_to_enum(frame_payload);
+	if (frame_payload >= RXE_MAX_HDR_LENGTH + TBRXE_MTU4096_PAYLOAD +
+			     RXE_ICRC_SIZE) {
+		/*
+		 * Wire-spec section 5 deviation: IB_MTU_4096 in verbs, the
+		 * engine fragments at TBRXE_MTU4096_PAYLOAD (4012) so the
+		 * worst-case transport unit fits one 4096-byte frame.
+		 */
+		mtu = IB_MTU_4096;
+	} else {
+		/*
+		 * Strict IB_MTU_2048 ceiling (wire-spec section 5, initial
+		 * rule): worst-case transport unit 80 + 2048 + pad + 4
+		 * always fits the link's frame; links smaller than that are
+		 * rejected at link_up (tbrxe_frame.c).
+		 */
+		mtu = eth_mtu_int_to_enum(frame_payload);
+		mtu = mtu ? min_t(enum ib_mtu, mtu, IB_MTU_2048) : IB_MTU_256;
+	}
 
-	/*
-	 * Strict IB_MTU_2048 ceiling (wire-spec section 5): worst-case
-	 * transport unit 80 + 2048 + pad + 4 always fits the 4096-byte
-	 * tbframe frame; links with a smaller max_payload are rejected at
-	 * link_up (tbrxe_frame.c).
-	 */
-	mtu = mtu ? min_t(enum ib_mtu, mtu, IB_MTU_2048) : IB_MTU_256;
-
+	port->attr.max_mtu = mtu;
 	port->attr.active_mtu = mtu;
-	port->mtu_cap = ib_mtu_enum_to_int(mtu);
+	port->mtu_cap = tbrxe_mtu_enum_to_int(mtu);
 }
 
 /* Initialize a freshly allocated tbrxe device (one per tbframe link,

@@ -153,7 +153,7 @@ static void rxe_qp_init_misc(struct rxe_dev *rxe, struct rxe_qp *qp,
 
 	qp->sq_sig_type		= init->sq_sig_type;
 	qp->attr.path_mtu	= 1;
-	qp->mtu			= ib_mtu_enum_to_int(qp->attr.path_mtu);
+	qp->mtu			= tbrxe_mtu_enum_to_int(qp->attr.path_mtu);
 
 	qpn			= qp->elem.index;
 	port			= &rxe->port;
@@ -685,7 +685,7 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask,
 
 	if (mask & IB_QP_PATH_MTU) {
 		qp->attr.path_mtu = attr->path_mtu;
-		qp->mtu = ib_mtu_enum_to_int(attr->path_mtu);
+		qp->mtu = tbrxe_mtu_enum_to_int(attr->path_mtu);
 	}
 
 	if (mask & IB_QP_TIMEOUT) {
