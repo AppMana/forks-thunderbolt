@@ -141,6 +141,42 @@ static void tbframe_teardown_inbound_bye_quiesces_then_acks(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 2u, fx->client.up_count);
 }
 
+/*
+ * A terminal teardown owes the client a link_down even when the session is
+ * already down non-terminally. Clients keep their record (ib_device,
+ * netdev) across session bounces and release it only on a terminal
+ * reason; a destroy right after a peer's BYE (LOGOUT) used to skip the
+ * upcall because was_up was false, so the client never unpublished --
+ * every peer reboot leaked a stale usb4_rdmaN that then shadowed the live
+ * device and poisoned every diagnostic run against the link.
+ */
+static void tbframe_teardown_terminal_down_after_logout(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	tbframe_mock_link_up(test, fx);
+
+	/* Peer BYEs: non-terminal LOGOUT down, record must survive. */
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_LOGOUT,
+			fx->client.reasons[1]);
+
+	/* Unplug lands before any re-handshake: the client still must see
+	 * the terminal reason, or its device leaks. */
+	tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
+	fx->link_destroyed = true;
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_UNPLUG,
+			fx->client.reasons[2]);
+}
+
 static void tbframe_teardown_publisher_drain_poisons(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -254,6 +290,7 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
 	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
+	KUNIT_CASE(tbframe_teardown_terminal_down_after_logout),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),
 	KUNIT_CASE(tbframe_teardown_clean_when_hw_cancels),

@@ -481,6 +481,7 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
 	tbframe_link_deliver_up(link, &info);
 
 	spin_lock_irqsave(&link->lock, flags);
+	link->up_delivered = true;
 	if (!link->removing && link->state == TBFRAME_STATE_UP)
 		mod_timer(&link->verify_timer,
 			  jiffies + msecs_to_jiffies(link->tf->verify_ms));
@@ -498,7 +499,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool was_up, had_rings, had_paths, had_hopid;
+	bool was_up, deliver_down, terminal, had_rings, had_paths, had_hopid;
 	u16 remote_hopid;
 	int active;
 
@@ -610,7 +611,26 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * order above.
 	 */
 
-	if (was_up) {
+	/*
+	 * Delivery rule: a session that was UP gets its bracketing
+	 * link_down as always; additionally, a TERMINAL teardown (CLOSED /
+	 * UNPLUG / DEAD_HW) owes the client a link_down whenever it still
+	 * holds an active record (->up_delivered), even if the session was
+	 * already down non-terminally -- a destroy right after a peer's BYE
+	 * (LOGOUT) used to skip the upcall entirely, so the client never
+	 * unpublished and every peer reboot leaked a stale usb4_rdmaN
+	 * shadowing the live device. Non-terminal downs do not clear the
+	 * flag: the client's record (and device) outlives session bounces.
+	 */
+	terminal = reason == TBFRAME_DOWN_CLOSED ||
+		   reason == TBFRAME_DOWN_UNPLUG ||
+		   reason == TBFRAME_DOWN_DEAD_HW;
+	spin_lock_irqsave(&link->lock, flags);
+	deliver_down = was_up || (link->up_delivered && terminal);
+	if (terminal)
+		link->up_delivered = false;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (deliver_down) {
 		pr_info("%s: link down (%d)\n", link->name, reason);
 		down_read(&tf->client_rwsem);
 		if (tf->client_ops && tf->client_ops->link_down)

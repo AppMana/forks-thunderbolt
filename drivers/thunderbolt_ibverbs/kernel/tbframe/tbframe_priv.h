@@ -176,6 +176,18 @@ struct tbframe_link {
 	bool			needs_down;
 	enum tbframe_down_reason down_reason;
 	bool			announce_pending; /* replay link_up to a late client */
+	/*
+	 * The client holds an active record for this link: set when
+	 * link_up() is delivered, cleared only when a TERMINAL link_down
+	 * (CLOSED/UNPLUG/DEAD_HW) is delivered. Non-terminal session
+	 * bounces (SUPERSEDE/VERIFY/LOGOUT) do not clear it -- the client's
+	 * device outlives them. A terminal teardown delivers link_down
+	 * whenever this is set, even if the session was already down: a
+	 * destroy right after a peer BYE used to skip the upcall and leak
+	 * a stale usb4_rdmaN shadowing the live device on every peer
+	 * reboot.
+	 */
+	bool			up_delivered;
 
 	int			local_hopid;
 	u64			local_cookie;
