@@ -610,8 +610,31 @@ static struct kunit_case tbrxe_admission_cases[] = {
 	{}
 };
 
+/*
+ * These suites assert EXACT wire packet counts, so the retransmit backoff
+ * (rxe_qp_retrans_delay) must not inject timer-driven retransmits mid-test:
+ * run them with the stock verbs-derived delay (base = 0). The long-timeout
+ * tests pass t=31 to keep that timer out of the picture entirely; the
+ * rewind test passes a short timeout to force exactly one retry.
+ */
+static uint adm_saved_retransmit_base_ms;
+
+static int tbrxe_admission_suite_init(struct kunit_suite *suite)
+{
+	adm_saved_retransmit_base_ms = tbrxe_retransmit_base_ms;
+	tbrxe_retransmit_base_ms = 0;
+	return 0;
+}
+
+static void tbrxe_admission_suite_exit(struct kunit_suite *suite)
+{
+	tbrxe_retransmit_base_ms = adm_saved_retransmit_base_ms;
+}
+
 static struct kunit_suite tbrxe_admission_suite = {
 	.name = "tbrxe_admission",
+	.suite_init = tbrxe_admission_suite_init,
+	.suite_exit = tbrxe_admission_suite_exit,
 	.test_cases = tbrxe_admission_cases,
 };
 

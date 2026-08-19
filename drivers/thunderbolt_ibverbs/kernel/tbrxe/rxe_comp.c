@@ -11,6 +11,51 @@
 #include "rxe_queue.h"
 #include "rxe_task.h"
 
+/*
+ * Bounded first-retransmit delay (fork deviation; legacy 0.2.18 analog).
+ *
+ * The IB ack_timeout curve (4.096us * 2^t) is sized for WAN fabrics: NCCL
+ * passes t=18 (~1.07s), perftest t=14 (~67ms), while the link RTT here is
+ * ~15us and the only loss while a link is UP is ~2-4e-6/frame CRC drops.
+ * With the stock timer every such drop that the responder cannot NAK
+ * (lost LAST / lost ACK) stalls the QP for the full verbs timeout - the
+ * measured "100x-slow NCCL iteration" tail. Arm the retry timer at
+ * base << consecutive-timeouts instead, capped at the verbs timeout: the
+ * first retransmit is prompt while the cumulative budget still spans any
+ * genuine outage (a flat clamp made interval * retry_cnt the total budget
+ * and killed QPs - the legacy 0.2.17 -> 0.2.18 lesson). Any dequeued
+ * response resets the backoff. base = 0 restores stock behavior.
+ *
+ * The 10ms default sits above the worst genuine ACK latency under load (a
+ * full 1984-frame window at ~0.5M frames/s drains in ~4ms), so a healthy
+ * link never fires spuriously.
+ */
+uint tbrxe_retransmit_base_ms = 10;
+module_param_named(retransmit_base_ms, tbrxe_retransmit_base_ms, uint, 0644);
+MODULE_PARM_DESC(retransmit_base_ms,
+		 "First RC retransmit delay in ms, doubling per consecutive timeout up to the verbs ack_timeout; 0 = stock verbs-derived delay");
+
+unsigned long rxe_retrans_backoff_jiffies(unsigned long qp_timeout,
+					  unsigned long base,
+					  unsigned int shift)
+{
+	unsigned long d;
+
+	if (!base || !qp_timeout)
+		return qp_timeout;
+
+	d = base << min_t(unsigned int, shift, 16);
+	d = min(d, qp_timeout);
+	return d ?: 1;
+}
+
+unsigned long rxe_qp_retrans_delay(struct rxe_qp *qp)
+{
+	return rxe_retrans_backoff_jiffies(qp->qp_timeout_jiffies,
+			msecs_to_jiffies(READ_ONCE(tbrxe_retransmit_base_ms)),
+			READ_ONCE(qp->comp.retrans_shift));
+}
+
 enum comp_state {
 	COMPST_GET_ACK,
 	COMPST_GET_WQE,
@@ -630,7 +675,7 @@ static void reset_retry_timer(struct rxe_qp *qp)
 		if (qp_state(qp) >= IB_QPS_RTS &&
 		    psn_compare(qp->req.psn, qp->comp.psn) > 0)
 			mod_timer(&qp->retrans_timer,
-				  jiffies + qp->qp_timeout_jiffies);
+				  jiffies + rxe_qp_retrans_delay(qp));
 		spin_unlock_irqrestore(&qp->state_lock, flags);
 	}
 }
@@ -679,6 +724,10 @@ int rxe_completer(struct rxe_qp *qp)
 			if (skb) {
 				pkt = SKB_TO_PKT(skb);
 				qp->comp.timeout_retry = 0;
+				/* peer response: reset the retransmit
+				 * backoff (see rxe_qp_retrans_delay)
+				 */
+				qp->comp.retrans_shift = 0;
 			}
 			state = COMPST_GET_WQE;
 			break;
@@ -786,6 +835,12 @@ int rxe_completer(struct rxe_qp *qp)
 					qp->req.need_retry = 1;
 					qp->comp.started_retry = 1;
 					qp->req.again = 1;
+					/* consecutive timeout: double the
+					 * next retransmit delay
+					 */
+					if (qp->comp.timeout_retry &&
+					    qp->comp.retrans_shift < 16)
+						qp->comp.retrans_shift++;
 				}
 				goto done;
 

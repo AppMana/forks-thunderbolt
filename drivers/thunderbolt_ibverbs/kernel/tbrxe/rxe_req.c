@@ -591,7 +591,7 @@ static void update_state(struct rxe_qp *qp, struct rxe_pkt_info *pkt)
 
 	if (qp->qp_timeout_jiffies && !timer_pending(&qp->retrans_timer))
 		mod_timer(&qp->retrans_timer,
-			  jiffies + qp->qp_timeout_jiffies);
+			  jiffies + rxe_qp_retrans_delay(qp));
 }
 
 static int rxe_do_local_ops(struct rxe_qp *qp, struct rxe_send_wqe *wqe)

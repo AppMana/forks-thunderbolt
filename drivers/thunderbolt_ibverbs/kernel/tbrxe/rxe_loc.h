@@ -168,6 +168,13 @@ static inline void rxe_advance_resp_resource(struct rxe_qp *qp)
 void retransmit_timer(struct timer_list *t);
 void rnr_nak_timer(struct timer_list *t);
 
+/* rxe_comp.c: bounded first-retransmit delay (fork; sub-ms RTT fabric) */
+extern uint tbrxe_retransmit_base_ms;
+unsigned long rxe_retrans_backoff_jiffies(unsigned long qp_timeout,
+					  unsigned long base,
+					  unsigned int shift);
+unsigned long rxe_qp_retrans_delay(struct rxe_qp *qp);
+
 /* rxe_srq.c */
 int rxe_srq_chk_init(struct rxe_dev *rxe, struct ib_srq_init_attr *init);
 int rxe_srq_from_init(struct rxe_dev *rxe, struct rxe_srq *srq,

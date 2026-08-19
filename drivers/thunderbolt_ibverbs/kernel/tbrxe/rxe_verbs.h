@@ -126,6 +126,10 @@ struct rxe_comp_info {
 	int			started_retry;
 	u32			retry_cnt;
 	u32			rnr_retry;
+	/* consecutive timer-fired retransmits without a peer response;
+	 * scales the retransmit backoff (rxe_qp_retrans_delay())
+	 */
+	unsigned int		retrans_shift;
 };
 
 /* responder states */
