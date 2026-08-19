@@ -50,6 +50,86 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 11, fx->mock.in_hopid);
 }
 
+/*
+ * READY certification vs a pending supersede teardown.
+ *
+ * The reload race: a peer whose client bounced re-HELLOs (queueing our
+ * supersede down) and immediately follows with READY, all from the dispatch
+ * context, before the session work has run the teardown. The old code read
+ * ->paths_enabled -- still true for the OLD session's paths, which the queued
+ * down_session() is about to rip out -- and certified mutual readiness with
+ * READY_ACK. The peer then went UP and streamed a full TX ring into a hop
+ * entry we were disabling; on the 023/025 canaries that wedged the peer's
+ * egress HopID at the router level (TX ring enabled, 2047 posted, zero
+ * consumed) until a reboot. The ack must be withheld while a down is
+ * pending, exactly as it is withheld before the paths first come up; the
+ * peer's READY retry budget absorbs the delay.
+ */
+static void tbframe_ready_ack_withheld_during_pending_supersede(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	struct tbframe_wire_hello reply;
+	struct tbframe_wire_info info;
+
+	tbframe_mock_link_up(test, fx);
+
+	/*
+	 * Hold the session lock: the HELLO handler queues the supersede
+	 * teardown but the session work cannot run it yet, exactly the
+	 * dispatch-outruns-worker window of a fast peer reload.
+	 */
+	mutex_lock(&fx->link->session_lock);
+
+	fx->mock.peer.session_cookie = 0x5a5a5a5a5a5a5a5aull;
+	fx->mock.peer.transmit_hopid = 13;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	fx->mock.have_response = false;
+
+	/* Peer's READY lands while our down is still queued. */
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	/*
+	 * No READY_ACK may certify the stale paths: the entries it vouches
+	 * for are scheduled for teardown.
+	 */
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+
+	mutex_unlock(&fx->link->session_lock);
+
+	/* The supersede runs and the session re-establishes cleanly. */
+	flush_workqueue(fx->tf.wq);
+	tbframe_link_session_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_GE(test, fx->client.down_count, 1u);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_SUPERSEDE,
+			fx->client.reasons[1]);
+	KUNIT_EXPECT_EQ(test, 2u, fx->client.up_count);
+
+	/* With the new session's paths enabled, READY is acked again. */
+	fx->mock.have_response = false;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_wire_parse_hello(fx->mock.last_response,
+						 sizeof(fx->mock.last_response),
+						 &reply, &info));
+	KUNIT_EXPECT_EQ(test, TBFRAME_WIRE_OP_READY_ACK, info.op);
+}
+
 static void tbframe_cookie_mismatch_zombie(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -144,6 +224,7 @@ static void tbframe_supersede_test_exit(struct kunit *test)
 
 static struct kunit_case tbframe_supersede_cases[] = {
 	KUNIT_CASE(tbframe_supersede_on_rehello),
+	KUNIT_CASE(tbframe_ready_ack_withheld_during_pending_supersede),
 	KUNIT_CASE(tbframe_cookie_mismatch_zombie),
 	KUNIT_CASE(tbframe_verify_sends_keepalive),
 	KUNIT_CASE(tbframe_no_keepalive_without_capability),

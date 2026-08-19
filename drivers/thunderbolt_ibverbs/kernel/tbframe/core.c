@@ -112,10 +112,15 @@ static void tbframe_link_fill_local_hello(struct tbframe_link *link,
 					  struct tbframe_wire_hello *hello)
 {
 	struct tbframe *tf = link->tf;
+	unsigned long flags;
 
 	memset(hello, 0, sizeof(*hello));
 	hello->proto_version = TBFRAME_WIRE_VERSION;
+	/* Under the lock: down_session rotates ->local_hopid per session and
+	 * this runs from the dispatch context too (HELLO_ACK build). */
+	spin_lock_irqsave(&link->lock, flags);
 	hello->transmit_hopid = link->local_hopid;
+	spin_unlock_irqrestore(&link->lock, flags);
 	hello->rx_ring_entries = tf->ring_entries;
 	if (tf->e2e)
 		hello->capabilities |= TBFRAME_WIRE_CAP_E2E;
@@ -383,7 +388,16 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
 	bool deliver = false;
 
 	spin_lock_irqsave(&link->lock, flags);
+	/*
+	 * !needs_down: a supersede can land between this step's down-check
+	 * snapshot and here (inbound HELLO from the dispatch context while
+	 * bring_up was in flight). Announcing UP over a session that is
+	 * already queued for teardown hands the client a link whose paths
+	 * are about to vanish; let the down run and the re-handshake deliver
+	 * the up.
+	 */
 	if (link->state == TBFRAME_STATE_INIT && !link->removing &&
+	    !link->needs_down &&
 	    link->hello_done && link->rings_up && link->paths_enabled &&
 	    tb_xdomain_handshake_complete(&link->hs)) {
 		link->state = TBFRAME_STATE_UP;
@@ -471,16 +485,62 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 		reason = TBFRAME_DOWN_DEAD_HW;
 	}
 
+	/*
+	 * Quiesce the NHI before touching the fabric, the tbnet_tear_down()
+	 * order: stop the rings first (the backend flushes what the fabric
+	 * will still accept, then cancels the rest), and only then disable
+	 * the hop entries. The old order deactivated the egress hop entry
+	 * under a still actively-DMAing TX ring -- the local half of the
+	 * rapid-disable-of-an-active-path pattern implicated in the
+	 * router-level egress HopID wedge.
+	 */
+	if (had_rings)
+		/* Cancels all in-flight frames through the completion path. */
+		link->ops->stop_rings(link->hw);
 	if (had_paths)
 		link->ops->disable_paths(link->hw, link->local_hopid,
 					 remote_hopid);
-	if (had_rings) {
-		/* Cancels all in-flight frames through the completion path. */
-		link->ops->stop_rings(link->hw);
+	if (had_rings)
 		link->ops->free_rings(link->hw);
-	}
 	if (had_hopid)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
+
+	/*
+	 * Rotate the transmit HopID so the next session never reuses this
+	 * one. The router keeps per-HopID egress state (queues, credit
+	 * counters) that a hop-entry rewrite does not reset; a session torn
+	 * down with frames stranded on the egress (peer's ingress hop gone
+	 * mid-stream) leaves that state wedged until a router power cycle,
+	 * and the ida hands the lowest free id back, so without rotation
+	 * every following session is born onto the poisoned HopID (023/025:
+	 * TX ring fully posted, zero consumed, across full reloads on both
+	 * ends). Alloc before release so the ida cannot return the id being
+	 * abandoned; on alloc failure keep the old id rather than dying.
+	 * Serialization: rotation runs under session_lock like every other
+	 * writer of the session's identity; the dispatch context reads
+	 * ->local_hopid under link->lock (tbframe_link_fill_local_hello), so
+	 * a concurrently built HELLO_ACK sees old or new, never garbage --
+	 * a peer that acts on the old id gets superseded by our next HELLO.
+	 * Skipped on destroy: the final release in link_destroy() covers the
+	 * live id.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	if (!link->removing) {
+		int hopid;
+
+		spin_unlock_irqrestore(&link->lock, flags);
+		hopid = link->ops->alloc_out_hopid(link->hw);
+		if (hopid >= 0) {
+			int old = link->local_hopid;
+
+			spin_lock_irqsave(&link->lock, flags);
+			link->local_hopid = hopid;
+			spin_unlock_irqrestore(&link->lock, flags);
+			link->ops->release_out_hopid(link->hw, old);
+		}
+	} else {
+		spin_unlock_irqrestore(&link->lock, flags);
+	}
 
 	if (was_up) {
 		pr_info("%s: link down (%d)\n", link->name, reason);
@@ -810,7 +870,17 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 
 		spin_lock_irqsave(&link->lock, flags);
 		link->hs.peer_seen = true;
-		enabled = link->paths_enabled;
+		/*
+		 * A pending down (supersede queued by the HELLO that preceded
+		 * this READY) means ->paths_enabled still describes the OLD
+		 * session's hop entries, which the session work is about to
+		 * disable. Acking from them certifies paths that are already
+		 * scheduled for teardown: the peer goes UP and streams a full
+		 * TX ring into a hop entry mid-removal, which is the observed
+		 * router-level egress wedge (TX ring enabled, everything
+		 * posted, nothing consumed, reboot-only recovery).
+		 */
+		enabled = link->paths_enabled && !link->needs_down;
 		tbframe_link_kick_locked(link, 0);
 		spin_unlock_irqrestore(&link->lock, flags);
 

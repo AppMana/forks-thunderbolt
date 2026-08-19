@@ -32,6 +32,13 @@ struct tbframe_mock {
 	bool		rings_e2e;
 	bool		paths_on;
 	bool		enable_seen;
+	/* out-HopID allocator: ida-like, lowest free, never a held id */
+	int		next_out_hopid;
+	unsigned int	out_hopid_allocs;
+	unsigned int	out_hopid_releases;
+	int		last_release_out_hopid;
+	/* transmit HopID the link advertised in its most recent request */
+	int		last_request_tx_hopid;
 	int		in_hopid;
 	int		last_alloc_in_hopid;	/* -1 when never allocated */
 	int		last_release_in_hopid;	/* -1 when never released */
@@ -50,7 +57,36 @@ struct tbframe_mock {
 	bool		have_response;
 	u16		req_ops[TBFRAME_MOCK_MAX_REQS];
 	unsigned int	req_count;
+
+	/* teardown call order (enum tbframe_mock_hw_call tokens) */
+	u8		hw_calls[TBFRAME_MOCK_MAX_EVENTS];
+	unsigned int	hw_call_count;
 };
+
+enum tbframe_mock_hw_call {
+	TBFRAME_HW_STOP_RINGS = 1,
+	TBFRAME_HW_FREE_RINGS,
+	TBFRAME_HW_DISABLE_PATHS,
+	TBFRAME_HW_RELEASE_IN_HOPID,
+};
+
+static void tbframe_mock_hw_call(struct tbframe_mock *m, u8 call)
+{
+	if (m->hw_call_count < TBFRAME_MOCK_MAX_EVENTS)
+		m->hw_calls[m->hw_call_count++] = call;
+}
+
+/* Position of @call's first occurrence at or after @from, or -1. */
+static __maybe_unused int tbframe_mock_hw_call_pos(const struct tbframe_mock *m,
+						   u8 call, unsigned int from)
+{
+	unsigned int i;
+
+	for (i = from; i < m->hw_call_count; i++)
+		if (m->hw_calls[i] == call)
+			return i;
+	return -1;
+}
 
 enum tbframe_mock_ev {
 	TBFRAME_EV_UP = 1,
@@ -138,11 +174,18 @@ static const struct tbframe_client_ops tbframe_mock_client_ops = {
 
 static int tbframe_mock_alloc_out_hopid(void *data)
 {
-	return 8;
+	struct tbframe_mock *m = data;
+
+	m->out_hopid_allocs++;
+	return m->next_out_hopid++;
 }
 
 static void tbframe_mock_release_out_hopid(void *data, int hopid)
 {
+	struct tbframe_mock *m = data;
+
+	m->out_hopid_releases++;
+	m->last_release_out_hopid = hopid;
 }
 
 static int tbframe_mock_alloc_in_hopid(void *data, int hopid)
@@ -159,6 +202,7 @@ static void tbframe_mock_release_in_hopid(void *data, int hopid)
 {
 	struct tbframe_mock *m = data;
 
+	tbframe_mock_hw_call(m, TBFRAME_HW_RELEASE_IN_HOPID);
 	m->in_hopid = -1;
 	m->last_release_in_hopid = hopid;
 	m->in_hopid_releases++;
@@ -185,6 +229,7 @@ static void tbframe_mock_stop_rings(void *data)
 {
 	struct tbframe_mock *m = data;
 
+	tbframe_mock_hw_call(m, TBFRAME_HW_STOP_RINGS);
 	m->rings_started = false;
 	if (m->never_cancel)
 		return;
@@ -216,6 +261,7 @@ static void tbframe_mock_free_rings(void *data)
 {
 	struct tbframe_mock *m = data;
 
+	tbframe_mock_hw_call(m, TBFRAME_HW_FREE_RINGS);
 	m->rings_alloced = false;
 }
 
@@ -260,6 +306,7 @@ static int tbframe_mock_disable_paths(void *data, int local_hopid,
 {
 	struct tbframe_mock *m = data;
 
+	tbframe_mock_hw_call(m, TBFRAME_HW_DISABLE_PATHS);
 	m->paths_on = false;
 	m->last_disable_remote_hopid = remote_hopid;
 	return 0;
@@ -289,6 +336,7 @@ static int tbframe_mock_control_request(void *data, const void *req,
 		return ret;
 	if (m->req_count < TBFRAME_MOCK_MAX_REQS)
 		m->req_ops[m->req_count++] = info.op;
+	m->last_request_tx_hopid = local.transmit_hopid;
 
 	if (m->control_err)
 		return m->control_err;

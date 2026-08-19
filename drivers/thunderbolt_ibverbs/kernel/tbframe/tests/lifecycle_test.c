@@ -198,6 +198,50 @@ static void tbframe_lifecycle_hopid_release_matches_alloc(struct kunit *test)
 }
 
 /*
+ * A new session must never reuse the previous session's transmit HopID.
+ *
+ * The router keeps per-HopID egress state (queues, credit counters) that no
+ * hop-entry rewrite resets: an abrupt peer teardown that strands packets on
+ * the egress leaves that HopID wedged at the router until a power cycle
+ * (023/025 incident: fresh sessions on the same HopID were born dead, TX
+ * ring fully posted with zero consumption, across full module reloads on
+ * both ends). Recovery must stop at session re-handshake, so each
+ * re-handshake allocates a fresh out-HopID (alloc before release, the ida
+ * never hands back the held one) and advertises it in the new HELLO; a
+ * poisoned egress HopID is then simply never used again.
+ */
+static void tbframe_lifecycle_session_rotates_out_hopid(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	int first;
+
+	tbframe_mock_link_up(test, fx);
+	first = fx->mock.last_request_tx_hopid;
+	KUNIT_ASSERT_EQ(test, fx->link->local_hopid, first);
+
+	/* Peer reboots and re-HELLOs: supersede, full re-handshake. */
+	fx->mock.peer.session_cookie ^= 0xffull;
+	tbframe_lifecycle_inject(fx, TBFRAME_WIRE_OP_HELLO);
+	flush_workqueue(fx->tf.wq);
+	tbframe_link_session_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
+
+	/* The re-handshake advertised a fresh HopID and freed the old one. */
+	KUNIT_EXPECT_NE(test, first, fx->mock.last_request_tx_hopid);
+	KUNIT_EXPECT_EQ(test, fx->link->local_hopid,
+			fx->mock.last_request_tx_hopid);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_EQ(test, first, fx->mock.last_release_out_hopid);
+
+	/* Destroy releases exactly the live HopID, no double free. */
+	tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
+	fx->link_destroyed = true;
+	KUNIT_EXPECT_EQ(test, fx->mock.out_hopid_allocs,
+			fx->mock.out_hopid_releases);
+}
+
+/*
  * Destroy against hardware that never cancels a frame AND an inbound peer
  * still hammering the link: still bounded, still no hang.
  */
@@ -253,6 +297,7 @@ static struct kunit_case tbframe_lifecycle_cases[] = {
 	KUNIT_CASE(tbframe_lifecycle_reregister_after_unregister),
 	KUNIT_CASE(tbframe_lifecycle_double_register_refused),
 	KUNIT_CASE(tbframe_lifecycle_hopid_release_matches_alloc),
+	KUNIT_CASE(tbframe_lifecycle_session_rotates_out_hopid),
 	KUNIT_CASE(tbframe_lifecycle_destroy_dead_hw_under_dispatch),
 	{}
 };

@@ -10,6 +10,43 @@
  */
 #include "tbframe_mock.h"
 
+/*
+ * Session teardown quiesces the NHI before touching the fabric: rings stop
+ * (all DMA cancelled) BEFORE the hop entries are disabled, the
+ * tbnet_tear_down() order. Disabling the egress hop entry under a still
+ * actively-DMAing TX ring is the local half of the "rapid disable of an
+ * active path" pattern implicated in the router-level egress wedge.
+ */
+static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned long flags;
+	int stop, disable, freed, release;
+
+	tbframe_mock_link_up(test, fx);
+
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+
+	stop = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_STOP_RINGS, 0);
+	disable = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_DISABLE_PATHS,
+					   0);
+	freed = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_FREE_RINGS, 0);
+	release = tbframe_mock_hw_call_pos(&fx->mock,
+					   TBFRAME_HW_RELEASE_IN_HOPID, 0);
+	KUNIT_ASSERT_GE(test, stop, 0);
+	KUNIT_ASSERT_GE(test, disable, 0);
+	KUNIT_ASSERT_GE(test, freed, 0);
+	KUNIT_ASSERT_GE(test, release, 0);
+	/* stop -> disable -> free -> release */
+	KUNIT_EXPECT_LT(test, stop, disable);
+	KUNIT_EXPECT_LT(test, disable, freed);
+	KUNIT_EXPECT_LT(test, freed, release);
+}
+
 static void tbframe_teardown_publisher_drain_poisons(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -120,6 +157,7 @@ static void tbframe_teardown_test_exit(struct kunit *test)
 }
 
 static struct kunit_case tbframe_teardown_cases[] = {
+	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),
 	KUNIT_CASE(tbframe_teardown_clean_when_hw_cancels),
