@@ -499,18 +499,30 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool was_up, deliver_down, terminal, had_rings, had_paths, had_hopid;
+	bool was_up, deliver_down, terminal, hold;
+	bool had_rings, had_paths, had_hopid;
 	u16 remote_hopid;
 	int active;
 
 	lockdep_assert_held(&link->session_lock);
 
+	/*
+	 * A LOGOUT down is a HOLD: the peer told us it is tearing down and
+	 * will re-negotiate. Quiesce for the client (state, admission, TX
+	 * flush, link_down) but keep rings/paths/HopIDs -- our RX keeps
+	 * absorbing the peer's teardown residue, and skipping the hardware
+	 * cycle halves the path disable/enable churn per peer reload. The
+	 * deferred hardware teardown (->hw_stale) runs at the head of the
+	 * next session step, right before the aligned rebuild.
+	 */
+	hold = reason == TBFRAME_DOWN_LOGOUT && !link->removing;
+
 	spin_lock_irqsave(&link->lock, flags);
 	was_up = link->state == TBFRAME_STATE_UP;
 	if (link->state != TBFRAME_STATE_DEAD)
 		link->state = TBFRAME_STATE_INIT;
-	had_rings = link->rings_up;
-	had_paths = link->paths_enabled;
+	had_rings = link->rings_up || link->hw_stale;
+	had_paths = link->paths_enabled || link->hw_stale;
 	had_hopid = link->in_hopid_held;
 	/*
 	 * NOT link->remote_hopid: that field tracks the peer's latest HELLO
@@ -520,7 +532,10 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	remote_hopid = link->active_remote_hopid;
 	link->rings_up = false;
 	link->paths_enabled = false;
-	link->in_hopid_held = false;
+	if (hold)
+		link->hw_stale = true;
+	else
+		link->in_hopid_held = false;
 	link->hello_done = false;
 	link->needs_down = false;
 	link->tx_blocked = false;
@@ -562,6 +577,9 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_quiesced = true;
 	spin_unlock_irqrestore(&link->lock, flags);
 
+	if (hold)
+		goto deliver;
+
 	/*
 	 * BYE after our own quiesce (the ack contract is symmetric: each
 	 * side certifies its TX is silent), before any path teardown. Only
@@ -594,6 +612,11 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 		link->ops->free_rings(link->hw);
 	if (had_hopid)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
+	spin_lock_irqsave(&link->lock, flags);
+	link->hw_stale = false;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+deliver:
 
 	/*
 	 * The transmit HopID is deliberately NOT rotated across sessions.
@@ -639,23 +662,27 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	}
 
 	/*
-	 * Automatic re-handshake for every reason but the terminal ones.
-	 * After a LOGOUT (peer's BYE) the peer is mid-teardown for up to its
-	 * whole BYE budget: re-handshaking into that window produces the
-	 * one-sided bring_up above. Wait it out; if the peer comes back
-	 * sooner its fresh HELLO kicks this session immediately anyway.
+	 * Automatic re-handshake for every reason but the terminal ones and
+	 * the LOGOUT hold: after a peer's BYE this side deliberately WAITS
+	 * for the peer's fresh HELLO (which kicks the step immediately) so
+	 * the deferred hardware teardown and both rebuilds run in lockstep.
+	 * A safety re-kick at the settle interval covers a peer whose
+	 * return HELLO was lost.
 	 */
-	if (reason != TBFRAME_DOWN_CLOSED && reason != TBFRAME_DOWN_DEAD_HW &&
-	    reason != TBFRAME_DOWN_UNPLUG)
-		tbframe_link_kick(link, msecs_to_jiffies(
-			reason == TBFRAME_DOWN_LOGOUT ?
-			TBFRAME_BYE_SETTLE_MS : TBFRAME_RETRY_DELAY_MS));
+	if (reason == TBFRAME_DOWN_LOGOUT)
+		tbframe_link_kick(link,
+				  msecs_to_jiffies(TBFRAME_BYE_SETTLE_MS));
+	else if (reason != TBFRAME_DOWN_CLOSED &&
+		 reason != TBFRAME_DOWN_DEAD_HW &&
+		 reason != TBFRAME_DOWN_UNPLUG)
+		tbframe_link_kick(link,
+				  msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
 }
 
 static void __tbframe_link_session_step(struct tbframe_link *link)
 {
 	unsigned long flags;
-	bool hello_done, rings_up, ready_sent, down;
+	bool hello_done, rings_up, ready_sent, down, hw_stale;
 	enum tbframe_down_reason reason;
 	int ret;
 
@@ -685,6 +712,23 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 	if (down) {
 		tbframe_link_down_session(link, reason);
 		return;
+	}
+
+	/*
+	 * Deferred hardware teardown from a LOGOUT hold: the peer is (re)
+	 * negotiating now, so tear the stale session hardware down and fall
+	 * through to the aligned rebuild in this same step.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	hw_stale = link->hw_stale;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (hw_stale) {
+		tbframe_link_down_session(link, TBFRAME_DOWN_VERIFY);
+		spin_lock_irqsave(&link->lock, flags);
+		hello_done = link->hello_done;
+		rings_up = link->rings_up;
+		ready_sent = link->hs.request_sent;
+		spin_unlock_irqrestore(&link->lock, flags);
 	}
 
 	if (!hello_done) {

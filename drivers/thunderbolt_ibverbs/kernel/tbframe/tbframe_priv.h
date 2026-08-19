@@ -163,6 +163,18 @@ struct tbframe_link {
 	 */
 	bool			tx_quiesced;
 	/*
+	 * Set by a LOGOUT (peer BYE) hold: the session is down for the
+	 * client and admission is closed, but rings/paths/HopIDs are
+	 * deliberately KEPT -- the RX keeps absorbing the peer's teardown
+	 * residue, and tearing hardware down here would double the number
+	 * of path disable/enable cycles per peer reload (each cycle is a
+	 * shot at the router-level born-dead pairing). The deferred
+	 * teardown runs at the head of the next session step -- normally
+	 * kicked by the returning peer's HELLO -- immediately before the
+	 * aligned rebuild.
+	 */
+	bool			hw_stale;
+	/*
 	 * The remote HopID the CURRENT session actually allocated its in-HopID
 	 * with and enabled its paths on. An inbound HELLO rewrites
 	 * ->remote_hopid from the dispatch context at any time, so teardown
