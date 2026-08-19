@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-stage latency budget from two tbv-lat-timeline.bt traces.
+"""Per-stage latency budget from two tbrxe-lat-timeline.sh --events traces.
 
 Reads the client-side and server-side event logs captured during an
 ib_send_lat run (single QP, one WR in flight) and attributes microseconds
