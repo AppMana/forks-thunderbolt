@@ -18,6 +18,47 @@ struct tbframe_hw {
 	struct tb_ring		*rx_ring;
 };
 
+/*
+ * Per-ring MSI-X interrupt moderation for the data rings. The NHI driver
+ * programs 128 us into every vector at probe (nhi_enable_int_throttling),
+ * which gates TX-completion (window release) and RX delivery by up to that
+ * interval; the legacy driver zeroed it for its data rings via the fork's
+ * optional tb_ring_throttling() export (nhi_interrupt_throttle_ns=0 was its
+ * default) and measured single-digit-us ping-pong latency where the tbframe
+ * stack measures ~64 us. Sentinel -1 leaves the hardware/driver default
+ * untouched; 0 disables moderation; otherwise the interval in ns
+ * (256 ns granularity). Runtime-writable: applies at the next session's
+ * ring allocation. Resolved via symbol_get like the legacy driver so
+ * tbframe still loads on a core without the export.
+ */
+static int data_ring_throttle_ns = -1;
+module_param(data_ring_throttle_ns, int, 0644);
+MODULE_PARM_DESC(data_ring_throttle_ns,
+		 "Data-ring MSI-X interrupt moderation in ns (-1 = leave NHI default, 0 = disable)");
+
+extern int tb_ring_throttling(struct tb_ring *ring, unsigned int interval_nsec);
+
+static void tbframe_hw_apply_throttling(struct tbframe_hw *hw)
+{
+	typeof(&tb_ring_throttling) fn;
+	int interval = READ_ONCE(data_ring_throttle_ns);
+	int ret;
+
+	if (interval < 0)
+		return;
+
+	fn = symbol_get(tb_ring_throttling);
+	if (!fn) {
+		pr_warn_once("data_ring_throttle_ns set but tb_ring_throttling() is not exported by this thunderbolt core; ignoring\n");
+		return;
+	}
+	ret = fn(hw->tx_ring, interval);
+	ret = ret ?: fn(hw->rx_ring, interval);
+	if (ret)
+		pr_warn("ring throttling %d ns failed: %d\n", interval, ret);
+	symbol_put(tb_ring_throttling);
+}
+
 static struct device *tbframe_hw_dma_dev(struct tbframe_hw *hw)
 {
 	return &hw->xd->tb->nhi->pdev->dev;
@@ -87,6 +128,9 @@ static int tbframe_hw_alloc_rings(void *data, u16 tx_entries, u16 rx_entries,
 		hw->tx_ring = NULL;
 		return -ENOMEM;
 	}
+
+	/* Rings are not running yet; tb_ring_throttling() requires that. */
+	tbframe_hw_apply_throttling(hw);
 	return 0;
 }
 
