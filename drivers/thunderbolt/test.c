@@ -3478,6 +3478,101 @@ static void tb_test_xdomain_bond_abort_preserves_single_lane(struct kunit *test)
 }
 
 /*
+ * Boot skew is the fleet's x1 fixed point: the two ends' target-DUAL
+ * windows never overlap during initial negotiation (sequential reboots),
+ * every failure is terminal, and no one ever retries. Re-arm from
+ * ENUMERATED must recover the pair - and because it can succeed AFTER
+ * services published, the success path must re-announce the property dirs
+ * so DMA paths are reborn with bonded credits (never unregister/re-register
+ * live directories - the tb_reannounce_property_dirs() contract).
+ */
+static void tb_test_xdomain_bonding_rearm_recovers_boot_skew(struct kunit *test)
+{
+	struct bond_model_link link;
+
+	bond_model_appmana_023_025(&link);
+	/* The synchronous cold-boot scheduler: windows never overlap. */
+	bond_model_run(&link, true);
+	KUNIT_ASSERT_FALSE(test, bond_model_pair_bonded(&link));
+
+	/* Services meanwhile came up on the x1 link. */
+	link.a.port[1].services_published = true;
+	link.b.port[0].services_published = true;
+
+	bond_model_rearm(&link, 5);
+
+	KUNIT_EXPECT_TRUE(test, bond_model_pair_bonded(&link));
+	KUNIT_EXPECT_TRUE(test, link.a.port[1].services_republished);
+	KUNIT_EXPECT_TRUE(test, link.b.port[0].services_republished);
+	KUNIT_EXPECT_FALSE(test, link.destabilized);
+}
+
+/* Re-arm is bounded and an incapable peer never bonds or destabilizes. */
+static void tb_test_xdomain_bonding_rearm_bounded_and_safe(struct kunit *test)
+{
+	struct bond_model_link link;
+
+	bond_model_appmana_023_025(&link);
+	bond_model_run(&link, true);
+
+	/* Budget zero: stays x1, quietly. */
+	bond_model_rearm(&link, 0);
+	KUNIT_EXPECT_FALSE(test, bond_model_pair_bonded(&link));
+	KUNIT_EXPECT_FALSE(test, link.destabilized);
+
+	/* Incapable peer: retries exhaust without bonding or destabilizing. */
+	link.b.port[0].capable = false;
+	bond_model_rearm(&link, 5);
+	KUNIT_EXPECT_FALSE(test, bond_model_pair_bonded(&link));
+	KUNIT_EXPECT_FALSE(test, link.destabilized);
+
+	/* The b5f07da constraint holds for the re-arm path too. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_bonding_rearm_touches_lanes_on_failure());
+}
+
+/*
+ * The re-arm predicates in xdomain.c: an ENUMERATED, capable, unbonded
+ * XDomain with budget left re-arms; a bonded or exhausted one does not.
+ * The passive high side accepts a link-state-change request while
+ * ENUMERATED (capable, unbonded), so the low side's re-arm window never
+ * needs to overlap a 10 s park - which is what made boot skew terminal.
+ */
+static void tb_test_xdomain_bonding_rearm_predicates(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_bonding_rearm_allowed(true, false, 0));
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_bonding_rearm_allowed(true, false, 4));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_bonding_rearm_allowed(true, false, 5));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_bonding_rearm_allowed(true, true, 0));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_bonding_rearm_allowed(false, false, 0));
+
+	/* Parked high side keeps accepting, as today. */
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_accepts_link_state_change(true, false,
+							  true, false));
+	/* ENUMERATED + capable + unbonded now accepts (the passive side). */
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_accepts_link_state_change(false, true,
+							  true, false));
+	/* Bonded or incapable ENUMERATED peers still refuse. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_accepts_link_state_change(false, true,
+							  true, true));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_accepts_link_state_change(false, true,
+							  false, false));
+	/* Any other state still refuses. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_accepts_link_state_change(false, false,
+							  true, false));
+}
+
+/*
  * ICM owns physical-lane cleanup.  On appmana-025, module removal received an
  * ICM XDomain-disconnected notification after the NHI had stopped answering.
  * Link exit tried tb_port_lane_bonding_disable(), blocked in a config read,
@@ -3741,6 +3836,9 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_two_port_bonding_does_not_serialize_peers),
 	KUNIT_CASE(tb_test_xdomain_never_bonds_after_services_publish),
 	KUNIT_CASE(tb_test_xdomain_bond_abort_preserves_single_lane),
+	KUNIT_CASE(tb_test_xdomain_bonding_rearm_recovers_boot_skew),
+	KUNIT_CASE(tb_test_xdomain_bonding_rearm_bounded_and_safe),
+	KUNIT_CASE(tb_test_xdomain_bonding_rearm_predicates),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),
 	KUNIT_CASE(tb_test_xdomain_handler_dispatch_source_blind_registrant),

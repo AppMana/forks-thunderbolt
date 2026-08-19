@@ -32,6 +32,13 @@ bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							int link_status_ret,
 							bool peer_confirmed);
 bool tb_test_xdomain_direct_bonding_blocks_controller(void);
+bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
+					   unsigned int attempts);
+bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
+					       bool enumerated,
+					       bool bonding_possible,
+					       bool bonded);
+bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);

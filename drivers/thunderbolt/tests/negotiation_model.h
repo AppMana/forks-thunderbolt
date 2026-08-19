@@ -481,6 +481,7 @@ struct bond_model_port {
 	bool capable;
 	bool bonded;
 	bool services_published;
+	bool services_republished;
 };
 
 struct bond_model_host {
@@ -561,6 +562,48 @@ static inline void bond_model_run(struct bond_model_link *L,
 static inline bool bond_model_pair_bonded(const struct bond_model_link *L)
 {
 	return L->a.port[1].bonded && L->b.port[0].bonded;
+}
+
+/*
+ * ---- Bonding re-arm (from ENUMERATED) ----
+ *
+ * Bounded retries from ENUMERATED with a PASSIVE high side: an
+ * enumerated, capable, unbonded peer accepts a link-state-change request
+ * at any time (it re-enters BONDING_UUID_HIGH on demand), so the low
+ * side's attempt wakes it and the two ends' windows no longer need to
+ * overlap - which is what made boot skew the terminal x1 fixed point.
+ * A success on a link whose services are already published re-announces
+ * the property dirs (generation bump; never unregister/re-register live
+ * dirs) so the service sessions re-establish their DMA paths with bonded
+ * credits; that is what keeps a late bond from destabilizing the link the
+ * way mid-session bonding did (c1777f9). Failure exhausts the budget
+ * quietly and never touches lane adapters (b5f07da).
+ */
+static inline void bond_model_rearm(struct bond_model_link *L, int attempts)
+{
+	int i, try;
+
+	for (try = 0; try < attempts; try++) {
+		for (i = 0; i < BOND_MODEL_PORTS; i++) {
+			struct bond_model_port *a = &L->a.port[i];
+			struct bond_model_port *b;
+
+			if (!a->capable || a->peer_port < 0)
+				continue;
+			b = &L->b.port[a->peer_port];
+			if (!b->capable || b->peer_port != i)
+				continue;
+			if (a->bonded && b->bonded)
+				continue;
+			/* Passive high side: no window overlap required. */
+			a->bonded = true;
+			b->bonded = true;
+			if (a->services_published)
+				a->services_republished = true;
+			if (b->services_published)
+				b->services_republished = true;
+		}
+	}
 }
 
 #endif /* _TB_NEGOTIATION_MODEL_H */

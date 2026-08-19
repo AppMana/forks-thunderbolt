@@ -54,6 +54,10 @@ add_removing=1;   grep -q 'bool removing;' "$src" && add_removing=0
 # backport -- lets service drivers wait for in-flight frames to complete
 # before stopping a ring)
 add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
+# struct tb_xdomain::bonding_rearm_attempts (xdomain.c: bounded lane-bonding
+# re-arm from ENUMERATED; appended at the END of the struct so every stock
+# member keeps its stock offset for stock-header consumers)
+add_rearm=1;      grep -q 'bonding_rearm_attempts' "$src" && add_rearm=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
@@ -68,7 +72,8 @@ awk -v add_completion="$add_completion" \
     -v add_paths_active="$add_paths_active" \
     -v add_reannounce="$add_reannounce" \
     -v add_removing="$add_removing" \
-    -v add_ring_flush="$add_ring_flush" '
+    -v add_ring_flush="$add_ring_flush" \
+    -v add_rearm="$add_rearm" '
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
 		print
@@ -87,6 +92,12 @@ awk -v add_completion="$add_completion" \
 	add_removing == 1 && in_xd == 1 && $0 == "\tbool is_unplugged;" {
 		print
 		print "\tbool removing;"
+		next
+	}
+	add_rearm == 1 && in_xd == 1 && $0 == "};" {
+		print "\tunsigned int bonding_rearm_attempts;"
+		print "};"
+		in_xd = 0
 		next
 	}
 	in_xd == 1 && $0 == "};" { in_xd = 0 }
@@ -152,7 +163,7 @@ awk -v add_completion="$add_completion" \
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE' 'bool removing;' 'TB_RING_HAS_FLUSH'; do
+for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE' 'bool removing;' 'TB_RING_HAS_FLUSH' 'bonding_rearm_attempts'; do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1

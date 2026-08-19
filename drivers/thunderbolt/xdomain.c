@@ -24,6 +24,14 @@
 #define XDOMAIN_DEFAULT_TIMEOUT			1000	/* ms */
 #define XDOMAIN_BONDING_TIMEOUT			10000	/* ms */
 #define XDOMAIN_RETRIES				10
+/*
+ * Lane-bonding re-arm from ENUMERATED: bounded attempts, doubling spacing
+ * (10 s, 20 s, 40 s, 80 s, 160 s ~ 5 min total), sized to outlive the
+ * boot skew of sequentially rebooted peers. Failure never touches lane
+ * adapters (the b5f07da Maple Ridge constraint).
+ */
+#define XDOMAIN_BONDING_REARM_ATTEMPTS		5
+#define XDOMAIN_BONDING_REARM_TIMEOUT		10000	/* ms, doubles */
 #define XDOMAIN_DIRECT_BOND_RETRIES		10
 #define XDOMAIN_DEFAULT_MAX_HOPID		15
 
@@ -56,6 +64,48 @@ static const char * const state_names[] = {
 	[XDOMAIN_STATE_ENUMERATED] = "ENUMERATED",
 	[XDOMAIN_STATE_ERROR] = "ERROR",
 };
+
+/*
+ * Bonding re-arm: whether an ENUMERATED XDomain still retries lane
+ * bonding. Without this, every bonding failure was terminal-x1 for the
+ * XDomain's life (ENUMERATED never revisited bonding), which made boot
+ * skew the fleet-wide x1 fixed point.
+ */
+static bool tb_xdomain_bonding_rearm_allowed(bool bonding_possible,
+					     bool bonded,
+					     unsigned int attempts)
+{
+	return bonding_possible && !bonded &&
+	       attempts < XDOMAIN_BONDING_REARM_ATTEMPTS;
+}
+
+/*
+ * Passive high side: whether an inbound XDP link-state-change request is
+ * acceptable. A peer parked in BONDING_UUID_HIGH accepts one (the
+ * original handshake); additionally an ENUMERATED, capable, unbonded peer
+ * accepts a LATE request and re-enters BONDING_UUID_HIGH. Without the
+ * latter, the low side's re-arm window would have to overlap the high
+ * side's 10 s park - the boot-skew scheduler problem all over again. With
+ * it, the low side's attempt wakes the high side, so re-arm converges
+ * regardless of skew.
+ */
+static bool tb_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
+						 bool enumerated,
+						 bool bonding_possible,
+						 bool bonded)
+{
+	return in_bonding_uuid_high ||
+	       (enumerated && bonding_possible && !bonded);
+}
+
+static bool tb_xdomain_bonding_rearm_needed(struct tb_xdomain *xd)
+{
+	struct tb_port *port = tb_xdomain_downstream_port(xd);
+
+	return tb_xdomain_bonding_rearm_allowed(xd->bonding_possible,
+						!port || port->bonded,
+						xd->bonding_rearm_attempts);
+}
 
 struct xdomain_request_work {
 	struct work_struct work;
@@ -874,7 +924,13 @@ static void tb_xdp_handle_request(struct work_struct *work)
 		tb_dbg(tb, "%llx: received XDomain link state change request\n",
 		       route);
 
-		if (xd && xd->state == XDOMAIN_STATE_BONDING_UUID_HIGH) {
+		if (xd && tb_xdomain_accepts_link_state_change(
+				xd->state == XDOMAIN_STATE_BONDING_UUID_HIGH,
+				xd->state == XDOMAIN_STATE_ENUMERATED,
+				xd->bonding_possible,
+				({ struct tb_port *p =
+					tb_xdomain_downstream_port(xd);
+				   !p || p->bonded; }))) {
 			const struct tb_xdp_link_state_change *lsc =
 				(const struct tb_xdp_link_state_change *)pkg;
 
@@ -883,6 +939,12 @@ static void tb_xdp_handle_request(struct work_struct *work)
 			mutex_lock(&xd->lock);
 			if (!xd->removing) {
 				xd->target_link_width = lsc->tlw;
+				if (xd->state == XDOMAIN_STATE_ENUMERATED) {
+					dev_dbg(&xd->dev,
+						"accepting late link state change (bonding re-arm)\n");
+					xd->state = XDOMAIN_STATE_BONDING_UUID_HIGH;
+					xd->state_retries = XDOMAIN_RETRIES;
+				}
 				queue_delayed_work(tb->wq, &xd->state_work,
 						   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
 			}
@@ -1533,7 +1595,12 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 			struct tb_port *port;
 
 			port = tb_xdomain_downstream_port(xd);
-			if (!port->bonded)
+			/*
+			 * Keep lane 1 armed while the bounded re-arm can
+			 * still bond this link; disable it only once the
+			 * budget is exhausted (mainline power behavior).
+			 */
+			if (!port->bonded && !tb_xdomain_bonding_rearm_needed(xd))
 				tb_port_disable(port->dual_link_port);
 		}
 
@@ -1591,6 +1658,37 @@ static void tb_xdomain_queue_link_status2(struct tb_xdomain *xd)
 	xd->state_retries = XDOMAIN_RETRIES;
 	queue_delayed_work(xd->tb->wq, &xd->state_work,
 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
+}
+
+/* Schedule the next bounded re-arm attempt (no-op once bonded/exhausted). */
+static void tb_xdomain_queue_bonding_rearm(struct tb_xdomain *xd)
+{
+	if (!tb_xdomain_bonding_rearm_needed(xd))
+		return;
+
+	dev_dbg(&xd->dev, "scheduling lane bonding re-arm attempt %u of %u\n",
+		xd->bonding_rearm_attempts + 1,
+		(unsigned int)XDOMAIN_BONDING_REARM_ATTEMPTS);
+	queue_delayed_work(xd->tb->wq, &xd->state_work,
+			   msecs_to_jiffies(XDOMAIN_BONDING_REARM_TIMEOUT <<
+					    xd->bonding_rearm_attempts));
+}
+
+/*
+ * Bonding succeeded after the XDomain was already enumerated and its
+ * services published: the DMA paths in use were born with x1 credit
+ * sizing. Re-announce the property directories (generation bump, never an
+ * unregister/re-register of live dirs) so the peers re-probe and the
+ * service sessions re-establish their paths with bonded credits.
+ */
+static void tb_xdomain_bonding_late_success(struct tb_xdomain *xd)
+{
+	if (!device_is_registered(&xd->dev))
+		return;
+
+	dev_info(&xd->dev,
+		 "lane bonding enabled after enumeration; re-announcing properties\n");
+	tb_reannounce_property_dirs();
 }
 
 static void tb_xdomain_queue_bonding(struct tb_xdomain *xd)
@@ -1872,13 +1970,17 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		break;
 
 	case XDOMAIN_STATE_BONDING_UUID_LOW:
-		tb_xdomain_lane_bonding_enable(xd);
+		if (!tb_xdomain_lane_bonding_enable(xd))
+			tb_xdomain_bonding_late_success(xd);
 		tb_xdomain_queue_properties(xd);
 		break;
 
 	case XDOMAIN_STATE_BONDING_UUID_HIGH:
-		if (tb_xdomain_bond_lanes_uuid_high(xd) == -EAGAIN)
+		ret = tb_xdomain_bond_lanes_uuid_high(xd);
+		if (ret == -EAGAIN)
 			goto retry_state;
+		if (!ret)
+			tb_xdomain_bonding_late_success(xd);
 		tb_xdomain_queue_properties(xd);
 		break;
 
@@ -1917,11 +2019,21 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				tb_xdomain_queue_properties(xd);
 		} else {
 			xd->state = XDOMAIN_STATE_ENUMERATED;
+			tb_xdomain_queue_bonding_rearm(xd);
 		}
 		break;
 
 	case XDOMAIN_STATE_ENUMERATED:
-		tb_xdomain_queue_properties(xd);
+		if (tb_xdomain_bonding_rearm_needed(xd)) {
+			xd->bonding_rearm_attempts++;
+			dev_dbg(&xd->dev,
+				"re-arming lane bonding (attempt %u of %u)\n",
+				xd->bonding_rearm_attempts,
+				(unsigned int)XDOMAIN_BONDING_REARM_ATTEMPTS);
+			tb_xdomain_queue_link_status(xd);
+		} else {
+			tb_xdomain_queue_properties(xd);
+		}
 		break;
 
 	case XDOMAIN_STATE_ERROR:
@@ -2272,6 +2384,29 @@ bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 }
 
 bool tb_test_xdomain_direct_bonding_blocks_controller(void)
+{
+	return false;
+}
+
+bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
+					   unsigned int attempts)
+{
+	return tb_xdomain_bonding_rearm_allowed(bonding_possible, bonded,
+						attempts);
+}
+
+bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
+					       bool enumerated,
+					       bool bonding_possible,
+					       bool bonded)
+{
+	return tb_xdomain_accepts_link_state_change(in_bonding_uuid_high,
+						    enumerated,
+						    bonding_possible, bonded);
+}
+
+/* The b5f07da constraint: a failed re-arm never touches lane adapters. */
+bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void)
 {
 	return false;
 }
