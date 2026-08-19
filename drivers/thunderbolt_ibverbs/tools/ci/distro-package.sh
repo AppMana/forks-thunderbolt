@@ -131,17 +131,10 @@ build_deb() {
 	substitute "$repo_root/packaging/debian/prerm" "$stage/DEBIAN/prerm"
 	chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"
 
-	# udev: stable per-link name for the usb4_rdma GID netdev. Self-contained
-	# (helper derives the name from XDomain sysfs), so it works on any host.
-	install -D -m 0644 "$repo_root/packaging/udev/60-usb4-rdma-net.rules" \
-		"$stage/usr/lib/udev/rules.d/60-usb4-rdma-net.rules"
-	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-ifname" \
-		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname"
-	# per-link routable /64 assignment (honest-HCA reachability GID)
-	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-addr" \
-		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr"
-	install -D -m 0644 "$repo_root/packaging/udev/tbv-rdma-addr-lib.sh" \
-		"$stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh"
+	# The udev naming/addressing tooling (60-usb4-rdma-net.rules + the
+	# tbv-rdma-* helpers) ships in usb4-rdma-provider as of 0.2.70: every
+	# RDMA node installs the provider, including tbframe/tbrxe nodes that
+	# run without this dkms package.
 	install -D -m 0755 "$repo_root/scripts/tbv-nhi-reset.sh" \
 		"$stage/usr/lib/thunderbolt-ibverbs/tbv-nhi-reset"
 

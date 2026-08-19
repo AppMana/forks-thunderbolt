@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Apply the per-link naming/addressing rules to rails that already
+        # exist (fresh install or upgrade on a live fabric). No-op without
+        # udev.
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules 2>/dev/null || true
+            udevadm trigger --subsystem-match=net --action=add 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

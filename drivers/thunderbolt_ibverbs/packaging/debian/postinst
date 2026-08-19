@@ -33,7 +33,8 @@ case "$1" in
             done
             [ -z "$failed" ] || exit 1
         fi
-        # Pick up the usb4_rdma netdev naming rule (no-op if udev not running).
+        # Replay net add events so rails that already exist get the naming/
+        # addressing rules usb4-rdma-provider ships (no-op if udev not running).
         if command -v udevadm >/dev/null 2>&1; then
             udevadm control --reload-rules 2>/dev/null || true
             udevadm trigger --subsystem-match=net --action=add 2>/dev/null || true

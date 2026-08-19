@@ -239,7 +239,23 @@ build_deb() {
 	install -m 0644 "$files/tbrxe.driver" \
 		"$deb_stage/etc/libibverbs.d/tbrxe.driver"
 
+	# udev: stable per-link name + deterministic per-link /64 (ULA) for the
+	# u4r* rail netdevs both engines publish. Shipped here (not in the dkms
+	# package) because every RDMA node installs the provider, including
+	# tbframe/tbrxe nodes that run without thunderbolt-ibverbs-dkms; the
+	# fleet tbv-rail-gids oneshot also execs tbv-rdma-addr by this path.
+	install -D -m 0644 "$repo_root/packaging/udev/60-usb4-rdma-net.rules" \
+		"$deb_stage/usr/lib/udev/rules.d/60-usb4-rdma-net.rules"
+	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-ifname" \
+		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname"
+	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-addr" \
+		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr"
+	install -D -m 0644 "$repo_root/packaging/udev/tbv-rdma-addr-lib.sh" \
+		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh"
+
 	substitute "$repo_root/packaging/debian/control-rdma" "$deb_stage/DEBIAN/control"
+	substitute "$repo_root/packaging/debian/postinst-rdma" "$deb_stage/DEBIAN/postinst"
+	chmod 0755 "$deb_stage/DEBIAN/postinst"
 
 	local deb="$out_dir/${pkgname}_${version}_amd64.deb"
 	dpkg-deb --root-owner-group --build "$deb_stage" "$deb" >/dev/null
