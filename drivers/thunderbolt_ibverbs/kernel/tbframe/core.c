@@ -507,14 +507,19 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 
 	/*
 	 * Rotate the transmit HopID so the next session never reuses this
-	 * one. The router keeps per-HopID egress state (queues, credit
-	 * counters) that a hop-entry rewrite does not reset; a session torn
-	 * down with frames stranded on the egress (peer's ingress hop gone
-	 * mid-stream) leaves that state wedged until a router power cycle,
-	 * and the ida hands the lowest free id back, so without rotation
-	 * every following session is born onto the poisoned HopID (023/025:
-	 * TX ring fully posted, zero consumed, across full reloads on both
-	 * ends). Alloc before release so the ida cannot return the id being
+	 * one: a session torn down with frames stranded on the egress can
+	 * leave per-HopID router state behind, and the ida hands the lowest
+	 * free id straight back, so every following session would be born
+	 * onto whatever the last one left. Protocol hygiene, not a recovery
+	 * mechanism: the 2026-08-18 023/025 egress wedge (TX ring fully
+	 * posted, zero consumed) was reproduced under capture and did NOT
+	 * clear when the next session rotated to a fresh HopID -- that
+	 * poison is per-port/link (egress credit state at the lane adapter),
+	 * survives every hop-entry and ring re-program, and only a router
+	 * reset clears it. Prevention therefore lives in the READY gate and
+	 * the quiesce-before-disable teardown order above; rotation just
+	 * keeps sessions from inheriting stale per-HopID state.
+	 * Alloc before release so the ida cannot return the id being
 	 * abandoned; on alloc failure keep the old id rather than dying.
 	 * Serialization: rotation runs under session_lock like every other
 	 * writer of the session's identity; the dispatch context reads
