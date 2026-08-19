@@ -36,6 +36,16 @@ enum tbframe_wire_op {
 	TBFRAME_WIRE_OP_HELLO_ACK = 2,
 	TBFRAME_WIRE_OP_READY = 3,
 	TBFRAME_WIRE_OP_READY_ACK = 4,
+	/*
+	 * Orderly-teardown quiesce (tbnet LOGOUT analog), additive in wire
+	 * v2: BYE tells the peer this side is about to tear its paths down;
+	 * the peer stops transmitting (session down, rings cancelled) and
+	 * only then acks. A pre-BYE peer never consumes the request, the
+	 * core answers an error, and the sender proceeds after its bounded
+	 * retry budget -- degraded to exactly the old behavior.
+	 */
+	TBFRAME_WIRE_OP_BYE = 5,
+	TBFRAME_WIRE_OP_BYE_ACK = 6,
 };
 
 /* HELLO capability word (spec §3): additive, unknown bits ignored. */
@@ -105,7 +115,7 @@ static inline int tbframe_wire_build_hello(void *buf, size_t size,
 
 	if (!p || !hello)
 		return -EINVAL;
-	if (op < TBFRAME_WIRE_OP_HELLO || op > TBFRAME_WIRE_OP_READY_ACK)
+	if (op < TBFRAME_WIRE_OP_HELLO || op > TBFRAME_WIRE_OP_BYE_ACK)
 		return -EINVAL;
 	if (size < TBFRAME_WIRE_HELLO_MSG_SIZE)
 		return -ENOSPC;
@@ -161,7 +171,7 @@ static inline int tbframe_wire_parse_hello(const void *buf, size_t size,
 		return -EINVAL;
 
 	op = tbframe_wire_get_le32(p + 28);
-	if (op < TBFRAME_WIRE_OP_HELLO || op > TBFRAME_WIRE_OP_READY_ACK)
+	if (op < TBFRAME_WIRE_OP_HELLO || op > TBFRAME_WIRE_OP_BYE_ACK)
 		return -EINVAL;
 
 	if (info) {

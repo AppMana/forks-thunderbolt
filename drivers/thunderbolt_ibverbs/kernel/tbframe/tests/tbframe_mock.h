@@ -57,6 +57,8 @@ struct tbframe_mock {
 	bool		have_response;
 	u16		req_ops[TBFRAME_MOCK_MAX_REQS];
 	unsigned int	req_count;
+	unsigned int	bye_count;
+	bool		bye_rings_started;
 
 	/* teardown call order (enum tbframe_mock_hw_call tokens) */
 	u8		hw_calls[TBFRAME_MOCK_MAX_EVENTS];
@@ -349,6 +351,13 @@ static int tbframe_mock_control_request(void *data, const void *req,
 		break;
 	case TBFRAME_WIRE_OP_READY:
 		ack_op = TBFRAME_WIRE_OP_READY_ACK;
+		break;
+	case TBFRAME_WIRE_OP_BYE:
+		/* The quiesce contract: BYE must go out while this side's
+		 * rings still absorb the peer's in-flight frames. */
+		m->bye_rings_started = m->rings_started;
+		m->bye_count++;
+		ack_op = TBFRAME_WIRE_OP_BYE_ACK;
 		break;
 	default:
 		return -EPROTO;

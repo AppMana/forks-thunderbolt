@@ -97,6 +97,23 @@ HELLO payload (new, replaces the legacy tbv HELLO):
 
 READY confirms both sides observed each other's HELLO and the paths are
 enabled. Data may flow only after READY completes in both directions.
+READY_ACK is withheld while a teardown of the current session is pending:
+the ack certifies the paths it vouches for, and certifying entries that
+are queued for removal lets the peer stream a full TX ring into a
+half-torn-down path (the 2026-08-18 router egress wedge).
+
+BYE (op 5) / BYE_ACK (op 6), additive: orderly-teardown quiesce, the
+ThunderboltIP logout analog. A side about to tear its session down for a
+reason the peer cannot know about (local close, dead-path verify) sends
+BYE before touching any hop entry or ring. The receiver downs its session
+(reason LOGOUT: admission closed, rings cancelled, automatic re-handshake
+later) and acks only once it has left UP, so the ack certifies "no more
+frames from this side". The sender's wait is bounded (3 x 300 ms) and a
+peer that does not know BYE simply never consumes it -- degradation is
+exactly the pre-BYE behavior. Rationale: a transmitter left streaming
+into a peer's disabled or absent ingress hop wedges its OWN router
+egress persistently (credit state, reset-only recovery); measured on the
+023/025 canaries 2026-08-18.
 
 ### Link liveness
 

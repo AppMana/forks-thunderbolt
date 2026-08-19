@@ -47,6 +47,77 @@ static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
 	KUNIT_EXPECT_LT(test, freed, release);
 }
 
+/*
+ * Orderly teardown must quiesce the peer FIRST: a BYE goes out while this
+ * side's rings are still up (so the peer's in-flight frames still land in
+ * real descriptors), and only then does the hardware teardown run. Without
+ * it the peer keeps streaming into hop entries this side is disabling, and
+ * its router egress wedges persistently (canary validation cycle 6:
+ * surviving transmitter frozen at zero TX consumption, reboot-only).
+ */
+static void tbframe_teardown_sends_bye_while_rings_up(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned long flags;
+
+	tbframe_mock_link_up(test, fx);
+	KUNIT_ASSERT_EQ(test, 0u, fx->mock.bye_count);
+
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.bye_count);
+	KUNIT_EXPECT_TRUE(test, fx->mock.bye_rings_started);
+}
+
+/*
+ * Inbound BYE downs the session (reason LOGOUT) and the ack is withheld
+ * until the session has actually left UP -- the ack certifies "no more
+ * frames from this side", so acking from a live session would be the same
+ * lie the READY_ACK gate closes.
+ */
+static void tbframe_teardown_inbound_bye_quiesces_then_acks(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	struct tbframe_wire_hello reply;
+	struct tbframe_wire_info info;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.have_response = false;
+
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	/* Session still UP at dispatch time: no ack yet. */
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_LOGOUT,
+			fx->client.reasons[1]);
+
+	/* The peer's BYE retry lands after the down: now it is acked. */
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_wire_parse_hello(fx->mock.last_response,
+						 sizeof(fx->mock.last_response),
+						 &reply, &info));
+	KUNIT_EXPECT_EQ(test, TBFRAME_WIRE_OP_BYE_ACK, info.op);
+
+	/* LOGOUT re-handshakes automatically once the peer returns. */
+	tbframe_link_session_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+	KUNIT_EXPECT_EQ(test, 2u, fx->client.up_count);
+}
+
 static void tbframe_teardown_publisher_drain_poisons(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -158,6 +229,8 @@ static void tbframe_teardown_test_exit(struct kunit *test)
 
 static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
+	KUNIT_CASE(tbframe_teardown_sends_bye_while_rings_up),
+	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),
 	KUNIT_CASE(tbframe_teardown_clean_when_hw_cancels),

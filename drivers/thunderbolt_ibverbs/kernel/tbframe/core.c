@@ -359,6 +359,50 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	return 0;
 }
 
+/*
+ * Orderly-teardown quiesce (tbnet LOGOUT analog). The canary campaign
+ * measured that a peer which keeps streaming into paths we are about to
+ * tear down wedges ITS router egress persistently (reset-only recovery):
+ * validation cycle 6, 023 reloading while 025 streamed, 025's TX ring
+ * frozen at zero consumption afterwards. So before this side touches its
+ * hop entries, tell the peer; the peer downs its session (admission
+ * closed, rings cancelled) and acks only once it has left UP. Bounded:
+ * a dead or pre-BYE peer costs TBFRAME_BYE_RETRIES * TBFRAME_BYE_TIMEOUT_MS
+ * and teardown proceeds exactly as before.
+ */
+static void tbframe_link_bye(struct tbframe_link *link)
+{
+	u8 req[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	u8 resp[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	struct tbframe_wire_hello local;
+	struct tbframe_wire_hello remote;
+	struct tbframe_wire_info info;
+	unsigned int i;
+	int ret;
+
+	tbframe_link_fill_local_hello(link, &local);
+	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
+				       TBFRAME_WIRE_OP_BYE, 0, link->route,
+				       link->local_hopid & 0x3);
+	if (ret < 0)
+		return;
+
+	for (i = 0; i < TBFRAME_BYE_RETRIES; i++) {
+		memset(resp, 0, sizeof(resp));
+		ret = link->ops->control_request(link->hw, req, sizeof(req),
+						 resp, sizeof(resp),
+						 TBFRAME_BYE_TIMEOUT_MS);
+		if (ret)
+			continue;
+		if (!tbframe_wire_parse_hello(resp, sizeof(resp), &remote,
+					      &info) &&
+		    info.op == TBFRAME_WIRE_OP_BYE_ACK)
+			return;
+	}
+	pr_info("%s: BYE unacknowledged; proceeding with teardown\n",
+		link->name);
+}
+
 static void tbframe_link_deliver_up(struct tbframe_link *link,
 				    struct tbframe_link_info *info)
 {
@@ -463,6 +507,20 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	timer_delete_sync(&link->verify_timer);
+
+	/*
+	 * Quiesce the peer before touching any hardware: it must stop
+	 * transmitting into paths this teardown is about to disable, or its
+	 * router egress wedges (see tbframe_link_bye()). Only for downs the
+	 * peer cannot already know about (local close, dead-path verify):
+	 * on SUPERSEDE and LOGOUT the peer initiated, on UNPLUG the control
+	 * channel is gone, and DEAD_HW is assigned after this point.
+	 * Our own admission is closed above, so nothing new flows from this
+	 * side during the wait.
+	 */
+	if (was_up && (reason == TBFRAME_DOWN_CLOSED ||
+		       reason == TBFRAME_DOWN_VERIFY))
+		tbframe_link_bye(link);
 
 	/*
 	 * Admission is closed above; wait out the publishers that already
@@ -878,6 +936,43 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 			pr_warn("%s: READY_ACK failed: %d\n", link->name, ret);
 		return 1;
 	}
+	case TBFRAME_WIRE_OP_BYE: {
+		bool quiesced;
+
+		spin_lock_irqsave(&link->lock, flags);
+		if (link->state == TBFRAME_STATE_UP && !link->needs_down) {
+			link->needs_down = true;
+			link->down_reason = TBFRAME_DOWN_LOGOUT;
+			tbframe_link_kick_locked(link, 0);
+		}
+		/*
+		 * The ack certifies "no more frames from this side": withhold
+		 * it until the session has left UP and its rings are being
+		 * torn down; the peer retries BYE (bounded) and the retry
+		 * lands after our down has run.
+		 */
+		quiesced = link->state != TBFRAME_STATE_UP && !link->rings_up;
+		spin_unlock_irqrestore(&link->lock, flags);
+		if (!quiesced)
+			return 1;
+
+		tbframe_link_fill_local_hello(link, &local);
+		ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
+					       TBFRAME_WIRE_OP_BYE_ACK,
+					       info.seq, link->route,
+					       info.xdomain_sequence);
+		if (ret >= 0)
+			ret = link->ops->control_response(link->hw, reply,
+							  sizeof(reply));
+		if (ret < 0)
+			pr_warn("%s: BYE_ACK failed: %d\n", link->name, ret);
+		return 1;
+	}
+
+	case TBFRAME_WIRE_OP_BYE_ACK:
+		/* Response matching in the requester consumes it. */
+		return 0;
+
 	default:
 		return 0;
 	}
