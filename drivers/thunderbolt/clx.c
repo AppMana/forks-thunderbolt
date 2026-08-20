@@ -12,8 +12,9 @@
 #include "tb.h"
 
 static bool clx_enabled = true;
-module_param_named(clx, clx_enabled, bool, 0444);
-MODULE_PARM_DESC(clx, "allow low power states on the high-speed lanes (default: true)");
+module_param_named(clx, clx_enabled, bool, 0644);
+MODULE_PARM_DESC(clx,
+		 "allow low power states on the high-speed lanes; a runtime change applies at the next link bring-up (default: true)");
 
 static const char *clx_name(unsigned int clx)
 {

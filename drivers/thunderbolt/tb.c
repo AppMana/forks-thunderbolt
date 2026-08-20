@@ -70,6 +70,14 @@ module_param(port_retrain, bool, 0644);
 MODULE_PARM_DESC(port_retrain,
 		 "toggle lane disable to re-arm detection on unplugged root ports (default: true)");
 
+#define TB_RECONCILE_PROBE_MS	500
+
+static unsigned int reconcile_probe_ms = TB_RECONCILE_PROBE_MS;
+module_param(reconcile_probe_ms, uint, 0644);
+MODULE_PARM_DESC(reconcile_probe_ms,
+		 "config-space probe timeout (ms) confirming a lane that reads unplugged before its enumerated peer is torn down, 0 trusts the lane state sample alone (default: "
+		 __MODULE_STRING(TB_RECONCILE_PROBE_MS) ")");
+
 /**
  * struct tb_cm - Simple Thunderbolt connection manager
  * @tunnel_list: List of active tunnels
@@ -2643,6 +2651,10 @@ static bool tb_reconcile_peer_reachable(struct tb *tb, struct tb_port *port)
 	u64 route;
 	u32 dummy;
 
+	/* Probe disabled: fall back to trusting the lane state sample. */
+	if (!reconcile_probe_ms)
+		return false;
+
 	if (port->remote)
 		route = tb_route(port->remote->sw);
 	else if (port->xdomain)
@@ -2651,7 +2663,7 @@ static bool tb_reconcile_peer_reachable(struct tb *tb, struct tb_port *port)
 		return false;
 
 	res = tb_cfg_read_raw(tb->ctl, &dummy, route, 0, TB_CFG_SWITCH, 0, 1,
-			      500);
+			      reconcile_probe_ms);
 	return !res.err;
 }
 
