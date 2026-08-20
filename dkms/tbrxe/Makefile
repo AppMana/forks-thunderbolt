@@ -50,6 +50,12 @@ preflight:
 		echo "error: no thunderbolt-tbfix Module.symvers for $(KVER);" >&2; \
 		echo "       build/install thunderbolt-tbfix-dkms for this kernel first." >&2; \
 		exit 1; }
+	@ls /lib/modules/$(KVER)/kernel/drivers/infiniband/core/ib_uverbs.ko* \
+	    >/dev/null 2>&1 || { \
+		echo "error: ib_uverbs.ko not present for $(KVER); tbrxe imports" >&2; \
+		echo "       ib_core/ib_umem symbols that Ubuntu ships in" >&2; \
+		echo "       linux-modules-extra-$(KVER). Install it first." >&2; \
+		exit 1; }
 	$(TBFIX_HDR_GEN) "$(KDIR)" "$(TBV_THUNDERBOLT_H_DIR)"
 
 clean:
