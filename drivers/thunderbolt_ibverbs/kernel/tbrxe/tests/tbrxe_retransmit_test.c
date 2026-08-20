@@ -349,6 +349,113 @@ static void tbrxe_retransmit_first_delay_bounded(struct kunit *test)
 }
 
 /*
+ * Contract guard: acked progress pushes the retransmit deadline forward.
+ * The completer re-arms the retry timer on its empty-queue EXIT path, and
+ * a pass that consumes an ACK drains to that EXIT, so the effective timer
+ * semantics are gap-since-last-ACK -- a mid-interval partial ACK defers
+ * the surviving message's retransmit by a full fresh interval. This case
+ * pins that behavior (it is what keeps a slow-but-flowing peer from
+ * being rewound); the qps32 bidirectional dup storms on the tbloop rig
+ * were NOT a violation of it -- there the real ACK arrival gaps exceed
+ * the base interval (ACKs queue behind reverse-direction data), which is
+ * an ACK-prioritization problem, not a timer-logic one.
+ */
+static void tbrxe_retransmit_progress_defers_rewind(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr	= 8,
+			.max_recv_wr	= 2,
+			.max_send_sge	= 1,
+			.max_recv_sge	= 1,
+		},
+		.sq_sig_type	= IB_SIGNAL_ALL_WR,
+		.qp_type	= IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	uint saved_base = tbrxe_retransmit_base_ms;
+	unsigned long progress_at, gap;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	u8 *src;
+	int sent;
+
+	/* Wide interval so the 1x-vs-2x deadline discrimination survives
+	 * qemu scheduling noise.
+	 */
+	tbrxe_retransmit_base_ms = 200;
+
+	rtx_pool_used = 0;
+	atomic_set(&rtx_sent, 0);
+	tbrxe_set_transport_ops(&rtx_transport);
+	tbrxe_test_link_up(&fake_link);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, RTX_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+
+	KUNIT_ASSERT_EQ(test, rtx_connect(qp, 0x42, &peer, sgid_index), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = RTX_MSG_LEN;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+
+	/* A then B, one packet each; the wire eats both. */
+	swr.wr_id = 1;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+	swr.wr_id = 2;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+	KUNIT_ASSERT_GE(test, rtx_wait_sent(2), 2);
+
+	/* Mid-interval, A is acked: real progress while B waits. */
+	msleep(tbrxe_retransmit_base_ms / 2);
+	rtx_inject_ack(&fake_link, qp->qp_num, RTX_SQ_PSN);
+	progress_at = jiffies;
+
+	/* B's retransmit: a full fresh interval after the progress. */
+	KUNIT_ASSERT_GE(test, rtx_wait_sent(3), 3);
+	gap = rtx_sent_at[2] - progress_at;
+	KUNIT_EXPECT_GE(test, jiffies_to_msecs(gap),
+			(unsigned int)(tbrxe_retransmit_base_ms * 3 / 4));
+
+	rtx_inject_ack(&fake_link, qp->qp_num, RTX_SQ_PSN + 1);
+	msleep(20);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+	tbrxe_retransmit_base_ms = saved_base;
+}
+
+/*
  * The delay curve itself: base << shift, capped at the verbs timeout;
  * base 0 disables (stock verbs interval); the delay is never 0 when a
  * verbs timeout exists.
@@ -375,6 +482,7 @@ static void tbrxe_retransmit_backoff_curve(struct kunit *test)
 
 static struct kunit_case tbrxe_retransmit_cases[] = {
 	KUNIT_CASE(tbrxe_retransmit_first_delay_bounded),
+	KUNIT_CASE(tbrxe_retransmit_progress_defers_rewind),
 	KUNIT_CASE(tbrxe_retransmit_backoff_curve),
 	{}
 };
