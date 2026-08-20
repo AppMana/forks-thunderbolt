@@ -160,3 +160,27 @@ Accommodation: `pcie_ports=native` added to the one-shot GRUB entry —
 native hotplug/PME control regardless of _OSC, keeping pcie_aspm=off.
 Expected on the next armed boot: pciehp binds 05:01.0/05:04.0, and the
 tunnel link-up raises a hotplug interrupt that enumerates the dock.
+
+## 2026-08-20 FINAL: dock fully working — three stacked root causes, each proven independently fatal
+
+Removing `pcie_aspm=off` (machine-wide; the fleet mitigation targeted
+marginal HP FlexIO links, not this soldered Titan Ridge) restored the
+_OSC grant: "OS now controls [PCIeHotplug SHPCHotplug PME AER ...]",
+pciehp bound the TR bridges (SltCtl HPIrq+ LinkChg+, real slots), and the
+plug enumerated the dock's whole PCIe tree (Goshen Ridge bridges 07/08:xx,
+xHCI 09:00). Zero false unplugs, zero AER errors with ASPM on. AER/DPC
+reporting is newly active as a side benefit of the same grant.
+
+The accidental ablation series proves no single cause "was it all along":
+
+| Boot | Fixed layers | Plug result |
+|---|---|---|
+| stock ICM CM | — | nothing at all (firmware emits no hot events; no tunnel ever exists) |
+| v2.37 force_sw_cm | firmware bypass | TB enumerated + tunnel up, then reconcile false-unplug tore it down; domain wedged; hang |
+| v2.38 | + reconcile probe-gate | TB layer perfect, link trained x4, PresDet+ — and nothing enumerated (hotplug-deaf) |
+| v2.38 + ASPM restored | + _OSC grant | fully working |
+
+The _OSC silent-ceding remains a PCI-core behavior we cannot patch from
+DKMS scope; the fork now diagnoses it loudly at NHI probe
+("PCIe hotplug is firmware-controlled ... tunnel devices will NOT
+enumerate") so this failure shape costs minutes, not days, next time.

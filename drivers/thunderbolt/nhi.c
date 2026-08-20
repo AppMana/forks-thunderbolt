@@ -1679,6 +1679,22 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	dev_dbg(dev, "NHI initialized, starting thunderbolt\n");
 
+	/*
+	 * If the kernel does not own native PCIe hotplug, a PCIe tunnel can
+	 * come up perfectly (link trained, presence detected) and its
+	 * devices will still never enumerate: pciehp binds no slots and the
+	 * platform firmware that retained control may never react. The PCI
+	 * core cedes ALL native services when any _OSC precondition fails --
+	 * most commonly pcie_aspm=off on the command line -- and says so
+	 * only in one easily-missed line ("_OSC: not requesting OS
+	 * control"). Cost 2026-08-20 on appmana-001: a healthy dock tunnel
+	 * with a trained x4 link enumerated nothing, and every layer above
+	 * looked broken. Diagnose it loudly at probe instead.
+	 */
+	if (!pci_find_host_bridge(pdev->bus)->native_pcie_hotplug)
+		dev_warn(dev,
+			 "PCIe hotplug is firmware-controlled (_OSC did not grant it, often caused by pcie_aspm=off); PCIe tunnel devices will NOT enumerate\n");
+
 	init_completion(&nhi->domain_released);
 
 	res = tb_domain_add(tb, host_reset);
