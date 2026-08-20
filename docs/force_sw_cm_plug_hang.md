@@ -136,3 +136,27 @@ demonstrated, on a register a coexisting master (and CLx) can perturb.
   ICM-owned state the software CM mutates while idle are the lane
   enable/disable re-arms and TMU mode; on plug it would additionally
   configure the new router and enable tunnels.
+
+## 2026-08-20 second instrumented plug (v2.38): TB layer healthy, machine is hotplug-deaf
+
+With the probe-gated reconcile + clx=0, the plug enumerated the dock, the
+PCIe tunnel activated, and the link stayed up past the old death window —
+no false unplug, no hang. "Nothing happened" was the NEXT layer down:
+
+- 05:01.0 (TR tunnel bridge): LnkSta 2.5GT/s x4, PresDet+ — the dock's
+  PCIe upstream trained. Resources are ample (64M MMIO + 64M prefetch +
+  51 buses per tunnel port; only the 16K I/O windows failed, which
+  MMIO-only dock devices do not need).
+- But SltCtl has every hotplug interrupt disabled and /sys/bus/pci/slots
+  is empty: pciehp owns nothing, because
+  `_OSC: not requesting OS control; OS requires [ExtendedConfig ASPM
+  ClockPM MSI]` — the long-standing `pcie_aspm=off` on the cmdline fails
+  the _OSC preconditions, so the kernel never requested native PCIe
+  hotplug and the platform firmware (the broken TBT stack) retained it.
+  This machine has been hotplug-deaf for tunnel devices all along,
+  under the ICM firmware CM too.
+
+Accommodation: `pcie_ports=native` added to the one-shot GRUB entry —
+native hotplug/PME control regardless of _OSC, keeping pcie_aspm=off.
+Expected on the next armed boot: pciehp binds 05:01.0/05:04.0, and the
+tunnel link-up raises a hotplug interrupt that enumerates the dock.
