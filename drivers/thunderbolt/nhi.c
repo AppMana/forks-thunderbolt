@@ -50,8 +50,8 @@ static bool host_reset = true;
 module_param(host_reset, bool, 0444);
 MODULE_PARM_DESC(host_reset, "reset USB4 host router (default: true)");
 
-static bool force_sw_cm;
-module_param(force_sw_cm, bool, 0444);
+bool tb_force_sw_cm;
+module_param_named(force_sw_cm, tb_force_sw_cm, bool, 0444);
 MODULE_PARM_DESC(force_sw_cm,
 		 "use the software connection manager even if ICM firmware is running (default: false)");
 
@@ -1584,13 +1584,15 @@ static struct tb *nhi_select_cm(struct tb_nhi *nhi)
 	 * without losing NVM authentication (see icm_stop()). The software CM
 	 * does not depend on the firmware forwarding hot events -- it
 	 * enumerates by scanning and the lane-state reconcile loop
-	 * synthesizes lost edges.
+	 * synthesizes lost edges. It DOES depend on the resident firmware
+	 * opening the config space, which happens only after DRIVER_READY:
+	 * tb_probe()'s driver_ready hook sends it (icm_unlock_config_space()).
 	 *
 	 * The USB4 native case is simple: if we got control of any of the
 	 * capabilities, we use the software CM.
 	 */
-	if (tb_nhi_use_software_cm(force_sw_cm, tb_acpi_is_native())) {
-		if (force_sw_cm) {
+	if (tb_nhi_use_software_cm(tb_force_sw_cm, tb_acpi_is_native())) {
+		if (tb_force_sw_cm) {
 			u32 val = nhi_read(nhi, nhi->iobase + REG_FW_STS);
 
 			dev_info(&nhi->pdev->dev,
@@ -1676,6 +1678,22 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			"failed to determine connection manager, aborting\n");
 
 	dev_dbg(dev, "NHI initialized, starting thunderbolt\n");
+
+	/*
+	 * If the kernel does not own native PCIe hotplug, a PCIe tunnel can
+	 * come up perfectly (link trained, presence detected) and its
+	 * devices will still never enumerate: pciehp binds no slots and the
+	 * platform firmware that retained control may never react. The PCI
+	 * core cedes ALL native services when any _OSC precondition fails --
+	 * most commonly pcie_aspm=off on the command line -- and says so
+	 * only in one easily-missed line ("_OSC: not requesting OS
+	 * control"). Cost 2026-08-20 on appmana-001: a healthy dock tunnel
+	 * with a trained x4 link enumerated nothing, and every layer above
+	 * looked broken. Diagnose it loudly at probe instead.
+	 */
+	if (!pci_find_host_bridge(pdev->bus)->native_pcie_hotplug)
+		dev_warn(dev,
+			 "PCIe hotplug is firmware-controlled (_OSC did not grant it, often caused by pcie_aspm=off); PCIe tunnel devices will NOT enumerate\n");
 
 	init_completion(&nhi->domain_released);
 

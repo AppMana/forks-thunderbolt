@@ -801,6 +801,10 @@ static inline int tb_port_write(struct tb_port *port, const void *buffer,
 struct tb *icm_probe(struct tb_nhi *nhi);
 struct tb *tb_probe(struct tb_nhi *nhi);
 
+/* Set by the force_sw_cm module parameter (nhi.c) */
+extern bool tb_force_sw_cm;
+int icm_unlock_config_space(struct tb *tb);
+
 extern const struct device_type tb_domain_type;
 extern const struct device_type tb_retimer_type;
 extern const struct device_type tb_switch_type;

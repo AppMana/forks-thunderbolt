@@ -70,6 +70,14 @@ module_param(port_retrain, bool, 0644);
 MODULE_PARM_DESC(port_retrain,
 		 "toggle lane disable to re-arm detection on unplugged root ports (default: true)");
 
+#define TB_RECONCILE_PROBE_MS	500
+
+static unsigned int reconcile_probe_ms = TB_RECONCILE_PROBE_MS;
+module_param(reconcile_probe_ms, uint, 0644);
+MODULE_PARM_DESC(reconcile_probe_ms,
+		 "config-space probe timeout (ms) confirming a lane that reads unplugged before its enumerated peer is torn down, 0 trusts the lane state sample alone (default: "
+		 __MODULE_STRING(TB_RECONCILE_PROBE_MS) ")");
+
 /**
  * struct tb_cm - Simple Thunderbolt connection manager
  * @tunnel_list: List of active tunnels
@@ -2618,6 +2626,48 @@ static void tb_port_kick_detection(struct tb_port *port)
 }
 
 /*
+ * tb_reconcile_peer_reachable() - bounded config-space probe of the child
+ * @tb: Domain
+ * @port: Root null port whose enumerated child/peer to probe
+ *
+ * One lane-state register sample is not evidence of an unplug. Observed
+ * live 2026-08-20 on appmana-001 (force_sw_cm, resident Titan Ridge ICM):
+ * two seconds after the resident ICM's stray hot event, the root port's
+ * LANE_ADP_CS_1 read UNPLUGGED while the freshly enumerated dock still
+ * answered config space, and the synthesized unplug tore down a live PCIe
+ * tunnel and kicked the PHY of a live link -- after which the resident
+ * ICM wedged the control path and the domain hung. CLx transitions
+ * (CL0s/CL1 was active on that link) and plain flaky reads under a
+ * coexisting master produce the same lie.
+ *
+ * A dead peer's router is unpowered and cannot answer a read; a live one
+ * answers no matter what its lane-state register momentarily reads. One
+ * dword, bounded 500 ms, only on the rare suspicious poll. Kept in
+ * lockstep with cm_peer_probe() in tests/negotiation_model.h.
+ */
+static bool tb_reconcile_peer_reachable(struct tb *tb, struct tb_port *port)
+{
+	struct tb_cfg_result res;
+	u64 route;
+	u32 dummy;
+
+	/* Probe disabled: fall back to trusting the lane state sample. */
+	if (!reconcile_probe_ms)
+		return false;
+
+	if (port->remote)
+		route = tb_route(port->remote->sw);
+	else if (port->xdomain)
+		route = port->xdomain->route;
+	else
+		return false;
+
+	res = tb_cfg_read_raw(tb->ctl, &dummy, route, 0, TB_CFG_SWITCH, 0, 1,
+			      reconcile_probe_ms);
+	return !res.err;
+}
+
+/*
  * tb_reconcile_work() - converge software topology to hardware lane state
  *
  * tb_handle_hotplug() is edge-triggered only. When a hot event is lost (the
@@ -2668,8 +2718,20 @@ static void tb_reconcile_work(struct work_struct *work)
 			continue;
 
 		state = tb_port_state(port);
-		if (state < 0)
-			continue;
+		if (state < 0) {
+			/*
+			 * The control channel is sick (reads to our own
+			 * root switch failing). Every further read this
+			 * pass would burn another timeout while holding
+			 * tb->lock, starving sysfs readers (boltd, udev)
+			 * into D state. Give up the whole pass and let
+			 * the next poll retry a healthy channel.
+			 */
+			tb_port_dbg(port,
+				    "lane state read failed (%d); ending reconcile pass early\n",
+				    state);
+			break;
+		}
 
 		present = state == TB_PORT_UP ||
 			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
@@ -2679,6 +2741,22 @@ static void tb_reconcile_work(struct work_struct *work)
 		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
 			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
 				continue;
+			/*
+			 * A condemned XDomain (is_unplugged) is torn down on
+			 * that signal alone. A bare UNPLUGGED lane sample is
+			 * confirmed against the enumerated peer first: if it
+			 * still answers config space the link is alive and
+			 * must be left alone (see
+			 * tb_reconcile_peer_reachable()).
+			 */
+			if (gone &&
+			    !(port->xdomain && port->xdomain->is_unplugged) &&
+			    tb_reconcile_peer_reachable(tb, port)) {
+				tb_port_dbg(port,
+					    "lane reads unplugged but peer answers config space; not synthesizing unplug\n");
+				port->reconcile_synth = TB_RECONCILE_NONE;
+				continue;
+			}
 			port->reconcile_synth = TB_RECONCILE_UNPLUG;
 			tb_port_warn(port,
 				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
@@ -3509,7 +3587,21 @@ static int tb_runtime_resume(struct tb *tb)
 	return 0;
 }
 
+/*
+ * Only does anything under force_sw_cm: a resident (broken) ICM serves
+ * config space only after it has seen DRIVER_READY, so send it before
+ * tb_start() reads the root switch. Without this the first read times
+ * out and the whole NHI probe fails with -ETIMEDOUT.
+ */
+static int tb_driver_ready(struct tb *tb)
+{
+	if (!tb_force_sw_cm)
+		return 0;
+	return icm_unlock_config_space(tb);
+}
+
 static const struct tb_cm_ops tb_cm_ops = {
+	.driver_ready = tb_driver_ready,
 	.start = tb_start,
 	.stop = tb_stop,
 	.deinit = tb_deinit,

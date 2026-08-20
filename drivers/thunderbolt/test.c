@@ -3015,6 +3015,7 @@ struct icm_fw_model {
 	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
 	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
 	bool responsive; /* ICM message loop alive (a wedged ICM keeps ICM_EN) */
+	bool cfg_open;	/* config space served (only after DRIVER_READY) */
 };
 
 /* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
@@ -3023,6 +3024,7 @@ static void icm_fw_cold_boot(struct icm_fw_model *fw)
 	fw->icm_en = true;
 	fw->authed = true;
 	fw->responsive = true;
+	fw->cfg_open = false;
 }
 
 /*
@@ -3052,7 +3054,21 @@ static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
 /* ICM_DRIVER_READY succeeds only if running AND authenticated AND alive. */
 static bool icm_fw_driver_ready(struct icm_fw_model *fw)
 {
-	return fw->icm_en && fw->authed && fw->responsive;
+	if (!(fw->icm_en && fw->authed && fw->responsive))
+		return false;
+	/* Seeing DRIVER_READY is what makes the firmware serve config space. */
+	fw->cfg_open = true;
+	return true;
+}
+
+/*
+ * Can the host read router config space over ring 0? With no firmware
+ * resident the routers answer directly; a resident ICM serves (proxies)
+ * config access only after it has seen DRIVER_READY.
+ */
+static bool icm_fw_cfg_space_open(struct icm_fw_model *fw)
+{
+	return !fw->icm_en || fw->cfg_open;
 }
 
 static void tb_test_icm_warm_restart_reauth(struct kunit *test)
@@ -3210,6 +3226,62 @@ static void tb_test_cm_select_forced_software(struct kunit *test)
 }
 
 /*
+ * Regression: the first forced-software boot on the X570 Creator failed
+ * probe with -ETIMEDOUT because the software CM read the root switch
+ * config space while the resident ICM -- which serves config access only
+ * after DRIVER_READY -- had never been sent one. The forced takeover must
+ * therefore send DRIVER_READY before the first read
+ * (tb.c tb_driver_ready() -> icm_unlock_config_space()), while boards
+ * with no resident firmware need nothing.
+ */
+/*
+ * Model of the software CM takeover as tb.c's driver_ready hook performs
+ * it (tb_driver_ready() -> icm_unlock_config_space()): with firmware
+ * resident, send DRIVER_READY and report whether the config space opened;
+ * with no firmware there is nothing to do. Kept in lockstep with the
+ * driver -- the pre-fix driver sent nothing, which is the red state of
+ * this test and the -ETIMEDOUT probe observed on the X570 Creator.
+ */
+static bool cm_model_forced_takeover(struct icm_fw_model *fw)
+{
+	if (!fw->icm_en)
+		return true;
+	if (!icm_fw_driver_ready(fw))
+		return false;
+	return icm_fw_cfg_space_open(fw);
+}
+
+static void tb_test_cm_forced_takeover_unlocks_config(struct kunit *test)
+{
+	struct icm_fw_model fw;
+
+	/*
+	 * Resident healthy ICM: config space is shut until DRIVER_READY,
+	 * so the takeover must send it -- reading first is the regression.
+	 */
+	icm_fw_cold_boot(&fw);
+	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
+	KUNIT_EXPECT_TRUE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+
+	/* No resident firmware (Apple boot): nothing to unlock. */
+	icm_fw_cold_boot(&fw);
+	fw.icm_en = false;
+	KUNIT_EXPECT_TRUE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+
+	/*
+	 * Wedged resident ICM: DRIVER_READY fails and the config space
+	 * stays shut -- the takeover must report the error (probe fails
+	 * loudly) instead of reading into a timeout per dword.
+	 */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+	KUNIT_EXPECT_FALSE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
+}
+
+/*
  * Reproduces the 2026-07-09/10 appmana-019<->008 stranding: the survivor gets
  * NO unplug event when its neighbour's link drops (008's kernel log is silent
  * across 019's reboot while the lane adapter reads UNPLUGGED), and a plug
@@ -3262,6 +3334,58 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
 	/* Reconciliation while disarmed (init/suspend) must do nothing. */
 	memset(&h, 0, sizeof(h));
 	cm_link_up_lost(&h, 0);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+}
+
+/*
+ * Reproduces the 2026-08-20 appmana-001 live-tunnel teardown: under
+ * force_sw_cm the software CM enumerated the Razer TB4 dock and activated
+ * its PCIe tunnel; sixteen seconds later (one reconcile poll after the
+ * resident ICM's stray "event 0xa") the root port's lane state read
+ * UNPLUGGED while the dock still answered config space -- the driver's own
+ * warning said "router present but lane state 7" and synthesized the
+ * unplug anyway, tearing down the live tunnel and kicking the PHY of a
+ * live link. The resident ICM chewed on that real edge, root-switch
+ * config reads started timing out, and the domain (and the desktop behind
+ * its sysfs) hung.
+ *
+ * Contract: one lane-state sample is not evidence of an unplug. The
+ * reconcile may synthesize an unplug only when the enumerated child/peer
+ * router also fails a bounded config-space probe. A dead peer (the
+ * appmana-008/019 stranding this reconcile exists for) fails the probe
+ * and is still torn down; a live link with a perturbed state register is
+ * left alone.
+ */
+static void tb_test_cm_reconcile_perturbed_lane_keeps_live_link(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/*
+	 * Resident ICM / CLx perturbs the lane-state register; the link and
+	 * its tunnel are alive and the router answers the probe.
+	 */
+	h.port[0].state_perturbed = true;
+	KUNIT_EXPECT_TRUE(test, cm_lane_sample_unplugged(&h, 0));
+	KUNIT_EXPECT_TRUE(test, cm_peer_probe(&h, 0));
+
+	cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* live link kept */
+
+	/* The perturbation clears; nothing may have changed. */
+	h.port[0].state_perturbed = false;
+	cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/* A REAL unplug still converges: sample unplugged AND probe dead. */
+	cm_link_down_lost(&h, 0);
+	KUNIT_EXPECT_FALSE(test, cm_peer_probe(&h, 0));
 	cm_reconcile(&h);
 	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
 }
@@ -3874,9 +3998,11 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
+	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
+	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
