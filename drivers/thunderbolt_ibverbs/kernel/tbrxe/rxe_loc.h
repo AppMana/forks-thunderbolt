@@ -170,6 +170,8 @@ void rnr_nak_timer(struct timer_list *t);
 
 /* rxe_comp.c: bounded first-retransmit delay (fork; sub-ms RTT fabric) */
 extern uint tbrxe_retransmit_base_ms;
+void rxe_rto_sample(u32 *srtt_us, u32 *rttvar_us, u32 sample_us);
+u32 rxe_rto_deadline_us(u32 srtt_us, u32 rttvar_us);
 unsigned long rxe_retrans_backoff_jiffies(unsigned long qp_timeout,
 					  unsigned long base,
 					  unsigned int shift);

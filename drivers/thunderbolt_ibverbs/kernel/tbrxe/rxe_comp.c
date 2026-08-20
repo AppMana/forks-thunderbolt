@@ -33,7 +33,27 @@
 uint tbrxe_retransmit_base_ms = 10;
 module_param_named(retransmit_base_ms, tbrxe_retransmit_base_ms, uint, 0644);
 MODULE_PARM_DESC(retransmit_base_ms,
-		 "First RC retransmit delay in ms, doubling per consecutive timeout up to the verbs ack_timeout; 0 = stock verbs-derived delay");
+		 "Floor of the adaptive RC retransmit deadline in ms (deadline = max(this, srtt+4*rttvar) << consecutive timeouts, capped at the verbs ack_timeout); 0 = stock verbs-derived delay");
+
+/* Jacobson/RFC 6298: srtt += (s-srtt)/8, rttvar += (|s-srtt|-rttvar)/4;
+ * first sample seeds srtt = s, rttvar = s/2.
+ */
+void rxe_rto_sample(u32 *srtt_us, u32 *rttvar_us, u32 sample_us)
+{
+	if (!*srtt_us) {
+		*srtt_us = sample_us;
+		*rttvar_us = sample_us / 2;
+		return;
+	}
+	*rttvar_us += ((s32)abs_diff(sample_us, *srtt_us) -
+		       (s32)*rttvar_us) / 4;
+	*srtt_us += ((s32)sample_us - (s32)*srtt_us) / 8;
+}
+
+u32 rxe_rto_deadline_us(u32 srtt_us, u32 rttvar_us)
+{
+	return srtt_us + 4 * rttvar_us;
+}
 
 unsigned long rxe_retrans_backoff_jiffies(unsigned long qp_timeout,
 					  unsigned long base,
@@ -51,8 +71,14 @@ unsigned long rxe_retrans_backoff_jiffies(unsigned long qp_timeout,
 
 unsigned long rxe_qp_retrans_delay(struct rxe_qp *qp)
 {
-	return rxe_retrans_backoff_jiffies(qp->qp_timeout_jiffies,
-			msecs_to_jiffies(READ_ONCE(tbrxe_retransmit_base_ms)),
+	unsigned long base =
+		msecs_to_jiffies(READ_ONCE(tbrxe_retransmit_base_ms));
+	u32 rto_us = rxe_rto_deadline_us(READ_ONCE(qp->comp.srtt_us),
+					 READ_ONCE(qp->comp.rttvar_us));
+
+	/* The measured fabric raises the floor; the param never drops it. */
+	base = max(base, usecs_to_jiffies(rto_us));
+	return rxe_retrans_backoff_jiffies(qp->qp_timeout_jiffies, base,
 			READ_ONCE(qp->comp.retrans_shift));
 }
 
@@ -669,13 +695,49 @@ static void free_pkt(struct rxe_pkt_info *pkt)
 static void reset_retry_timer(struct rxe_qp *qp)
 {
 	unsigned long flags;
+	bool tb = false;
+	u64 now;
 
 	if (qp_type(qp) == IB_QPT_RC && qp->qp_timeout_jiffies) {
 		spin_lock_irqsave(&qp->state_lock, flags);
 		if (qp_state(qp) >= IB_QPS_RTS &&
-		    psn_compare(qp->req.psn, qp->comp.psn) > 0)
+		    psn_compare(qp->req.psn, qp->comp.psn) > 0) {
+			tb = true;
+		}
+		/*
+		 * Sample BEFORE the outstanding gate: the exit that observes
+		 * the final ack of a message is both the progress point and
+		 * an idle boundary, and the sample must survive it.
+		 *
+		 * Deliberately anti-Karn: intervals that contained a
+		 * retransmit still sample. On a ~1e-6-loss fabric the ack is
+		 * almost surely for the original flight, and excluding such
+		 * intervals would let a too-short deadline void every
+		 * sample and never learn (the tbloop qps32 storm exactly).
+		 */
+		now = ktime_get_ns();
+		if (qp->comp.rto_armed &&
+		    psn_compare(qp->comp.psn, qp->comp.rto_armed_psn) > 0) {
+			u64 d = div_u64(now - qp->comp.rto_armed_ns,
+					NSEC_PER_USEC);
+
+			rxe_rto_sample(&qp->comp.srtt_us, &qp->comp.rttvar_us,
+				       min_t(u64, d, U32_MAX));
+			qp->comp.rto_armed_ns = now;
+			qp->comp.rto_armed_psn = qp->comp.psn;
+		}
+		if (tb) {
+			if (!qp->comp.rto_armed) {
+				qp->comp.rto_armed = true;
+				qp->comp.rto_armed_ns = now;
+				qp->comp.rto_armed_psn = qp->comp.psn;
+			}
 			mod_timer(&qp->retrans_timer,
 				  jiffies + rxe_qp_retrans_delay(qp));
+		} else {
+			/* Idle boundary: a later interval must not span it. */
+			qp->comp.rto_armed = false;
+		}
 		spin_unlock_irqrestore(&qp->state_lock, flags);
 	}
 }

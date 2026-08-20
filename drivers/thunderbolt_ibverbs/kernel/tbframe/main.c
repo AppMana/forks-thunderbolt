@@ -26,6 +26,11 @@ static bool e2e;
 module_param(e2e, bool, 0444);
 MODULE_PARM_DESC(e2e, "Advertise and use hardware E2E flow control (default n)");
 
+static ushort tx_ring_budget = 64;
+module_param(tx_ring_budget, ushort, 0444);
+MODULE_PARM_DESC(tx_ring_budget,
+		 "Max frames resident in the hardware TX ring per link; excess waits in a ctrl-first software queue (bounds ACK queueing delay). 0 = unbounded");
+
 static bool keepalive = true;
 module_param(keepalive, bool, 0444);
 MODULE_PARM_DESC(keepalive,
@@ -77,6 +82,7 @@ static int __init tbframe_init(void)
 
 	tbframe_state_init(tf);
 	tf->ring_entries = ring_entries;
+	tf->tx_ring_budget = tx_ring_budget;
 	tf->e2e = e2e;
 	tf->keepalive = keepalive;
 	tf->verify_ms = verify_ms;

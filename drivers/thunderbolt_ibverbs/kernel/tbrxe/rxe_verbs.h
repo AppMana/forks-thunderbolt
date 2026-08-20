@@ -130,6 +130,22 @@ struct rxe_comp_info {
 	 * scales the retransmit backoff (rxe_qp_retrans_delay())
 	 */
 	unsigned int		retrans_shift;
+	/*
+	 * Adaptive retransmit deadline (Jacobson/RFC 6298 shape) from
+	 * arm-to-progress samples: the measured interval between recording
+	 * (time, comp.psn) at a completer exit and the exit that observed
+	 * comp.psn advance past it. A fixed base cannot fit fabrics whose
+	 * ack latency spans 15us (idle fleet link) to tens of ms (saturated
+	 * shared-NHI loop): srtt + 4*rttvar sizes the deadline to the
+	 * fabric, floored by retransmit_base_ms, capped by the verbs
+	 * timeout. rto_armed is cleared by a timer-fired rewind (the
+	 * post-rewind interval is not a valid sample).
+	 */
+	u32			srtt_us;
+	u32			rttvar_us;
+	u64			rto_armed_ns;
+	u32			rto_armed_psn;
+	bool			rto_armed;
 };
 
 /* responder states */

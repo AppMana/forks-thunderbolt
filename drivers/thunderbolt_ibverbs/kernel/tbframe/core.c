@@ -563,6 +563,29 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	}
 
 	/*
+	 * The software TX backlog belongs to the closing session and has no
+	 * ring to go to; return it before certifying quiescence. Admission
+	 * closed above and the publishers are drained, so nothing refills.
+	 */
+	{
+		LIST_HEAD(txq_flush);
+
+		spin_lock_irqsave(&link->lock, flags);
+		list_splice_init(&link->txq_ctrl, &txq_flush);
+		list_splice_init(&link->txq_data, &txq_flush);
+		spin_unlock_irqrestore(&link->lock, flags);
+		while (!list_empty(&txq_flush)) {
+			struct tbframe_frame_priv *qf =
+				list_first_entry(&txq_flush,
+						 struct tbframe_frame_priv,
+						 node);
+
+			list_del_init(&qf->node);
+			tbframe_core_tx_complete(qf, true);
+		}
+	}
+
+	/*
 	 * Drain our TX into the still fully-programmed fabric FIRST -- both
 	 * paths and the peer's ingress are untouched at this point, so the
 	 * backlog has somewhere to go -- and only then mark this side
@@ -1204,12 +1227,68 @@ static bool tbframe_tx_return_locked(struct tbframe_link *link,
 void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 {
 	struct tbframe_link *link = f->link;
+	struct tbframe_frame_priv *next = NULL;
+	LIST_HEAD(flush);
 	unsigned long flags;
 	bool release;
 
+	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
+	if (f->hw_posted) {
+		f->hw_posted = false;
+		if (!WARN_ON(!link->ring_posted))
+			link->ring_posted--;
+	}
 	release = tbframe_tx_return_locked(link, f) && !canceled;
+	if (link->tf->tx_ring_budget) {
+		if (!canceled && link->state == TBFRAME_STATE_UP &&
+		    link->rings_up) {
+			/* Ctrl (rxe ACKs, keepalives) overtakes bulk data. */
+			if (!list_empty(&link->txq_ctrl))
+				next = list_first_entry(&link->txq_ctrl,
+							struct tbframe_frame_priv,
+							node);
+			else if (!list_empty(&link->txq_data))
+				next = list_first_entry(&link->txq_data,
+							struct tbframe_frame_priv,
+							node);
+			if (next) {
+				list_del_init(&next->node);
+				next->hw_posted = true;
+				link->ring_posted++;
+			}
+		} else if (canceled) {
+			/*
+			 * The ring is being cancelled: the backlog has no
+			 * ring to go to. Take it out whole; each frame
+			 * completes as cancelled below (their own calls find
+			 * these queues already empty).
+			 */
+			list_splice_init(&link->txq_ctrl, &flush);
+			list_splice_init(&link->txq_data, &flush);
+		}
+	}
 	spin_unlock_irqrestore(&link->lock, flags);
+
+	if (next && link->ops->ring_tx(link->hw, next)) {
+		spin_lock_irqsave(&link->lock, flags);
+		next->hw_posted = false;
+		if (!WARN_ON(!link->ring_posted))
+			link->ring_posted--;
+		spin_unlock_irqrestore(&link->lock, flags);
+		tbframe_core_tx_complete(next, true);
+	}
+	atomic_dec(&link->hw_active);
+
+	while (!list_empty(&flush)) {
+		struct tbframe_frame_priv *qf =
+			list_first_entry(&flush, struct tbframe_frame_priv,
+					 node);
+
+		list_del_init(&qf->node);
+		tbframe_core_tx_complete(qf, true);
+	}
+
 	if (release)
 		queue_work(link->tf->wq, &link->tx_released_work);
 	tbframe_link_put(link);
@@ -1349,8 +1428,33 @@ int tbframe_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
 	ok = link->state == TBFRAME_STATE_UP && link->rings_up;
+	/*
+	 * Bounded ring residency: over budget, the frame waits in the
+	 * software queue (ctrl ahead of data at refill) instead of behind
+	 * a full hardware ring. Queued frames are consumed like posted
+	 * ones; the completion path feeds them to the ring one-in-one-out.
+	 */
+	if (ok && link->tf->tx_ring_budget &&
+	    link->ring_posted >= link->tf->tx_ring_budget) {
+		list_add_tail(&f->node, frame->is_ctrl ? &link->txq_ctrl :
+							 &link->txq_data);
+		spin_unlock_irqrestore(&link->lock, flags);
+		atomic_dec(&link->hw_active);
+		return 0;
+	}
+	if (ok) {
+		f->hw_posted = true;
+		link->ring_posted++;
+	}
 	spin_unlock_irqrestore(&link->lock, flags);
 	ret = ok ? link->ops->ring_tx(link->hw, f) : -ENETDOWN;
+	if (ret && ok) {
+		spin_lock_irqsave(&link->lock, flags);
+		f->hw_posted = false;
+		if (!WARN_ON(!link->ring_posted))
+			link->ring_posted--;
+		spin_unlock_irqrestore(&link->lock, flags);
+	}
 	atomic_dec(&link->hw_active);
 	return ret;
 }
@@ -1528,6 +1632,8 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	INIT_LIST_HEAD(&link->node);
 	INIT_LIST_HEAD(&link->tx_free);
 	INIT_LIST_HEAD(&link->rx_free);
+	INIT_LIST_HEAD(&link->txq_ctrl);
+	INIT_LIST_HEAD(&link->txq_data);
 	INIT_DELAYED_WORK(&link->session_work, tbframe_session_workfn);
 	INIT_WORK(&link->tx_released_work, tbframe_tx_released_workfn);
 	INIT_WORK(&link->verify_work, tbframe_verify_workfn);

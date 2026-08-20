@@ -54,6 +54,8 @@ struct tbframe_frame_priv {
 	bool			is_rx;
 	bool			charged_ctrl;
 	bool			charged_data;
+	/* counted against tx_ring_budget (posted to the hardware ring) */
+	bool			hw_posted;
 	refcount_t		rx_refs;
 	/* hardware backend fields (unused by the mock) */
 	struct ring_frame	rf;
@@ -121,6 +123,14 @@ struct tbframe {
 	unsigned int		xmit_drain_ms;
 	unsigned int		teardown_warn_ms;
 	unsigned int		teardown_force_ms;
+	/*
+	 * Max frames resident in the hardware TX ring per link; the excess
+	 * waits in the link's software queues where ctrl frames (rxe ACKs,
+	 * keepalives) overtake bulk data. Bounds ACK queueing delay to
+	 * budget * frame-time instead of a full ring (~9ms at 2048 x 4KiB).
+	 * 0 = unbounded (post straight to the ring, pre-budget behavior).
+	 */
+	u16			tx_ring_budget;
 };
 
 struct tbframe_link {
@@ -227,6 +237,11 @@ struct tbframe_link {
 	u16			rx_frame_count;
 	struct list_head	tx_free;
 	struct list_head	rx_free;
+
+	/* budgeted TX: software backlog (ctrl overtakes data) + residency */
+	struct list_head	txq_ctrl;
+	struct list_head	txq_data;
+	u16			ring_posted;
 
 	/* one ref per frame outside the free lists, plus the base ref */
 	refcount_t		refcnt;

@@ -125,6 +125,117 @@ static void tbframe_window_resets_on_link_down(struct kunit *test)
 			tbframe_alloc_frame(fx->link, 512, false, &f));
 }
 
+/*
+ * Bounded ring residency: with tx_ring_budget set, at most budget frames
+ * sit in the hardware TX ring; the rest wait in a software queue. This is
+ * what keeps ACK queueing delay at microseconds instead of a full ring
+ * (2048 x 4KiB ~ 9ms at wire rate) -- the qps32 bidirectional rewind
+ * storm was ACK arrival gaps exceeding the retransmit base purely from
+ * ring FIFO depth.
+ */
+static void tbframe_txq_budget_bounds_ring(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_frame *f;
+	u16 i;
+
+	fx->tf.tx_ring_budget = 4;
+	tbframe_mock_link_up(test, fx);
+
+	for (i = 0; i < 10; i++) {
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+		KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	}
+	/* Only the budget reaches the hardware ring. */
+	KUNIT_EXPECT_EQ(test, 4u, fx->mock.tx_queued);
+
+	/* One-in-one-out: each completion admits exactly one queued frame. */
+	KUNIT_ASSERT_TRUE(test, tbframe_mock_complete_tx(fx));
+	KUNIT_EXPECT_EQ(test, 5u, fx->mock.tx_queued);
+
+	/* Draining the ring drains the backlog completely. */
+	while (tbframe_mock_complete_tx(fx))
+		;
+	KUNIT_EXPECT_EQ(test, 10u, fx->mock.tx_queued);
+	flush_workqueue(fx->tf.wq);
+}
+
+/* A ctrl frame (rxe ACK, keepalive) overtakes the queued data backlog. */
+static void tbframe_txq_ctrl_jumps_queue(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_frame *f;
+	struct tbframe_frame_priv *fp;
+	struct ring_frame *rf;
+	u16 i;
+
+	fx->tf.tx_ring_budget = 4;
+	tbframe_mock_link_up(test, fx);
+
+	for (i = 0; i < 6; i++) {
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+		KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	}
+	KUNIT_ASSERT_EQ(test, 0, tbframe_alloc_frame(fx->link, 64, true, &f));
+	KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	KUNIT_EXPECT_EQ(test, 4u, fx->mock.tx_queued);
+
+	/* The next refill posts the ctrl frame, ahead of 2 queued data. */
+	KUNIT_ASSERT_TRUE(test, tbframe_mock_complete_tx(fx));
+	KUNIT_ASSERT_EQ(test, 5u, fx->mock.tx_queued);
+	rf = list_last_entry(&fx->mock.tx_queue, struct ring_frame, list);
+	fp = container_of(rf, struct tbframe_frame_priv, rf);
+	KUNIT_EXPECT_TRUE(test, fp->frame.is_ctrl);
+
+	/* After the ctrl frame, data resumes in FIFO order. */
+	KUNIT_ASSERT_TRUE(test, tbframe_mock_complete_tx(fx));
+	rf = list_last_entry(&fx->mock.tx_queue, struct ring_frame, list);
+	fp = container_of(rf, struct tbframe_frame_priv, rf);
+	KUNIT_EXPECT_FALSE(test, fp->frame.is_ctrl);
+
+	while (tbframe_mock_complete_tx(fx))
+		;
+	flush_workqueue(fx->tf.wq);
+}
+
+/* Session down returns the software backlog; nothing posts afterwards. */
+static void tbframe_txq_flushes_on_down(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_frame *f;
+	u16 window = TBFRAME_MOCK_RING - TBFRAME_CTRL_RESERVE;
+	u16 i;
+
+	fx->tf.tx_ring_budget = 2;
+	tbframe_mock_link_up(test, fx);
+
+	for (i = 0; i < 6; i++) {
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+		KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	}
+	KUNIT_EXPECT_EQ(test, 2u, fx->mock.tx_queued);
+
+	fx->mock.paths_active_ret = 0;
+	tbframe_link_verify_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	/* The flush never posted the backlog into the dying ring. */
+	KUNIT_EXPECT_EQ(test, 2u, fx->mock.tx_queued);
+
+	/* Every frame (posted and queued) is back: the window is whole. */
+	fx->mock.paths_active_ret = 1;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
+	for (i = 0; i < window; i++)
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+	KUNIT_EXPECT_EQ(test, -ENOSPC,
+			tbframe_alloc_frame(fx->link, 512, false, &f));
+}
+
 static int tbframe_window_test_init(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx;
@@ -150,6 +261,9 @@ static struct kunit_case tbframe_window_cases[] = {
 	KUNIT_CASE(tbframe_window_tx_released_on_completion),
 	KUNIT_CASE(tbframe_window_honors_peer_ring),
 	KUNIT_CASE(tbframe_window_resets_on_link_down),
+	KUNIT_CASE(tbframe_txq_budget_bounds_ring),
+	KUNIT_CASE(tbframe_txq_ctrl_jumps_queue),
+	KUNIT_CASE(tbframe_txq_flushes_on_down),
 	{}
 };
 
