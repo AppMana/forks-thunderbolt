@@ -3339,6 +3339,58 @@ static void tb_test_cm_reconcile_lost_plug(struct kunit *test)
 }
 
 /*
+ * Reproduces the 2026-08-20 appmana-001 live-tunnel teardown: under
+ * force_sw_cm the software CM enumerated the Razer TB4 dock and activated
+ * its PCIe tunnel; sixteen seconds later (one reconcile poll after the
+ * resident ICM's stray "event 0xa") the root port's lane state read
+ * UNPLUGGED while the dock still answered config space -- the driver's own
+ * warning said "router present but lane state 7" and synthesized the
+ * unplug anyway, tearing down the live tunnel and kicking the PHY of a
+ * live link. The resident ICM chewed on that real edge, root-switch
+ * config reads started timing out, and the domain (and the desktop behind
+ * its sysfs) hung.
+ *
+ * Contract: one lane-state sample is not evidence of an unplug. The
+ * reconcile may synthesize an unplug only when the enumerated child/peer
+ * router also fails a bounded config-space probe. A dead peer (the
+ * appmana-008/019 stranding this reconcile exists for) fails the probe
+ * and is still torn down; a live link with a perturbed state register is
+ * left alone.
+ */
+static void tb_test_cm_reconcile_perturbed_lane_keeps_live_link(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/*
+	 * Resident ICM / CLx perturbs the lane-state register; the link and
+	 * its tunnel are alive and the router answers the probe.
+	 */
+	h.port[0].state_perturbed = true;
+	KUNIT_EXPECT_TRUE(test, cm_lane_sample_unplugged(&h, 0));
+	KUNIT_EXPECT_TRUE(test, cm_peer_probe(&h, 0));
+
+	cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* live link kept */
+
+	/* The perturbation clears; nothing may have changed. */
+	h.port[0].state_perturbed = false;
+	cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/* A REAL unplug still converges: sample unplugged AND probe dead. */
+	cm_link_down_lost(&h, 0);
+	KUNIT_EXPECT_FALSE(test, cm_peer_probe(&h, 0));
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+}
+
+/*
  * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
  * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
  * tail from a half-trained-link read) fails every property read -- the healthy
@@ -3825,6 +3877,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
+	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),

@@ -325,6 +325,17 @@ int tb_switch_clx_enable(struct tb_switch *sw, unsigned int clx)
 	if (!clx || sw->clx == clx)
 		return 0;
 
+	/*
+	 * Never enter CLx while coexisting with a resident ICM
+	 * (force_sw_cm): the low-power transitions make the lane-state
+	 * register unreadable-as-truth for the reconcile loop, and the
+	 * fleet already runs clx=0 for link stability. Observed feeding
+	 * the 2026-08-20 appmana-001 live-tunnel teardown (CL0s/CL1
+	 * active when the lane sample lied UNPLUGGED).
+	 */
+	if (tb_force_sw_cm)
+		return 0;
+
 	if (!validate_mask(clx))
 		return -EINVAL;
 

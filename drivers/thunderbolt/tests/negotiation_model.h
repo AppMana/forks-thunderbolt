@@ -234,6 +234,19 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
 struct cm_port {
 	bool link_up;	/* peer's link has trained */
 	bool xdomain;	/* this port's XDomain was enumerated */
+	/*
+	 * The lane-state SAMPLE reads UNPLUGGED even though the link is
+	 * electrically up. Observed live 2026-08-20 on appmana-001
+	 * (force_sw_cm, resident Titan Ridge ICM): the dock enumerated and
+	 * its PCIe tunnel activated, the resident ICM emitted its stray
+	 * event (unexpected event 0xa) at t=242, and two seconds later the
+	 * root port's LANE_ADP_CS_1 read state 7 while the dock still
+	 * answered config space -- the reconcile log line itself said
+	 * "router present but lane state 7". CLx (CL0s/CL1 was active on
+	 * the link) and plain flaky reads under a coexisting master
+	 * produce the same lie.
+	 */
+	bool state_perturbed;
 };
 
 struct cm_host {
@@ -309,12 +322,37 @@ static inline void cm_link_down_lost(struct cm_host *h, int p)
 }
 
 /*
+ * What tb_reconcile_work() actually observes: one lane-state register read.
+ * A dead peer reads UNPLUGGED -- but so does a live link whose state was
+ * perturbed by a coexisting master or a CLx transition (state_perturbed).
+ */
+static inline bool cm_lane_sample_unplugged(const struct cm_host *h, int p)
+{
+	return !h->port[p].link_up || h->port[p].state_perturbed;
+}
+
+/*
+ * Bounded config-space probe of the enumerated child/peer router. A dead
+ * peer's router is unpowered and cannot answer; a live one answers no
+ * matter what its lane-state register momentarily reads.
+ */
+static inline bool cm_peer_probe(const struct cm_host *h, int p)
+{
+	return h->port[p].link_up;
+}
+
+/*
  * Lockstep with tb.c tb_reconcile_work(): poll each null port's lane state
  * (tb_port_state) and synthesize the missing hotplug edge so the software
  * topology converges to the hardware:
- *   - xdomain present but lane UNPLUGGED  -> synthesized unplug (teardown)
- *   - lane UP but nothing enumerated      -> synthesized plug (tb_scan_port)
- * Runs only while hotplug is armed (same tcm->hotplug_active gate).
+ *   - xdomain present, lane sample UNPLUGGED AND the bounded config-space
+ *     probe of the enumerated peer fails (tb_reconcile_peer_reachable())
+ *                                               -> synthesized unplug
+ *   - lane UP but nothing enumerated            -> synthesized plug
+ * One lane-state sample alone is NOT evidence of an unplug: a coexisting
+ * master (resident ICM) or a CLx transition perturbs the register on a
+ * live link (2026-08-20 appmana-001 live-tunnel teardown). Runs only
+ * while hotplug is armed (same tcm->hotplug_active gate).
  */
 static inline void cm_reconcile(struct cm_host *h)
 {
@@ -324,7 +362,8 @@ static inline void cm_reconcile(struct cm_host *h)
 		return;
 
 	for (i = 0; i < 2; i++) {
-		if (h->port[i].xdomain && !h->port[i].link_up)
+		if (h->port[i].xdomain && cm_lane_sample_unplugged(h, i) &&
+		    !cm_peer_probe(h, i))
 			h->port[i].xdomain = false;	/* synthesized unplug */
 		else if (!h->port[i].xdomain && h->port[i].link_up)
 			h->port[i].xdomain = true;	/* synthesized plug */

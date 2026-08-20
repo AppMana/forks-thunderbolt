@@ -78,7 +78,49 @@ the marker that the armed boot took over correctly.
    `drivers/thunderbolt/test.c`, mock-firmware style) and only then write
    the v2.38 mitigation.
 
-## Open hypotheses the capture will separate
+## RESOLVED 2026-08-20: the capture named the mechanism
+
+The instrumented plug test captured the whole sequence on appmana-019:
+
+1. t=228.2: the software CM synthesized the (correctly) lost plug, scanned,
+   and enumerated the Razer Thunderbolt 4 Dock (Goshen Ridge, 20 Gb/s dual
+   lane) at route 0x1; PCIe Down/Up paths activated. **The plug worked.**
+2. t=228.2: CLx CL0s/CL1 was enabled on the dock link (no `clx=0` on the
+   armed boot).
+3. t=242.6: the resident ICM emitted its stray hot event
+   ("unexpected event 0xa, ignoring" — correctly dropped at packet level).
+4. t=244.6: the reconcile poll read the root port lane state as
+   UNPLUGGED(7) **while the dock still answered config space** — the
+   warning itself printed "router present but lane state 7" — and
+   synthesized an unplug anyway: tore down the live PCIe tunnel, removed
+   the device, and kicked the PHY (lane disable/enable) of a live link.
+5. t=247.0: root-switch config reads began timing out (the resident ICM
+   chewing on the real link edge the kick fed it), then the domain went
+   silent forever. Kernel alive (mouse moving), TB domain dead, desktop
+   D-stated behind its sysfs. Manual reboot.
+
+So the lethal defect was OURS: the reconcile heuristic trusted one
+lane-state register sample over the reachability it had already
+demonstrated, on a register a coexisting master (and CLx) can perturb.
+
+## The v2.38 fix (KUnit red-first: tb_test_cm_reconcile_perturbed_lane_keeps_live_link)
+
+- `tb_reconcile_peer_reachable()`: a bare UNPLUGGED sample is confirmed
+  with a bounded (500 ms, 1 dword) config read of the enumerated
+  child/XDomain router before any unplug is synthesized. A dead peer
+  (the appmana-008/019 stranding this reconcile exists for) fails the
+  probe and still converges; a live link with a lying register is left
+  alone. Condemned XDomains (`is_unplugged`) tear down on that signal
+  as before.
+- CLx is refused entirely under `force_sw_cm` (and `thunderbolt.clx=0`
+  added to the one-shot GRUB entry as belt) — fleet-consistent, and it
+  removes the state-register ambiguity at the source.
+- The reconcile pass ends early on the first failed lane-state read
+  instead of burning a timeout per port while holding `tb->lock` — that
+  lock-hold is what starves sysfs readers into D state and freezes the
+  desktop when the control channel goes sick.
+
+## Superseded hypotheses (kept for the record)
 
 - H1 (firmware-first): the resident ICM's broken hot-plug path wedges the
   Titan Ridge on the physical connect (its lane/port state disagrees with
