@@ -62,7 +62,7 @@ static int tbframe_service_probe(struct tb_service *svc,
 	if (!binding)
 		return -ENOMEM;
 
-	hw = tbframe_hw_create(xd);
+	hw = tbframe_hw_create(tbframe_service_tf, xd);
 	if (!hw) {
 		ret = -ENOMEM;
 		goto err_free_binding;

@@ -150,6 +150,64 @@ static DEFINE_MUTEX(xdomain_dispatch_lock);
 static struct tb_property_dir *xdomain_property_dir;
 static u32 xdomain_property_block_gen;
 
+/*
+ * Intra-domain loop rig (docs/tb_same_host.md): both ports of one host
+ * cabled together. On boards whose resident ICM firmware is alive
+ * (thunderbolt.force_sw_cm boards), ring-0 XDomain protocol packets never
+ * reach the wire -- the firmware claims and answers them itself
+ * (TB_CFG_PKG_ICM_RESP, packet-trace proven), and the firmware cannot be
+ * stopped at runtime (see icm_stop()). A loop needs no wire for discovery
+ * anyway: the "peer" is this kernel, so the UUID and property exchange are
+ * answered from local state. The operator declares the looped route pair
+ * (e.g. thunderbolt.loop_routes=1,3); consecutive entries pair up.
+ */
+static char xdomain_loop_routes[64];
+module_param_string(loop_routes, xdomain_loop_routes,
+		    sizeof(xdomain_loop_routes), 0444);
+MODULE_PARM_DESC(loop_routes,
+		 "Comma-separated hex route pairs cabled in an intra-domain loop (e.g. 1,3)");
+
+/*
+ * Parses the operator list on each call: discovery-path only, and the
+ * routes must be readable while xdomain init ordering stays untouched.
+ * Returns true and fills @sibling when @route is a declared loop end.
+ */
+static bool tb_xdomain_loop_sibling(u64 route, u64 *sibling)
+{
+	u64 pair[2];
+	unsigned int n = 0;
+	const char *p = xdomain_loop_routes;
+
+	while (*p) {
+		char *end;
+		u64 val = simple_strtoull(p, &end, 16);
+
+		if (end == p)
+			break;
+		pair[n & 1] = val;
+		if (n & 1) {
+			if (pair[0] == route) {
+				*sibling = pair[1];
+				return true;
+			}
+			if (pair[1] == route) {
+				*sibling = pair[0];
+				return true;
+			}
+		}
+		n++;
+		p = (*end == ',') ? end + 1 : end;
+	}
+	return false;
+}
+
+static bool tb_xdomain_is_loop_route(u64 route)
+{
+	u64 unused;
+
+	return tb_xdomain_loop_sibling(route, &unused);
+}
+
 /* Additional protocol handlers */
 static LIST_HEAD(protocol_handlers);
 
@@ -1347,8 +1405,18 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 
 	dev_dbg(&xd->dev, "requesting remote UUID\n");
 
-	ret = tb_xdp_uuid_request(tb->ctl, xd->route, xd->state_retries, &uuid,
-				  &route);
+	/*
+	 * Declared loop end: the peer is this host, so the answer is known
+	 * without the wire (which a live resident ICM would intercept). The
+	 * sibling route makes the uuid_equal branch below classify this as
+	 * an intra-domain loop, not a single-port loopback.
+	 */
+	if (tb_xdomain_loop_sibling(xd->route, &route)) {
+		uuid_copy(&uuid, xd->local_uuid);
+		ret = 0;
+	} else
+		ret = tb_xdp_uuid_request(tb->ctl, xd->route, xd->state_retries,
+					  &uuid, &route);
 	if (ret < 0) {
 		if (xd->state_retries-- > 0) {
 			dev_dbg(&xd->dev, "failed to request UUID, retrying\n");
@@ -1546,9 +1614,29 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 
 	dev_dbg(&xd->dev, "requesting remote properties\n");
 
-	ret = tb_xdp_properties_request(tb->ctl, xd->route, xd->local_uuid,
-					xd->remote_uuid, xd->state_retries,
-					&block, &gen);
+	/*
+	 * Declared loop end: the "remote" property block is this host's own
+	 * local block, byte-identical to what a wire peer would receive.
+	 */
+	if (tb_xdomain_is_loop_route(xd->route)) {
+		update_property_block(xd);
+		mutex_lock(&xd->lock);
+		if (xd->local_property_block) {
+			block = kmemdup(xd->local_property_block,
+					xd->local_property_block_len *
+					sizeof(*block), GFP_KERNEL);
+			gen = xd->local_property_block_gen;
+			ret = block ? (int)xd->local_property_block_len :
+				      -ENOMEM;
+		} else
+			ret = -ENODATA;
+		mutex_unlock(&xd->lock);
+	} else
+		ret = tb_xdp_properties_request(tb->ctl, xd->route,
+						xd->local_uuid,
+						xd->remote_uuid,
+						xd->state_retries, &block,
+						&gen);
 	if (ret < 0) {
 		if (xd->state_retries-- > 0) {
 			dev_dbg(&xd->dev,
@@ -2080,6 +2168,23 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 	int ret;
 
 	dev_dbg(&xd->dev, "sending properties changed notification\n");
+
+	/*
+	 * Loop end: the peer observing our property change is this same
+	 * XDomain (it reads the local block), so apply the effect the
+	 * inbound PROPERTIES_CHANGED_REQUEST handler would have applied --
+	 * force a fresh accept and re-run the state machine. No wire.
+	 */
+	if (tb_xdomain_is_loop_route(xd->route)) {
+		mutex_lock(&xd->lock);
+		if (!xd->removing && device_is_registered(&xd->dev)) {
+			xd->remote_property_block_gen = 0;
+			queue_delayed_work(xd->tb->wq, &xd->state_work,
+					   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+		}
+		mutex_unlock(&xd->lock);
+		return;
+	}
 
 	ret = tb_xdp_properties_changed_request(xd->tb->ctl, xd->route,
 				xd->properties_changed_retries, xd->local_uuid);

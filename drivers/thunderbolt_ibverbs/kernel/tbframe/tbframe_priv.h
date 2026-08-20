@@ -265,7 +265,7 @@ struct tbframe *tbframe_instance(void);
 int tbframe_service_start(struct tbframe *tf);
 void tbframe_service_stop(struct tbframe *tf);
 struct tbframe_hw;
-struct tbframe_hw *tbframe_hw_create(struct tb_xdomain *xd);
+struct tbframe_hw *tbframe_hw_create(struct tbframe *tf, struct tb_xdomain *xd);
 void tbframe_hw_destroy(struct tbframe_hw *hw);
 extern const struct tbframe_hw_ops tbframe_hw_real_ops;
 

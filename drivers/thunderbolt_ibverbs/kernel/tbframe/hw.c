@@ -16,7 +16,54 @@ struct tbframe_hw {
 	struct tb_xdomain	*xd;
 	struct tb_ring		*tx_ring;
 	struct tb_ring		*rx_ring;
+	/* intra-domain loop control plane (see tbframe_hw_loop_*) */
+	struct tbframe		*tf;
+	struct list_head	loop_node;
+	bool			loop;
+	u8			*loop_capture;
+	size_t			loop_capture_len;
+	bool			loop_captured;
 };
+
+/*
+ * Intra-domain loop control plane. Both ends of the cable are this kernel
+ * (xd->remote_uuid == xd->local_uuid, enumerated via thunderbolt.loop_routes),
+ * and on the boards that need such a rig the resident ICM firmware answers
+ * ring-0 XDomain protocol packets itself instead of forwarding them
+ * (packet-trace proven), so tb_xdomain_request() can never work. It also
+ * never needs to: a control request from one end is delivered synchronously
+ * to the sibling end's real inbound handler with the XDomain header route
+ * rewritten to the receiver's route -- exactly the rewrite the hardware
+ * performs for a packet crossing the cable, and exactly the wire model the
+ * tbframe_selfloop KUnit suite proves the session layer against. Only the
+ * DMA-ring data path touches the physical cable.
+ *
+ * One global mutex serializes loop control exchanges; requests are rare
+ * (session handshake, keepalive-independent) and both ends requesting
+ * concurrently must not deadlock on per-end state.
+ */
+static DEFINE_MUTEX(tbframe_loop_lock);
+static LIST_HEAD(tbframe_loop_hws);
+
+static struct tbframe_hw *tbframe_hw_loop_sibling(struct tbframe_hw *hw)
+{
+	struct tbframe_hw *other;
+
+	list_for_each_entry(other, &tbframe_loop_hws, loop_node)
+		if (other != hw &&
+		    uuid_equal(other->xd->local_uuid, hw->xd->local_uuid))
+			return other;
+	return NULL;
+}
+
+/* The hardware's route rewrite: as-received header route = receiver's. */
+static void tbframe_hw_loop_patch_route(u8 *msg, size_t len, u64 route)
+{
+	if (len < 8)
+		return;
+	tbframe_wire_put_le32(msg, route >> 32);
+	tbframe_wire_put_le32(msg + 4, route & 0xffffffffull);
+}
 
 /*
  * Per-ring MSI-X interrupt moderation for the data rings. The NHI driver
@@ -304,11 +351,65 @@ static int tbframe_hw_paths_active(void *data, int local_hopid,
 #endif
 }
 
+static int tbframe_hw_loop_control_request(struct tbframe_hw *hw,
+					   const void *req, size_t req_len,
+					   void *resp, size_t resp_len)
+{
+	u8 buf[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	struct tbframe_hw *sib;
+	int ret = -ETIMEDOUT;
+
+	if (req_len > sizeof(buf) || resp_len > sizeof(buf))
+		return -EINVAL;
+	if (!hw->tf)
+		return -ENODEV;
+
+	mutex_lock(&tbframe_loop_lock);
+	sib = tbframe_hw_loop_sibling(hw);
+	if (!sib) {
+		/* Sibling end not probed (yet/anymore): the peer retries. */
+		mutex_unlock(&tbframe_loop_lock);
+		return -ETIMEDOUT;
+	}
+
+	memcpy(buf, req, req_len);
+	tbframe_hw_loop_patch_route(buf, req_len, sib->xd->route);
+
+	sib->loop_capture = resp;
+	sib->loop_capture_len = resp_len;
+	sib->loop_captured = false;
+	tbframe_handle_packet(hw->tf, sib->xd, buf, req_len);
+	if (sib->loop_captured) {
+		/*
+		 * The requester's protocol handler observes the response
+		 * before response matching on a real wire (HELLO_ACK is
+		 * applied there); mirror that ordering.
+		 */
+		memcpy(buf, resp, resp_len);
+		tbframe_hw_loop_patch_route(buf, resp_len, hw->xd->route);
+		tbframe_handle_packet(hw->tf, hw->xd, buf, resp_len);
+		memcpy(resp, buf, resp_len);
+		ret = 0;
+	}
+	sib->loop_capture = NULL;
+	sib->loop_capture_len = 0;
+	sib->loop_captured = false;
+	mutex_unlock(&tbframe_loop_lock);
+
+	/* A withheld ack (READY/BYE gating) is a request timeout, as on
+	 * the wire; the session machinery's retry cadence handles it. */
+	return ret;
+}
+
 static int tbframe_hw_control_request(void *data, const void *req,
 				      size_t req_len, void *resp,
 				      size_t resp_len, unsigned int timeout_ms)
 {
 	struct tbframe_hw *hw = data;
+
+	if (hw->loop)
+		return tbframe_hw_loop_control_request(hw, req, req_len,
+						       resp, resp_len);
 
 	return tb_xdomain_request(hw->xd, req, req_len,
 				  TB_CFG_PKG_XDOMAIN_REQ, resp, resp_len,
@@ -319,6 +420,16 @@ static int tbframe_hw_control_response(void *data, const void *resp,
 				       size_t len)
 {
 	struct tbframe_hw *hw = data;
+
+	if (hw->loop) {
+		/* Caller holds tbframe_loop_lock (dispatch is synchronous
+		 * inside the loop control exchange). */
+		if (!hw->loop_capture || len > hw->loop_capture_len)
+			return -ENOSPC;
+		memcpy(hw->loop_capture, resp, len);
+		hw->loop_captured = true;
+		return 0;
+	}
 
 	return tb_xdomain_response(hw->xd, resp, len,
 				   TB_CFG_PKG_XDOMAIN_RESP);
@@ -395,7 +506,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.match			= tbframe_hw_match,
 };
 
-struct tbframe_hw *tbframe_hw_create(struct tb_xdomain *xd)
+struct tbframe_hw *tbframe_hw_create(struct tbframe *tf, struct tb_xdomain *xd)
 {
 	struct tbframe_hw *hw;
 
@@ -403,6 +514,22 @@ struct tbframe_hw *tbframe_hw_create(struct tb_xdomain *xd)
 	if (!hw)
 		return NULL;
 	hw->xd = tb_xdomain_get(xd);
+	hw->tf = tf;
+	INIT_LIST_HEAD(&hw->loop_node);
+
+	/*
+	 * An enumerated XDomain whose remote identity is our own domain is
+	 * an intra-domain loop end: control plane loops in software.
+	 */
+	if (xd->local_uuid && xd->remote_uuid &&
+	    uuid_equal(xd->local_uuid, xd->remote_uuid)) {
+		hw->loop = true;
+		mutex_lock(&tbframe_loop_lock);
+		list_add_tail(&hw->loop_node, &tbframe_loop_hws);
+		mutex_unlock(&tbframe_loop_lock);
+		pr_info("tbframe0x%llx: loop control plane active\n",
+			xd->route);
+	}
 	return hw;
 }
 
@@ -410,6 +537,11 @@ void tbframe_hw_destroy(struct tbframe_hw *hw)
 {
 	if (!hw)
 		return;
+	if (hw->loop) {
+		mutex_lock(&tbframe_loop_lock);
+		list_del(&hw->loop_node);
+		mutex_unlock(&tbframe_loop_lock);
+	}
 	tb_xdomain_put(hw->xd);
 	kfree(hw);
 }
