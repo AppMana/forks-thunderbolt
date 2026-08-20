@@ -105,6 +105,7 @@ static void tbframe_link_fill_info_locked(const struct tbframe_link *link,
 	memset(info, 0, sizeof(*info));
 	info->gid_eui64 = link->remote_gid_eui64;
 	info->local_gid_eui64 = link->local_gid_eui64;
+	info->route = link->route;
 	info->rx_ring_entries = link->remote_rx_entries;
 	info->data_window = link->data_window;
 	info->max_payload = TBFRAME_MAX_FRAME;

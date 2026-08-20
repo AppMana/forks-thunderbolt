@@ -18,6 +18,21 @@ iface="${1:-}"
 [ -n "$iface" ] || exit 0
 nd="/sys/class/net/${iface}"
 
+# Intra-domain self-loop (docs/tb_same_host.md): the peer IS this host, so
+# tbr-<peer-hostname> would collide across the loop's two netdevs (the
+# second rename fails and the name becomes enumeration-dependent). Name by
+# the end's own route instead: tbr-lo<route-hex>, distinct by construction.
+peer_uuid=$(cat "${nd}/tbv_peer_uuid" 2>/dev/null | tr -cd '0-9a-f')
+local_uuid=$(cat /sys/bus/thunderbolt/devices/0-0/unique_id 2>/dev/null | tr -cd '0-9a-f')
+[ -n "$local_uuid" ] || local_uuid=$(cat /sys/bus/thunderbolt/devices/*-0/unique_id 2>/dev/null | head -n1 | tr -cd '0-9a-f')
+if [ -n "$peer_uuid" ] && [ "$peer_uuid" = "$local_uuid" ]; then
+	route=$(cat "${nd}/tbv_route" 2>/dev/null | tr -cd '0-9a-f')
+	if [ -n "$route" ]; then
+		printf 'tbr-lo%s' "$(printf '%s' "$route" | tail -c 9)"
+		exit 0
+	fi
+fi
+
 host=$(cat "${nd}/tbv_peer_name" 2>/dev/null | tr -cd 'A-Za-z0-9')
 [ -n "$host" ] || host=$(cat "${nd}/device/device_name" 2>/dev/null | tr -cd 'A-Za-z0-9')
 if [ -n "$host" ]; then

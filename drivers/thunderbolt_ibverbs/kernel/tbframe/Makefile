@@ -55,6 +55,7 @@ tbframe-$(CONFIG_KUNIT) += tests/supersede_test.o
 tbframe-$(CONFIG_KUNIT) += tests/window_test.o
 tbframe-$(CONFIG_KUNIT) += tests/teardown_test.o
 tbframe-$(CONFIG_KUNIT) += tests/lifecycle_test.o
+tbframe-$(CONFIG_KUNIT) += tests/selfloop_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 

@@ -337,6 +337,7 @@ u32 tbrxe_link_unacked(struct rxe_dev *rxe)
 struct tbrxe_ndev_priv {
 	char	peer_uuid[UUID_STRING_LEN + 1];
 	char	peer_name[sizeof_field(struct tbframe_link_info, remote_name)];
+	u64	route;
 };
 
 static netdev_tx_t tbrxe_ndev_xmit(struct sk_buff *skb,
@@ -380,9 +381,25 @@ static ssize_t tbv_peer_name_show(struct device *d,
 }
 static DEVICE_ATTR_RO(tbv_peer_name);
 
+/*
+ * The link's XDomain route (hex). On an intra-domain self-loop every UUID
+ * matches on both ends; the route is the only per-end-distinct value, and
+ * the udev naming/addressing tie-breaks (tbv-rdma-ifname, tbv-rdma-addr)
+ * read it from here.
+ */
+static ssize_t tbv_route_show(struct device *d, struct device_attribute *a,
+			      char *buf)
+{
+	struct tbrxe_ndev_priv *priv = netdev_priv(to_net_dev(d));
+
+	return sysfs_emit(buf, "%llx\n", priv->route);
+}
+static DEVICE_ATTR_RO(tbv_route);
+
 static struct attribute *tbrxe_ndev_attrs[] = {
 	&dev_attr_tbv_peer_uuid.attr,
 	&dev_attr_tbv_peer_name.attr,
+	&dev_attr_tbv_route.attr,
 	NULL,
 };
 static const struct attribute_group tbrxe_ndev_group = {
@@ -418,6 +435,7 @@ static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info
 	snprintf(priv->peer_uuid, sizeof(priv->peer_uuid), "%pUb",
 		 info->remote_uuid);
 	strscpy(priv->peer_name, info->remote_name, sizeof(priv->peer_name));
+	priv->route = info->route;
 
 	tbrxe_mac_from_eui64(info->local_gid_eui64, mac);
 	eth_hw_addr_set(ndev, mac);

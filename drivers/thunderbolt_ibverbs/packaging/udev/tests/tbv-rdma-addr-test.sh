@@ -46,5 +46,30 @@ case "$p" in fd??:*:*:*) printf 'ok   - prefix is fd../64-shaped (%s)\n' "$p" ;;
 # full address assembles cleanly
 check "full addr A->B" "$(tbv_link_addr "$A" "$B")" "${p}::1/64"
 
+# --- intra-domain self-loop (docs/tb_same_host.md): local uid == remote uid.
+# The uid pair is degenerate, so the host split MUST come from the one value
+# the two cable ends never share: each end's XDomain route. Contract:
+#   * same /64 for both ends (they are one cabled link);
+#   * host part derived from the end's own route, so the ends differ;
+#   * stable, and never colliding with the ::1/::2 of a normal link.
+RA=1      # port 1 route as read from the xdomain (hex, no 0x)
+RB=3      # port 3 route
+lp="$(tbv_link_prefix "$A" "$A")"
+check "selfloop /64 symmetric"    "$(tbv_link_prefix "$A" "$A")" "$lp"
+neq   "selfloop ends differ"      "$(tbv_link_addr "$A" "$A" "$RA")" "$(tbv_link_addr "$A" "$A" "$RB")"
+check "selfloop end A stable"     "$(tbv_link_addr "$A" "$A" "$RA")" "$(tbv_link_addr "$A" "$A" "$RA")"
+# both ends sit in the loop /64
+case "$(tbv_link_addr "$A" "$A" "$RA")" in "${lp}:"*) printf 'ok   - selfloop A in loop /64\n' ;;
+	*) printf 'FAIL - selfloop A not in %s: %q\n' "$lp" "$(tbv_link_addr "$A" "$A" "$RA")"; fail=1 ;; esac
+# never the ::1/::2 host parts a normal two-host link uses
+neq   "selfloop A avoids ::1"     "$(tbv_link_addr "$A" "$A" "$RA")" "${lp}::1/64"
+neq   "selfloop A avoids ::2"     "$(tbv_link_addr "$A" "$A" "$RA")" "${lp}::2/64"
+neq   "selfloop B avoids ::1"     "$(tbv_link_addr "$A" "$A" "$RB")" "${lp}::1/64"
+neq   "selfloop B avoids ::2"     "$(tbv_link_addr "$A" "$A" "$RB")" "${lp}::2/64"
+# a wide (multi-hop) route still yields a valid distinct address
+neq   "selfloop wide routes differ" "$(tbv_link_addr "$A" "$A" "30501")" "$(tbv_link_addr "$A" "$A" "50301")"
+# two-host behavior is untouched by the optional route argument
+check "two-host ignores route"    "$(tbv_link_addr "$A" "$B" "$RA")" "${p}::1/64"
+
 [ "$fail" = 0 ] && echo "PASS" || echo "FAILED"
 exit "$fail"

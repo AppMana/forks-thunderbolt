@@ -26,7 +26,25 @@ tbv_link_host() {
 	[ "$_lo" = "$1" ] && printf '1' || printf '2'
 }
 
-# tbv_link_addr LOCAL REMOTE -> "fd..::H/64", the address this end assigns.
+# tbv_link_addr LOCAL REMOTE [ROUTE] -> the address this end assigns.
+#
+# Two hosts: "fd..::H/64" with H from tbv_link_host (ROUTE ignored).
+#
+# Intra-domain self-loop (docs/tb_same_host.md): LOCAL == REMOTE makes the
+# UUID pair degenerate, so the host split comes from ROUTE -- each end's own
+# XDomain route (hex, the netdev's tbv_route attr), the one per-link value
+# the two cable ends never share. The interface ID is the 64-bit route with
+# the top bit set as a marker, keeping the self-loop ID space disjoint from
+# the ::1/::2 a normal link uses (route 1 would otherwise render as ::1).
 tbv_link_addr() {
+	if [ "$1" = "$2" ] && [ -n "${3:-}" ]; then
+		_r=$(( 0x$3 ))
+		printf '%s:%x:%x:%x:%x/64' "$(tbv_link_prefix "$1" "$2")" \
+			$(( ((_r >> 48) & 0xffff) | 0x8000 )) \
+			$(( (_r >> 32) & 0xffff )) \
+			$(( (_r >> 16) & 0xffff )) \
+			$(( _r & 0xffff ))
+		return
+	fi
 	printf '%s::%s/64' "$(tbv_link_prefix "$1" "$2")" "$(tbv_link_host "$1" "$2")"
 }

@@ -44,7 +44,10 @@ local="$(cat /sys/bus/thunderbolt/devices/0-0/unique_id 2>/dev/null | tr -d '[:s
 [ -n "$local" ] || local="$(cat /sys/bus/thunderbolt/devices/*-0/unique_id 2>/dev/null | head -n1 | tr -d '[:space:]')"
 [ -n "$local" ] || exit 0
 
-addr="$(tbv_link_addr "$local" "$remote")"
+# Self-loop tie-break input: the end's own route (see tbv_link_addr).
+route="$(cat "/sys/class/net/${ifc}/tbv_route" 2>/dev/null | tr -cd '0-9a-f')"
+
+addr="$(tbv_link_addr "$local" "$remote" "$route")"
 
 ip -6 addr replace "$addr" dev "$ifc" nodad 2>/dev/null || \
 	ip -6 addr replace "$addr" dev "$ifc"

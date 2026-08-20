@@ -125,10 +125,16 @@ enum tbframe_down_reason {
  *                endpoint UUID pair).
  * @remote_name:  peer hostname from the XDomain properties ("" when
  *                unknown); used for stable netdev naming (tbr-<peer>).
+ * @route:        XDomain route of this link's port. On an intra-domain
+ *                self-loop (both ports of one host cabled together) every
+ *                UUID is equal on both ends and the route is the ONLY
+ *                per-end-distinct value; the udev self-loop addressing
+ *                and naming tie-breaks derive from it.
  */
 struct tbframe_link_info {
 	u64	gid_eui64;
 	u64	local_gid_eui64;
+	u64	route;
 	u16	rx_ring_entries;
 	u16	data_window;
 	u16	max_payload;

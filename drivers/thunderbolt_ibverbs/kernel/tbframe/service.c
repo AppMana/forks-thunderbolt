@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/uuid.h>
 
+#include "tbframe_identity.h"
 #include "tbframe_priv.h"
 
 #define TBFRAME_PROTOCOL_KEY	"tbframe"
@@ -35,55 +36,14 @@ struct tbframe_service_binding {
 	struct tbframe_hw	*hw;
 };
 
-/*
- * Per-link ULA EUI-64 for GID derivation (spec §8), the legacy per-rail
- * identity math: a 24-bit host hash folded from the host router UUID
- * (stable across boots, unique per host) plus a 16-bit link hash over the
- * remote UUID and route, formatted as the modified EUI-64 of the synthetic
- * locally-administered MAC 02:H1:H2:H3:L1:L2.
+/* identity math lives in tbframe_identity.h, shared with the KUnit
+ * self-loop model so tests assert the exact shipped derivation.
  */
-static u32 tbframe_host_identity_hash(const u8 uuid[16])
-{
-	u32 h = 0;
-	int i;
-
-	if (!uuid)
-		return 0x544246; /* "TBF" */
-	for (i = 0; i < 16; i++)
-		h = h * 31 + uuid[i];
-	h &= 0xffffffu;
-	return h ? h : 0x544246;
-}
-
-static u16 tbframe_link_identity_hash(const u8 remote_uuid[16], u64 route)
-{
-	u32 h = tbframe_host_identity_hash(remote_uuid);
-	u16 folded;
-
-	h ^= lower_32_bits(route);
-	h ^= upper_32_bits(route);
-	h ^= h >> 16;
-	h *= 0x7feb352du;
-	h ^= h >> 15;
-	folded = (u16)(h ^ (h >> 16));
-	return folded ? folded : 1;
-}
-
 static u64 tbframe_gid_eui64(const struct tb_xdomain *xd)
 {
-	u32 host = tbframe_host_identity_hash(xd->local_uuid ?
-					      xd->local_uuid->b : NULL);
-	u16 link = tbframe_link_identity_hash(xd->remote_uuid ?
-					      xd->remote_uuid->b : NULL,
-					      xd->route);
-	u8 mac[6] = {
-		0x02, host >> 16, host >> 8, host, link >> 8, link,
-	};
-
-	/* RFC 4291 modified EUI-64: mac[0..2] ^ U/L, ff:fe, mac[3..5]. */
-	return ((u64)(mac[0] ^ 0x02) << 56) | ((u64)mac[1] << 48) |
-	       ((u64)mac[2] << 40) | (0xffULL << 32) | (0xfeULL << 24) |
-	       ((u64)mac[3] << 16) | ((u64)mac[4] << 8) | (u64)mac[5];
+	return tbframe_identity_eui64(xd->local_uuid ? xd->local_uuid->b : NULL,
+				      xd->remote_uuid ? xd->remote_uuid->b :
+				      NULL, xd->route);
 }
 
 static int tbframe_service_probe(struct tb_service *svc,
