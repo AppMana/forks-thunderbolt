@@ -1,5 +1,5 @@
 From 233861d2618966687de148f8fc349843c25d9e7a Mon Sep 17 00:00:00 2001
-From: thunderbolt-ibverbs <ci@thunderbolt-ibverbs>
+From: forks-thunderbolt <ci@forks-thunderbolt>
 Date: Tue, 18 Aug 2026 14:21:28 -0700
 Subject: [PATCH] providers/tbrxe: dedicated provider for tbrxe (usb4_rdma*)
  devices

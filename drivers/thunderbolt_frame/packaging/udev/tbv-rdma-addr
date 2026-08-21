@@ -13,7 +13,7 @@ set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 
 LIB="$(dirname "$0")/tbv-rdma-addr-lib.sh"
-[ -r "$LIB" ] || LIB=/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh
+[ -r "$LIB" ] || LIB=/usr/lib/usb4-rdma/tbv-rdma-addr-lib.sh
 . "$LIB"
 
 ifc="${1:-}"

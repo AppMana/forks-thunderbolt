@@ -246,11 +246,11 @@ build_deb() {
 	install -D -m 0644 "$repo_root/packaging/udev/60-usb4-rdma-net.rules" \
 		"$deb_stage/usr/lib/udev/rules.d/60-usb4-rdma-net.rules"
 	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-ifname" \
-		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-ifname"
+		"$deb_stage/usr/lib/usb4-rdma/tbv-rdma-ifname"
 	install -D -m 0755 "$repo_root/packaging/udev/tbv-rdma-addr" \
-		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr"
+		"$deb_stage/usr/lib/usb4-rdma/tbv-rdma-addr"
 	install -D -m 0644 "$repo_root/packaging/udev/tbv-rdma-addr-lib.sh" \
-		"$deb_stage/usr/lib/thunderbolt-ibverbs/tbv-rdma-addr-lib.sh"
+		"$deb_stage/usr/lib/usb4-rdma/tbv-rdma-addr-lib.sh"
 
 	substitute "$repo_root/packaging/debian/control-rdma" "$deb_stage/DEBIAN/control"
 	substitute "$repo_root/packaging/debian/postinst-rdma" "$deb_stage/DEBIAN/postinst"

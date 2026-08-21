@@ -1,5 +1,5 @@
 From 45cdeef137e9576ced14c81cfdfa0ca0dd7e2b1c Mon Sep 17 00:00:00 2001
-From: thunderbolt-ibverbs <ci@thunderbolt-ibverbs>
+From: forks-thunderbolt <ci@forks-thunderbolt>
 Date: Sat, 30 May 2026 10:39:00 +0200
 Subject: [PATCH 2/3] CMakeLists.txt: build the usb4_rdma provider
 

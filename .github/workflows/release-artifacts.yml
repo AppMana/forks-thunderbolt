@@ -88,7 +88,7 @@ jobs:
             -w /work \
             ubuntu:24.04 \
             bash drivers/thunderbolt_frame/tools/ci/distro-install.sh \
-              'dist/thunderbolt-ibverbs-tools_*.deb'
+              'dist/thunderbolt-frame-tools_*.deb'
 
       - name: Build usb4-rdma-provider deb (noble)
         run: |

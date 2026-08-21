@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Install a thunderbolt-ibverbs-tools or usb4-rdma-provider package built by
+# Install a thunderbolt-frame-tools or usb4-rdma-provider package built by
 # the matching distro-package*.sh script. Verifies:
 #
 #   usb4-rdma-provider         — provider .so is installed at the expected path,
 #                                its dynamic deps resolve, and libibverbs does
 #                                not crash when its driver hint is present.
-#   thunderbolt-ibverbs-tools  — the capture harness is installed, parses, and
+#   thunderbolt-frame-tools    — the capture harness is installed, parses, and
 #                                exposes its documented CLI.
 #
 # Does NOT load any kernel module.
@@ -18,7 +18,7 @@ Usage:
   tools/ci/distro-install.sh <artefact-path-or-glob>
 
 Detects the package type from the artefact filename
-(thunderbolt-ibverbs-tools or usb4-rdma-provider) and runs the appropriate
+(thunderbolt-frame-tools or usb4-rdma-provider) and runs the appropriate
 verification flow.
 EOF
 }
@@ -49,7 +49,7 @@ artefact="$(realpath "${artefacts[0]}")"
 [[ -f "$artefact" ]] || { printf 'error: not a file: %s\n' "$artefact" >&2; exit 1; }
 
 case "$(basename "$artefact")" in
-	thunderbolt-ibverbs-tools*) pkg_kind="tools" ;;
+	thunderbolt-frame-tools*) pkg_kind="tools" ;;
 	usb4-rdma-provider*)       pkg_kind="rdma-provider" ;;
 	*)
 		printf 'error: unknown package name in %s\n' "$artefact" >&2

@@ -65,9 +65,9 @@ build_tools_deb() {
 	install -D -m 0755 "$repo_root/tools/nhi-ring-regs.py" \
 		"$tools_stage/usr/bin/tbv-nhi-ring-regs"
 	install -D -m 0644 "$repo_root/docs/tbv-hang-repro.md" \
-		"$tools_stage/usr/share/doc/thunderbolt-ibverbs-tools/README.md"
+		"$tools_stage/usr/share/doc/thunderbolt-frame-tools/README.md"
 
-	local tools_deb="$out_dir/thunderbolt-ibverbs-tools_${version}_all.deb"
+	local tools_deb="$out_dir/thunderbolt-frame-tools_${version}_all.deb"
 	dpkg-deb --root-owner-group --build "$tools_stage" "$tools_deb" >/dev/null
 	printf '==> Built %s\n' "$tools_deb"
 

@@ -7,7 +7,7 @@ Release:        1%{?dist}
 Summary:        usb4_rdma libibverbs userspace provider
 
 License:        GPL-2.0-only OR BSD-3-Clause
-URL:            https://github.com/hellas-ai/thunderbolt-ibverbs
+URL:            https://github.com/AppMana/forks-thunderbolt
 
 BuildArch:      x86_64
 Requires:       libibverbs
@@ -15,7 +15,7 @@ Requires:       libibverbs
 %description
 Drop-in libibverbs provider that lets libibverbs enumerate and use
 thunderbolt_ibverbs kernel devices. Install alongside the matching
-thunderbolt-ibverbs-dkms package for full ibv_devices visibility and
+thunderbolt-frame-dkms package for full ibv_devices visibility and
 downstream RDMA tool support (NCCL, vllm, perftest).
 
 %install

@@ -29,8 +29,8 @@ cd "$WORK"
 rm -rf .git
 
 git init -q
-git config user.email "ci@thunderbolt-ibverbs"
-git config user.name "thunderbolt-ibverbs"
+git config user.email "ci@forks-thunderbolt"
+git config user.name "forks-thunderbolt"
 git config commit.gpgsign false
 git add -A
 git commit -qm "rdma-core baseline"
@@ -45,7 +45,7 @@ Out-of-tree provider for the usb4_rdma kernel module which exposes
 Thunderbolt/USB4 host-to-host xdomain links as InfiniBand verbs
 devices.
 
-Source: https://github.com/hellas-ai/thunderbolt-ibverbs"
+Source: https://github.com/AppMana/forks-thunderbolt"
 
 # Wire the provider into the build.
 sed -i '/add_subdirectory(providers\/siw)/a add_subdirectory(providers/usb4_rdma)' CMakeLists.txt

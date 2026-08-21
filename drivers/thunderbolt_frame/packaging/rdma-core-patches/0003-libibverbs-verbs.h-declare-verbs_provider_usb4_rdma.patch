@@ -1,5 +1,5 @@
 From 3043fc974d36dd07a926f206b66cbcd8d42c9862 Mon Sep 17 00:00:00 2001
-From: thunderbolt-ibverbs <ci@thunderbolt-ibverbs>
+From: forks-thunderbolt <ci@forks-thunderbolt>
 Date: Sat, 30 May 2026 10:39:00 +0200
 Subject: [PATCH 3/3] libibverbs/verbs.h: declare verbs_provider_usb4_rdma
 
