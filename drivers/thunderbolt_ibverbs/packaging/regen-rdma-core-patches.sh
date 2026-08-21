@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate the rdma-core patches that ship our libibverbs provider.
 #
-# Pulls a clean rdma-core source tarball (the version nixpkgs is pinned
-# to), checks in our provider sources, and rewrites the numbered patches
+# Pulls a clean rdma-core source tree (RDMA_CORE_TAG, default v62.0 — the
+# tag distro-package-rdma.sh builds), checks in our provider sources, and
+# rewrites the numbered patches
 # in ./packaging/rdma-core-patches/ that any rdma-core build can apply:
 # 0001-0003 from userspace/usb4_rdma/, 0005 from userspace/tbrxe/. 0004
 # is hand-maintained (it edits upstream providers/rxe files) and is only
@@ -14,21 +15,18 @@ set -euo pipefail
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$REPO_ROOT/packaging/rdma-core-patches"
 
-# Pull the exact rdma-core source selected by this flake.
-RDMA_SRC=$(nix eval --raw \
-    "$REPO_ROOT#packages.x86_64-linux.rdma-core-usb4.src.outPath")
-if [ ! -d "$RDMA_SRC" ]; then
-    echo "rdma-core source is not a directory: $RDMA_SRC" >&2
-    exit 1
-fi
-echo "Using rdma-core source: $RDMA_SRC"
+# Pull a clean rdma-core source at the same tag the provider package builds
+# against (tools/ci/distro-package-rdma.sh).
+RDMA_CORE_TAG="${RDMA_CORE_TAG:-v62.0}"
 
 WORK=$(mktemp -d -t rdma-patches-XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-cp -r "$RDMA_SRC"/. "$WORK/"
-chmod -R u+w "$WORK"
+echo "Using rdma-core $RDMA_CORE_TAG"
+git clone -q --depth 1 --branch "$RDMA_CORE_TAG" \
+    https://github.com/linux-rdma/rdma-core "$WORK"
 cd "$WORK"
+rm -rf .git
 
 git init -q
 git config user.email "ci@thunderbolt-ibverbs"

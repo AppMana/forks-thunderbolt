@@ -20,7 +20,7 @@ IMAGE=${1:-debian:sid}
 DOCKER=${DOCKER:-docker}
 
 # Pin to a tag the patches were generated against. Bump in lockstep with
-# `nixpkgs#rdma-core` and `regen-rdma-core-patches.sh`.
+# `regen-rdma-core-patches.sh`.
 RDMA_CORE_TAG=${RDMA_CORE_TAG:-v62.0}
 
 STAGE=$(mktemp -d -t tb-ibv-rdma-patches-XXXXXX)

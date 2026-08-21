@@ -71,14 +71,14 @@ jobs:
               'dist/thunderbolt-tbfix-dkms_*.deb' \
               'dist/thunderbolt-tbrxe-dkms_*.deb'
 
-      - name: Build ibverbs DKMS and reproduction-tools debs
+      - name: Build reproduction-tools deb
         run: |
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             -e OUT_DIR=/work/dist \
             ubuntu:24.04 \
-            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package.sh debian
+            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package.sh ubuntu
           ls -la dist/
 
       - name: Verify reproduction-tools deb

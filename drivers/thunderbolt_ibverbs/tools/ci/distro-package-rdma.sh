@@ -20,7 +20,7 @@ Outputs the produced .deb / .rpm / .pkg.tar.zst into OUT_DIR. For ubuntu the
 filename includes the distro codename (e.g. usb4-rdma-provider_0.2.0~jammy_amd64.deb).
 
 Environment:
-  TBV_VERSION       Override base version (default reads PACKAGE_VERSION from dkms.conf).
+  TBV_VERSION       Override base version (default reads packaging/version).
   OUT_DIR           Output directory (default $PWD/dist).
   WORK_DIR          Scratch directory (default mktemp).
   RDMA_CORE_TAG     rdma-core git tag for the upstream-source distros (default v62.0).
@@ -40,7 +40,7 @@ case "${distro:-}" in
 esac
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-base_version="${TBV_VERSION:-$(awk -F'"' '/^PACKAGE_VERSION=/ { print $2; exit }' "$repo_root/dkms.conf")}"
+base_version="${TBV_VERSION:-$(tr -d '[:space:]' < "$repo_root/packaging/version")}"
 [[ -n "$base_version" ]] || { printf 'error: could not determine version\n' >&2; exit 1; }
 
 # Ubuntu builds encode the codename in the version so different ubuntu releases'

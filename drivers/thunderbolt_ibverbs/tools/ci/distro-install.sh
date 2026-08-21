@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# Install a thunderbolt-ibverbs-dkms, thunderbolt-ibverbs-tools, or
-# usb4-rdma-provider package built by the matching distro-package*.sh script.
-# Verifies:
+# Install a thunderbolt-ibverbs-tools or usb4-rdma-provider package built by
+# the matching distro-package*.sh script. Verifies:
 #
-#   thunderbolt-ibverbs-dkms   — DKMS can build the module against the distro's
-#                                packaged kernel-headers.
 #   usb4-rdma-provider         — provider .so is installed at the expected path,
 #                                its dynamic deps resolve, and libibverbs does
 #                                not crash when its driver hint is present.
 #   thunderbolt-ibverbs-tools  — the capture harness is installed, parses, and
 #                                exposes its documented CLI.
 #
-# Does NOT load the kernel module — that needs a real distro kernel and lives
-# in tools/ci/vm-smoke.sh.
+# Does NOT load any kernel module.
 
 set -euo pipefail
 
@@ -22,8 +18,8 @@ Usage:
   tools/ci/distro-install.sh <artefact-path-or-glob>
 
 Detects the package type from the artefact filename
-(thunderbolt-ibverbs-dkms, thunderbolt-ibverbs-tools, or usb4-rdma-provider)
-and runs the appropriate verification flow.
+(thunderbolt-ibverbs-tools or usb4-rdma-provider) and runs the appropriate
+verification flow.
 EOF
 }
 
@@ -53,7 +49,6 @@ artefact="$(realpath "${artefacts[0]}")"
 [[ -f "$artefact" ]] || { printf 'error: not a file: %s\n' "$artefact" >&2; exit 1; }
 
 case "$(basename "$artefact")" in
-	thunderbolt-ibverbs-dkms*) pkg_kind="dkms" ;;
 	thunderbolt-ibverbs-tools*) pkg_kind="tools" ;;
 	usb4-rdma-provider*)       pkg_kind="rdma-provider" ;;
 	*)
@@ -61,31 +56,6 @@ case "$(basename "$artefact")" in
 		exit 1
 		;;
 esac
-
-install_dkms_deps() {
-	if command -v apt-get >/dev/null 2>&1; then
-		export DEBIAN_FRONTEND=noninteractive
-		local headers_pkg=linux-headers-amd64
-		if grep -qi '^ID=ubuntu' /etc/os-release; then
-			headers_pkg=linux-headers-generic
-		fi
-		apt-get update -qq
-		apt-get install -y -qq --no-install-recommends \
-			build-essential ca-certificates dkms file kmod \
-			"$headers_pkg" make
-	elif command -v dnf >/dev/null 2>&1; then
-		dnf install -y -q --setopt=install_weak_deps=False \
-			ca-certificates dkms diffutils file gcc kernel-devel \
-			kernel-headers kmod make openssl
-	elif command -v pacman >/dev/null 2>&1; then
-		pacman -Syu --noconfirm --needed \
-			base-devel ca-certificates dkms file kmod linux-headers make
-	else
-		printf 'error: unsupported distro\n' >&2
-		cat /etc/os-release >&2 || true
-		exit 1
-	fi
-}
 
 install_provider_deps() {
 	if command -v apt-get >/dev/null 2>&1; then
@@ -113,7 +83,7 @@ install_tools_deps() {
 		apt-get install -y -qq --no-install-recommends \
 			bash coreutils openssh-client python3
 	else
-		printf 'error: thunderbolt-ibverbs-tools is currently packaged for Debian/Ubuntu only\n' >&2
+		printf 'error: the tools package is currently packaged for Debian/Ubuntu only\n' >&2
 		exit 1
 	fi
 }
@@ -134,62 +104,6 @@ install_package() {
 		exit 1
 		;;
 	esac
-}
-
-find_dkms_kver() {
-	local kver=""
-	if [[ -d /usr/src/kernels ]]; then
-		kver="$(find /usr/src/kernels -mindepth 1 -maxdepth 1 -type d \
-			-printf '%f\n' | sort -V | tail -n 1)"
-		if [[ -n "$kver" && ! -e "/lib/modules/$kver/build" ]]; then
-			mkdir -p "/lib/modules/$kver"
-			ln -s "/usr/src/kernels/$kver" "/lib/modules/$kver/build"
-		fi
-	fi
-	if [[ -z "$kver" && -d /lib/modules ]]; then
-		kver="$(find /lib/modules -mindepth 1 -maxdepth 1 -type d \
-			-printf '%f\n' | sort -V | tail -n 1)"
-	fi
-	[[ -n "$kver" && -d "/lib/modules/$kver/build" ]] ||
-		{ printf 'error: no kernel headers found under /lib/modules/*/build\n' >&2; exit 1; }
-	printf '%s\n' "$kver"
-}
-
-verify_dkms() {
-	install_dkms_deps
-	install_package
-
-	local modname=thunderbolt-ibverbs
-	local src_dir
-	src_dir="$(find /usr/src -maxdepth 1 -type d -name "${modname}-*" -print -quit)"
-	[[ -n "$src_dir" ]] ||
-		{ printf 'error: %s source not under /usr/src after install\n' "$modname" >&2; exit 1; }
-	local version
-	version="$(awk -F'"' '/^PACKAGE_VERSION=/ { print $2; exit }' "$src_dir/dkms.conf")"
-
-	local kver
-	kver="$(find_dkms_kver)"
-
-	printf '==> Source dir: %s\n' "$src_dir"
-	printf '==> Version:    %s\n' "$version"
-	printf '==> Kernel:     %s\n' "$kver"
-
-	dkms status -m "$modname" -v "$version" || true
-
-	if ! dkms build -m "$modname" -v "$version" -k "$kver" --force; then
-		cat "/var/lib/dkms/$modname/$version/build/make.log" >&2 || true
-		exit 1
-	fi
-
-	local built
-	built="$(find "/var/lib/dkms/$modname/$version" -name 'thunderbolt_ibverbs.ko' -print -quit)"
-	[[ -n "$built" ]] ||
-		{ printf 'error: dkms build did not produce thunderbolt_ibverbs.ko\n' >&2; exit 1; }
-
-	file "$built"
-	modinfo "$built" | sed -n '1,20p'
-
-	printf '==> DKMS install verification OK\n'
 }
 
 verify_provider() {
@@ -243,21 +157,13 @@ verify_tools() {
 	install_package
 	command -v tbv-hang-repro >/dev/null
 	command -v tbv-nhi-ring-regs >/dev/null
-	command -v tbv-trace-to-kunit >/dev/null
 	bash -n "$(command -v tbv-hang-repro)"
 	tbv-hang-repro --help | grep -q '^Usage:'
-	tbv-trace-to-kunit --help >/dev/null
 	python3 -c 'compile(open("/usr/bin/tbv-nhi-ring-regs", encoding="utf-8").read(), "/usr/bin/tbv-nhi-ring-regs", "exec")'
-	python3 -c 'compile(open("/usr/bin/tbv-trace-to-kunit", encoding="utf-8").read(), "/usr/bin/tbv-trace-to-kunit", "exec")'
-	for trace in tbv-post-trace.bt tbv-ring-progress.bt \
-		tbv-send-timeline.bt tbv-verb-trace.bt; do
-		test -r "/usr/share/thunderbolt-ibverbs/bpftrace/$trace"
-	done
 	printf '==> tools install verification OK\n'
 }
 
 case "$pkg_kind" in
-	dkms)          verify_dkms ;;
 	tools)         verify_tools ;;
 	rdma-provider) verify_provider ;;
 esac

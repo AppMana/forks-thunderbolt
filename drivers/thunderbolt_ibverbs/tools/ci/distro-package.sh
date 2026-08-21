@@ -1,154 +1,60 @@
 #!/usr/bin/env bash
-# Build a DKMS source package for the given distro using the distro's native
-# packaging tooling. The Debian build also emits the architecture-independent
-# reproduction-tools package. Run inside a matching distro container
-# (debian:sid, fedora:rawhide, archlinux:latest). The script installs the build
-# dependencies it needs.
+# Build the architecture-independent reproduction-tools package (the bounded
+# tbv-hang-repro capture harness plus read-only NHI register diagnostics).
+# Run inside a matching distro container (debian:sid / ubuntu). The script
+# installs the build dependencies it needs.
 
 set -euo pipefail
 
 usage() {
 	cat <<'EOF'
 Usage:
-  tools/ci/distro-package.sh debian|fedora|arch
+  tools/ci/distro-package.sh debian|ubuntu
 
-Outputs the produced .deb / .rpm / .pkg.tar.zst into OUT_DIR.
+Outputs the produced tools .deb into OUT_DIR.
 
 Environment:
-  TBV_VERSION     Override package version. Defaults to PACKAGE_VERSION read
-                  from dkms.conf.
+  TBV_VERSION     Override package version. Defaults to packaging/version
+                  (the userspace package stream shared with
+                  usb4-rdma-provider).
   OUT_DIR         Output directory. Defaults to $(pwd)/dist.
   WORK_DIR        Scratch directory. Defaults to a fresh mktemp dir.
-  TBV_LINT        Run lintian / rpmlint / namcap on the artefact. 1 to enable.
-                  Defaults to 0.
-  TBV_SKIP_DEPS   Skip the distro deps install step. 1 to skip. Useful for
-                  local dev when deps are already present.
+  TBV_LINT        Run lintian on the artefact. 1 to enable. Defaults to 0.
+  TBV_SKIP_DEPS   Skip the distro deps install step. 1 to skip.
 EOF
 }
 
 distro="${1:-}"
 case "${distro:-}" in
 	-h|--help) usage; exit 0 ;;
-	debian|fedora|arch) ;;
+	debian|ubuntu) ;;
 	"") usage >&2; exit 1 ;;
 	*) printf 'error: unsupported distro: %s\n' "$distro" >&2; exit 1 ;;
 esac
 
 repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-version="${TBV_VERSION:-$(awk -F'"' '/^PACKAGE_VERSION=/ { print $2; exit }' "$repo_root/dkms.conf")}"
-[[ -n "$version" ]] || { printf 'error: could not determine version from dkms.conf\n' >&2; exit 1; }
+version="${TBV_VERSION:-$(tr -d '[:space:]' < "$repo_root/packaging/version")}"
+[[ -n "$version" ]] || { printf 'error: could not determine version from packaging/version\n' >&2; exit 1; }
 out_dir="${OUT_DIR:-$repo_root/dist}"
 work_dir="${WORK_DIR:-$(mktemp -d)}"
 lint="${TBV_LINT:-0}"
 skip_deps="${TBV_SKIP_DEPS:-0}"
-modname="thunderbolt-ibverbs"
-pkgname="${modname}-dkms"
 
 mkdir -p "$out_dir" "$work_dir"
 
 install_deps() {
 	[[ "$skip_deps" == "1" ]] && return 0
-	case "$distro" in
-		debian)
-			export DEBIAN_FRONTEND=noninteractive
-			apt-get update -qq
-			apt-get install -y -qq --no-install-recommends \
-				ca-certificates dpkg-dev fakeroot lintian
-			;;
-		fedora)
-			dnf install -y -q --setopt=install_weak_deps=False \
-				ca-certificates coreutils rpm-build rpmlint tar
-			;;
-		arch)
-			pacman -Sy --noconfirm --needed \
-				base-devel ca-certificates dkms namcap sudo
-			;;
-	esac
-}
-
-stage_source() {
-	local stage="$1"
-	local contaminant
-	install -d -m 0755 "$stage"
-	# A developer package is commonly built immediately after `make`. Never
-	# stage those host-kernel objects into an architecture-independent DKMS
-	# source package: DKMS must rebuild only source against the target kernel
-	# and the installed tbfix header/symbol table.
-	tar -C "$repo_root" \
-		--exclude='*.o' \
-		--exclude='*.ko' \
-		--exclude='*.mod' \
-		--exclude='*.mod.c' \
-		--exclude='*.cmd' \
-		--exclude='Module.symvers' \
-		--exclude='modules.order' \
-		--exclude='.tmp_*' \
-		--exclude='.tbfix-gen-include' \
-		-cf - \
-		Makefile \
-		dkms.conf \
-		LICENSE \
-		README.md \
-		kernel \
-		proto \
-		| tar -C "$stage" -xf -
-	contaminant="$(find "$stage" -type f \( \
-		-name '*.o' -o -name '*.ko' -o -name '*.mod' -o \
-		-name '*.mod.c' -o -name '*.cmd' -o \
-		-name 'Module.symvers' -o -name 'modules.order' \
-		\) -print -quit)"
-	[[ -z "$contaminant" ]] || {
-		printf 'error: build artefact escaped DKMS source filter: %s\n' \
-			"$contaminant" >&2
-		exit 1
-	}
-	chmod -R a+rX,u+w,go-w "$stage"
-	sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$version\"/" \
-		"$stage/dkms.conf"
-}
-
-make_source_tarball() {
-	local top="$work_dir/${modname}-${version}"
-	rm -rf "$top"
-	stage_source "$top"
-	tar -C "$work_dir" -czf "$work_dir/${modname}-${version}.tar.gz" \
-		"${modname}-${version}"
-	printf '%s\n' "$work_dir/${modname}-${version}.tar.gz"
+	export DEBIAN_FRONTEND=noninteractive
+	apt-get update -qq
+	apt-get install -y -qq --no-install-recommends \
+		ca-certificates dpkg-dev fakeroot lintian
 }
 
 substitute() {
 	sed "s/@VERSION@/${version}/g" "$1" > "$2"
 }
 
-build_deb() {
-	local stage="$work_dir/deb"
-	rm -rf "$stage"
-	install -d -m 0755 "$stage/DEBIAN"
-	stage_source "$stage/usr/src/${modname}-${version}"
-
-	substitute "$repo_root/packaging/debian/control" "$stage/DEBIAN/control"
-	substitute "$repo_root/packaging/debian/postinst" "$stage/DEBIAN/postinst"
-	substitute "$repo_root/packaging/debian/prerm" "$stage/DEBIAN/prerm"
-	chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"
-
-	# The udev naming/addressing tooling (60-usb4-rdma-net.rules + the
-	# tbv-rdma-* helpers) ships in usb4-rdma-provider as of 0.2.70: every
-	# RDMA node installs the provider, including tbframe/tbrxe nodes that
-	# run without this dkms package.
-	install -D -m 0755 "$repo_root/scripts/tbv-nhi-reset.sh" \
-		"$stage/usr/lib/thunderbolt-ibverbs/tbv-nhi-reset"
-
-	local deb="$out_dir/${pkgname}_${version}_all.deb"
-	dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null
-	printf '==> Built %s\n' "$deb"
-
-	if [[ "$lint" == "1" ]] && command -v lintian >/dev/null 2>&1; then
-		printf '==> lintian\n'
-		lintian --no-tag-display-limit \
-			--suppress-tags no-changelog,no-manual-page,no-copyright-file,extended-description-is-probably-too-short,initial-upload-closes-no-bugs,debian-changelog-file-missing \
-			"$deb" || true
-	fi
-
+build_tools_deb() {
 	local tools_stage="$work_dir/deb-tools"
 	rm -rf "$tools_stage"
 	install -d -m 0755 "$tools_stage/DEBIAN"
@@ -158,13 +64,6 @@ build_deb() {
 		"$tools_stage/usr/bin/tbv-hang-repro"
 	install -D -m 0755 "$repo_root/tools/nhi-ring-regs.py" \
 		"$tools_stage/usr/bin/tbv-nhi-ring-regs"
-	install -D -m 0755 "$repo_root/tools/tbv-trace-to-kunit.py" \
-		"$tools_stage/usr/bin/tbv-trace-to-kunit"
-	for trace in tbv-post-trace.bt tbv-ring-progress.bt \
-		tbv-send-timeline.bt tbv-verb-trace.bt; do
-		install -D -m 0644 "$repo_root/tools/$trace" \
-			"$tools_stage/usr/share/thunderbolt-ibverbs/bpftrace/$trace"
-	done
 	install -D -m 0644 "$repo_root/docs/tbv-hang-repro.md" \
 		"$tools_stage/usr/share/doc/thunderbolt-ibverbs-tools/README.md"
 
@@ -180,78 +79,5 @@ build_deb() {
 	fi
 }
 
-build_rpm() {
-	local rpm_top="$work_dir/rpmbuild"
-	rm -rf "$rpm_top"
-	install -d -m 0755 "$rpm_top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-
-	local tarball
-	tarball="$(make_source_tarball)"
-	cp "$tarball" "$rpm_top/SOURCES/"
-
-	substitute "$repo_root/packaging/rpm/${pkgname}.spec" "$rpm_top/SPECS/${pkgname}.spec"
-
-	rpmbuild --define "_topdir $rpm_top" -bb "$rpm_top/SPECS/${pkgname}.spec"
-
-	local rpm
-	rpm="$(find "$rpm_top/RPMS" -name '*.rpm' -print -quit)"
-	[[ -n "$rpm" ]] || { printf 'error: rpmbuild produced no .rpm\n' >&2; exit 1; }
-
-	cp "$rpm" "$out_dir/"
-	printf '==> Built %s\n' "$out_dir/$(basename "$rpm")"
-
-	if [[ "$lint" == "1" ]] && command -v rpmlint >/dev/null 2>&1; then
-		printf '==> rpmlint\n'
-		rpmlint "$out_dir/$(basename "$rpm")" || true
-	fi
-}
-
-build_arch_as_builder() {
-	local stage="$work_dir/arch"
-	rm -rf "$stage"
-	install -d -m 0755 "$stage"
-
-	local tarball
-	tarball="$(make_source_tarball)"
-	cp "$tarball" "$stage/"
-
-	substitute "$repo_root/packaging/arch/PKGBUILD" "$stage/PKGBUILD"
-	cp "$repo_root/packaging/arch/${pkgname}.install" "$stage/"
-
-	( cd "$stage" && makepkg --noconfirm --skipchecksums )
-
-	local pkg
-	pkg="$(find "$stage" -name '*.pkg.tar.zst' -print -quit)"
-	[[ -n "$pkg" ]] || { printf 'error: makepkg produced no package\n' >&2; exit 1; }
-
-	cp "$pkg" "$out_dir/"
-	printf '==> Built %s\n' "$out_dir/$(basename "$pkg")"
-
-	if [[ "$lint" == "1" ]] && command -v namcap >/dev/null 2>&1; then
-		printf '==> namcap\n'
-		namcap "$out_dir/$(basename "$pkg")" || true
-	fi
-}
-
-build_arch() {
-	# makepkg refuses to run as root. If we are root, create a builder user
-	# and re-exec this script as that user.
-	if [[ "$(id -u)" -eq 0 ]]; then
-		id -u builder >/dev/null 2>&1 || useradd -m -s /bin/bash builder
-		chown -R builder:builder "$work_dir" "$out_dir"
-		exec sudo -u builder \
-			env TBV_VERSION="$version" OUT_DIR="$out_dir" \
-				WORK_DIR="$work_dir" TBV_LINT="$lint" \
-				TBV_SKIP_DEPS=1 \
-			bash "$0" "$distro"
-	fi
-	build_arch_as_builder
-}
-
 install_deps
-
-case "$distro" in
-	debian) build_deb ;;
-	fedora) build_rpm ;;
-	arch)   build_arch ;;
-esac
+build_tools_deb

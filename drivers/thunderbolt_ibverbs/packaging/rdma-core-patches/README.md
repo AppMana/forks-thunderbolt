@@ -90,11 +90,6 @@ hand-maintained. All apply cleanly against upstream rdma-core ≥ v62.
 
 ## How each consumer applies them
 
-### Nix (this repo)
-
-Already wired up — `rdma-core-usb4` in `flake.nix` applies the patch files on
-top of `pkgs.rdma-core`.
-
 ### Debian / Ubuntu
 
 Build the standalone provider package against the distro's own rdma-core
