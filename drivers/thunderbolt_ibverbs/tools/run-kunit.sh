@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the fork's KUnit suites (core thunderbolt negotiation + thunderbolt_ibverbs)
-# for real via tools/testing/kunit/kunit.py against a v6.17 tree with the fork's
-# drivers overlaid. The fleet/host kernels lack CONFIG_KUNIT, so this stands up a
+# for real via tools/testing/kunit/kunit.py against a v7.0.12 tree (the vendored
+# subsystem's upstream base) with the fork's drivers overlaid. The fleet/host kernels lack CONFIG_KUNIT, so this stands up a
 # throwaway kunit kernel (x86_64 qemu, because USB4/INFINIBAND need PCI -> not UML).
 #
 # Usage:
@@ -25,8 +25,8 @@
 set -euo pipefail
 
 REPO="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-TREE="${KUNIT_TREE:-$HOME/Documents/linux-kunit}"
-KVER="${KUNIT_KVER:-v6.17}"
+TREE="${KUNIT_TREE:-$HOME/Documents/linux-kunit-v7.0.12}"
+KVER="${KUNIT_KVER:-v7.0.12}"
 LOCKDEP="${KUNIT_LOCKDEP:-0}"
 if [[ "$LOCKDEP" == 1 ]]; then
 	BUILD="$TREE/.kunit-tbv-lockdep"
@@ -37,7 +37,7 @@ fi
 if [[ ! -e "$TREE/tools/testing/kunit/kunit.py" ]]; then
 	echo ">> cloning $KVER into $TREE (shallow)"
 	git clone --depth 1 --branch "$KVER" \
-		https://github.com/torvalds/linux.git "$TREE"
+		https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git "$TREE"
 fi
 
 echo ">> overlaying fork drivers onto $TREE"

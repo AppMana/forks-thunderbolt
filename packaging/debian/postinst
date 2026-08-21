@@ -19,7 +19,7 @@ case "$1" in
                 [ -d "$modules_dir/build" ] || continue
                 kernelver=${modules_dir##*/}
                 case "$kernelver" in
-                    6.17.*) ;;
+                    7.0.*) ;;
                     *)
                         echo "thunderbolt-tbfix: skipping unsupported kernel $kernelver"
                         continue

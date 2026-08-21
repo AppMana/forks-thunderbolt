@@ -3,7 +3,7 @@
 # The package depends on the exact-version thunderbolt-tbfix-dkms, so that deb
 # is installed (and, when compiling, dkms-built) first. By default this
 # verifies package/source staging only. Set TBFIX_VERIFY_DKMS_BUILD=1 in an
-# environment with matching 6.17 kernel headers to compile all modules too.
+# environment with matching 7.0 kernel headers to compile all modules too.
 
 set -euo pipefail
 
@@ -43,11 +43,11 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 headers_pkg=linux-headers-amd64
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-    # Same 6.17-headers selection rationale as tools/ci/distro-install.sh.
-    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-6[.]17[.]0-[0-9]+-generic$' |
+    # Same 7.0-headers selection rationale as tools/ci/distro-install.sh.
+    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-7[.]0[.]0-[0-9]+-generic$' |
         awk '{print $1}' | sort -V | tail -1)}"
     [[ -n "$headers_pkg" ]] ||
-        { printf 'error: no concrete Ubuntu 6.17 headers package is available\n' >&2; exit 1; }
+        { printf 'error: no concrete Ubuntu 7.0 headers package is available\n' >&2; exit 1; }
 fi
 # modules-extra matches the tbrxe dkms preflight: tbrxe imports ib_core/
 # ib_umem symbols that Ubuntu ships there, and the preflight hard-fails
@@ -90,7 +90,7 @@ done
 
 if [[ "${TBFIX_VERIFY_DKMS_BUILD:-0}" != "1" ]]; then
 	printf '==> Package install/source verification OK\n'
-	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 6.17 headers\n'
+	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 7.0 headers\n'
 	exit 0
 fi
 

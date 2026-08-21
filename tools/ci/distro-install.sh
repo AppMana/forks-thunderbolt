@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install and verify a thunderbolt-tbfix-dkms .deb without loading modules.
 # By default this verifies package/source staging only. Set
-# TBFIX_VERIFY_DKMS_BUILD=1 in an environment with matching 6.17 kernel headers
+# TBFIX_VERIFY_DKMS_BUILD=1 in an environment with matching 7.0 kernel headers
 # to compile the modules too.
 
 set -euo pipefail
@@ -35,15 +35,15 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 headers_pkg=linux-headers-amd64
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-    # The fleet runs noble's HWE 6.17 kernel and this is a v6.17-based fork, so
-    # build against matching 6.17 headers (stock linux-headers-generic is 6.8 and
-    # would fail to compile). Do not use linux-headers-generic-hwe-24.04 here:
-    # that rolling meta-package now resolves to 7.x. Select the newest concrete
-    # 6.17 package exactly as the fleet playbook does.
-    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-6[.]17[.]0-[0-9]+-generic$' |
+    # This branch targets noble's HWE 7.0 kernel line (a v7.0-based fork), so
+    # build against matching 7.0 headers (stock linux-headers-generic is 6.8 and
+    # would fail to compile). Select the newest concrete 7.0 package rather than
+    # the rolling linux-headers-generic-hwe-24.04 meta so a future HWE line bump
+    # cannot silently change the build target.
+    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-7[.]0[.]0-[0-9]+-generic$' |
         awk '{print $1}' | sort -V | tail -1)}"
     [[ -n "$headers_pkg" ]] ||
-        { printf 'error: no concrete Ubuntu 6.17 headers package is available\n' >&2; exit 1; }
+        { printf 'error: no concrete Ubuntu 7.0 headers package is available\n' >&2; exit 1; }
 fi
 apt-get install -y -qq --no-install-recommends \
 	build-essential ca-certificates dkms file kmod "$headers_pkg" make
@@ -70,11 +70,11 @@ done
 
 if [[ "${TBFIX_VERIFY_DKMS_BUILD:-0}" != "1" ]]; then
 	printf '==> Package install/source verification OK\n'
-	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 6.17 headers\n'
+	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 7.0 headers\n'
 	exit 0
 fi
 
-# Pick the installed kernel that actually has build headers (the concrete 6.17
+# Pick the installed kernel that actually has build headers (the concrete 7.0
 # package above), not $(uname -r) which in CI is the headerless runner kernel.
 kver="$(for d in /lib/modules/*/build; do [[ -e "$d" ]] && basename "$(dirname "$d")"; done | sort -V | tail -n 1)"
 [[ -n "$kver" && -d "/lib/modules/$kver/build" ]] || { printf 'error: no kernel headers found\n' >&2; exit 1; }
