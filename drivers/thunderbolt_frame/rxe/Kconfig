@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+config RDMA_THUNDERBOLT_FRAME_RXE
+	tristate "rxe-derived RDMA engine over the thunderbolt_frame service"
+	depends on INFINIBAND
+	select CRC32
+	help
+	  Soft RDMA provider forked from the rdma_rxe driver with its
+	  UDP/IP network transport replaced by the thunderbolt_frame
+	  lossless frame service on Thunderbolt/USB4 XDomain DMA rings.
+	  The uverbs ABI and driver id are unchanged, so the rdma-core
+	  usb4-rdma-provider remains the userspace provider. See
+	  drivers/thunderbolt_frame/docs/frame-rxe-wire-spec.md.

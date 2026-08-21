@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Test reproduction harness supervision
-        run: drivers/thunderbolt_ibverbs/tools/tests/tbv-hang-repro-smoke.sh
+        run: drivers/thunderbolt_frame/tools/tests/tbv-hang-repro-smoke.sh
 
       - name: Build tbfix DKMS deb
         run: |
@@ -49,27 +49,27 @@ jobs:
             ubuntu:24.04 \
             bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
 
-      - name: Build tbrxe DKMS deb
+      - name: Build thunderbolt-frame DKMS deb
         run: |
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             -e TBFIX_LINT=1 \
             ubuntu:24.04 \
-            bash tools/ci/distro-package-tbrxe.sh ubuntu
-          (cd dist && sha256sum -c thunderbolt-tbrxe-dkms_*.deb.sha256)
+            bash tools/ci/distro-package-frame.sh ubuntu
+          (cd dist && sha256sum -c thunderbolt-frame-dkms_*.deb.sha256)
           ls -la dist/
 
-      - name: Verify tbrxe DKMS deb builds (noble HWE 6.17 headers)
+      - name: Verify thunderbolt-frame DKMS deb builds (noble HWE 6.17 headers)
         run: |
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             -e TBFIX_VERIFY_DKMS_BUILD=1 \
             ubuntu:24.04 \
-            bash tools/ci/distro-install-tbrxe.sh \
+            bash tools/ci/distro-install-frame.sh \
               'dist/thunderbolt-tbfix-dkms_*.deb' \
-              'dist/thunderbolt-tbrxe-dkms_*.deb'
+              'dist/thunderbolt-frame-dkms_*.deb'
 
       - name: Build reproduction-tools deb
         run: |
@@ -78,7 +78,7 @@ jobs:
             -w /work \
             -e OUT_DIR=/work/dist \
             ubuntu:24.04 \
-            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package.sh ubuntu
+            bash drivers/thunderbolt_frame/tools/ci/distro-package.sh ubuntu
           ls -la dist/
 
       - name: Verify reproduction-tools deb
@@ -87,7 +87,7 @@ jobs:
             -v "$PWD:/work" \
             -w /work \
             ubuntu:24.04 \
-            bash drivers/thunderbolt_ibverbs/tools/ci/distro-install.sh \
+            bash drivers/thunderbolt_frame/tools/ci/distro-install.sh \
               'dist/thunderbolt-ibverbs-tools_*.deb'
 
       - name: Build usb4-rdma-provider deb (noble)
@@ -97,7 +97,7 @@ jobs:
             -w /work \
             -e OUT_DIR=/work/dist \
             ubuntu:24.04 \
-            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package-rdma.sh ubuntu
+            bash drivers/thunderbolt_frame/tools/ci/distro-package-rdma.sh ubuntu
           ls -la dist/
 
       - name: Build usb4-rdma-provider deb (jammy)
@@ -107,7 +107,7 @@ jobs:
             -w /work \
             -e OUT_DIR=/work/dist \
             ubuntu:22.04 \
-            bash drivers/thunderbolt_ibverbs/tools/ci/distro-package-rdma.sh ubuntu
+            bash drivers/thunderbolt_frame/tools/ci/distro-package-rdma.sh ubuntu
           ls -la dist/
 
       - name: Upload artifacts

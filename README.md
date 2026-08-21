@@ -1,21 +1,22 @@
 # forks-thunderbolt
 
 AppMana fork of the Linux kernel Thunderbolt drivers and our out-of-tree
-`thunderbolt_ibverbs` (usb4_rdma RDMA) transport, in **one repo** so the three
-host-to-host Thunderbolt stacks share a single negotiation header instead of
-hand-synced copies:
+Thunderbolt RDMA engine, in **one repo** so the host-to-host Thunderbolt
+stacks share a single negotiation header instead of hand-synced copies:
 
 - **`thunderbolt`** — the core XDomain/USB4 driver.
 - **`thunderbolt_net`** — IP-over-Thunderbolt (`tbnet`).
-- **`thunderbolt_ibverbs`** — the legacy usb4_rdma RDMA transport + userspace provider.
-- **`tbframe` + `tbrxe`** — the rxe-derived successor RDMA engine (lossless frame
-  service + IB engine); see "Two RDMA engines" below.
+- **`thunderbolt_frame` + `thunderbolt_frame_rxe`** — the rxe-derived RDMA
+  engine (lossless frame service + IB engine); see "The RDMA engine" below.
+  Known as `tbframe`/`tbrxe` before the 2.42 module rename; the retired
+  pre-frame `thunderbolt_ibverbs` driver was removed from this tree.
 - **`rdma_rxe`** — AppMana's soft-RoCE fallback override for `rxe_lan`.
 
-All three negotiate the same XDomain connection and shared the same soft-reconnect
-bug; the fix lives once in `drivers/thunderbolt/thunderbolt_negotiation.h`
+All of them negotiate the same XDomain connection and shared the same
+soft-reconnect bug; the fix lives once in
+`drivers/thunderbolt/thunderbolt_negotiation.h`
 (generation gate + handshake re-arm + the `TB_XNEG_*` installable macros), with
-KUnit, run via `drivers/thunderbolt_ibverbs/tools/run-kunit.sh` (`kunit.py` on an
+KUnit, run via `drivers/thunderbolt_frame/tools/run-kunit.sh` (`kunit.py` on an
 overlaid v6.17 tree, x86_64 qemu; the fleet/host kernels lack `CONFIG_KUNIT`).
 
 ```
@@ -33,26 +34,30 @@ drivers/thunderbolt/            full subsystem source (patched) + the shared
 drivers/net/thunderbolt/        tbnet driver source (patched)
 drivers/infiniband/sw/rxe/      RXE source from Ubuntu HWE 6.17 with AppMana
                                 `rdma link del` protection for `rxe_lan`
-drivers/thunderbolt_ibverbs/    legacy usb4_rdma RDMA driver, userspace providers,
-                                dkms, tests (merged from the old thunderbolt-ibverbs
-                                repo), plus the successor engine:
-  kernel/tbframe/               session + lossless frame service on XDomain rings
-  kernel/tbrxe/                 rxe-derived IB engine over tbframe
+drivers/thunderbolt_frame/      the RDMA engine family, userspace providers,
+                                tooling, traces:
+  frame/                        thunderbolt_frame.ko: session + lossless frame
+                                service on XDomain rings (tbframe_* symbols)
+  rxe/                          thunderbolt_frame_rxe.ko: rxe-derived IB engine
+                                over the frame service
   userspace/tbrxe/              libtbrxe provider source (rdma-core patch 0005)
-  docs/tbframe-tbrxe-wire-spec.md   normative wire/contract spec for the new stack
+  userspace/usb4_rdma/          libusb4_rdma provider source (patches 0001-0003)
+  packaging/                    usb4-rdma-provider deb/rpm/arch + udev tooling
+  docs/frame-rxe-wire-spec.md   normative wire/contract spec for the engine
 dkms/                           DKMS scaffolding for thunderbolt-tbfix-dkms
-  tbrxe/                        DKMS scaffolding for thunderbolt-tbrxe-dkms
-                                (tbframe.ko + tbrxe.ko in one package)
+  frame/                        DKMS scaffolding for thunderbolt-frame-dkms
+                                (thunderbolt_frame.ko + thunderbolt_frame_rxe.ko
+                                in one package)
 packaging/debian/           Debian package metadata (thunderbolt-tbfix-dkms
-                            unsuffixed; *-tbrxe for thunderbolt-tbrxe-dkms)
+                            unsuffixed; *-frame for thunderbolt-frame-dkms)
 scripts/
   oot-build.sh              fast iteration: stage at ~/src/tb-oot, build, hot-swap
   export-dkms-payload.sh    write byte-identical DKMS bundle into the appmana repo
 tools/ci/
   distro-package.sh         build thunderbolt-tbfix-dkms_<version>_all.deb
-  distro-package-tbrxe.sh   build thunderbolt-tbrxe-dkms_<version>_all.deb
+  distro-package-frame.sh   build thunderbolt-frame-dkms_<version>_all.deb
   distro-install.sh         verify the tbfix .deb can build through DKMS
-  distro-install-tbrxe.sh   verify the tbrxe .deb can build through DKMS
+  distro-install-frame.sh   verify the frame .deb can build through DKMS
 tests/
   run-smoke.sh              60-s NCCL hostnet sweep on the 3-node chain
   run-durability.sh         192 GiB allreduce reproducer (~30 min, the wedge gate)
@@ -70,81 +75,82 @@ Read `docs/thunderbolt_fix.md` in the parent `appmana` repo. It covers:
 6. Rebasing on a newer kernel when the fleet bumps.
 7. Preparing upstream topic patches for manual review.
 
-## Two RDMA engines: legacy `thunderbolt_ibverbs` and `tbrxe` + `tbframe`
+## The RDMA engine: `thunderbolt_frame` + `thunderbolt_frame_rxe`
 
-The repo now carries **two** host-to-host RDMA engines. Both publish ib_devices
-named `usb4_rdma*`, so consumers (NCCL, perftest) see the same device names
-either way.
+The engine publishes ib_devices named `usb4_rdma*` (the same names the
+retired legacy driver used, so NCCL/perftest device selection is unchanged).
+Before the 2.42 module rename the modules were named `tbframe.ko` and
+`tbrxe.ko` (package `thunderbolt-tbrxe-dkms`); the internal `tbframe_*` /
+`rxe_*` symbol namespaces and the on-wire XDomain service key `"tbframe"`
+are intentionally unchanged, so renamed and pre-rename peers interoperate.
 
-| | legacy `thunderbolt_ibverbs` | `tbrxe` + `tbframe` (successor) |
-|---|---|---|
-| Kernel modules | `thunderbolt_ibverbs.ko` (dkms, `0.2.6x`) | `tbframe.ko` + `tbrxe.ko` (`thunderbolt-tbrxe-dkms`, tbfix version stream) |
-| Verbs ABI | private (provider must match version exactly) | stock rxe uverbs ABI under a private driver id |
-| Userspace provider | `libusb4_rdma` | `libtbrxe` (rdma-core patch 0005) |
-| Provider package | `usb4-rdma-provider` (any) | `usb4-rdma-provider >= 0.2.70` |
-| Wire protocol | `proto/native_data.h` (being retired) | wire v3 per `docs/tbframe-tbrxe-wire-spec.md` |
+| | `thunderbolt_frame` + `thunderbolt_frame_rxe` |
+|---|---|
+| Kernel modules | `thunderbolt_frame.ko` + `thunderbolt_frame_rxe.ko` (`thunderbolt-frame-dkms`, tbfix version stream) |
+| Verbs ABI | stock rxe uverbs ABI under a private driver id |
+| Userspace provider | `libtbrxe` (rdma-core patch 0005) |
+| Provider package | `usb4-rdma-provider >= 0.2.70` |
+| Wire protocol | wire v3 per `docs/frame-rxe-wire-spec.md` |
 
-**Status (2026-08-19).** The tbrxe stack has passed a real two-rank
+**Status (2026-08-19).** The engine has passed a real two-rank
 pipeline-parallel training gate over NCCL `NET/IB` on `usb4_rdma0`
 (60/60 steps, loss decreasing, clean counters; evidence in
-`drivers/thunderbolt_ibverbs/traces/20260819-m4-diffusionpipe-023-025/`).
+`drivers/thunderbolt_frame/traces/20260819-m4-diffusionpipe-023-025/`).
 
-### tbrxe's driver id and the provider requirement
+### The engine's driver id and the provider requirement
 
-`tbrxe.ko` registers under its own RDMA driver id,
+`thunderbolt_frame_rxe.ko` registers under its own RDMA driver id,
 `RDMA_DRIVER_USB4_RDMA` (`0x55534234`, "USB4"), not `RDMA_DRIVER_RXE`
-(commit `7815b8f`: with the stock id, `rmmod rdma_rxe` swept live tbrxe
+(commit `7815b8f`: with the stock id, `rmmod rdma_rxe` swept live engine
 devices off the node). rdma-core matches providers by driver id and stamps
 the compiled-in id into every uverbs ioctl header, so **stock `librxe`
-cannot bind a tbrxe device**; a `usb4-rdma-provider` deb >= 0.2.70 is
+cannot bind an engine device**; a `usb4-rdma-provider` deb >= 0.2.70 is
 required in every userspace that touches the device — hosts *and*
-containers. The 0.2.70 deb ships both provider families
+containers. The deb ships both provider families
 (`libusb4_rdma-rdmav<PABI>.so`, `libtbrxe-rdmav<PABI>.so`), both
 `/etc/libibverbs.d/*.driver` files, and the udev rail tooling (stable
 `tbr-<peer>` naming + deterministic per-link ULA /64 assignment via
-`tbv-rdma-addr`). `tbrxe.ko` and the provider deb must roll together. See
-`drivers/thunderbolt_ibverbs/packaging/rdma-core-patches/README.md`.
+`tbv-rdma-addr`). The engine and the provider deb must roll together. See
+`drivers/thunderbolt_frame/packaging/rdma-core-patches/README.md`.
 
 ### Build coupling and the deploy procedure
 
-tbfix core, tbframe and tbrxe are **lockstep-built**: tbframe links against
-the tbfix core's `Module.symvers` (private `tb_*` exports) and the generated
+The tbfix core, `thunderbolt_frame` and `thunderbolt_frame_rxe` are
+**lockstep-built**: the frame service links against the tbfix core's
+`Module.symvers` (private `tb_*` exports) and the generated
 `<linux/thunderbolt.h>` header shim (`dkms/tbfix-gen-thunderbolt-header.sh`
 — building source-blind against the stock header causes an NX-execute
-panic on first inbound traffic); tbrxe links against tbframe's
-`Module.symvers`. Never mix builds from different revisions.
+panic on first inbound traffic); the rxe engine links against the frame
+service's `Module.symvers`. Never mix builds from different revisions.
 
-The packaging enforces that coupling. `thunderbolt-tbrxe-dkms` ships BOTH
-modules in one DKMS package (`dkms/tbrxe/`): its build makes tbframe first
-and feeds tbframe's freshly written `Module.symvers` to tbrxe within the
-same pass, resolves the tbfix core symbols from the per-kernel
-`/var/lib/dkms/thunderbolt-tbfix/...` table, and hard-fails (instead of
-building source-blind) when the tbfix header-shim script or symvers is
-missing. At the package level the version rides the tbfix stream and the
-deb pins `Depends: thunderbolt-tbfix-dkms (= <version>)`; it also
-`Conflicts/Replaces: thunderbolt-ibverbs-dkms` — a node runs ONE RDMA
-engine, and both engines claim the `usb4_rdma*` device names.
+The packaging enforces that coupling. `thunderbolt-frame-dkms` ships BOTH
+modules in one DKMS package (`dkms/frame/`): its build makes the frame
+service first and feeds its freshly written `Module.symvers` to the rxe
+engine within the same pass, resolves the tbfix core symbols from the
+per-kernel `/var/lib/dkms/thunderbolt-tbfix/...` table, and hard-fails
+(instead of building source-blind) when the tbfix header-shim script or
+symvers is missing. At the package level the version rides the tbfix
+stream and the deb pins `Depends: thunderbolt-tbfix-dkms (= <version>)`;
+it also `Conflicts/Replaces: thunderbolt-tbrxe-dkms` (the same modules
+under their old names) and the retired `thunderbolt-ibverbs-dkms` — a
+node runs ONE RDMA engine, and every engine claims the `usb4_rdma*`
+device names.
 
 The package installs **no autoload** (no `modules-load.d`). Loading is a
 deliberate act after boot:
 
 ```sh
-modprobe tbrxe       # depmod dependency pulls in tbframe first
+modprobe thunderbolt_frame_rxe   # depmod pulls in thunderbolt_frame first
 ```
 
-(Before the deb existed, the two `.ko` were built by hand from
-`drivers/thunderbolt_ibverbs/kernel/{tbframe,tbrxe}/` and insmod'd from a
-staged directory; that development-era procedure is retired.)
+Both engine modules are hot-reloadable when the link is quiesced (no
+active uverbs users): the fleet transition off the old `tbframe`/`tbrxe`
+names is a live unload-old/load-new. Core/tbnet bumps remain
+cold-boot-only. Never reload under active RDMA traffic — that is the
+silicon-wedge class — and verify the link bidirectionally
+(`ib_send_lat` both ways or counter deltas) before any workload.
 
-Deploys go via **reboot, one node at a time**, with bidirectional link
-verification (`ib_send_lat` both ways or counter deltas) before any
-workload. Never reload the modules under active RDMA traffic — that is the
-silicon-wedge class. Even idle ring teardown/re-create without a reboot has
-wedged an NHI TX ring (`driver_head` advances, `nhi_tail` stuck at 0)
-roughly every other event in testing (2026-08-18); the BYE/READY_ACK
-spec work narrows the windows but reboot remains the deploy path.
-
-### Wire and behavior summary (normative spec: `docs/tbframe-tbrxe-wire-spec.md`)
+### Wire and behavior summary (normative spec: `docs/frame-rxe-wire-spec.md`)
 
 - **Wire v3**: verbs report `IB_MTU_4096` while the engine fragments at the
   4012-byte payload ceiling (4096 frame − 80 header budget − 4 ICRC, aligned
@@ -154,7 +160,7 @@ spec work narrows the windows but reboot remains the deploy path.
   window after the 64-slot control reserve). No credit messages exist.
 - **BYE/BYE_ACK** orderly-teardown quiesce (ThunderboltIP LOGOUT analog)
   protects the peer's router egress from streaming into a torn-down path.
-- **Interrupt moderation off by default** on tbframe data rings
+- **Interrupt moderation off by default** on the frame service's data rings
   (`data_ring_throttle_ns=0`, commit `18c990c`): the NHI's 128 us MSI-X
   moderation was the whole latency gap vs the legacy engine.
 - **Loss model**: CRC frame loss at ~2-4e-6/frame is normal on this fabric
@@ -177,7 +183,7 @@ spec work narrows the windows but reboot remains the deploy path.
   frames/s per direction (~540k measured) regardless of QP count or CPU;
   bytes-per-frame (the MTU-4096 deviation) is the lever.
 
-Evidence: `drivers/thunderbolt_ibverbs/traces/20260818-*/RESULTS.txt` and
+Evidence: `drivers/thunderbolt_frame/traces/20260818-*/RESULTS.txt` and
 `20260819-m4-diffusionpipe-023-025/RESULTS.txt`.
 
 ### Lane bonding verdict (2026-08-19)
@@ -204,8 +210,8 @@ deployment's orchestration layer, not to images.
 |---|---|---|---|
 | Linux kernel (6.17 HWE) | no | Ubuntu | host package manager |
 | `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (release assets). Core bumps are cold-boot-only |
-| `tbframe.ko` (frame/session layer) | new | this repo (`kernel/tbframe`) | host: `thunderbolt-tbrxe-dkms` deb (lockstep with the core: symvers + header shim); loaded via `modprobe tbrxe`, never autoloaded |
-| `tbrxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`kernel/tbrxe`) | same `thunderbolt-tbrxe-dkms` deb, built lockstep in the same DKMS pass |
+| `thunderbolt_frame.ko` (frame/session layer) | new | this repo (`drivers/thunderbolt_frame/frame`) | host: `thunderbolt-frame-dkms` deb (lockstep with the core: symvers + header shim); loaded via `modprobe thunderbolt_frame_rxe`, never autoloaded |
+| `thunderbolt_frame_rxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`drivers/thunderbolt_frame/rxe`) | same `thunderbolt-frame-dkms` deb, built lockstep in the same DKMS pass |
 | `rdma_rxe` (ethernet soft-RoCE fallback device) | ~stock (one fail-fast patch) | kernel / this repo | module in the tbfix deb; device created via `rdma link add ... type rxe` |
 | rdma-core / `libibverbs` | no | distro (noble = v50, PABI 34) | host + container, stock |
 | `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA addressing) | patches, not a fork (`packaging/rdma-core-patches/`) | this repo | host: deb >= 0.2.70. container: same deb baked in, or injected from the host at runtime (PABI must match the container's rdma-core) |
@@ -215,7 +221,7 @@ deployment's orchestration layer, not to images.
 | vLLM | **yes** | serving fork | the serving image |
 | perftest / nccl-tests | no | upstream | validation tooling only |
 
-### Consuming the stack from NCCL (either engine)
+### Consuming the stack from NCCL
 
 Use the rail-routing NCCL fork (2.30.7 base): it advertises all device GIDs
 in the listen handle and selects the `usb4_rdma` rail that shares a /64 with
@@ -245,61 +251,35 @@ NCCL's builtin IB transport, derives topology from each device's PCI path
 and segfaults on these PCI-less HCAs (`nccl_p2p_ib_pci_path`) — and even a
 non-crashing plugin would bypass the fork's rail routing entirely.
 
-Containers additionally need the matching `usb4-rdma-provider` (>= 0.2.70
-for tbrxe hosts; exactly the host's version for legacy hosts — see
-`drivers/thunderbolt_ibverbs/docs/provider_version_matching.md`),
+Containers additionally need the matching `usb4-rdma-provider` (>= 0.2.70;
+see `drivers/thunderbolt_frame/docs/provider_version_matching.md`),
 `/dev/infiniband`, `IPC_LOCK`/unlimited memlock, and adequate `/dev/shm`.
 
-## Who owns the link: `usb4_rdma` vs `thunderbolt_net`
+## `thunderbolt_net` coexistence
 
-Both drivers can be loaded at once, and both advertise their XDomain services
-(`tbverbs` -> `thunderbolt_ibverbs`, `network` -> `thunderbolt_net`). But **one
-driver owns the link's DMA data path at a time**, and which one is a runtime
-switch — no `rmmod`, no reboot:
-
-```sh
-# hand the link to thunderbolt_net (IP over Thunderbolt: tb-ch* netdevs)
-echo tbnet > /sys/module/thunderbolt_ibverbs/parameters/link_owner
-
-# hand it back to usb4_rdma (RDMA: usb4_rdma* ib_devices)  [default]
-echo rdma  > /sys/module/thunderbolt_ibverbs/parameters/link_owner
-
-# who owns it right now
-grep link_owner /sys/kernel/debug/thunderbolt_ibverbs/summary
-```
-
-`rdma` is the default; set it at boot with
-`options thunderbolt_ibverbs link_owner=tbnet` in `/etc/modprobe.d/`.
-
-- **`link_owner=tbnet`** — `thunderbolt_ibverbs` unpublishes its `usb4_rdma`
-  ib_devices and disables its DMA tunnels. It does *not* tear down rings or
-  negotiation, so the switch back is cheap. `thunderbolt_net` then establishes
-  its tunnel and the `tb-ch*` netdevs start passing packets.
-- **`link_owner=rdma`** — each rail re-runs its HELLO negotiation, re-enables its
-  tunnel and republishes the ib_device. `ib_send_lat` works again.
-
-The switch is idempotent and applied on a bounded workqueue (no RTNL, no hotplug
-notifiers, no ICM interaction), so it cannot wedge the chain the way a module
-reload does.
+The frame engine and `thunderbolt_net` register different XDomain services
+(`"tbframe"` vs `"network"`) on separate NHI rings and hopids, so both can
+be loaded at once. The legacy driver's `link_owner` runtime switch was
+removed with the legacy driver itself.
 
 ### Why `thunderbolt_net` used to be a zombie
 
 Before **tbfix 2.13 / tbv 0.2.36**, `thunderbolt_net` on a chain node looked
 healthy — netdev `up`, `carrier=1`, correct IPs, routes resolving — and passed
-**zero packets**. That was *not* a resource conflict with `usb4_rdma`: the two
-use separate NHI rings and separate XDomain hopids, and both hop entries are
-programmed. Reading the hop entries back off the routers showed the real
-mechanism: tbnet's inbound lane-adapter entries were **deactivated**
-(`enable=0`) while tbv's entries on the same adapters were `enable=1` and
-carrying traffic.
+**zero packets**. That was *not* a resource conflict with the RDMA engine:
+the two use separate NHI rings and separate XDomain hopids, and both hop
+entries are programmed. Reading the hop entries back off the routers showed
+the real mechanism: tbnet's inbound lane-adapter entries were
+**deactivated** (`enable=0`) while the RDMA driver's entries on the same
+adapters were `enable=1` and carrying traffic.
 
 tbnet got stuck that way because its ThunderboltIP session is **one-shot**:
 `login_work` and `connected_work` both early-return once carrier is on, so once
 both ends latch "login complete" nothing ever re-LOGINs — and this fleet
 demonstrably loses the hotplug edges upstream relies on to tear the session down
 (a neighbour rebooting can produce *no* thunderbolt event on the surviving node).
-`thunderbolt_ibverbs` survives the identical events because its HELLO
-negotiation is level-triggered.
+The RDMA engine's negotiation survives the identical events because it is
+level-triggered.
 
 The fix (in `thunderbolt_net`, using the stock spec LOGIN — the negotiation is
 not reimplemented) is a **level-triggered session verify**: while carrier is on,
@@ -331,9 +311,10 @@ echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/appmana-archive-keyring.gpg]
 sudo apt update
 sudo apt install thunderbolt-tbfix-dkms
 
-# tbframe/tbrxe engine (optional; version-locked to thunderbolt-tbfix-dkms,
-# conflicts with the legacy thunderbolt-ibverbs-dkms):
-sudo apt install thunderbolt-tbrxe-dkms usb4-rdma-provider
+# thunderbolt_frame engine (optional; version-locked to
+# thunderbolt-tbfix-dkms, conflicts with/replaces the older
+# thunderbolt-tbrxe-dkms and the retired thunderbolt-ibverbs-dkms):
+sudo apt install thunderbolt-frame-dkms usb4-rdma-provider
 ```
 
 ### From GitHub Releases
@@ -357,11 +338,12 @@ runs `dkms autoinstall`. It intentionally does not reload `thunderbolt` or
 `thunderbolt_net`; reload ordering remains owned by the deployment's
 maintenance procedure.
 
-`thunderbolt-tbrxe-dkms_<version>_all.deb` (same release, same version)
-installs the tbframe/tbrxe engine the same way: source under
-`/usr/src/thunderbolt-tbrxe-<version>`, both modules built through DKMS in
-one pass. It never loads the modules — after the deploy reboot, run
-`modprobe tbrxe` and verify the link bidirectionally before any workload.
+`thunderbolt-frame-dkms_<version>_all.deb` (same release, same version)
+installs the engine the same way: source under
+`/usr/src/thunderbolt-frame-<version>`, both modules built through DKMS in
+one pass. It never loads the modules — after the deploy, run
+`modprobe thunderbolt_frame_rxe` and verify the link bidirectionally before
+any workload.
 
 The split-package build also emits `rdma-rxe-appmana_<version>_all.deb`.
 That package installs an override `rdma_rxe.ko` which does not advertise
@@ -385,12 +367,12 @@ Build the DKMS `.deb`s locally:
 
 ```bash
 tools/ci/distro-package.sh ubuntu        # thunderbolt-tbfix-dkms
-tools/ci/distro-package-tbrxe.sh ubuntu  # thunderbolt-tbrxe-dkms (tbframe+tbrxe)
+tools/ci/distro-package-frame.sh ubuntu  # thunderbolt-frame-dkms
 ```
 
 The artifacts are written to `dist/thunderbolt-tbfix-dkms_<version>_all.deb`
-and `dist/thunderbolt-tbrxe-dkms_<version>_all.deb` (with `.sha256` files;
-both carry the same version — the tbrxe deb depends on the exact tbfix
+and `dist/thunderbolt-frame-dkms_<version>_all.deb` (with `.sha256` files;
+both carry the same version — the frame deb depends on the exact tbfix
 version). Tags matching `v*` publish the `.deb`s and their `.sha256` files
 to GitHub Releases in `AppMana/thunderbolt-tbfix`. The public apt
 repository in `AppMana/apt` consumes those release assets.
@@ -521,35 +503,21 @@ storage hotplug changes should not.
   followed by power-on clears it every time. Arm Wake-on-LAN first
   (`ethtool -s <if> wol g`) or the node needs a physical power button press —
   some boards ignore WoL from S5 regardless.
-- **Never live-reload the modules on a chain node.** `rmmod`/`modprobe` of
-  `thunderbolt_ibverbs` under traffic wedges the ICM. The deploy path is
-  `dpkg -i` then `rmmod` the module *before* rebooting (a warm reboot with
-  active NHI rings leaves the ICM mid-transaction) — see
+- **Never reload the engine modules under active RDMA traffic.** Reloading
+  `thunderbolt_frame_rxe`/`thunderbolt_frame` while uverbs users are live
+  is the silicon-wedge class; quiesce first. When rebooting, `rmmod` the
+  modules *before* the reboot (a warm reboot with active NHI rings leaves
+  the ICM mid-transaction) — see
   `appmana-management/.../scripts/tb-chain-reboot-cover.sh`, which drains,
   unloads, reboots a pairwise non-adjacent set, and verifies negotiation.
 - **A rail's peers only re-negotiate after its neighbour also rolls.** After
   rebooting one half of the chain, `data-ready-rails=0` on those nodes is
   expected until their neighbours reboot too; do not chase it.
-- **Loss recovery is deadline-armed since 0.2.25.** Before that, every lost
-  frame recovered on a ~100 ms grid regardless of `tbv_retransmit_base_ms`,
-  because the backoff deadline was only a threshold checked when the QP timeout
-  work happened to run, and every arming site scheduled that work at
-  `min3(ack_timeout, 1000ms, TBV_READ_RESP_RETRY_MS=100ms)`. Symptom to watch
-  for in `/sys/kernel/debug/thunderbolt_ibverbs/summary`:
-  `data_rx_ack_match_over_64ms` climbing with `data_wr_retransmit`, and
-  `data_rx_duplicate_ack` close to the retransmit count (spurious resends).
-- **`data_rx_bad_header` is not necessarily wire corruption.** Until 0.2.26 the
-  RX path never inspected `frame->flags`, so frames the NHI had already marked
-  `RING_DESC_CRC_ERROR` / `RING_DESC_BUFFER_OVERRUN` were parsed anyway. The
-  `data_rx_crc_error` / `data_rx_overrun` counters now separate hardware-flagged
-  corruption from software framing bugs. Note `enum ring_desc_flags` aliases TX
-  and RX meanings on the same bits (`0x1` ISOCH/CRC_ERROR, `0x4` POSTED/
-  BUFFER_OVERRUN) — the check is only valid on an RX completion.
 - **Hardware E2E flow control is NOT a throughput win.** The `c5ec614` commit
   message reports ~28 Gb/s duplex with E2E vs ~3 Gb/s on software credits; that
   came from a synthetic bandwidth sweep and does not reproduce on real NCCL
-  message shapes, where the two are about the same. E2E remains off for the
-  native backend: it buys nothing measurable and carries the Maple Ridge
+  message shapes, where the two are about the same. E2E remains off by default
+  (`thunderbolt_frame` `e2e=0`): it buys nothing measurable and carries the Maple Ridge
   ring-teardown lockup and AMD TX-completion wedge history. Do not re-derive a
   policy change from that commit message alone.
 
