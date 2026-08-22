@@ -1,7 +1,7 @@
 # Packaged hang reproducer
 
 `tbv-hang-repro` is a bounded traffic-and-capture harness for a directly
-connected `thunderbolt_ibverbs` peer pair. It is shipped by the
+connected Thunderbolt/USB4 RDMA peer pair. It is shipped by the
 `thunderbolt-ibverbs-tools` APT package and is also runnable from
 `tools/tbv-hang-repro.sh` in a source checkout.
 
@@ -40,7 +40,7 @@ tbv-hang-repro --help
 The orchestrating host needs Bash, OpenSSH, and GNU coreutils. Remote peers
 need passwordless SSH and sudo for capture, coreutils, util-linux, `iproute2`,
 `perftest`, mounted debugfs, and the matching loaded
-`thunderbolt_ibverbs` module.
+`thunderbolt_frame_rxe` engine (override with `TBV_MODULE`).
 
 ## Other packaged diagnostics
 

@@ -168,7 +168,7 @@ struct tbnet_ring {
  * @login_hs: ThunderboltIP login handshake state (shared tb_xdomain_handshake:
  *	      request_sent == our login sent, peer_seen == remote login received,
  *	      complete == both, so a soft reconnect can re-arm/supersede it the
- *	      same way the core and thunderbolt_ibverbs do)
+ *	      same way the core and the RDMA stack do)
  * @local_transmit_path: HopID we are using to send out packets
  * @remote_transmit_path: HopID the other end is using to send packets to us
  * @connection_lock: Lock serializing access to @login_hs and @transmit_path.
@@ -561,7 +561,7 @@ static int tbnet_handle_packet(const void *buf, size_t size, void *data)
 			 * rings. Supersede the stale handshake and tear the
 			 * tunnel down; the peer's ongoing login retries then
 			 * re-establish a fresh session. (Shared contract with the
-			 * core and thunderbolt_ibverbs; see thunderbolt_negotiation.h.)
+			 * core and the RDMA stack; see thunderbolt_negotiation.h.)
 			 */
 			if (tb_xdomain_handshake_supersede(&net->login_hs)) {
 				mutex_unlock(&net->connection_lock);

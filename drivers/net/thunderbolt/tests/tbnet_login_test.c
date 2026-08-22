@@ -2,7 +2,7 @@
 /*
  * KUnit tests for thunderbolt_net's login handshake after adopting the shared
  * struct tb_xdomain_handshake (the negotiation header shared with the core and
- * thunderbolt_ibverbs). Verifies the soft-reconnect contract main.c relies on:
+ * the RDMA stack). Verifies the soft-reconnect contract main.c relies on:
  * connected == handshake complete, and an inbound LOGIN arriving while already
  * complete supersedes the stale session (main.c then tears the tunnel down and
  * the peer's login retries re-establish a fresh one) instead of carrying

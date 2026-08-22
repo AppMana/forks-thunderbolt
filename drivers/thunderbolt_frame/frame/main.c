@@ -137,8 +137,8 @@ static void __exit tbframe_exit(void)
 	/*
 	 * A registered client here would mean a module that uses our exported
 	 * symbols outlived us, which the module dependency refcount makes
-	 * impossible (rmmod tbframe returns -EWOULDBLOCK while tbrxe is
-	 * loaded). Assert it rather than trust it: its ops vector lives in
+	 * impossible (rmmod thunderbolt_frame returns -EWOULDBLOCK while
+	 * thunderbolt_frame_rxe is loaded). Assert it rather than trust it: its ops vector lives in
 	 * that module's text, so a stale pointer here is an NX-execute panic
 	 * on the next upcall.
 	 */

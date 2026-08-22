@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Thunderbolt XDomain connection-negotiation primitives, shared by the
- * thunderbolt core, thunderbolt_net and thunderbolt_ibverbs.
+ * thunderbolt core, thunderbolt_net and the out-of-tree RDMA stack
+ * (thunderbolt_frame today; the retired thunderbolt_ibverbs originally).
  *
  * All three negotiate a host-to-host connection over the same XDomain control
  * channel (ring 0) and suffer the same class of bug: after a SOFT reconnect
@@ -22,7 +23,7 @@
  *   2. One-shot handshake. Each service driver runs a login/HELLO handshake
  *      that does not re-arm on a soft reconnect:
  *        thunderbolt_net      -> login_sent / login_received / login_retries
- *        thunderbolt_ibverbs  -> native_ready_sent / native_remote_ready /
+ *        legacy thunderbolt_ibverbs -> native_ready_sent / native_remote_ready /
  *                                native_negotiated / native_ready_attempts
  *      both carried over tb_xdomain_request()/tb_xdomain_response().
  *
@@ -36,9 +37,9 @@
  *     tb_xdomain_handshake_reset(), to be called on every reconnect so the
  *     handshake re-runs instead of staying latched.
  *
- * Pure, dependency-light, and safe to vendor verbatim into out-of-tree users
- * (thunderbolt_ibverbs keeps a byte-identical copy under proto/). Keep the
- * three copies in lockstep.
+ * Pure and dependency-light. This is the single canonical copy:
+ * thunderbolt_frame includes it by relative path and the DKMS packaging
+ * bundles this exact file into the staged source tree.
  */
 #ifndef _LINUX_THUNDERBOLT_NEGOTIATION_H
 #define _LINUX_THUNDERBOLT_NEGOTIATION_H
@@ -87,7 +88,7 @@ static inline bool tb_xdomain_generation_stale(bool have_remote, u32 remote_gen,
  * @attempts:     number of request attempts since the last reset
  *
  * Mirrors thunderbolt_net's login_sent/login_received and
- * thunderbolt_ibverbs's native_ready_sent/native_remote_ready/native_negotiated
+ * the legacy driver's native_ready_sent/native_remote_ready/native_negotiated
  * so both can share one re-arm contract.
  */
 struct tb_xdomain_handshake {
@@ -174,8 +175,8 @@ tb_xdomain_session_zombie(const struct tb_xdomain_handshake *h,
  * Service-set negotiation. One XDomain link advertises a SET of protocol
  * services in its property directory; the peer's core enumerates the set and
  * binds a matching service driver to each entry (thunderbolt_net to the stock
- * ThunderboltIP UUID, thunderbolt_ibverbs to the native UUID). The set is
- * dynamic: thunderbolt_ibverbs adds the ThunderboltIP entry only when
+ * ThunderboltIP UUID, the legacy RDMA driver to the native UUID). The set is
+ * dynamic: the legacy RDMA driver added the ThunderboltIP entry only when
  * tbnet_identity != off, so flipping that param (or a reload that flips it)
  * is a property-directory change the peer MUST re-read to (un)bind tbnet.
  *
@@ -187,7 +188,7 @@ tb_xdomain_session_zombie(const struct tb_xdomain_handshake *h,
  * and the binder (tbnet, which must (re)bind on a newly-present entry).
  */
 enum {
-	TB_XSVC_NATIVE = 1u << 0,	/* thunderbolt_ibverbs native data */
+	TB_XSVC_NATIVE = 1u << 0,	/* legacy RDMA driver native data */
 	TB_XSVC_TBNET  = 1u << 1,	/* stock ThunderboltIP / thunderbolt_net */
 };
 
@@ -232,7 +233,7 @@ static inline bool tb_xdomain_service_set_changed(u32 prev_local, u32 now_local)
  * Installable cohesive negotiation
  * ============================================================================
  * The predicates above are the building blocks; these macros compose them into
- * drop-in state + operations so thunderbolt_ibverbs and thunderbolt_net "install"
+ * drop-in state + operations so the RDMA stack and thunderbolt_net "install"
  * the SAME negotiation into their own per-link objects. Because both sides run
  * byte-identical logic, a service-set change advertised by one driver is honoured
  * by the peer's other driver -- that is the cohesion: tbnet binds iff ibverbs
