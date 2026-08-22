@@ -1,0 +1,28 @@
+Package: thunderbolt-frame-dkms
+Version: @VERSION@
+Section: kernel
+Priority: optional
+Architecture: all
+Depends: dkms (>= 2.1.0.0), kmod, make, libc6, thunderbolt-tbfix-dkms (= @VERSION@)
+Recommends: usb4-rdma-provider (>= 0.2.72), linux-modules-extra-generic-hwe-24.04-edge | linux-modules-extra-generic-hwe-24.04 | linux-modules-extra-generic
+Conflicts: thunderbolt-ibverbs-dkms, thunderbolt-tbrxe-dkms
+Replaces: thunderbolt-ibverbs-dkms, thunderbolt-tbrxe-dkms
+Maintainer: AppMana <ops@appmana.com>
+Homepage: https://github.com/AppMana/forks-thunderbolt
+Description: thunderbolt_frame + thunderbolt_frame_rxe RDMA engine (DKMS source)
+ DKMS source package for thunderbolt_frame.ko (session + lossless frame
+ service on Thunderbolt XDomain rings) and thunderbolt_frame_rxe.ko
+ (rxe-derived InfiniBand engine over the frame service). Both modules build
+ in one DKMS pass: thunderbolt_frame links against the thunderbolt-tbfix
+ core's Module.symvers and generated header shim, thunderbolt_frame_rxe
+ links against thunderbolt_frame's Module.symvers, so this package is
+ version-locked to the exact thunderbolt-tbfix-dkms release (never mix
+ revisions).
+ .
+ The modules are NOT autoloaded: no modules-load.d entry is installed.
+ Loading is a deliberate act: `modprobe thunderbolt_frame_rxe` (depmod pulls
+ in thunderbolt_frame). A node runs one RDMA engine at a time; this package
+ conflicts with and replaces the previous thunderbolt-tbrxe-dkms (the same
+ modules under their old tbframe/tbrxe names) and the retired
+ thunderbolt-ibverbs-dkms, and userspace needs usb4-rdma-provider >= 0.2.70
+ to bind the engine's driver id.

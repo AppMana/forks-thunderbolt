@@ -7,7 +7,7 @@
 # header too. The vendored .c files reference members the stock header lacks:
 #   - struct tb_nhi::domain_released   (nhi.c, domain.c: unconditional)
 #   - struct tb_protocol_handler::callback_xd + TB_PROTOCOL_HANDLER_HAS_XDOMAIN
-#     (xdomain.c: unconditional; thunderbolt_ibverbs: source-aware handler)
+#     (xdomain.c: unconditional; thunderbolt_frame: source-aware handler)
 #
 # Rather than mutate the node's kernel headers out-of-band (the ansible
 # lineinfile/blockinfile anti-pattern this replaces), read the kernel's OWN

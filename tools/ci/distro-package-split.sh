@@ -2,7 +2,6 @@
 # Build THREE dependency-linked DKMS .debs from the one source tree:
 #   thunderbolt-tbfix-core            -> thunderbolt.ko
 #   thunderbolt-tbfix-net  (Dep core) -> thunderbolt_net.ko
-#   thunderbolt-ibverbs    (Dep core) -> thunderbolt_ibverbs.ko
 #   rdma-rxe-appmana                   -> rdma_rxe.ko
 #
 # Each package preserves the repo's drivers/ layout so the single canonical
@@ -32,10 +31,6 @@ stage_pkg() {
 	install -d "$stage/DEBIAN" "$src/$(dirname "$sub")"
 	# the module source, preserving drivers/ structure
 	cp -a "$root/$sub" "$src/$sub"
-	# ibverbs links ../proto/*.o -- bring its sibling proto/ along
-	if [ -d "$root/$(dirname "$sub")/proto" ]; then
-		cp -a "$root/$(dirname "$sub")/proto" "$src/$(dirname "$sub")/proto"
-	fi
 	# the dependents bundle the ONE canonical header at its in-tree path
 	if [ "$needs_core" = 1 ]; then
 		install -D -m0644 "$root/drivers/thunderbolt/thunderbolt_negotiation.h" \
@@ -112,5 +107,4 @@ PR
 
 stage_pkg thunderbolt-tbfix-core thunderbolt           drivers/thunderbolt            ""                        0
 stage_pkg thunderbolt-tbfix-net  thunderbolt_net       drivers/net/thunderbolt        thunderbolt-tbfix-core    1
-stage_pkg thunderbolt-ibverbs    thunderbolt_ibverbs   drivers/thunderbolt_ibverbs/kernel thunderbolt-tbfix-core 1
 stage_pkg rdma-rxe-appmana       rdma_rxe              drivers/infiniband/sw/rxe      ""                        0

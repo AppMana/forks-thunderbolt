@@ -37,9 +37,10 @@ case "$1" in
             [ -z "$failed" ] || exit 1
         fi
         # thunderbolt/thunderbolt_net are pulled into the initramfs (early boot).
-        # dkms.conf REMAKE_INITRD=yes already refreshes it for the built kernel;
-        # this covers ALL installed kernels as a belt so a STALE initramfs can't
-        # keep loading the in-tree kernel/ copy instead of our updates/dkms one
+        # dkms >= 3.0 dropped REMAKE_INITRD, so this explicit call is the ONLY
+        # thing refreshing the initramfs on package install — it must stay, and
+        # it covers ALL installed kernels so a STALE initramfs can't keep
+        # loading the in-tree kernel/ copy instead of our updates/dkms one
         # (that stale-initramfs case was the old boot -22). initramfs-tools
         # resolves module names via modules.dep, which the "search updates ..."
         # depmod order points at updates/dkms/, so the refresh bakes OUR modules.

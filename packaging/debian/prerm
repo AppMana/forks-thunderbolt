@@ -9,10 +9,9 @@ case "$1" in
         if command -v dkms >/dev/null 2>&1; then
             dkms remove -m "$NAME" -v "$VERSION" --all 2>/dev/null || true
         fi
-        # dkms remove (with REMAKE_INITRD=yes) regenerates the initramfs; once our
-        # updates/dkms modules are gone, depmod/initramfs resolve the module names
-        # back to the in-tree kernel/ copies. Refresh here too for all kernels in
-        # case REMAKE_INITRD did not cover them.
+        # dkms >= 3.0 dropped REMAKE_INITRD, so this explicit refresh is the
+        # only one: once our updates/dkms modules are gone, depmod/initramfs
+        # resolve the module names back to the in-tree kernel/ copies.
         if command -v update-initramfs >/dev/null 2>&1; then
             update-initramfs -u -k all || true
         fi

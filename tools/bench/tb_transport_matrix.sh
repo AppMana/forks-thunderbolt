@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Transport matrix for a single adjacent Thunderbolt link.
 # Compares three software stacks over the SAME physical TB link:
-#   1. usb4_rdma  (thunderbolt_ibverbs native RDMA, data over TB DMA rings)
+#   1. usb4_rdma  (thunderbolt_frame_rxe RDMA, data over TB DMA rings)
 #   2. soft-RoCE  (rxe on the thunderbolt_net tb-ch netdev -> RoCE over TB)
 #   3. socket     (TCP over the thunderbolt_net tb-ch netdev, the NCCL socket path)
 # Reports peak bandwidth and small-message half-RTT latency for each.

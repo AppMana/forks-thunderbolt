@@ -1,0 +1,15 @@
+# Stable per-link name for the usb4_rdma GID-only netdev that the
+# thunderbolt_frame_rxe engine creates per rail (kernel name u4r<N>, which is
+# enumeration-order and unstable).
+# The helper derives a name from the parent XDomain device the kernel already
+# populates (peer hostname / UUID), so this needs NO site configuration and works
+# on any host. A site that wants its own scheme can ship a higher-priority rule.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="u4r*", PROGRAM="/usr/lib/usb4-rdma/tbv-rdma-ifname %k", NAME="%c"
+# Assign the deterministic per-link routable /64 (shared by both ends of the
+# cabled link) so the rail gets an honest RoCE GID the kernel RTR backstop and
+# the rdmaroute NCCL plugin can sense. Pure derivation in tbv-rdma-addr-lib.sh.
+# Matched on the tbv_peer_uuid attr (not the u4r* kernel name): the rename in
+# the rule above changes the kernel name, so a replayed add event (udevadm
+# trigger, package postinst) arrives as tbr-* and must still re-apply the
+# address after a device republish (module reload, peer reboot).
+SUBSYSTEM=="net", ACTION=="add", ATTR{tbv_peer_uuid}=="?*", RUN+="/usr/lib/usb4-rdma/tbv-rdma-addr %k"

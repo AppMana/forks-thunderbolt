@@ -1,0 +1,22 @@
+Package: usb4-rdma-provider
+Version: @VERSION@
+Section: libs
+Priority: optional
+Architecture: amd64
+Depends: libibverbs1, iproute2
+Breaks: thunderbolt-ibverbs-dkms (<< 0.2.70)
+Replaces: thunderbolt-ibverbs-dkms (<< 0.2.70)
+Maintainer: AppMana <ops@appmana.com>
+Homepage: https://github.com/AppMana/forks-thunderbolt
+Description: ALPHA usb4_rdma and tbrxe libibverbs userspace providers
+ Drop-in libibverbs providers for the AppMana Thunderbolt/USB4 RDMA engine:
+ the tbrxe provider binds the thunderbolt_frame_rxe kernel devices (rxe
+ uverbs ABI under the private USB4 driver id, coexisting with the distro's
+ librxe); the usb4_rdma provider serves the retired legacy engine's private
+ ABI and remains for archival compatibility. Install alongside the matching
+ thunderbolt-frame-dkms package for full ibv_devices visibility and
+ downstream RDMA tool support (NCCL, vllm, perftest). Also carries the udev
+ tooling for the u4r* rail netdevs: stable per-link naming (tbr-<peer>) and
+ the deterministic per-link /64 ULA assignment (tbv-rdma-addr, installed
+ under /usr/lib/usb4-rdma/). This AppMana build is alpha/pre-release
+ software.

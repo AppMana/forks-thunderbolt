@@ -1,12 +1,17 @@
 # Thunderbolt XDomain connection negotiation — shared model and the soft-reconnect fix
 
-This documents the connection-negotiation logic shared by the three Thunderbolt
+This documents the connection-negotiation logic shared by the Thunderbolt
 host-to-host stacks we run, the bug they share, and the single common header
-that fixes it.
+that fixes it. (Written against the legacy `thunderbolt_ibverbs` RDMA driver,
+since removed; its successor `thunderbolt_frame` consumes the same shared
+contract, and the legacy driver's behavior is kept below as the historical
+record of the bug.)
 
 - `thunderbolt` — the core driver (XDomain property exchange).
 - `thunderbolt_net` — IP-over-Thunderbolt (`tbnet`).
-- `thunderbolt_ibverbs` — the out-of-tree usb4_rdma RDMA transport.
+- `thunderbolt_frame` — the frame service under the out-of-tree RDMA engine
+  (registers the `"tbframe"` service; the legacy `thunderbolt_ibverbs`
+  registered `"tbverbs"`).
 
 ## The shared negotiation model
 
@@ -15,8 +20,8 @@ same XDomain control channel (ring 0, `TB_CFG_PKG_XDOMAIN_REQ/RESP`):
 
 1. **Property/identity exchange (owned by the core).** Each host advertises an
    XDomain *property directory* via `tb_register_property_dir()`
-   (`thunderbolt_net` registers `"network"`, `thunderbolt_ibverbs` registers
-   `"tbverbs"`). The remote block carries a **monotonic generation**. A peer
+   (`thunderbolt_net` registers `"network"`, `thunderbolt_frame` registers
+   `"tbframe"`; the legacy driver registered `"tbverbs"`). The remote block carries a **monotonic generation**. A peer
    re-reads the remote directory and accepts it only if the generation is
    strictly newer (`tb_xdomain_get_properties()` in `xdomain.c`). Service
    discovery (`enumerate_services()`) then binds the matching service driver
@@ -26,8 +31,9 @@ same XDomain control channel (ring 0, `TB_CFG_PKG_XDOMAIN_REQ/RESP`):
    discovered service, each driver runs a one-shot two-phase handshake:
    - `thunderbolt_net`: `login_sent` / `login_received` / `login_retries`
      (`start_login()`, `tbnet_login_work()`, `tbnet_login_request/response()`).
-   - `thunderbolt_ibverbs`: `native_ready_sent` / `native_remote_ready` /
-     `native_negotiated` / `native_ready_attempts` (`native_control.c`).
+   - the legacy `thunderbolt_ibverbs`: `native_ready_sent` /
+     `native_remote_ready` / `native_negotiated` / `native_ready_attempts`
+     (`native_control.c`, removed with the legacy driver).
    Both ride `tb_xdomain_request()` / `tb_xdomain_response()`.
 
 ## The shared bug: soft reconnect never re-establishes
@@ -63,9 +69,10 @@ one-shot property re-read and usually lose").
 
 ## The fix: one common header
 
-`drivers/thunderbolt/thunderbolt_negotiation.h` carries the shared primitives,
-vendored byte-identically into `thunderbolt_ibverbs` (`proto/`). Keep the copies
-in lockstep.
+`drivers/thunderbolt/thunderbolt_negotiation.h` carries the shared primitives.
+It is the single canonical copy: `thunderbolt_frame` includes it directly
+(`frame/tbframe_priv.h`), and the packaging bundles this one header into the
+DKMS source tree (the legacy driver's byte-identical `proto/` copy is gone).
 
 - **`tb_xdomain_generation_stale(have_remote, remote_gen, cached_gen)`** — the
   generation gate, with one contract change: a `cached_gen` of **0** forces the
@@ -94,18 +101,17 @@ in lockstep.
 - `thunderbolt_net`: replace the ad-hoc `login_sent`/`login_received` booleans
   with `struct tb_xdomain_handshake` and call `tb_xdomain_handshake_reset()` from
   its properties-changed path so a soft reconnect re-logs-in.
-- `thunderbolt_ibverbs`: replace the per-rail `native_ready_sent` /
-  `native_remote_ready` / `native_negotiated` booleans with the shared struct
-  and reset on reconnect; consume the core `rescan` so a single sysfs write
-  recovers a stuck rail.
+- `thunderbolt_frame`: the generation gate, re-announce and supersede
+  semantics come from the shared contract via `frame/core.c`; the legacy
+  driver's per-rail `native_*` booleans left with it.
 
 ## Validation
 
-- Pure predicate `tb_xdomain_generation_stale()` is covered by the KUnit cases in
-  `drivers/thunderbolt/test.c` (core) and the ibverbs ack-routing suite. Run via
-  `drivers/thunderbolt_ibverbs/tools/run-kunit.sh` (`kunit.py`, x86_64 qemu).
-- Hardware: with the patched core on both ends of a link, a soft
-  `thunderbolt_ibverbs` reload re-negotiates without a reboot (the patched side
+- Pure predicate `tb_xdomain_generation_stale()` is covered by the KUnit cases
+  in `drivers/thunderbolt/test.c` (core). Run via
+  `drivers/thunderbolt_frame/tools/run-kunit.sh` (`kunit.py`, x86_64 qemu).
+- Hardware (2026, legacy era): with the patched core on both ends of a link, a
+  soft RDMA-driver reload re-negotiates without a reboot (the patched side
   re-reads where an unpatched neighbour's gen-gate blocks it).
 
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note

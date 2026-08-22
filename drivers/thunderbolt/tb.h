@@ -1309,8 +1309,8 @@ bool tb_is_xdomain_enabled(void);
 
 /*
  * The XDomain connection-negotiation primitives (generation gate + handshake
- * re-arm contract) are shared verbatim with thunderbolt_net and
- * thunderbolt_ibverbs. tb_xdomain_generation_stale() is the gate used below in
+ * re-arm contract) are shared verbatim with thunderbolt_net and the
+ * out-of-tree RDMA stack. tb_xdomain_generation_stale() is the gate used below in
  * tb_xdomain_get_properties().
  */
 #include "thunderbolt_negotiation.h"

@@ -1,0 +1,14 @@
+Package: thunderbolt-frame-tools
+Conflicts: thunderbolt-ibverbs-tools
+Replaces: thunderbolt-ibverbs-tools
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: all
+Depends: bash, coreutils, openssh-client, python3
+Maintainer: AppMana <ops@appmana.com>
+Homepage: https://github.com/AppMana/forks-thunderbolt
+Description: Reproduction and diagnostics for Thunderbolt/USB4 RDMA
+ Installs the bounded tbv-hang-repro orchestrator and read-only NHI
+ register diagnostics for turning a directly connected peer failure into
+ a capture that can become a regression test.
