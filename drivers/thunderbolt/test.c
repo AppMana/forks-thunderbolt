@@ -3445,6 +3445,221 @@ static void tb_test_cm_reconcile_no_kick_under_resident_icm(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
 }
 
+static void cm_run_reconcile(struct cm_host *h, int passes)
+{
+	while (passes-- > 0)
+		cm_reconcile(h);
+}
+
+/*
+ * The live appmana-001 port 0:4 failure (2026-08-22): an ASM246x NVMe
+ * enclosure's link half-trains and parks at CONNECTING ("failed to reach
+ * state TB_PORT_UP. Ignoring port...", LANE_ADP_CS_1 state 1). CONNECTING
+ * is neither present nor gone, so without a retrain the reconcile ignores
+ * the port FOREVER -- and with the blind kick correctly gated out under the
+ * resident ICM (05d1e4c) nothing else ever gives the lane a fresh training
+ * edge. The same disk enumerated cleanly earlier the same morning: only a
+ * new edge is missing.
+ *
+ * Contract: an enclosure attached to a resident-ICM host must eventually
+ * enumerate via the bounded plug-directed retrain, and the retrain must
+ * never wedge the firmware (it waits out the ICM's transition window).
+ */
+static void tb_test_cm_plug_retrain_half_trained_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_marginal(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 12);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 1);
+
+	/* The same recovery must work on a chain host (no firmware). */
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_enclosure_attach_marginal(&h, 1, /*dead=*/false);
+	cm_run_reconcile(&h, 12);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+/*
+ * Detection latched off under a resident ICM: the lane samples UNPLUGGED
+ * forever despite the powered enclosure on the cable, so the lane itself
+ * carries NO plug signal -- but the resident firmware still watches the
+ * port and emits its ICM-protocol notification (the live "unexpected event
+ * 0xa"). That notification is the connect request that directs the
+ * retrain. On a chain host no such notification exists and an UNPLUGGED
+ * lane must never be bounced by the reconcile (the blind start-time kick
+ * owns that case); this is what keeps the state-7 retrain plug-DIRECTED
+ * rather than a periodic blind bounce.
+ */
+static void tb_test_cm_plug_retrain_latched_port_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	/* Idle for a while first: no hint, no edges on the empty port. */
+	cm_run_reconcile(&h, 10);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+
+	cm_enclosure_attach_latched(&h, 0);
+	cm_run_reconcile(&h, 12);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 1);
+
+	/* Chain host: no notification -> the reconcile never bounces a
+	 * bare UNPLUGGED lane, no matter how long it sits. */
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_enclosure_attach_latched(&h, 0);
+	cm_run_reconcile(&h, 40);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+}
+
+/*
+ * Electrically dead (or hopelessly marginal) hardware: every fresh edge
+ * ends parked at CONNECTING again. The retrain must be BOUNDED -- a fixed
+ * number of spaced attempts per episode, then leave the port alone -- and
+ * must never wedge the resident firmware while doing so (each host edge
+ * makes the firmware busy again; the attempt spacing must outlast that).
+ */
+static void tb_test_cm_plug_retrain_bounded_dead_hardware(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_marginal(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, CM_RETRAIN_MAX_ATTEMPTS);
+}
+
+/*
+ * The 05d1e4c regression guard, restated for the retrain: a REAL surprise
+ * unplug of an enumerated enclosure under the resident ICM raises the
+ * firmware's own notification AND leaves the firmware mid-transition. The
+ * reconcile must synthesize the unplug, and the retrain must sit out both
+ * the teardown cooldown and the firmware's busy window before it touches
+ * the (now empty) port -- an early edge is exactly the 2026-08-22 silent
+ * freeze. The single late edge it does issue is the harmless re-arm that
+ * readies the latched-off port for the NEXT plug.
+ */
+static void tb_test_cm_plug_retrain_post_unplug_cooldown(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	cm_link_down_lost(&h, 0);
+
+	/* Inside the firmware's transition window: teardown only, no edge. */
+	cm_run_reconcile(&h, 3);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+
+	/* After the quiet window: at most one directed re-arm, no wedge. */
+	cm_run_reconcile(&h, 30);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_LE(test, h.port[0].lane_edges, 1);
+}
+
+/*
+ * The ACTUAL live appmana-001 topology decoded 2026-08-22: the two
+ * "ports" 0:3/0:4 are the two LANES of one connector (dual pair (3,4),
+ * primaries iterate; "0:4 failed to reach state TB_PORT_UP" is
+ * tb_switch_lane_bonding_enable() waiting on the dual_link_port). The
+ * KIOXIA enclosure's router (0-3) enumerates on lane 0, but lane 1 parks
+ * at CONNECTING, bonding fails once at enumeration and is NEVER retried,
+ * and the degraded x1 link's PCIe payload stays dead ("Slot(4): No
+ * link"). Contract: the reconcile retrains the half-trained SECONDARY
+ * lane only (the primary, carrying the router, is never bounced -- a
+ * full-connector bounce of a live link is the 2026-08-20 ICM wedge), and
+ * once the secondary lane is up it re-runs lane bonding, which upstream
+ * only ever attempts at enumeration.
+ */
+static void tb_test_cm_lane1_bonding_recovery_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 20);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, 1);
+	/* The primary lane was never bounced. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+
+	/*
+	 * Secondary lane already up but the link runs x1 (bonding raced or
+	 * failed at enumeration): late bonding needs no lane edge at all.
+	 */
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[1].link_up = true;
+	h.port[1].lane1_sample = CM_SAMPLE_UP;
+	cm_scan_port(&h, 1);
+	cm_arm_hotplug(&h);
+	cm_run_reconcile(&h, 12);
+	KUNIT_EXPECT_TRUE(test, h.port[1].bonded);
+	KUNIT_EXPECT_EQ(test, h.port[1].lane1_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+/*
+ * A secondary lane that can never train (marginal cable seat): bounded
+ * lane-directed attempts, then the link is left alone at x1 -- degraded
+ * but working, clean logs, no wedge. Exactly the "prove driver-side
+ * behavior correct on dead hardware" contract.
+ */
+static void tb_test_cm_lane1_retrain_bounded_dead_lane(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* x1 still works */
+	KUNIT_EXPECT_FALSE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, CM_RETRAIN_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
 /*
  * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
  * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
@@ -4055,6 +4270,12 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
 	KUNIT_CASE(tb_test_cm_reconcile_no_kick_under_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_half_trained_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_latched_port_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_bounded_dead_hardware),
+	KUNIT_CASE(tb_test_cm_plug_retrain_post_unplug_cooldown),
+	KUNIT_CASE(tb_test_cm_lane1_bonding_recovery_resident_icm),
+	KUNIT_CASE(tb_test_cm_lane1_retrain_bounded_dead_lane),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),

@@ -231,6 +231,28 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
  * XDomain to answer 020's property requests. Modelled as a per-port state +
  * the arm-ordering; the fix re-scans ports when hotplug is armed.
  */
+/*
+ * Lane-state samples as tb_reconcile_work() reads them (tb_regs.h
+ * enum tb_port_state). Only the three the reconcile logic branches on.
+ */
+#define CM_SAMPLE_CONNECTING	1	/* TB_PORT_CONNECTING: half-trained */
+#define CM_SAMPLE_UP		2	/* TB_PORT_UP */
+#define CM_SAMPLE_UNPLUGGED	7	/* TB_PORT_UNPLUGGED */
+
+/*
+ * Timing constants, in reconcile passes (one pass ~ port_reconcile_ms).
+ * Kept in lockstep with tb.c: CM_RETRAIN_QUIET_PASSES mirrors
+ * TB_PLUG_RETRAIN_QUIET_MS / TB_RECONCILE_INTERVAL_MS and MUST exceed
+ * CM_ICM_BUSY_PASSES -- the safety argument for the plug-directed retrain
+ * is exactly "the resident ICM's port state machine settles inside the
+ * quiet window, so a bounded edge afterwards cannot race it" (the 05d1e4c
+ * wedge class). CM_RETRAIN_MAX_ATTEMPTS mirrors TB_PLUG_RETRAIN_MAX_ATTEMPTS.
+ */
+#define CM_ICM_BUSY_PASSES	4
+#define CM_RETRAIN_QUIET_PASSES	5
+#define CM_RETRAIN_HINT_MAX_PASSES 30	/* TB_PLUG_RETRAIN_HINT_MAX_MS */
+#define CM_RETRAIN_MAX_ATTEMPTS	3
+
 struct cm_port {
 	bool link_up;	/* peer's link has trained */
 	bool xdomain;	/* this port's XDomain was enumerated */
@@ -249,6 +271,57 @@ struct cm_port {
 	bool state_perturbed;
 	/* Lane detection was re-armed by a PHY kick (tb_port_kick_detection). */
 	bool detection_rearmed;
+	/*
+	 * Device attached but the port's detection is LATCHED OFF: the lane
+	 * adapter samples UNPLUGGED (state 7) despite a powered peer on a
+	 * live cable (the 2026-07-10 019<->008 signature, and the ASM246x
+	 * enclosure signature on appmana-001). Only a host lane edge
+	 * re-arms it.
+	 */
+	bool latched_off;
+	/*
+	 * Lane stuck half-trained at CONNECTING (state 1): present, never
+	 * UP. Live 2026-08-22 appmana-001 port 0:4: "failed to reach state
+	 * TB_PORT_UP. Ignoring port..." then LANE_ADP_CS_1 parked at state
+	 * 1 forever. A fresh training edge completes it (the same disk
+	 * enumerated cleanly at 08:26 the same morning).
+	 */
+	bool half_trained;
+	/* Attached hardware that can never train (electrically dead). */
+	bool dead;
+	/*
+	 * Passes the resident ICM's port state machine is still
+	 * mid-transition after consuming a physical (or host-generated)
+	 * lane edge on this port. A host edge issued while this is
+	 * nonzero races the firmware and wedges it -- both observed
+	 * wedges (2026-08-20 live link, 2026-08-22 3 s post-unplug) are
+	 * edges inside this window.
+	 */
+	int icm_busy;
+	int last_sample;	/* previous pass's lane sample */
+	int stable;		/* consecutive passes the sample was unchanged */
+	int cooldown;		/* passes until post-teardown retrain allowed */
+	int since_attempt;	/* passes since the last retrain attempt */
+	int attempts;		/* retrain attempts this episode */
+	int lane_edges;		/* host-generated edges (boundedness proof) */
+	/*
+	 * SECONDARY lane adapter (dual_link_port) of this connector. The
+	 * live appmana-001 signature (2026-08-22, port 0:4): lane 0 trains
+	 * and the router enumerates, but lane 1 parks at CONNECTING --
+	 * tb_switch_lane_bonding_enable()'s tb_wait_for_port(dual) prints
+	 * "failed to reach state TB_PORT_UP. Ignoring port..." and the
+	 * link runs degraded at x1 forever, because NOTHING upstream ever
+	 * retries either the lane or the bonding. 0 = no secondary lane
+	 * modelled (single-lane tests).
+	 */
+	int lane1_sample;	/* CM_SAMPLE_* of the secondary lane */
+	bool lane1_dead;	/* secondary lane can never train */
+	bool bonded;		/* link bonded at x2 */
+	int lane1_last;		/* previous pass's secondary sample */
+	int lane1_stable;	/* stability of the secondary sample */
+	int lane1_since_attempt;
+	int lane1_attempts;
+	int lane1_edges;	/* host edges on the SECONDARY lane only */
 };
 
 struct cm_host {
@@ -269,6 +342,16 @@ struct cm_host {
 	 * power removal (S5), not a warm reboot.
 	 */
 	bool icm_wedged;
+	/*
+	 * The resident ICM's own hot-event notification (TB_CFG_PKG_ICM_EVENT,
+	 * the live "unexpected event 0xa"): under force_sw_cm the firmware
+	 * still watches the ports and tells us about plug edges the latched
+	 * -off lane adapter never shows. 0 = none; set to 1 when the event
+	 * fires, then ages one per reconcile pass. This is the CONNECT-
+	 * REQUEST signal that makes the state-7 retrain plug-DIRECTED
+	 * instead of blind.
+	 */
+	int hint_age;
 };
 
 /* Initial scan of one port: enumerate it only if the link is already up. */
@@ -301,8 +384,13 @@ static inline void cm_arm_hotplug(struct cm_host *h)
 	int i;
 
 	h->hotplug_armed = true;
-	for (i = 0; i < 2; i++)
+	for (i = 0; i < 2; i++) {
+		/* No retrain has ever run (tb_port's zeroed jiffies stamp
+		 * reads as "long ago", not "just now"). */
+		h->port[i].since_attempt = CM_RETRAIN_HINT_MAX_PASSES + 1;
+		h->port[i].lane1_since_attempt = CM_RETRAIN_HINT_MAX_PASSES + 1;
 		cm_scan_port(h, i);
+	}
 }
 
 /*
@@ -328,24 +416,97 @@ static inline void cm_arm_hotplug(struct cm_host *h)
  * no reconciliation, cm_reconcile() must stay empty and the recovery tests go
  * red -- exactly like reverting the driver.
  */
+/*
+ * The resident ICM consumes a physical lane edge on port @p: its port state
+ * machine goes busy for a while and it emits its ICM-protocol notification
+ * (the "unexpected event 0xa" the software CM sees). No-op on a chain host
+ * with no resident firmware.
+ */
+static inline void cm_icm_notices_edge(struct cm_host *h, int p)
+{
+	if (!h->resident_icm)
+		return;
+	h->port[p].icm_busy = CM_ICM_BUSY_PASSES;
+	h->hint_age = 1;
+}
+
 static inline void cm_link_up_lost(struct cm_host *h, int p)
 {
 	h->port[p].link_up = true;	/* plug event lost: no scan happens */
+	cm_icm_notices_edge(h, p);
 }
 
 static inline void cm_link_down_lost(struct cm_host *h, int p)
 {
 	h->port[p].link_up = false;	/* unplug event lost: xdomain stays */
+	cm_icm_notices_edge(h, p);
+}
+
+/*
+ * An enclosure is attached to a port whose detection is latched off: the
+ * lane sample never changes (still UNPLUGGED), so the ONLY plug signal is
+ * the resident ICM's notification. On a chain host there is no signal at
+ * all here -- that case is what the start-time blind kick covers.
+ */
+static inline void cm_enclosure_attach_latched(struct cm_host *h, int p)
+{
+	h->port[p].latched_off = true;
+	cm_icm_notices_edge(h, p);
+}
+
+/*
+ * An enclosure is attached and its link half-trains: the lane parks at
+ * CONNECTING (the live appmana-001 port 0:4 signature). @dead models
+ * hardware that can never complete training no matter how many fresh
+ * edges it is given.
+ */
+static inline void cm_enclosure_attach_marginal(struct cm_host *h, int p,
+						bool dead)
+{
+	h->port[p].half_trained = true;
+	h->port[p].dead = dead;
+	cm_icm_notices_edge(h, p);
+}
+
+/*
+ * An enclosure is attached, its PRIMARY lane trains and the router
+ * enumerates -- but the SECONDARY lane parks at CONNECTING, so lane
+ * bonding fails at enumeration and the link runs degraded x1 (the live
+ * appmana-001 0-3/0:4 signature). @dead: the secondary lane can never
+ * train no matter how many edges it gets.
+ */
+static inline void cm_enclosure_attach_bonding_stuck(struct cm_host *h, int p,
+						     bool dead)
+{
+	h->port[p].link_up = true;
+	h->port[p].lane1_sample = CM_SAMPLE_CONNECTING;
+	h->port[p].lane1_dead = dead;
+	cm_icm_notices_edge(h, p);
 }
 
 /*
  * What tb_reconcile_work() actually observes: one lane-state register read.
  * A dead peer reads UNPLUGGED -- but so does a live link whose state was
- * perturbed by a coexisting master or a CLx transition (state_perturbed).
+ * perturbed by a coexisting master or a CLx transition (state_perturbed),
+ * a latched-off port with a powered peer, and a half-trained lane reads
+ * CONNECTING: neither present nor gone.
  */
+static inline int cm_lane_sample(const struct cm_host *h, int p)
+{
+	const struct cm_port *port = &h->port[p];
+
+	if (port->state_perturbed || port->latched_off)
+		return CM_SAMPLE_UNPLUGGED;
+	if (port->link_up)
+		return CM_SAMPLE_UP;
+	if (port->half_trained)
+		return CM_SAMPLE_CONNECTING;
+	return CM_SAMPLE_UNPLUGGED;
+}
+
 static inline bool cm_lane_sample_unplugged(const struct cm_host *h, int p)
 {
-	return !h->port[p].link_up || h->port[p].state_perturbed;
+	return cm_lane_sample(h, p) == CM_SAMPLE_UNPLUGGED;
 }
 
 /*
@@ -360,20 +521,48 @@ static inline bool cm_peer_probe(const struct cm_host *h, int p)
 
 /*
  * Hardware model of a host-generated lane edge (the lane disable/enable
- * bounce of tb_port_kick_detection()). On a host with no resident firmware
- * it re-arms latched-off detection (the 019<->008 segment). On a host whose
- * broken ICM is left resident, the firmware consumes the edge too, races
- * its own port state machine and wedges: 2026-08-20 appmana-001 (kick on a
- * live link -> control path hung) and 2026-08-22 appmana-001 (kick after a
- * REAL enclosure unplug -> silent NHI MMIO-stall freeze).
+ * bounce of tb_port_kick_detection() / tb_port_plug_retrain()). On a host
+ * with no resident firmware it re-arms latched-off detection (the 019<->008
+ * segment) or gives a half-trained lane a fresh training start. On a host
+ * whose broken ICM is left resident the firmware consumes the edge too:
+ * an edge issued while the firmware's port state machine is BUSY with a
+ * transition of its own -- a live link it tracks (2026-08-20: kick on a
+ * live link -> control path hung) or the window right after a physical
+ * edge it is still processing (2026-08-22: kick 3 s after a REAL enclosure
+ * unplug -> silent NHI MMIO-stall freeze) -- races it and wedges. An edge
+ * on a QUIESCENT port is the same recipe the ICM's own init runs
+ * (icm_reset_phy_port()); the firmware consumes it and starts a fresh
+ * detection/training cycle of its own, going busy again.
  */
 static inline void cm_hw_lane_edge(struct cm_host *h, int p)
 {
-	if (h->resident_icm) {
+	struct cm_port *port = &h->port[p];
+
+	port->lane_edges++;
+	if (h->resident_icm && (port->link_up || port->icm_busy > 0)) {
 		h->icm_wedged = true;
 		return;
 	}
-	h->port[p].detection_rearmed = true;
+	port->detection_rearmed = true;
+	if (port->latched_off) {
+		port->latched_off = false;
+		if (!port->dead)
+			port->link_up = true;
+	} else if (port->half_trained && !port->dead) {
+		port->half_trained = false;
+		port->link_up = true;
+	}
+	/*
+	 * The firmware consumes our edge and goes busy again, and it DOES
+	 * announce the edge back to us -- but the driver self-attributes a
+	 * notification arriving right after its own retrain
+	 * (TB_PLUG_RETRAIN_SELF_MS) and never arms it as a hint. Arming it
+	 * here turns the bounded retrain into a self-sustaining bounce
+	 * loop: each edge seeds the hint for the next (caught by
+	 * tb_test_cm_plug_retrain_post_unplug_cooldown).
+	 */
+	if (h->resident_icm)
+		h->port[p].icm_busy = CM_ICM_BUSY_PASSES;
 }
 
 /*
@@ -405,6 +594,114 @@ static inline void cm_kick_detection(struct cm_host *h, int p)
  * live link (2026-08-20 appmana-001 live-tunnel teardown). Runs only
  * while hotplug is armed (same tcm->hotplug_active gate).
  */
+/*
+ * Lockstep with tb.c tb_port_plug_retrain(): the bounded, plug-DIRECTED
+ * retrain that replaces the blind kick under a resident ICM. Preconditions
+ * mirror the driver predicates one to one:
+ *   - the lane sample has been stable for the whole quiet window (longer
+ *     than the ICM's busy window, so the edge cannot race the firmware);
+ *   - not inside the post-teardown cooldown (the 2026-08-22 wedge window);
+ *   - attempts are spaced at least a quiet window apart and capped per
+ *     episode (marginal hardware gets a bounded number of edges, then the
+ *     port is left alone until it enumerates or goes idle);
+ *   - a lane parked at CONNECTING is itself the presence signal; a lane
+ *     sampling UNPLUGGED is bounced ONLY on the resident ICM's own aged
+ *     connect notification (one attempt per notification).
+ */
+static inline void cm_plug_retrain(struct cm_host *h, int p, int sample)
+{
+	struct cm_port *port = &h->port[p];
+
+	if (port->stable < CM_RETRAIN_QUIET_PASSES)
+		return;
+	if (port->cooldown > 0)
+		return;
+	if (port->since_attempt < CM_RETRAIN_QUIET_PASSES)
+		return;
+	if (sample == CM_SAMPLE_UNPLUGGED) {
+		if (h->hint_age <= CM_RETRAIN_QUIET_PASSES ||
+		    h->hint_age > CM_RETRAIN_HINT_MAX_PASSES)
+			return;
+		if (port->since_attempt < h->hint_age)
+			return;		/* one attempt per notification */
+	}
+	if (port->attempts >= CM_RETRAIN_MAX_ATTEMPTS)
+		return;
+	port->attempts++;
+	port->since_attempt = 0;
+	cm_hw_lane_edge(h, p);
+}
+
+/*
+ * Host edge on the SECONDARY lane only; the primary (carrying the
+ * enumerated router and its tunnels) is never touched. Wedge condition
+ * under a resident ICM: only an in-flight firmware transition on the
+ * connector (icm_busy) -- the settled-live-primary case is exactly the
+ * regime the lane-directed retrain is allowed to touch, verified live
+ * (a full-connector bounce of a live link is the 2026-08-20 wedge and
+ * remains forbidden: nothing ever calls this on the primary).
+ */
+static inline void cm_hw_lane1_edge(struct cm_host *h, int p)
+{
+	struct cm_port *port = &h->port[p];
+
+	port->lane1_edges++;
+	if (h->resident_icm && port->icm_busy > 0) {
+		h->icm_wedged = true;
+		return;
+	}
+	if (!port->lane1_dead)
+		port->lane1_sample = CM_SAMPLE_UP;
+	if (h->resident_icm)
+		port->icm_busy = CM_ICM_BUSY_PASSES;
+}
+
+/*
+ * Lockstep with tb.c tb_port_lane1_recover(): bounded recovery of a
+ * degraded x1 link whose secondary lane is half-trained (retrain the
+ * SECONDARY lane only), and late lane bonding once the secondary lane is
+ * up (upstream runs bonding only at enumeration and never again --
+ * tb_switch_set_link_width(TB_LINK_WIDTH_DUAL) is the retry). Same quiet
+ * -window/budget discipline as cm_plug_retrain().
+ */
+static inline void cm_lane1_recover(struct cm_host *h, int p)
+{
+	struct cm_port *port = &h->port[p];
+
+	if (!port->lane1_sample || port->bonded)
+		return;
+	port->lane1_since_attempt++;
+	if (port->lane1_sample == port->lane1_last) {
+		port->lane1_stable++;
+	} else {
+		port->lane1_last = port->lane1_sample;
+		port->lane1_stable = 0;
+	}
+	if (port->lane1_sample != CM_SAMPLE_CONNECTING &&
+	    port->lane1_sample != CM_SAMPLE_UP)
+		return;
+	if (port->lane1_stable < CM_RETRAIN_QUIET_PASSES)
+		return;
+	if (port->cooldown > 0)
+		return;
+	if (port->lane1_since_attempt < CM_RETRAIN_QUIET_PASSES)
+		return;
+	/* a fresh firmware notification: the ICM may be mid-transition */
+	if (h->hint_age > 0 && h->hint_age <= CM_RETRAIN_QUIET_PASSES)
+		return;
+	if (port->lane1_attempts >= CM_RETRAIN_MAX_ATTEMPTS)
+		return;
+	port->lane1_attempts++;
+	port->lane1_since_attempt = 0;
+	if (port->lane1_sample == CM_SAMPLE_CONNECTING) {
+		cm_hw_lane1_edge(h, p);
+	} else {
+		/* tb_switch_set_link_width(sw, TB_LINK_WIDTH_DUAL) */
+		port->bonded = true;
+		port->lane1_attempts = 0;
+	}
+}
+
 static inline void cm_reconcile(struct cm_host *h)
 {
 	int i;
@@ -412,14 +709,40 @@ static inline void cm_reconcile(struct cm_host *h)
 	if (!h->hotplug_armed)
 		return;
 
+	if (h->hint_age > 0)
+		h->hint_age++;
+
 	for (i = 0; i < 2; i++) {
-		if (h->port[i].xdomain && cm_lane_sample_unplugged(h, i) &&
+		struct cm_port *port = &h->port[i];
+		int sample = cm_lane_sample(h, i);
+
+		if (port->icm_busy > 0)
+			port->icm_busy--;
+		if (port->cooldown > 0)
+			port->cooldown--;
+		port->since_attempt++;
+		if (sample == port->last_sample) {
+			port->stable++;
+		} else {
+			port->last_sample = sample;
+			port->stable = 0;
+		}
+
+		if (port->xdomain && sample == CM_SAMPLE_UNPLUGGED &&
 		    !cm_peer_probe(h, i)) {
-			h->port[i].xdomain = false;	/* synthesized unplug */
+			port->xdomain = false;	/* synthesized unplug */
+			port->cooldown = CM_RETRAIN_QUIET_PASSES;
 			/* tb.c: if (gone) tb_port_kick_detection(port) */
 			cm_kick_detection(h, i);
-		} else if (!h->port[i].xdomain && h->port[i].link_up) {
-			h->port[i].xdomain = true;	/* synthesized plug */
+		} else if (!port->xdomain && sample == CM_SAMPLE_UP) {
+			port->xdomain = true;	/* synthesized plug */
+			port->attempts = 0;	/* episode over: it trained */
+		} else if (port->xdomain && sample == CM_SAMPLE_UP) {
+			cm_lane1_recover(h, i);
+		} else if (!port->xdomain &&
+			   (sample == CM_SAMPLE_CONNECTING ||
+			    sample == CM_SAMPLE_UNPLUGGED)) {
+			cm_plug_retrain(h, i, sample);
 		}
 	}
 }

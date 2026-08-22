@@ -303,6 +303,18 @@ struct tb_bandwidth_group {
  * @reconcile_synth: Which synthetic hotplug edge (%TB_RECONCILE_*) the
  *		     reconciliation worker already sent for the port's
  *		     CURRENT divergence, so it is sent once, not every pass.
+ * @retrain_last_state: Lane state the reconcile worker sampled on its
+ *			previous pass (stability tracking for the
+ *			plug-directed retrain).
+ * @retrain_state_since: jiffies the current lane state was first sampled.
+ * @retrain_teardown: jiffies of the last unplug teardown on this port
+ *		      (real or synthesized); the retrain quiet window is
+ *		      measured from it.
+ * @retrain_last_attempt: jiffies of the last plug-directed retrain.
+ * @plug_synth_at: jiffies the last plug was synthesized for this port, so
+ *		   a synthesized plug whose scan failed on a marginal link
+ *		   is retried at a bounded rate instead of never.
+ * @retrain_attempts: Plug-directed retrain attempts in the current episode.
  *
  * In USB4 terminology this structure represents an adapter (protocol or
  * lane adapter).
@@ -333,6 +345,12 @@ struct tb_port {
 	unsigned int max_bw;
 	bool redrive;
 	u8 reconcile_synth;
+	int retrain_last_state;
+	unsigned long retrain_state_since;
+	unsigned long retrain_teardown;
+	unsigned long retrain_last_attempt;
+	unsigned long plug_synth_at;
+	u8 retrain_attempts;
 };
 
 /* Values for tb_port.reconcile_synth */

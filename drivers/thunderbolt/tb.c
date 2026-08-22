@@ -70,6 +70,40 @@ module_param(port_retrain, bool, 0644);
 MODULE_PARM_DESC(port_retrain,
 		 "toggle lane disable to re-arm detection on unplugged root ports (default: true)");
 
+/*
+ * Plug-directed bounded retrain (tb_port_plug_retrain()). Unlike the blind
+ * port_retrain kick this one is allowed under a resident ICM: it only ever
+ * touches a port whose lane sample has been STABLE for the whole quiet
+ * window (so the firmware's port state machine has settled -- both 05d1e4c
+ * wedges were edges inside the firmware's transition window), it is
+ * directed by evidence of presence (a lane parked at CONNECTING, or the
+ * resident ICM's own connect notification for a latched-off lane), and it
+ * is bounded per episode. Kept in lockstep with cm_plug_retrain() in
+ * tests/negotiation_model.h.
+ */
+static bool plug_retrain = true;
+module_param(plug_retrain, bool, 0644);
+MODULE_PARM_DESC(plug_retrain,
+		 "bounded plug-directed lane retrain of stuck root ports (default: true)");
+
+/* Lane sample must be stable this long before a retrain may touch it. */
+#define TB_PLUG_RETRAIN_QUIET_MS	10000
+/* A resident-ICM connect notification older than this is stale. */
+#define TB_PLUG_RETRAIN_HINT_MAX_MS	60000
+/* Retrain attempts per episode; episode ends on training or idle reset. */
+#define TB_PLUG_RETRAIN_MAX_ATTEMPTS	3
+/* An UNPLUGGED port idle this long starts a fresh episode. */
+#define TB_PLUG_RETRAIN_IDLE_RESET_MS	30000
+/*
+ * A resident-ICM notification arriving this soon after our own retrain
+ * edge is attributed to that edge (the firmware announces the bounce it
+ * just consumed) and must NOT arm a new hint, or every retrain would seed
+ * the next one -- a self-sustaining bounce loop (proven in the model:
+ * cm_hw_lane_edge arming the hint turns the bounded retrain into a
+ * periodic blind one).
+ */
+#define TB_PLUG_RETRAIN_SELF_MS		5000
+
 #define TB_RECONCILE_PROBE_MS	500
 
 static unsigned int reconcile_probe_ms = TB_RECONCILE_PROBE_MS;
@@ -90,6 +124,17 @@ MODULE_PARM_DESC(reconcile_probe_ms,
  *		 runtime resume
  * @reconcile_work: Periodic reconciliation of root port lane state with
  *		    the software topology (synthesizes lost hotplug edges)
+ * @icm_hint: A resident ICM (force_sw_cm) emitted a hot-event
+ *	      notification of its own (TB_CFG_PKG_ICM_EVENT, the live
+ *	      "unexpected event 0xa"). Under a resident ICM the software
+ *	      CM receives NO native hot-plug packets -- the firmware eats
+ *	      the edges and speaks its own protocol -- so this is the only
+ *	      connect-request signal a latched-off port ever produces.
+ *	      Consumed (aged) by tb_port_plug_retrain().
+ * @icm_hint_at: jiffies @icm_hint was last set.
+ * @last_retrain_at: jiffies of the last plug-directed retrain edge on any
+ *		     port; ICM notifications inside the self-attribution
+ *		     window after it do not arm @icm_hint.
  * @groups: Bandwidth groups used in this domain.
  */
 struct tb_cm {
@@ -98,6 +143,9 @@ struct tb_cm {
 	bool hotplug_active;
 	struct delayed_work remove_work;
 	struct delayed_work reconcile_work;
+	bool icm_hint;
+	unsigned long icm_hint_at;
+	unsigned long last_retrain_at;
 	struct tb_bandwidth_group groups[MAX_GROUPS];
 };
 
@@ -2523,6 +2571,11 @@ static void tb_handle_hotplug(struct work_struct *work)
 	if (ev->unplug) {
 		tb_retimer_remove_all(port);
 
+		/* Quiet window for the plug-directed retrain: a resident
+		 * ICM processes the same physical unplug edge and must not
+		 * be raced with a host edge (the 2026-08-22 wedge). */
+		port->retrain_teardown = jiffies;
+
 		if (tb_port_has_remote(port)) {
 			tb_port_dbg(port, "switch unplugged\n");
 			tb_sw_set_unplugged(port->remote->sw);
@@ -2641,6 +2694,189 @@ static void tb_port_kick_detection(struct tb_port *port)
 }
 
 /*
+ * tb_port_plug_retrain() - bounded plug-directed retrain of a stuck port
+ * @port: Bare root null port (nothing enumerated) to consider
+ * @state: Lane state the reconcile pass just sampled
+ *
+ * The ICM-safe replacement for the blind kick on hosts where
+ * tb_port_kick_detection() is gated out (force_sw_cm, resident ICM). Two
+ * stuck signatures need a host lane edge to ever produce a device:
+ *
+ *  (a) detection latched off: the lane samples UNPLUGGED forever with a
+ *      powered peer on the cable (019<->008 class; ASM246x enclosures).
+ *      Under a resident ICM the ONLY plug signal is the firmware's own
+ *      connect notification (tcm->icm_hint) -- the lane never moves.
+ *  (b) half-trained: the lane parks at CONNECTING and never reaches UP
+ *      (live appmana-001 port 0:4, 2026-08-22: "failed to reach state
+ *      TB_PORT_UP. Ignoring port..."), which is neither present nor gone,
+ *      so the reconcile ignores it forever. The parked state itself is
+ *      the presence signal.
+ *
+ * Safety under the resident ICM (the 05d1e4c wedge class): both observed
+ * wedges were edges issued while the firmware's port state machine was
+ * mid-transition -- on a live link (2026-08-20) and 3 s after a real
+ * unplug (2026-08-22). So an edge is issued only when the firmware is
+ * provably quiescent on this port: the lane sample has been stable for
+ * TB_PLUG_RETRAIN_QUIET_MS, no teardown inside the window, the ICM's own
+ * notification has aged past it, and attempts are spaced by it. Live and
+ * CLx states are never touched. Attempts are capped per episode so a dead
+ * enclosure gets a bounded number of edges and a clean log, not a bounce
+ * loop. Kept in lockstep with cm_plug_retrain() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_plug_retrain(struct tb_port *port, int state)
+{
+	struct tb_cm *tcm = tb_priv(port->sw->tb);
+	unsigned long quiet = msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS);
+
+	if (!plug_retrain)
+		return;
+	if (!tb_port_is_null(port) || tb_is_upstream_port(port))
+		return;
+	if (state != TB_PORT_CONNECTING && state != TB_PORT_UNPLUGGED)
+		return;
+	if (time_before(jiffies, port->retrain_state_since + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_teardown + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_last_attempt + quiet))
+		return;
+
+	if (state == TB_PORT_UNPLUGGED) {
+		/*
+		 * Plug-directed only: an UNPLUGGED lane is indistinguishable
+		 * from an empty port, so it is bounced only on the resident
+		 * ICM's aged connect notification, once per notification.
+		 * Chain hosts get the blind start-time kick and native hot
+		 * events instead.
+		 */
+		if (!tcm->icm_hint)
+			return;
+		if (time_before(jiffies, tcm->icm_hint_at + quiet))
+			return;
+		if (time_after(jiffies, tcm->icm_hint_at +
+			       msecs_to_jiffies(TB_PLUG_RETRAIN_HINT_MAX_MS)))
+			return;
+		if (time_after_eq(port->retrain_last_attempt, tcm->icm_hint_at))
+			return;
+	}
+
+	if (port->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS) {
+		if (state == TB_PORT_UNPLUGGED &&
+		    time_after(jiffies, port->retrain_state_since +
+			       msecs_to_jiffies(TB_PLUG_RETRAIN_IDLE_RESET_MS)))
+			port->retrain_attempts = 0;
+		else
+			return;
+	}
+
+	port->retrain_attempts++;
+	port->retrain_last_attempt = jiffies;
+	tcm->last_retrain_at = jiffies;
+	tb_port_warn(port,
+		     "plug-directed lane retrain %u/%u (lane state %d)\n",
+		     port->retrain_attempts, TB_PLUG_RETRAIN_MAX_ATTEMPTS,
+		     state);
+	if (tb_port_disable(port))
+		return;
+	tb_port_disable(port->dual_link_port);
+	usleep_range(10, 100);
+	tb_port_enable(port);
+	tb_port_enable(port->dual_link_port);
+}
+
+/*
+ * tb_port_lane1_recover() - recover a degraded x1 link's secondary lane
+ * @tb: Domain
+ * @port: Primary lane adapter with an enumerated remote router
+ *
+ * The live appmana-001 0-3/0:4 signature (2026-08-22): the enclosure's
+ * router enumerates on lane 0, but lane 1 parks at CONNECTING, so
+ * tb_switch_lane_bonding_enable() fails once at enumeration ("0:4:
+ * failed to reach state TB_PORT_UP. Ignoring port..." is its
+ * tb_wait_for_port() on the dual_link_port) and the link runs degraded
+ * at x1 forever: neither the lane nor the bonding is ever retried
+ * upstream. On this enclosure the degraded link's PCIe payload never
+ * comes up at all ("Slot(4): No link" on an activated tunnel).
+ *
+ * Two bounded recoveries, same quiet-window discipline as
+ * tb_port_plug_retrain():
+ *
+ *  - lane 1 parked at CONNECTING: bounce the SECONDARY lane adapter
+ *    only. The primary -- carrying the router and its tunnels -- is
+ *    never touched: a full-connector bounce of a live link is the
+ *    2026-08-20 resident-ICM wedge and stays forbidden. The firmware's
+ *    per-connector state machine is settled (lane 0 stable UP, no
+ *    fresh notification), which is the regime the bounded edge is
+ *    allowed in.
+ *  - lane 1 UP but the link still x1: re-run lane bonding via
+ *    tb_switch_set_link_width(TB_LINK_WIDTH_DUAL) (no lane edge at
+ *    all). Upstream attempts bonding only at enumeration.
+ *
+ * Budget and stamps live on the SECONDARY lane adapter's retrain
+ * fields. Kept in lockstep with cm_lane1_recover() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_lane1_recover(struct tb *tb, struct tb_port *port)
+{
+	unsigned long quiet = msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS);
+	struct tb_port *lane1 = port->dual_link_port;
+	struct tb_cm *tcm = tb_priv(tb);
+	int state;
+
+	if (!plug_retrain || !lane1 || !port->remote)
+		return;
+	if (port->bonded) {
+		lane1->retrain_attempts = 0;
+		return;
+	}
+
+	state = tb_port_state(lane1);
+	if (state < 0)
+		return;
+	if (state != lane1->retrain_last_state) {
+		lane1->retrain_last_state = state;
+		lane1->retrain_state_since = jiffies;
+	}
+	if (state != TB_PORT_CONNECTING && state != TB_PORT_UP)
+		return;
+	if (time_before(jiffies, lane1->retrain_state_since + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_teardown + quiet))
+		return;
+	if (time_before(jiffies, lane1->retrain_last_attempt + quiet))
+		return;
+	/* A fresh firmware notification: the ICM may be mid-transition. */
+	if (tcm->icm_hint &&
+	    time_before(jiffies, tcm->icm_hint_at + quiet))
+		return;
+	if (lane1->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS)
+		return;
+
+	lane1->retrain_attempts++;
+	lane1->retrain_last_attempt = jiffies;
+
+	if (state == TB_PORT_CONNECTING) {
+		tcm->last_retrain_at = jiffies;
+		tb_port_warn(lane1,
+			     "secondary lane half-trained; lane-directed retrain %u/%u\n",
+			     lane1->retrain_attempts,
+			     TB_PLUG_RETRAIN_MAX_ATTEMPTS);
+		if (tb_port_disable(lane1))
+			return;
+		usleep_range(10, 100);
+		tb_port_enable(lane1);
+		return;
+	}
+
+	tb_port_warn(lane1,
+		     "secondary lane trained; enabling lane bonding %u/%u\n",
+		     lane1->retrain_attempts, TB_PLUG_RETRAIN_MAX_ATTEMPTS);
+	if (!tb_switch_set_link_width(port->remote->sw, TB_LINK_WIDTH_DUAL))
+		lane1->retrain_attempts = 0;
+}
+
+/*
  * tb_reconcile_peer_reachable() - bounded config-space probe of the child
  * @tb: Domain
  * @port: Root null port whose enumerated child/peer to probe
@@ -2752,6 +2988,14 @@ static void tb_reconcile_work(struct work_struct *work)
 			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
 		gone = state == TB_PORT_UNPLUGGED;
 
+		/* Lane-state stability, measured in wall time across passes:
+		 * the plug-directed retrain refuses to touch a port whose
+		 * sample moved inside the quiet window. */
+		if (state != port->retrain_last_state) {
+			port->retrain_last_state = state;
+			port->retrain_state_since = jiffies;
+		}
+
 		if ((port->xdomain || port->remote) &&
 		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
 			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
@@ -2773,6 +3017,7 @@ static void tb_reconcile_work(struct work_struct *work)
 				continue;
 			}
 			port->reconcile_synth = TB_RECONCILE_UNPLUG;
+			port->retrain_teardown = jiffies;
 			tb_port_warn(port,
 				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
 				     port->xdomain ? "XDomain present" :
@@ -2788,14 +3033,34 @@ static void tb_reconcile_work(struct work_struct *work)
 			if (gone)
 				tb_port_kick_detection(port);
 		} else if (!port->xdomain && !port->remote && present) {
-			if (port->reconcile_synth == TB_RECONCILE_PLUG)
-				continue;
+			port->retrain_attempts = 0;	/* episode over */
+			if (port->reconcile_synth == TB_RECONCILE_PLUG) {
+				/*
+				 * The synthesized plug's scan failed (a
+				 * marginal link answering the lane but not
+				 * config space) while the lane still reads
+				 * present: retry at a bounded rate instead
+				 * of latching the divergence forever.
+				 */
+				if (time_before(jiffies, port->plug_synth_at +
+						msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+					continue;
+			}
 			port->reconcile_synth = TB_RECONCILE_PLUG;
+			port->plug_synth_at = jiffies;
 			tb_port_warn(port,
 				     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
 				     state);
 			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
 					 false);
+		} else if (!port->xdomain && !port->remote &&
+			   (state == TB_PORT_CONNECTING ||
+			    state == TB_PORT_UNPLUGGED)) {
+			port->reconcile_synth = TB_RECONCILE_NONE;
+			tb_port_plug_retrain(port, state);
+		} else if (port->remote && present) {
+			port->reconcile_synth = TB_RECONCILE_NONE;
+			tb_port_lane1_recover(tb, port);
 		} else {
 			port->reconcile_synth = TB_RECONCILE_NONE;
 		}
@@ -3205,6 +3470,37 @@ static void tb_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 		return;
 	case TB_CFG_PKG_EVENT:
 		break;
+	case TB_CFG_PKG_ICM_EVENT:
+		if (tb_force_sw_cm) {
+			struct tb_cm *tcm = tb_priv(tb);
+
+			/*
+			 * The resident ICM eats the physical hot edges and
+			 * announces them in its own protocol, so the
+			 * software CM never receives a native hot-plug
+			 * packet on this host. Record the notification as a
+			 * connect-request hint for the plug-directed retrain
+			 * and pull the next reconcile pass forward so a
+			 * healthy plug is detected promptly. A notification
+			 * right after our own retrain edge is the firmware
+			 * announcing that edge back to us: never arm it as
+			 * a hint or every retrain seeds the next one.
+			 */
+			if (!time_before(jiffies, tcm->last_retrain_at +
+					 msecs_to_jiffies(TB_PLUG_RETRAIN_SELF_MS)) ||
+			    !tcm->last_retrain_at) {
+				tcm->icm_hint = true;
+				tcm->icm_hint_at = jiffies;
+			}
+			tb_dbg(tb,
+			       "resident ICM event %#x: scheduling reconcile\n",
+			       type);
+			if (tcm->hotplug_active && port_reconcile_ms)
+				mod_delayed_work(tb->wq, &tcm->reconcile_work,
+						 msecs_to_jiffies(500));
+			return;
+		}
+		fallthrough;
 	default:
 		tb_warn(tb, "unexpected event %#x, ignoring\n", type);
 		return;
