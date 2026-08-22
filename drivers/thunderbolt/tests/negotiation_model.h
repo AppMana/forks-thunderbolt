@@ -247,11 +247,28 @@ struct cm_port {
 	 * produce the same lie.
 	 */
 	bool state_perturbed;
+	/* Lane detection was re-armed by a PHY kick (tb_port_kick_detection). */
+	bool detection_rearmed;
 };
 
 struct cm_host {
 	struct cm_port port[2];
 	bool hotplug_armed;
+	/*
+	 * A broken ICM firmware is left resident and coexists with the
+	 * software CM (force_sw_cm). It consumes every hardware edge the
+	 * host generates on the lanes, racing its own port state machine.
+	 */
+	bool resident_icm;
+	/*
+	 * The resident firmware wedged on a host-generated lane edge.
+	 * 2026-08-20 appmana-001: kick on a live link -> control path hung.
+	 * 2026-08-22 appmana-001: kick after a REAL enclosure unplug ->
+	 * silent NHI MMIO-stall freeze three seconds later (journal stops
+	 * mid-line, no hung-task output, hard reset). Recovery requires
+	 * power removal (S5), not a warm reboot.
+	 */
+	bool icm_wedged;
 };
 
 /* Initial scan of one port: enumerate it only if the link is already up. */
@@ -342,6 +359,40 @@ static inline bool cm_peer_probe(const struct cm_host *h, int p)
 }
 
 /*
+ * Hardware model of a host-generated lane edge (the lane disable/enable
+ * bounce of tb_port_kick_detection()). On a host with no resident firmware
+ * it re-arms latched-off detection (the 019<->008 segment). On a host whose
+ * broken ICM is left resident, the firmware consumes the edge too, races
+ * its own port state machine and wedges: 2026-08-20 appmana-001 (kick on a
+ * live link -> control path hung) and 2026-08-22 appmana-001 (kick after a
+ * REAL enclosure unplug -> silent NHI MMIO-stall freeze).
+ */
+static inline void cm_hw_lane_edge(struct cm_host *h, int p)
+{
+	if (h->resident_icm) {
+		h->icm_wedged = true;
+		return;
+	}
+	h->port[p].detection_rearmed = true;
+}
+
+/*
+ * Lockstep with tb.c tb_port_kick_detection(): kick only an UNPLUGGED port,
+ * and NEVER under a resident ICM (the tb_force_sw_cm bail is the fix --
+ * removing it here like removing it in the driver wedges the resident-ICM
+ * host and the recovery test goes red). Chain hosts run the software CM
+ * natively: nothing else consumes the edge and the kick stays.
+ */
+static inline void cm_kick_detection(struct cm_host *h, int p)
+{
+	if (h->resident_icm)
+		return;
+	if (!cm_lane_sample_unplugged(h, p))
+		return;
+	cm_hw_lane_edge(h, p);
+}
+
+/*
  * Lockstep with tb.c tb_reconcile_work(): poll each null port's lane state
  * (tb_port_state) and synthesize the missing hotplug edge so the software
  * topology converges to the hardware:
@@ -363,10 +414,13 @@ static inline void cm_reconcile(struct cm_host *h)
 
 	for (i = 0; i < 2; i++) {
 		if (h->port[i].xdomain && cm_lane_sample_unplugged(h, i) &&
-		    !cm_peer_probe(h, i))
+		    !cm_peer_probe(h, i)) {
 			h->port[i].xdomain = false;	/* synthesized unplug */
-		else if (!h->port[i].xdomain && h->port[i].link_up)
+			/* tb.c: if (gone) tb_port_kick_detection(port) */
+			cm_kick_detection(h, i);
+		} else if (!h->port[i].xdomain && h->port[i].link_up) {
 			h->port[i].xdomain = true;	/* synthesized plug */
+		}
 	}
 }
 

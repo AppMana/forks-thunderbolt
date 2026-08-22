@@ -2606,10 +2606,25 @@ out:
  * detection itself was latched off. A port that is genuinely empty just
  * re-arms harmlessly. Deliberately-disabled ports (TB_PORT_DISABLED) are left
  * alone.
+ *
+ * Never under a resident ICM (force_sw_cm): the lane bounce is a hardware
+ * edge the coexisting 8051 firmware also consumes, and it races the
+ * firmware's own port state machine. 2026-08-20 appmana-001: a kick on a
+ * live link wedged the resident Titan Ridge ICM and hung the control path.
+ * 2026-08-22 appmana-001: the kick after a REAL enclosure unplug (lane
+ * state 7, peer probe dead) was followed within three seconds by a silent
+ * machine freeze of the known NHI MMIO-stall class -- journald stopped
+ * mid-line, no hung-task output, hard reset required. The re-arm recipe
+ * exists for detection-wedged chain segments (019<->008), which run the
+ * software CM natively with no resident firmware; on those nothing else
+ * consumes the edge and the kick stays. Same coexistence gate as CLx
+ * (tb_enable_clx()).
  */
 static void tb_port_kick_detection(struct tb_port *port)
 {
 	if (!port_retrain)
+		return;
+	if (tb_force_sw_cm)
 		return;
 	if (!tb_port_is_null(port) || tb_is_upstream_port(port))
 		return;

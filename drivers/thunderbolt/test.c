@@ -3391,6 +3391,61 @@ static void tb_test_cm_reconcile_perturbed_lane_keeps_live_link(struct kunit *te
 }
 
 /*
+ * Reproduces the 2026-08-22 appmana-001 enclosure freeze: under force_sw_cm
+ * (resident Titan Ridge ICM) an ASMedia 246x NVMe enclosure was surprise-
+ * removed; pciehp tore the tunneled PCIe subtree down cleanly, the
+ * reconcile correctly synthesized the lost unplug ("router present but
+ * lane state 7") and the teardown completed -- and then the post-teardown
+ * PHY kick (tb_port_kick_detection) bounced the root port's lanes. Three
+ * seconds later the machine froze silently (journal stops mid-line, no
+ * hung-task output, mouse alive, all disk I/O wedged): the resident ICM
+ * consumed the host-generated lane edge and wedged the NHI in the known
+ * MMIO-stall class. Same firmware failure as the 2026-08-20 live-link
+ * kick, now proven for a genuinely empty port too.
+ *
+ * Contract: a synthesized unplug must still converge the topology on every
+ * host, but the detection re-arm kick is issued ONLY where no resident
+ * firmware coexists (chain segments, where the 019<->008 latch-off it
+ * exists for was observed). Under a resident ICM the kick must never be
+ * issued: the enumerated child is the reconcile's to tear down, the lane
+ * edge is the firmware's to own.
+ */
+static void tb_test_cm_reconcile_no_kick_under_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	/* Resident-ICM host (force_sw_cm) with an enumerated child. */
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/* Real surprise removal; the hot event is lost. */
+	cm_link_down_lost(&h, 0);
+	KUNIT_EXPECT_FALSE(test, cm_peer_probe(&h, 0));
+	cm_reconcile(&h);
+
+	/* The unplug is still synthesized... */
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	/* ...but no lane edge is generated: the resident ICM stays sane. */
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_FALSE(test, h.port[0].detection_rearmed);
+
+	/* Chain host (no resident firmware): the 019<->008 re-arm stays. */
+	memset(&h, 0, sizeof(h));
+	h.port[1].link_up = true;
+	cm_scan_port(&h, 1);
+	cm_arm_hotplug(&h);
+	cm_link_down_lost(&h, 1);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[1].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[1].detection_rearmed);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+/*
  * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
  * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
  * tail from a half-trained-link read) fails every property read -- the healthy
@@ -3999,6 +4054,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
+	KUNIT_CASE(tb_test_cm_reconcile_no_kick_under_resident_icm),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
