@@ -20,6 +20,13 @@ ifneq ($(TBV_PKG_VERSION),)
 ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
 endif
 
+# Experiment builds only (TBV_DEBUGFS_WRITE=1 in the environment): compile in
+# the upstream debugfs register-write support so live register experiments can
+# run without bespoke driver code. Never set for released packages.
+ifneq ($(TBV_DEBUGFS_WRITE),)
+ccflags-y += -DCONFIG_USB4_DEBUGFS_WRITE=1
+endif
+
 obj-${CONFIG_USB4} := thunderbolt.o
 thunderbolt-objs := nhi.o nhi_ops.o ctl.o tb.o switch.o cap.o path.o tunnel.o eeprom.o
 thunderbolt-objs += domain.o dma_port.o icm.o property.o xdomain.o lc.o tmu.o usb4.o

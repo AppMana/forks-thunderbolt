@@ -442,6 +442,58 @@ out:
 
 	return ret < 0 ? ret : count;
 }
+
+/*
+ * Experiment builds only: send a USB4/TBT reset control packet to the
+ * router (tb_cfg_reset()). Write-only trigger for register-level recovery
+ * experiments on device routers; production builds compile this out with
+ * the rest of the write support.
+ */
+static ssize_t switch_reset_write(struct file *file, const char __user *user_buf,
+				  size_t count, loff_t *ppos)
+{
+	struct tb_switch *sw = file->private_data;
+	struct tb *tb = sw->tb;
+	struct tb_cfg_result res;
+	bool val;
+	int ret;
+
+	ret = kstrtobool_from_user(user_buf, count, &val);
+	if (ret)
+		return ret;
+	if (!val)
+		return -EINVAL;
+
+	pm_runtime_get_sync(&sw->dev);
+
+	if (mutex_lock_interruptible(&tb->lock)) {
+		ret = -ERESTARTSYS;
+		goto out;
+	}
+
+	/* User did hardware changes behind the driver's back */
+	add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+
+	res = tb_cfg_reset(tb->ctl, tb_route(sw));
+	tb_sw_warn(sw, "debugfs: reset packet sent, err=%d\n", res.err);
+	ret = res.err ? -EIO : 0;
+
+	mutex_unlock(&tb->lock);
+
+out:
+	pm_runtime_mark_last_busy(&sw->dev);
+	pm_runtime_put_autosuspend(&sw->dev);
+
+	return ret < 0 ? ret : count;
+}
+
+static const struct file_operations switch_reset_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = switch_reset_write,
+	.llseek = default_llseek,
+};
+
 #define DEBUGFS_MODE		0600
 #else
 #define port_regs_write		NULL
@@ -2415,6 +2467,11 @@ void tb_switch_debugfs_init(struct tb_switch *sw)
 	sw->debugfs_dir = debugfs_dir;
 	debugfs_create_file("regs", DEBUGFS_MODE, debugfs_dir, sw,
 			    &switch_regs_fops);
+#if IS_ENABLED(CONFIG_USB4_DEBUGFS_WRITE)
+	if (tb_route(sw))
+		debugfs_create_file("reset", 0200, debugfs_dir, sw,
+				    &switch_reset_fops);
+#endif
 	if (sw->drom)
 		debugfs_create_blob("drom", 0400, debugfs_dir, &sw->drom_blob);
 
