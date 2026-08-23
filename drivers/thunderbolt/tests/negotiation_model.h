@@ -235,6 +235,7 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
  * Lane-state samples as tb_reconcile_work() reads them (tb_regs.h
  * enum tb_port_state). Only the three the reconcile logic branches on.
  */
+#define CM_SAMPLE_DISABLED	0	/* TB_PORT_DISABLED: lane held down */
 #define CM_SAMPLE_CONNECTING	1	/* TB_PORT_CONNECTING: half-trained */
 #define CM_SAMPLE_UP		2	/* TB_PORT_UP */
 #define CM_SAMPLE_UNPLUGGED	7	/* TB_PORT_UNPLUGGED */
@@ -252,6 +253,24 @@ static inline bool coreset_run(struct coreset_link *L, int rounds)
 #define CM_RETRAIN_QUIET_PASSES	5
 #define CM_RETRAIN_HINT_MAX_PASSES 30	/* TB_PLUG_RETRAIN_HINT_MAX_MS */
 #define CM_RETRAIN_MAX_ATTEMPTS	3
+
+/*
+ * Full-connector software replug (tb_port_connector_replug_*). Mirrors
+ * TB_CONNECTOR_REPLUG_HOLD_MS / TB_CONNECTOR_REPLUG_MAX_ATTEMPTS /
+ * TB_CONNECTOR_REPLUG_IDLE_RESET_MS in reconcile passes. The hold MUST
+ * exceed the ICM busy window: the disable is itself an edge the resident
+ * firmware consumes, and the re-enable may only be issued after the
+ * firmware has settled (the 2026-08-22 wedge was an edge 3 s after a real
+ * unplug -- i.e. inside the busy window that follows the previous edge).
+ */
+#define CM_REPLUG_HOLD_PASSES	6
+#define CM_REPLUG_MAX_ATTEMPTS	2
+#define CM_REPLUG_IDLE_RESET_PASSES 300
+
+/* tb_port replug phase (cm_port.replug_phase) */
+#define CM_REPLUG_IDLE		0
+#define CM_REPLUG_TEARDOWN	1
+#define CM_REPLUG_HELD		2
 
 struct cm_port {
 	bool link_up;	/* peer's link has trained */
@@ -322,6 +341,28 @@ struct cm_port {
 	int lane1_since_attempt;
 	int lane1_attempts;
 	int lane1_edges;	/* host edges on the SECONDARY lane only */
+	/*
+	 * The secondary lane trains ONLY on a full-connector simultaneous
+	 * train: both lanes disabled together, held down, then enabled
+	 * together, then a fresh enumeration. Live 2026-08-23 appmana-001
+	 * (the same ASM246x/KIOXIA enclosure the lane1 machinery was built
+	 * on): 3/3 single-lane bounces with any spacing bounced off (host
+	 * lane 1 parked CONNECTING, device lane 1 UNPLUGGED -- the device
+	 * arms its lane-1 receiver only during the connector handshake),
+	 * device-side DPR/SLI/PE pokes all inert, while both-lanes-down
+	 * 12 s + both-up + rescan trained the link to bonded x2 20 Gb/s.
+	 * Yesterday's "marginal cable seat, only a physical replug
+	 * recovers" conclusion is retired by that run: the replug's
+	 * essential ingredient is the full-connector electrical train,
+	 * which software CAN issue.
+	 */
+	bool lane1_full_train_only;
+	bool lanes_held;	/* both lane adapters held disabled */
+	int replug_phase;	/* CM_REPLUG_* */
+	int replug_held;	/* passes both lanes have been held down */
+	int replug_attempts;
+	int replug_since_attempt;
+	int connector_edges;	/* full-connector (both-lane) edges */
 };
 
 struct cm_host {
@@ -389,6 +430,7 @@ static inline void cm_arm_hotplug(struct cm_host *h)
 		 * reads as "long ago", not "just now"). */
 		h->port[i].since_attempt = CM_RETRAIN_HINT_MAX_PASSES + 1;
 		h->port[i].lane1_since_attempt = CM_RETRAIN_HINT_MAX_PASSES + 1;
+		h->port[i].replug_since_attempt = CM_REPLUG_IDLE_RESET_PASSES + 1;
 		cm_scan_port(h, i);
 	}
 }
@@ -485,6 +527,23 @@ static inline void cm_enclosure_attach_bonding_stuck(struct cm_host *h, int p,
 }
 
 /*
+ * The live 2026-08-23 refinement of the signature above: the secondary
+ * lane is NOT dead -- it trains on a full-connector simultaneous train
+ * (physical replug, or the software replug) -- but no single-lane edge
+ * ever wakes it. @dead additionally models a secondary that not even a
+ * full-connector train recovers.
+ */
+static inline void cm_enclosure_attach_bonding_stuck_full_train(struct cm_host *h,
+								int p, bool dead)
+{
+	h->port[p].link_up = true;
+	h->port[p].lane1_sample = CM_SAMPLE_CONNECTING;
+	h->port[p].lane1_full_train_only = true;
+	h->port[p].lane1_dead = dead;
+	cm_icm_notices_edge(h, p);
+}
+
+/*
  * What tb_reconcile_work() actually observes: one lane-state register read.
  * A dead peer reads UNPLUGGED -- but so does a live link whose state was
  * perturbed by a coexisting master or a CLx transition (state_perturbed),
@@ -495,6 +554,8 @@ static inline int cm_lane_sample(const struct cm_host *h, int p)
 {
 	const struct cm_port *port = &h->port[p];
 
+	if (port->lanes_held)
+		return CM_SAMPLE_DISABLED;
 	if (port->state_perturbed || port->latched_off)
 		return CM_SAMPLE_UNPLUGGED;
 	if (port->link_up)
@@ -650,10 +711,132 @@ static inline void cm_hw_lane1_edge(struct cm_host *h, int p)
 		h->icm_wedged = true;
 		return;
 	}
-	if (!port->lane1_dead)
+	if (!port->lane1_dead && !port->lane1_full_train_only)
 		port->lane1_sample = CM_SAMPLE_UP;
 	if (h->resident_icm)
 		port->icm_busy = CM_ICM_BUSY_PASSES;
+}
+
+/*
+ * Hardware model of the full-connector re-enable edge that ends a
+ * software replug: both lanes were disabled TOGETHER, held for @held
+ * passes, and are now enabled TOGETHER. This is the replug-equivalent
+ * electrical train (live 2026-08-23 appmana-001): the peer re-runs its
+ * connector handshake, so BOTH lanes train -- including a secondary that
+ * single-lane edges can never wake (lane1_full_train_only).
+ *
+ * Wedge rules (the rig's safety contract):
+ *  - an edge while the resident firmware is mid-transition (icm_busy)
+ *    races it: the 05d1e4c/2026-08-22 class;
+ *  - an edge on a connector whose router is still enumerated is the
+ *    2026-08-20 live-primary bounce and stays forbidden -- the replug
+ *    must tear the software topology down FIRST.
+ * A hold shorter than the firmware's busy window is a glitch edge, not a
+ * replug: the disable edge set the firmware busy, and enabling inside
+ * that window is the same race.
+ */
+static inline void cm_hw_connector_edge(struct cm_host *h, int p, int held)
+{
+	struct cm_port *port = &h->port[p];
+
+	port->connector_edges++;
+	if (h->resident_icm && port->icm_busy > 0) {
+		h->icm_wedged = true;
+		return;
+	}
+	if (port->xdomain) {
+		h->icm_wedged = true;
+		return;
+	}
+	if (held < CM_REPLUG_HOLD_PASSES)
+		return;
+	port->detection_rearmed = true;
+	port->latched_off = false;
+	if (!port->dead) {
+		port->half_trained = false;
+		port->link_up = true;
+		if (port->lane1_sample && !port->lane1_dead)
+			port->lane1_sample = CM_SAMPLE_UP;
+	}
+	if (h->resident_icm)
+		port->icm_busy = CM_ICM_BUSY_PASSES;
+}
+
+/*
+ * Lockstep with tb.c tb_port_connector_replug_start(): once the bounded
+ * single-lane attempts on a CONNECTING secondary are exhausted, escalate
+ * to a full-connector software replug. Keys ONLY on a secondary parked at
+ * CONNECTING -- hardware provably present on lane 1 -- never on an absent
+ * or UNPLUGGED secondary (a single-lane cable must be left alone). The
+ * caller (cm_lane1_recover) has already enforced stability, cooldown,
+ * spacing and hint-age discipline. Episodes are budgeted, and the budget
+ * re-arms only after a long idle window, so permanently-degraded hardware
+ * gets a bounded, slow-rate retry instead of a teardown loop.
+ */
+static inline void cm_connector_replug_start(struct cm_host *h, int p)
+{
+	struct cm_port *port = &h->port[p];
+
+	if (port->lane1_sample != CM_SAMPLE_CONNECTING)
+		return;
+	if (port->replug_phase != CM_REPLUG_IDLE)
+		return;
+	if (port->replug_since_attempt < CM_RETRAIN_QUIET_PASSES)
+		return;
+	if (port->replug_attempts >= CM_REPLUG_MAX_ATTEMPTS) {
+		if (port->replug_since_attempt < CM_REPLUG_IDLE_RESET_PASSES)
+			return;
+		port->replug_attempts = 0;
+	}
+	port->replug_attempts++;
+	port->replug_since_attempt = 0;
+	/* tb.c queues the synthesized unplug here (tb_queue_hotplug). */
+	port->replug_phase = CM_REPLUG_TEARDOWN;
+}
+
+/*
+ * Lockstep with tb.c tb_port_connector_replug_step(): the phase machine
+ * the reconcile steps while an episode is in flight.
+ *
+ *  TEARDOWN: the queued synthesized unplug has landed, so the software
+ *  topology below the connector is gone; disable BOTH lanes together.
+ *  The disable is itself an edge the resident firmware consumes.
+ *
+ *  HELD: keep both lanes down for the full hold (longer than the
+ *  firmware's busy window, and long enough that the peer treats the next
+ *  enable as a fresh connector handshake -- the live 2026-08-23 recovery
+ *  used 12 s where sub-ms glitch edges failed). A fresh firmware
+ *  notification extends the hold: re-enabling into the firmware's busy
+ *  window is the 2026-08-22 wedge recipe. Then enable both lanes
+ *  together; the fresh train rejoins the normal reconcile flow (lane UP,
+ *  nothing enumerated -> synthesized plug -> bonding at enumeration).
+ */
+static inline void cm_connector_replug_step(struct cm_host *h, int p)
+{
+	struct cm_port *port = &h->port[p];
+
+	switch (port->replug_phase) {
+	case CM_REPLUG_TEARDOWN:
+		port->xdomain = false;
+		port->cooldown = CM_RETRAIN_QUIET_PASSES;
+		port->lanes_held = true;
+		port->replug_held = 0;
+		if (h->resident_icm)
+			port->icm_busy = CM_ICM_BUSY_PASSES;
+		port->replug_phase = CM_REPLUG_HELD;
+		break;
+	case CM_REPLUG_HELD:
+		port->replug_held++;
+		if (port->replug_held < CM_REPLUG_HOLD_PASSES)
+			break;
+		/* a fresh firmware notification: extend the hold */
+		if (h->hint_age > 0 && h->hint_age <= CM_RETRAIN_QUIET_PASSES)
+			break;
+		port->lanes_held = false;
+		cm_hw_connector_edge(h, p, port->replug_held);
+		port->replug_phase = CM_REPLUG_IDLE;
+		break;
+	}
 }
 
 /*
@@ -662,7 +845,8 @@ static inline void cm_hw_lane1_edge(struct cm_host *h, int p)
  * SECONDARY lane only), and late lane bonding once the secondary lane is
  * up (upstream runs bonding only at enumeration and never again --
  * tb_switch_set_link_width(TB_LINK_WIDTH_DUAL) is the retry). Same quiet
- * -window/budget discipline as cm_plug_retrain().
+ * -window/budget discipline as cm_plug_retrain(). Exhausted single-lane
+ * budgets escalate to the bounded full-connector software replug.
  */
 static inline void cm_lane1_recover(struct cm_host *h, int p)
 {
@@ -689,8 +873,10 @@ static inline void cm_lane1_recover(struct cm_host *h, int p)
 	/* a fresh firmware notification: the ICM may be mid-transition */
 	if (h->hint_age > 0 && h->hint_age <= CM_RETRAIN_QUIET_PASSES)
 		return;
-	if (port->lane1_attempts >= CM_RETRAIN_MAX_ATTEMPTS)
+	if (port->lane1_attempts >= CM_RETRAIN_MAX_ATTEMPTS) {
+		cm_connector_replug_start(h, p);
 		return;
+	}
 	port->lane1_attempts++;
 	port->lane1_since_attempt = 0;
 	if (port->lane1_sample == CM_SAMPLE_CONNECTING) {
@@ -721,11 +907,17 @@ static inline void cm_reconcile(struct cm_host *h)
 		if (port->cooldown > 0)
 			port->cooldown--;
 		port->since_attempt++;
+		port->replug_since_attempt++;
 		if (sample == port->last_sample) {
 			port->stable++;
 		} else {
 			port->last_sample = sample;
 			port->stable = 0;
+		}
+
+		if (port->replug_phase != CM_REPLUG_IDLE) {
+			cm_connector_replug_step(h, i);
+			continue;
 		}
 
 		if (port->xdomain && sample == CM_SAMPLE_UNPLUGGED &&
@@ -737,6 +929,16 @@ static inline void cm_reconcile(struct cm_host *h)
 		} else if (!port->xdomain && sample == CM_SAMPLE_UP) {
 			port->xdomain = true;	/* synthesized plug */
 			port->attempts = 0;	/* episode over: it trained */
+			/*
+			 * tb_scan_port(): lane bonding is attempted at
+			 * enumeration; with the secondary lane up it
+			 * succeeds and the episodes are over.
+			 */
+			if (port->lane1_sample == CM_SAMPLE_UP) {
+				port->bonded = true;
+				port->lane1_attempts = 0;
+				port->replug_attempts = 0;
+			}
 		} else if (port->xdomain && sample == CM_SAMPLE_UP) {
 			cm_lane1_recover(h, i);
 		} else if (!port->xdomain &&

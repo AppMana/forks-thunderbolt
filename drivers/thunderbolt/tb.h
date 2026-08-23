@@ -315,6 +315,13 @@ struct tb_bandwidth_group {
  *		   a synthesized plug whose scan failed on a marginal link
  *		   is retried at a bounded rate instead of never.
  * @retrain_attempts: Plug-directed retrain attempts in the current episode.
+ * @replug_phase: %TB_REPLUG_* phase of a full-connector software replug
+ *		  in flight on this (primary) lane adapter.
+ * @replug_attempts: Connector replug episodes since the budget last
+ *		     re-armed (bonding success or a long idle window).
+ * @replug_hold_since: jiffies both lane adapters were disabled together.
+ * @replug_last_attempt: jiffies the last replug episode started or its
+ *			 lanes were re-enabled (spacing and idle re-arm).
  *
  * In USB4 terminology this structure represents an adapter (protocol or
  * lane adapter).
@@ -351,12 +358,21 @@ struct tb_port {
 	unsigned long retrain_last_attempt;
 	unsigned long plug_synth_at;
 	u8 retrain_attempts;
+	u8 replug_phase;
+	u8 replug_attempts;
+	unsigned long replug_hold_since;
+	unsigned long replug_last_attempt;
 };
 
 /* Values for tb_port.reconcile_synth */
 #define TB_RECONCILE_NONE	0
 #define TB_RECONCILE_UNPLUG	1
 #define TB_RECONCILE_PLUG	2
+
+/* Values for tb_port.replug_phase */
+#define TB_REPLUG_IDLE		0
+#define TB_REPLUG_TEARDOWN	1
+#define TB_REPLUG_HELD		2
 
 /**
  * struct usb4_port - USB4 port device

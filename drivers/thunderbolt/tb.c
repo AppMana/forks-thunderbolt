@@ -104,6 +104,29 @@ MODULE_PARM_DESC(plug_retrain,
  */
 #define TB_PLUG_RETRAIN_SELF_MS		5000
 
+/*
+ * Full-connector software replug (tb_port_connector_replug_*): both lane
+ * adapters disabled TOGETHER, held down, then enabled TOGETHER, then a
+ * fresh enumeration. Live 2026-08-23 appmana-001 (ASM246x/KIOXIA
+ * enclosure, resident Titan Ridge ICM): the peer arms its secondary-lane
+ * receiver only during the connector handshake, so no single-lane edge
+ * ever wakes it -- 3/3 bounded lane-directed retrains bounced off, and
+ * device-side DPR/SLI/PE pokes were inert -- while both-lanes-down 12 s +
+ * both-up + rescan trained the link to bonded x2 20 Gb/s with zero
+ * firmware races. The hold must exceed the resident ICM's settling
+ * window: the disable is itself an edge the firmware consumes, and
+ * re-enabling inside that window is the 2026-08-22 wedge recipe.
+ */
+#define TB_CONNECTOR_REPLUG_HOLD_MS		12000
+/* Replug episodes before the port is left alone (until idle re-arm). */
+#define TB_CONNECTOR_REPLUG_MAX_ATTEMPTS	2
+/*
+ * A stuck secondary idle this long since the last episode re-arms the
+ * budget: permanently-degraded hardware gets a slow bounded retry, not a
+ * teardown loop.
+ */
+#define TB_CONNECTOR_REPLUG_IDLE_RESET_MS	600000
+
 #define TB_RECONCILE_PROBE_MS	500
 
 static unsigned int reconcile_probe_ms = TB_RECONCILE_PROBE_MS;
@@ -2786,6 +2809,130 @@ static void tb_port_plug_retrain(struct tb_port *port, int state)
 }
 
 /*
+ * tb_port_connector_replug_start() - begin a full-connector software replug
+ * @tb: Domain
+ * @port: Primary lane adapter whose secondary is stuck at CONNECTING
+ * @lane1_state: The secondary lane state the caller just sampled
+ *
+ * Escalation for the exhausted single-lane budget: the live 2026-08-23
+ * appmana-001 evidence shows a peer (ASM246x) that arms its secondary
+ * -lane receiver only during the connector handshake, so no number of
+ * single-lane edges can wake it, while a full-connector electrical train
+ * -- the replug's essential ingredient -- can be issued from software:
+ * tear the topology down, disable BOTH lanes together, hold, enable
+ * together, and re-enumerate through the normal synthesized-plug path,
+ * where bonding-at-enumeration finds both lanes up.
+ *
+ * Keys ONLY on a secondary parked at CONNECTING (hardware provably
+ * present on lane 1); an absent or UNPLUGGED secondary (single-lane
+ * cable) is never touched. The caller has already enforced stability,
+ * cooldown, spacing and hint-age discipline; here the episodes are
+ * budgeted and the budget re-arms only after a long idle window. Kept in
+ * lockstep with cm_connector_replug_start() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_connector_replug_start(struct tb *tb, struct tb_port *port,
+					   int lane1_state)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	if (lane1_state != TB_PORT_CONNECTING)
+		return;
+	if (port->replug_phase != TB_REPLUG_IDLE)
+		return;
+	if (time_before(jiffies, port->replug_last_attempt +
+			msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+		return;
+	if (port->replug_attempts >= TB_CONNECTOR_REPLUG_MAX_ATTEMPTS) {
+		if (time_before(jiffies, port->replug_last_attempt +
+				msecs_to_jiffies(TB_CONNECTOR_REPLUG_IDLE_RESET_MS)))
+			return;
+		port->replug_attempts = 0;
+	}
+
+	port->replug_attempts++;
+	port->replug_last_attempt = jiffies;
+	tcm->last_retrain_at = jiffies;
+	port->replug_phase = TB_REPLUG_TEARDOWN;
+	port->reconcile_synth = TB_RECONCILE_UNPLUG;
+	tb_port_warn(port,
+		     "connector replug %u/%u: secondary lane needs a full-connector train; tearing down\n",
+		     port->replug_attempts, TB_CONNECTOR_REPLUG_MAX_ATTEMPTS);
+	tb_queue_hotplug(tb, tb_route(port->sw), port->port, true);
+}
+
+/*
+ * tb_port_connector_replug_step() - step an in-flight connector replug
+ * @tb: Domain
+ * @port: Primary lane adapter with a replug episode in flight
+ *
+ * TEARDOWN: wait (bounded) for the queued synthesized unplug to land so
+ * the software topology below the connector is gone -- a bounce of an
+ * enumerated primary is the 2026-08-20 wedge and stays forbidden -- then
+ * disable BOTH lane adapters together.
+ *
+ * HELD: keep the lanes down for the full hold, extended while a fresh
+ * resident-ICM notification is in flight (re-enabling into the
+ * firmware's busy window is the 2026-08-22 wedge recipe), then enable
+ * both together. The fresh full-connector train rejoins the normal
+ * reconcile flow: lane UP with nothing enumerated synthesizes a plug and
+ * enumeration bonds the trained pair. Kept in lockstep with
+ * cm_connector_replug_step() in tests/negotiation_model.h.
+ */
+static void tb_port_connector_replug_step(struct tb *tb, struct tb_port *port)
+{
+	struct tb_port *lane1 = port->dual_link_port;
+	struct tb_cm *tcm = tb_priv(tb);
+
+	if (!lane1) {
+		port->replug_phase = TB_REPLUG_IDLE;
+		return;
+	}
+
+	switch (port->replug_phase) {
+	case TB_REPLUG_TEARDOWN:
+		if (port->remote || port->xdomain) {
+			/* The queued synthesized unplug has not landed yet. */
+			if (time_after(jiffies, port->replug_last_attempt +
+				       msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS))) {
+				tb_port_warn(port,
+					     "connector replug: teardown did not complete; aborting\n");
+				port->replug_phase = TB_REPLUG_IDLE;
+			}
+			return;
+		}
+		tb_port_warn(port, "connector replug: holding both lanes down\n");
+		if (tb_port_disable(port)) {
+			port->replug_phase = TB_REPLUG_IDLE;
+			return;
+		}
+		tb_port_disable(lane1);
+		port->replug_hold_since = jiffies;
+		tcm->last_retrain_at = jiffies;
+		port->replug_phase = TB_REPLUG_HELD;
+		return;
+	case TB_REPLUG_HELD:
+		if (time_before(jiffies, port->replug_hold_since +
+				msecs_to_jiffies(TB_CONNECTOR_REPLUG_HOLD_MS)))
+			return;
+		/* A fresh firmware notification: extend the hold. */
+		if (tcm->icm_hint &&
+		    time_before(jiffies, tcm->icm_hint_at +
+				msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+			return;
+		tb_port_warn(port, "connector replug: re-enabling both lanes\n");
+		tb_port_enable(port);
+		tb_port_enable(lane1);
+		tcm->last_retrain_at = jiffies;
+		port->replug_last_attempt = jiffies;
+		lane1->retrain_last_attempt = jiffies;
+		port->retrain_state_since = jiffies;
+		port->replug_phase = TB_REPLUG_IDLE;
+		return;
+	}
+}
+
+/*
  * tb_port_lane1_recover() - recover a degraded x1 link's secondary lane
  * @tb: Domain
  * @port: Primary lane adapter with an enumerated remote router
@@ -2828,6 +2975,7 @@ static void tb_port_lane1_recover(struct tb *tb, struct tb_port *port)
 		return;
 	if (port->bonded) {
 		lane1->retrain_attempts = 0;
+		port->replug_attempts = 0;
 		return;
 	}
 
@@ -2850,8 +2998,10 @@ static void tb_port_lane1_recover(struct tb *tb, struct tb_port *port)
 	if (tcm->icm_hint &&
 	    time_before(jiffies, tcm->icm_hint_at + quiet))
 		return;
-	if (lane1->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS)
+	if (lane1->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS) {
+		tb_port_connector_replug_start(tb, port, state);
 		return;
+	}
 
 	lane1->retrain_attempts++;
 	lane1->retrain_last_attempt = jiffies;
@@ -2994,6 +3144,11 @@ static void tb_reconcile_work(struct work_struct *work)
 		if (state != port->retrain_last_state) {
 			port->retrain_last_state = state;
 			port->retrain_state_since = jiffies;
+		}
+
+		if (port->replug_phase != TB_REPLUG_IDLE) {
+			tb_port_connector_replug_step(tb, port);
+			continue;
 		}
 
 		if ((port->xdomain || port->remote) &&
@@ -3519,9 +3674,25 @@ static void tb_stop(struct tb *tb)
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
+	struct tb_port *port;
 
 	cancel_delayed_work(&tcm->reconcile_work);
 	cancel_delayed_work(&tcm->remove_work);
+	/*
+	 * A connector replug caught mid-hold must not strand the lanes
+	 * disabled across a driver stop: the next start would read
+	 * TB_PORT_DISABLED forever (deliberately-disabled ports are left
+	 * alone by design).
+	 */
+	if (tb->root_switch) {
+		tb_switch_for_each_port(tb->root_switch, port) {
+			if (port->replug_phase == TB_REPLUG_HELD) {
+				tb_port_enable(port);
+				tb_port_enable(port->dual_link_port);
+			}
+			port->replug_phase = TB_REPLUG_IDLE;
+		}
+	}
 	/* tunnels are only present after everything has been initialized */
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
 		/*

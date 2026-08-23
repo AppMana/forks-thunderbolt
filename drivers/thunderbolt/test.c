@@ -3637,10 +3637,11 @@ static void tb_test_cm_lane1_bonding_recovery_resident_icm(struct kunit *test)
 }
 
 /*
- * A secondary lane that can never train (marginal cable seat): bounded
- * lane-directed attempts, then the link is left alone at x1 -- degraded
- * but working, clean logs, no wedge. Exactly the "prove driver-side
- * behavior correct on dead hardware" contract.
+ * A secondary lane that can never train: bounded lane-directed attempts
+ * (and, since the connector-replug escalation, bounded full-connector
+ * episodes -- see the replug tests), then the link is left alone at x1
+ * -- degraded but working, clean logs, no wedge. Exactly the "prove
+ * driver-side behavior correct on dead hardware" contract.
  */
 static void tb_test_cm_lane1_retrain_bounded_dead_lane(struct kunit *test)
 {
@@ -3657,6 +3658,121 @@ static void tb_test_cm_lane1_retrain_bounded_dead_lane(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, h.port[0].bonded);
 	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
 	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, CM_RETRAIN_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
+/*
+ * The live 2026-08-23 appmana-001 recovery: the ASM246x enclosure's
+ * secondary lane never wakes on single-lane edges (host lane 1 parked
+ * CONNECTING, device lane 1 UNPLUGGED -- its receiver arms only during
+ * the connector handshake), but a full-connector software replug (both
+ * lanes disabled together, held past the firmware's busy window, enabled
+ * together, then a fresh enumeration) trains the link to bonded x2.
+ * Contract: once the bounded single-lane attempts are exhausted the
+ * reconcile escalates to a bounded connector replug -- tearing the
+ * software topology down FIRST (a bounce of an enumerated primary is the
+ * 2026-08-20 wedge), holding both lanes down together, re-enabling
+ * together, and re-enumerating through the normal synthesized-plug path,
+ * where bonding-at-enumeration finds both lanes up.
+ */
+static void tb_test_cm_connector_replug_recovers_full_train_only_lane(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	/* Single-lane attempts exhaust first, then ONE connector replug. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, CM_RETRAIN_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, 1);
+	/* No single-lane glitch edge ever touched the primary. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
+/*
+ * A secondary lane that not even a full-connector train recovers: the
+ * replug episodes are bounded, and -- critically -- each failed episode
+ * still brings the ROUTER back (the primary lane is not dead, so the
+ * fresh enumeration lands at x1). The port must never be left torn down
+ * or with its lanes held.
+ */
+static void tb_test_cm_connector_replug_bounded_when_lane1_dead(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, CM_REPLUG_IDLE_RESET_PASSES - 50);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* x1 still works */
+	KUNIT_EXPECT_FALSE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_FALSE(test, h.port[0].lanes_held);
+	KUNIT_EXPECT_EQ(test, h.port[0].replug_phase, CM_REPLUG_IDLE);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, CM_REPLUG_MAX_ATTEMPTS);
+}
+
+/*
+ * A firmware notification lands while the lanes are held down (another
+ * physical event on the domain): the re-enable edge must NOT be issued
+ * into the firmware's busy window -- the hold extends until the
+ * notification has aged, and the episode still completes. Enabling on
+ * the raw hold expiry regardless is the 2026-08-22 wedge recipe (an edge
+ * 3 s after a real unplug).
+ */
+static void tb_test_cm_connector_replug_defers_to_fresh_icm_event(struct kunit *test)
+{
+	struct cm_host h;
+	int guard = 0;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/false);
+	while (h.port[0].replug_phase != CM_REPLUG_HELD && guard++ < 60)
+		cm_reconcile(&h);
+	KUNIT_ASSERT_EQ(test, h.port[0].replug_phase, CM_REPLUG_HELD);
+
+	cm_icm_notices_edge(&h, 0);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+/*
+ * A single-lane cable (no secondary lane modelled) enumerates x1 and is
+ * left completely alone: the connector replug keys on a secondary lane
+ * parked at CONNECTING -- hardware provably present on lane 1 -- never on
+ * a lane that simply is not there.
+ */
+static void tb_test_cm_connector_replug_leaves_single_lane_cable(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;	/* lane1_sample stays 0 */
+	cm_arm_hotplug(&h);
+
+	cm_run_reconcile(&h, 200);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, 0);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, 0);
 	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
 }
 
@@ -4276,6 +4392,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_plug_retrain_post_unplug_cooldown),
 	KUNIT_CASE(tb_test_cm_lane1_bonding_recovery_resident_icm),
 	KUNIT_CASE(tb_test_cm_lane1_retrain_bounded_dead_lane),
+	KUNIT_CASE(tb_test_cm_connector_replug_recovers_full_train_only_lane),
+	KUNIT_CASE(tb_test_cm_connector_replug_bounded_when_lane1_dead),
+	KUNIT_CASE(tb_test_cm_connector_replug_defers_to_fresh_icm_event),
+	KUNIT_CASE(tb_test_cm_connector_replug_leaves_single_lane_cable),
 	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
