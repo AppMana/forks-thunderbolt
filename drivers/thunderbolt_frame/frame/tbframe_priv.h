@@ -29,6 +29,58 @@
 #define TBFRAME_SOF_MASK	BIT(TBFRAME_PDF_SOF)
 #define TBFRAME_EOF_MASK	(BIT(TBFRAME_PDF_DATA) | BIT(TBFRAME_PDF_KEEPALIVE))
 
+/*
+ * Shared-tunnel coexistence model (tbnet + tbframe on ONE DMA tunnel).
+ *
+ * Under a resident ICM connection manager (force_sw_cm=N, the discrete
+ * Titan/Maple Ridge controllers this stack runs on) the firmware enables
+ * exactly ONE DMA tunnel per XDomain: ICM_APPROVE_XDOMAIN is keyed by
+ * route + remote_uuid and ICM_DISCONNECT_XDOMAIN carries no HopIDs, so a
+ * second XDomain service that approves the same XDomain is ACKed (returns 0)
+ * but its lane-port ingress hop is left with the enable bit clear -> 0 RX.
+ * Register-proven on the fleet: on any link exactly one in_hop is enabled,
+ * the first approver's; the second service (tbnet OR tbframe, whichever lost
+ * the HopID race) is a silent zombie. Two independent tunnels are therefore
+ * impossible on a resident-ICM link -- true coexistence must MULTIPLEX both
+ * services onto the single approved tunnel, demultiplexed by the frame-type
+ * (EOF) PDF nibble the NHI writes back into each RX descriptor.
+ *
+ * The two services' PDF namespaces are disjoint by construction (tbframe.h
+ * notes "0x1/0x2 are tbnet's"), which is what makes one ring able to carry
+ * both without ambiguity:
+ *   tbnet  : PDF 1 = frame-start, 2 = frame-end
+ *   tbframe: PDF 4 = data, 5 = keepalive, 6 = SOF marker
+ */
+#define TBNET_PDF_FRAME_START	1
+#define TBNET_PDF_FRAME_END	2
+#define TBNET_SOF_MASK		BIT(TBNET_PDF_FRAME_START)
+#define TBNET_EOF_MASK		BIT(TBNET_PDF_FRAME_END)
+
+enum tbframe_pdf_class {
+	TBFRAME_PDF_CLASS_NONE = 0,	/* PDF belongs to no known service */
+	TBFRAME_PDF_CLASS_TBFRAME,	/* deliver to the frame HCA path   */
+	TBFRAME_PDF_CLASS_TBNET,	/* deliver to the IP netdev path   */
+};
+
+/*
+ * A shared RX ring must admit BOTH services' frames. The NHI opens a frame on
+ * any packet whose PDF matches sof_mask and closes it on any packet whose PDF
+ * matches eof_mask, so the shared ring's masks are the union of the two
+ * services' masks. STUB (red): today the frame RX ring is allocated with the
+ * tbframe-only masks (hw.c), so tbnet frames are never admitted.
+ */
+#define TBFRAME_SHARED_SOF_MASK		TBFRAME_SOF_MASK
+#define TBFRAME_SHARED_EOF_MASK		TBFRAME_EOF_MASK
+
+/*
+ * Demultiplex a received frame to its owning service by its frame-type (EOF)
+ * PDF. STUB (red): not yet implemented.
+ */
+static inline enum tbframe_pdf_class tbframe_pdf_class(u8 eof_pdf)
+{
+	return TBFRAME_PDF_CLASS_NONE;
+}
+
 #define TBFRAME_HELLO_TIMEOUT_MS	1000
 #define TBFRAME_RETRY_DELAY_MS		200
 #define TBFRAME_HELLO_RETRIES		5
