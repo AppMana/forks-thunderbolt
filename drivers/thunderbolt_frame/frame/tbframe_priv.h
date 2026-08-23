@@ -63,21 +63,36 @@ enum tbframe_pdf_class {
 };
 
 /*
+ * The disjoint-namespace invariant this whole model rests on: no PDF nibble is
+ * claimed by both services, so a received frame is attributable to exactly one
+ * of them by its PDF. Enforced at compile time; the KUnit suite pins it too.
+ */
+static_assert(((TBFRAME_SOF_MASK | TBFRAME_EOF_MASK) &
+	       (TBNET_SOF_MASK | TBNET_EOF_MASK)) == 0,
+	      "tbframe and tbnet PDF namespaces must be disjoint");
+
+/*
  * A shared RX ring must admit BOTH services' frames. The NHI opens a frame on
  * any packet whose PDF matches sof_mask and closes it on any packet whose PDF
  * matches eof_mask, so the shared ring's masks are the union of the two
- * services' masks. STUB (red): today the frame RX ring is allocated with the
- * tbframe-only masks (hw.c), so tbnet frames are never admitted.
+ * services' masks. (The frame-only masks in hw.c are why an ICM-second tbnet
+ * gets 0 RX even where its lane hop is enabled: the ring would drop PDF 1/2.)
  */
-#define TBFRAME_SHARED_SOF_MASK		TBFRAME_SOF_MASK
-#define TBFRAME_SHARED_EOF_MASK		TBFRAME_EOF_MASK
+#define TBFRAME_SHARED_SOF_MASK		(TBFRAME_SOF_MASK | TBNET_SOF_MASK)
+#define TBFRAME_SHARED_EOF_MASK		(TBFRAME_EOF_MASK | TBNET_EOF_MASK)
 
 /*
  * Demultiplex a received frame to its owning service by its frame-type (EOF)
- * PDF. STUB (red): not yet implemented.
+ * PDF -- the value the NHI writes back into the RX descriptor's EOF field. The
+ * SOF marker (0x6) opens a frame but is never an EOF, so it classifies as NONE
+ * along with any unknown nibble; such frames are dropped, never misrouted.
  */
 static inline enum tbframe_pdf_class tbframe_pdf_class(u8 eof_pdf)
 {
+	if (BIT(eof_pdf) & TBFRAME_EOF_MASK)
+		return TBFRAME_PDF_CLASS_TBFRAME;
+	if (BIT(eof_pdf) & TBNET_EOF_MASK)
+		return TBFRAME_PDF_CLASS_TBNET;
 	return TBFRAME_PDF_CLASS_NONE;
 }
 
