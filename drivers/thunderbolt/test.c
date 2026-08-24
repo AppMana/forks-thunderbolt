@@ -5007,6 +5007,29 @@ static void tb_test_xdomain_error_match_is_route_checked(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_error_pkg_matches(0x3, 0x1));
 }
 
+/*
+ * A domain whose root switch failed to initialise still has a live ring 0,
+ * so an inbound XDomain request can reach the lookup with tb->root_switch
+ * still NULL. Field crash (appmana-023, 2026-08-24, stack 2.46):
+ *   thunderbolt 0-0: failed to initialize port 1
+ *   BUG: kernel NULL pointer dereference at switch_find_xdomain+0x11
+ *   tb_xdomain_handle_request <- tb_domain_event_cb <- tb_ctl_rx_callback
+ * The lookup must answer "no such XDomain" instead of dereferencing.
+ */
+static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
+{
+	struct tb *tb;
+	uuid_t uuid;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, tb);
+	tb->root_switch = NULL;
+	uuid_gen(&uuid);
+
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_uuid(tb, &uuid), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_link_depth(tb, 1, 1), NULL);
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -5041,6 +5064,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_announce_rearms_mid_backoff),
 	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
+	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),

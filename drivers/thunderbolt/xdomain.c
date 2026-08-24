@@ -3133,6 +3133,16 @@ static struct tb_xdomain *switch_find_xdomain(struct tb_switch *sw,
 {
 	struct tb_port *port;
 
+	/* A domain whose root switch failed to initialise still has a live
+	 * ring 0, so an inbound XDomain request can reach the lookup before
+	 * tb->root_switch exists. Observed on appmana-023 with 2.46: "failed
+	 * to initialize port 1" followed by a NULL deref at
+	 * switch_find_xdomain+0x11 from tb_xdomain_handle_request. Answering
+	 * "no such XDomain" is correct -- there are no ports to search.
+	 */
+	if (!sw)
+		return NULL;
+
 	tb_switch_for_each_port(sw, port) {
 		struct tb_xdomain *xd;
 
