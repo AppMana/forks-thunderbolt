@@ -1698,6 +1698,35 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	init_completion(&nhi->domain_released);
 
 	res = tb_domain_add(tb, host_reset);
+	if (res && icm_domain_wedged(tb)) {
+		/*
+		 * The firmware CM was selected because REG_FW_STS advertised
+		 * ICM_EN, but DRIVER_READY timed out: the bit is latched with
+		 * a dead message loop behind it (appmana-009: a live module
+		 * reload latched ICM_EN; the ICM path then failed probe with
+		 * -110 and the NHI was lost until physical power removal).
+		 * Software-CM takeover is refused under a HEALTHY resident
+		 * ICM because that firmware answers every ring-0 request
+		 * itself (appmana-001) -- a wedged one answers nothing, so
+		 * that conflict cannot exist. Retry the probe with the
+		 * software connection manager instead of giving the NHI up.
+		 * The warm-reset refusal in icm_driver_ready() is untouched:
+		 * nothing here resets or restarts the firmware. KUnit:
+		 * tb_test_icm_wedged_takeover_selects_software.
+		 */
+		dev_warn(dev,
+			 "wedged ICM detected; taking over with software connection manager\n");
+		tb_domain_put(tb);
+		wait_for_completion(&nhi->domain_released);
+		reinit_completion(&nhi->domain_released);
+
+		tb = tb_probe(nhi);
+		if (!tb)
+			return dev_err_probe(dev, -ENODEV,
+				"failed to determine connection manager, aborting\n");
+
+		res = tb_domain_add(tb, host_reset);
+	}
 	if (res) {
 		/*
 		 * At this point the RX/TX rings might already have been
