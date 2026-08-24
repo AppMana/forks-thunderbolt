@@ -3016,6 +3016,7 @@ struct icm_fw_model {
 	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
 	bool responsive; /* ICM message loop alive (a wedged ICM keeps ICM_EN) */
 	bool cfg_open;	/* config space served (only after DRIVER_READY) */
+	unsigned int warm_restarts; /* ICM_EN_CPU/ARC restarts since cold boot */
 };
 
 /* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
@@ -3025,6 +3026,7 @@ static void icm_fw_cold_boot(struct icm_fw_model *fw)
 	fw->authed = true;
 	fw->responsive = true;
 	fw->cfg_open = false;
+	fw->warm_restarts = 0;
 }
 
 /*
@@ -3049,6 +3051,7 @@ static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
 	fw->icm_en = true;
 	fw->authed = !ar_tr;
 	fw->responsive = true;
+	fw->warm_restarts++;
 }
 
 /* ICM_DRIVER_READY succeeds only if running AND authenticated AND alive. */
@@ -3065,10 +3068,17 @@ static bool icm_fw_driver_ready(struct icm_fw_model *fw)
  * Can the host read router config space over ring 0? With no firmware
  * resident the routers answer directly; a resident ICM serves (proxies)
  * config access only after it has seen DRIVER_READY.
+ *
+ * A WEDGED firmware is the exception: interception requires a live message
+ * loop. A firmware whose loop is dead (DRIVER_READY times out) answers
+ * nothing on ring 0 -- it neither serves nor blocks config space, so the
+ * routers answer directly, exactly as if no firmware were resident. ICM_EN
+ * alone is a latched status bit, not an active gate (appmana-009: a live
+ * module reload latched ICM_EN with nothing behind it).
  */
 static bool icm_fw_cfg_space_open(struct icm_fw_model *fw)
 {
-	return !fw->icm_en || fw->cfg_open;
+	return !fw->icm_en || !fw->responsive || fw->cfg_open;
 }
 
 static void tb_test_icm_warm_restart_reauth(struct kunit *test)
@@ -3246,8 +3256,13 @@ static bool cm_model_forced_takeover(struct icm_fw_model *fw)
 {
 	if (!fw->icm_en)
 		return true;
-	if (!icm_fw_driver_ready(fw))
-		return false;
+	/*
+	 * DRIVER_READY may go unanswered -- a wedged firmware cannot reply,
+	 * but a dead loop intercepts nothing either, so the verification
+	 * read of the root switch config space is what decides
+	 * (icm_unlock_config_space()).
+	 */
+	icm_fw_driver_ready(fw);
 	return icm_fw_cfg_space_open(fw);
 }
 
@@ -3271,14 +3286,133 @@ static void tb_test_cm_forced_takeover_unlocks_config(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
 
 	/*
-	 * Wedged resident ICM: DRIVER_READY fails and the config space
-	 * stays shut -- the takeover must report the error (probe fails
-	 * loudly) instead of reading into a timeout per dword.
+	 * Wedged resident ICM: DRIVER_READY goes unanswered, but a dead
+	 * message loop intercepts nothing on ring 0 either -- the routers
+	 * answer the verification read directly and the takeover proceeds
+	 * (appmana-009 insight). The old hard-fail on the unanswered
+	 * DRIVER_READY threw away a domain the software CM can drive.
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_wedge(&fw);
-	KUNIT_EXPECT_FALSE(test, cm_model_forced_takeover(&fw));
-	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
+	KUNIT_EXPECT_TRUE(test, cm_model_forced_takeover(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+}
+
+/*
+ * Model of the whole probe pipeline as nhi_probe() runs it: CM selection
+ * (nhi_select_cm(), built on the same shared predicates as
+ * cm_model_selects_software) followed by tb_domain_add() ->
+ * cm_ops->driver_ready. Kept in lockstep with the driver on the wedged
+ * branch (icm_driver_ready() + nhi_probe()).
+ */
+struct cm_probe_model_result {
+	bool ok;		/* nhi_probe() succeeded */
+	bool software;		/* the domain ended up with the software CM */
+	bool wedged_diag;	/* the wedged-firmware diagnostic was emitted */
+};
+
+static struct cm_probe_model_result
+cm_model_probe(struct icm_fw_model *fw, bool force_sw_cm, bool acpi_native)
+{
+	u32 fw_sts = fw->icm_en ? REG_FW_STS_ICM_EN : 0;
+	struct cm_probe_model_result r = { };
+
+	/* nhi_select_cm(): forced/native goes straight to the software CM. */
+	if (tb_nhi_use_software_cm(force_sw_cm, acpi_native)) {
+		r.software = true;
+		r.ok = cm_model_forced_takeover(fw);
+		return r;
+	}
+
+	/* icm_probe()'s is_supported gate (start_icm=N fleet-wide). */
+	if (!tb_icm_fw_sts_running(fw_sts)) {
+		r.software = true;
+		r.ok = icm_fw_cfg_space_open(fw);
+		return r;
+	}
+
+	/* Firmware CM selected: tb_domain_add() -> icm_driver_ready(). */
+	if (icm_fw_driver_ready(fw)) {
+		r.software = false;
+		r.ok = true;
+		return r;
+	}
+
+	/*
+	 * DRIVER_READY failed with ICM_EN still latched: icm_driver_ready()
+	 * emits the wedged-firmware diagnosis (never a warm ARC reset --
+	 * see tb_test_icm_wedged_running) and records the wedge. nhi_probe()
+	 * then retries with the software CM (icm_domain_wedged() fallback):
+	 * a dead message loop answers nothing on ring 0, so the routers
+	 * answer the software CM directly.
+	 */
+	r.wedged_diag = tb_icm_wedged(-ETIMEDOUT, fw_sts);
+	r.software = true;
+	r.ok = icm_fw_cfg_space_open(fw);
+	return r;
+}
+
+/*
+ * appmana-009 (Maple Ridge 4C, NHI 0000:06:00.0): a live module reload
+ * (the playbook's v2.43 hot-migration, 2026-08-23 10:47) left ICM_EN
+ * latched. On re-probe the driver took the ICM path, DRIVER_READY timed
+ * out and the probe failed with -110 -- the NHI dead until physical power
+ * removal. But the reason software-CM takeover is refused under a resident
+ * ICM (it answers every ring-0 request itself, appmana-001) does NOT apply
+ * to a WEDGED one: a dead message loop answers nothing on ring 0. After
+ * the driver-ready timeout the probe must fall back to the software CM
+ * instead of failing, while keeping the wedged diagnosis and the
+ * warm-reset refusal.
+ */
+static void tb_test_icm_wedged_takeover_selects_software(struct kunit *test)
+{
+	struct cm_probe_model_result r;
+	struct icm_fw_model fw;
+
+	/* The reload latched ICM_EN; the message loop behind it is dead. */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+
+	r = cm_model_probe(&fw, false, false);
+
+	/* The probe must succeed with the software CM, not fail with -110. */
+	KUNIT_EXPECT_TRUE(test, r.ok);
+	KUNIT_EXPECT_TRUE(test, r.software);
+	/* The wedged-firmware diagnosis must still reach the operator. */
+	KUNIT_EXPECT_TRUE(test, r.wedged_diag);
+	/* The warm-reset refusal stays: no ARC/ICM restart was attempted... */
+	KUNIT_EXPECT_EQ(test, fw.warm_restarts, 0u);
+	/* ...so the NVM authentication was never thrown away. */
+	KUNIT_EXPECT_TRUE(test, fw.authed);
+	/* A dead loop intercepts nothing: the routers answer ring 0 directly. */
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+}
+
+/*
+ * The takeover fallback must NOT trigger for a healthy responding ICM
+ * (that one really does answer ring 0 itself) nor rewrite the plain
+ * no-firmware software path.
+ */
+static void tb_test_icm_healthy_keeps_firmware_cm(struct kunit *test)
+{
+	struct cm_probe_model_result r;
+	struct icm_fw_model fw;
+
+	/* Healthy responsive ICM: firmware CM, no wedge diagnosis. */
+	icm_fw_cold_boot(&fw);
+	r = cm_model_probe(&fw, false, false);
+	KUNIT_EXPECT_TRUE(test, r.ok);
+	KUNIT_EXPECT_FALSE(test, r.software);
+	KUNIT_EXPECT_FALSE(test, r.wedged_diag);
+	KUNIT_EXPECT_EQ(test, fw.warm_restarts, 0u);
+
+	/* No firmware at all (cold boot on 009): plain software CM. */
+	icm_fw_cold_boot(&fw);
+	fw.icm_en = false;
+	r = cm_model_probe(&fw, false, false);
+	KUNIT_EXPECT_TRUE(test, r.ok);
+	KUNIT_EXPECT_TRUE(test, r.software);
+	KUNIT_EXPECT_FALSE(test, r.wedged_diag);
 }
 
 /*
@@ -4400,6 +4534,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
+	KUNIT_CASE(tb_test_icm_wedged_takeover_selects_software),
+	KUNIT_CASE(tb_test_icm_healthy_keeps_firmware_cm),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),

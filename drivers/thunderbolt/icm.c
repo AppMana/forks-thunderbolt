@@ -140,6 +140,10 @@ struct usb4_switch_nvm_auth {
  * @xdomain_connected: Handle XDomain connected ICM message
  * @xdomain_disconnected: Handle XDomain disconnected ICM message
  * @rtd3_veto: Handle RTD3 veto notification ICM message
+ * @wedged: DRIVER_READY timed out while REG_FW_STS kept advertising
+ *	    ICM_EN: the firmware's message loop is dead behind a latched
+ *	    status bit. Read by icm_domain_wedged() so nhi_probe() can fall
+ *	    back to the software connection manager.
  */
 struct icm {
 	struct mutex request_lock;
@@ -147,6 +151,7 @@ struct icm {
 	struct pci_dev *upstream_port;
 	int vnd_cap;
 	bool safe_mode;
+	bool wedged;
 	size_t max_boot_acl;
 	bool rpm;
 	bool can_upgrade_nvm;
@@ -2614,9 +2619,18 @@ int icm_unlock_config_space(struct tb *tb)
 	tb_cfg_request_put(req);
 
 	if (res.err) {
-		tb_err(tb, "resident ICM did not answer DRIVER_READY: %d\n",
-		       res.err == 1 ? -EIO : res.err);
-		return res.err == 1 ? -EIO : res.err;
+		/*
+		 * A resident ICM that does not answer DRIVER_READY has a
+		 * dead message loop -- and a dead loop intercepts nothing,
+		 * so the routers may be answering ring 0 directly (the
+		 * wedged-ICM case, appmana-009). Do not fail here on the
+		 * assumption the firmware is blocking config space; let the
+		 * verification read below decide. KUnit:
+		 * tb_test_cm_forced_takeover_unlocks_config.
+		 */
+		tb_warn(tb,
+			"resident ICM did not answer DRIVER_READY (%d); verifying direct config space access\n",
+			res.err == 1 ? -EIO : res.err);
 	}
 
 	do {
@@ -2632,7 +2646,7 @@ int icm_unlock_config_space(struct tb *tb)
 		msleep(50);
 	} while (--retries);
 
-	tb_err(tb, "resident ICM answered DRIVER_READY but never opened the config space\n");
+	tb_err(tb, "resident ICM never opened the config space\n");
 	return -ETIMEDOUT;
 }
 
@@ -2837,10 +2851,20 @@ static int icm_driver_ready(struct tb *tb)
 		 * stall (the reverted tbfix 1.7/1.8 experiment). Tell the
 		 * operator the truth instead of a generic timeout. KUnit:
 		 * tb_test_icm_wedged_running.
+		 *
+		 * Record the wedge: a firmware whose message loop is dead
+		 * answers nothing on ring 0, so -- unlike a healthy resident
+		 * ICM -- it cannot conflict with the software connection
+		 * manager. nhi_probe() reads this via icm_domain_wedged()
+		 * and takes the domain over instead of losing the NHI until
+		 * a power cycle (appmana-009). KUnit:
+		 * tb_test_icm_wedged_takeover_selects_software.
 		 */
-		if (icm_firmware_running(tb->nhi))
+		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS))) {
+			icm->wedged = true;
 			tb_err(tb,
-			       "ICM advertises running (ICM_EN) but does not respond; wedged firmware. A warm reset cannot re-authenticate this controller -- a board COLD power cycle is required\n");
+			       "ICM advertises running (ICM_EN) but does not respond; wedged firmware. A warm reset cannot re-authenticate this controller -- restoring FIRMWARE mode needs a board COLD power cycle\n");
+		}
 		return ret;
 	}
 
@@ -3318,6 +3342,29 @@ static const struct tb_cm_ops icm_icl_ops = {
 	.usb4_switch_nvm_authenticate_status =
 		icm_usb4_switch_nvm_authenticate_status,
 };
+
+/**
+ * icm_domain_wedged() - Did this domain's probe die on a wedged ICM?
+ * @tb: Domain returned by icm_probe() whose tb_domain_add() failed
+ *
+ * True when DRIVER_READY timed out while REG_FW_STS kept advertising
+ * ICM_EN (icm_driver_ready() recorded it). Safe to call on a domain of
+ * either connection manager: for a software-CM domain it returns false.
+ * nhi_probe() uses this to fall back to the software connection manager
+ * -- a firmware with a dead message loop answers nothing on ring 0, so
+ * the reason takeover is refused under a healthy resident ICM does not
+ * apply.
+ */
+bool icm_domain_wedged(struct tb *tb)
+{
+	struct icm *icm;
+
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	icm = tb_priv(tb);
+	return icm->wedged;
+}
 
 struct tb *icm_probe(struct tb_nhi *nhi)
 {
