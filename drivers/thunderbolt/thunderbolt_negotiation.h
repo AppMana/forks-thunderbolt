@@ -81,6 +81,92 @@ static inline bool tb_xdomain_generation_stale(bool have_remote, u32 remote_gen,
 }
 
 /**
+ * tb_xdomain_uuid_is_placeholder() - is this a peer identity at all?
+ * @uuid: the 16 raw UUID bytes in wire order (as printed by %pUb)
+ *
+ * A Thunderbolt peer's UUID is assembled from router config-space reads. With
+ * no POWERED router behind the link those reads return all-ones, so the
+ * identity comes back with its low 64 bits set to 0xffff'ffff'ffff'ffff. Every
+ * live sample of this has that exact tail:
+ *
+ *   385a8780-0004-402c-ffff-ffffffffffff  (appmana-008 -> 019, 2026-08-24,
+ *                                          neighbour powered off at boot)
+ *   66518780-00e3-212c-ffff-ffffffffffff  (appmana-008 port 1, 2026-07-09,
+ *                                          half-trained link)
+ *
+ * Such a value must never be latched as an XDomain's final identity. XDP
+ * property requests carry dst_uuid and a healthy peer ignores a mismatch, so a
+ * placeholder identity fails every property read; worse, when the peer finally
+ * powers on and answers with its REAL UUID, tb_xdomain_get_uuid() reads the
+ * difference as "another domain connected" and condemns the XDomain. On a chain
+ * node with a resident ICM nothing then replaces the condemned object, so the
+ * XDomain never registers and no service ever binds until the host is rebooted
+ * with the neighbour already up.
+ *
+ * Distinct from the generation gate above: that one decides whether a peer's
+ * property BLOCK is fresh; this one decides whether an identity is real. Pure
+ * predicate, exercised by KUnit.
+ */
+static inline bool tb_xdomain_uuid_is_placeholder(const u8 *uuid)
+{
+	int i;
+
+	for (i = 8; i < 16; i++)
+		if (uuid[i] != 0xff)
+			return false;
+
+	return true;
+}
+
+/*
+ * Properties-changed announcement backoff.
+ *
+ * The announcement is what makes a peer's connection manager re-arm its
+ * XDomain announce, so a host that stops sending it can never be found again by
+ * a neighbour that powers on later. It therefore must not have a give-up point.
+ * An absent neighbour is cheap at these numbers: the spacing doubles from 1 s to
+ * a 64 s ceiling, so a peer that stays powered off costs about one control
+ * packet per minute and seven log lines in total, forever.
+ */
+#define TB_XDOMAIN_ANNOUNCE_BASE_MS	1000	/* == XDOMAIN_DEFAULT_TIMEOUT */
+#define TB_XDOMAIN_ANNOUNCE_MAX_SHIFT	6	/* 1 s, 2 s, ... 64 s */
+
+/*
+ * An announcement that never gives up re-queues its own delayed work, so it
+ * needs an explicit stop marker: __stop_handshake() writes this to the failure
+ * counter BEFORE cancel_delayed_work_sync(), and the work re-reads the counter
+ * after its (bounded) wire wait and declines to re-arm when it sees it.
+ * Without that, a callback that started before the cancel could re-queue after
+ * it and outlive module unload or suspend. Arming clears the marker.
+ */
+#define TB_XDOMAIN_ANNOUNCE_STOPPED	(-1)
+
+/**
+ * tb_xdomain_announce_delay_ms() - spacing before the next announce attempt
+ * @failures: consecutive failed attempts BEFORE the one being scheduled
+ */
+static inline unsigned int tb_xdomain_announce_delay_ms(unsigned int failures)
+{
+	if (failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
+		failures = TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
+
+	return TB_XDOMAIN_ANNOUNCE_BASE_MS << failures;
+}
+
+/**
+ * tb_xdomain_announce_should_warn() - rate-limit the announce diagnostics
+ * @failures: consecutive failed attempts BEFORE the one that just failed
+ *
+ * One line per doubling of the backoff, then silence. The old code emitted its
+ * dev_err on the retrying path as well as the giving-up path, so a single
+ * absent neighbour produced a burst of identical lines.
+ */
+static inline bool tb_xdomain_announce_should_warn(unsigned int failures)
+{
+	return failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
+}
+
+/**
  * struct tb_xdomain_handshake - common login/HELLO negotiation state
  * @request_sent: we have sent our LOGIN/HELLO to the peer
  * @peer_seen:    we have received the peer's LOGIN/HELLO/READY

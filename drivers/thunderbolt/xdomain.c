@@ -883,8 +883,15 @@ static void start_handshake(struct tb_xdomain *xd)
 /* Can be called from state_work */
 static void __stop_handshake(struct tb_xdomain *xd)
 {
+	/*
+	 * Publish the stop marker BEFORE the cancel. The announcement re-queues
+	 * itself indefinitely now, so a callback already inside its bounded wire
+	 * wait could otherwise re-arm after cancel_delayed_work_sync() has
+	 * returned and leave a delayed work pending across suspend or unload.
+	 * It re-reads this after the wait and declines.
+	 */
+	WRITE_ONCE(xd->properties_changed_retries, TB_XDOMAIN_ANNOUNCE_STOPPED);
 	cancel_delayed_work_sync(&xd->properties_changed_work);
-	xd->properties_changed_retries = 0;
 	xd->state_retries = 0;
 }
 
@@ -1417,6 +1424,16 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	} else
 		ret = tb_xdp_uuid_request(tb->ctl, xd->route, xd->state_retries,
 					  &uuid, &route);
+	/*
+	 * An all-ones identity tail is what config space reads back when there
+	 * is no POWERED router behind the link, so this is not an answer -- it
+	 * is the absence of one. Fold it into the ordinary failed-read path so
+	 * the same bounded budget and the same re-arm apply.
+	 */
+	if (!ret && tb_xdomain_uuid_is_placeholder(uuid.b)) {
+		dev_dbg(&xd->dev, "no powered peer behind the link yet\n");
+		ret = -ENODATA;
+	}
 	if (ret < 0) {
 		if (xd->state_retries-- > 0) {
 			dev_dbg(&xd->dev, "failed to request UUID, retrying\n");
@@ -1442,8 +1459,29 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	 * If the UUID is different, there is another domain connected
 	 * so mark this one unplugged and wait for the connection
 	 * manager to replace it.
+	 *
+	 * Unless what we hold is a PLACEHOLDER: the connection manager can
+	 * create an XDomain for a link whose peer is powered off, and the
+	 * identity it hands over is then the all-ones-tail read. That is not
+	 * "another domain", it is this domain finally answering, so adopt it.
+	 * Condemning here instead is what stranded appmana-008 against a
+	 * powered-off appmana-019 on 2026-08-24: the placeholder was latched at
+	 * boot, 019 powering on later looked like an identity change, and the
+	 * resulting terminal state had no replacement path under the node's
+	 * resident ICM.
 	 */
 	if (xd->remote_uuid && !uuid_equal(&uuid, xd->remote_uuid)) {
+		if (tb_xdomain_uuid_is_placeholder(xd->remote_uuid->b)) {
+			dev_info(&xd->dev,
+				 "peer powered on; adopting identity %pUb\n",
+				 &uuid);
+			mutex_lock(&xd->lock);
+			uuid_copy(xd->remote_uuid, &uuid);
+			/* Accept whatever generation the fresh peer reports. */
+			xd->remote_property_block_gen = 0;
+			mutex_unlock(&xd->lock);
+			return 0;
+		}
 		dev_dbg(&xd->dev, "remote UUID is different, unplugging\n");
 		xd->is_unplugged = true;
 		return -ENODEV;
@@ -1920,9 +1958,15 @@ static void tb_xdomain_queue_properties(struct tb_xdomain *xd)
 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
 }
 
+/*
+ * Arm (or re-arm) the announcement. properties_changed_retries counts
+ * CONSECUTIVE FAILURES upwards: it is the backoff shift and the diagnostic
+ * rate-limiter, and re-arming resets it so a peer-present event always gets the
+ * fast cadence back. The field name is fixed by the out-of-tree public header.
+ */
 static void tb_xdomain_queue_properties_changed(struct tb_xdomain *xd)
 {
-	xd->properties_changed_retries = XDOMAIN_RETRIES;
+	WRITE_ONCE(xd->properties_changed_retries, 0);
 	queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
 }
@@ -2187,20 +2231,56 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 	}
 
 	ret = tb_xdp_properties_changed_request(xd->tb->ctl, xd->route,
-				xd->properties_changed_retries, xd->local_uuid);
+				max(READ_ONCE(xd->properties_changed_retries), 0),
+				xd->local_uuid);
 	if (ret) {
-		if (xd->properties_changed_retries-- > 0) {
+		int pending = READ_ONCE(xd->properties_changed_retries);
+		unsigned int failures;
+
+		/*
+		 * __stop_handshake() may have run while we were inside the
+		 * bounded wire wait above. Honour it here: re-arming past it
+		 * would defeat its cancel_delayed_work_sync().
+		 */
+		if (pending == TB_XDOMAIN_ANNOUNCE_STOPPED)
+			return;
+		failures = pending;
+
+		/*
+		 * Never stop announcing. This notification is what makes a
+		 * peer's connection manager re-arm its XDomain announce, so a
+		 * host that gives up can no longer be found by a neighbour that
+		 * powers on later -- appmana-008 gave up ~10 s into a boot whose
+		 * chain neighbour was powered off and never spoke to it again.
+		 * The spacing doubles to a 64 s ceiling so an absent neighbour
+		 * costs about one control packet per minute, and the diagnostic
+		 * is emitted once per doubling instead of once per attempt.
+		 */
+		if (tb_xdomain_announce_should_warn(failures))
+			dev_err(&xd->dev,
+				"failed to send properties changed notification\n");
+		else
 			dev_dbg(&xd->dev,
-				"failed to send properties changed notification, retrying\n");
-			queue_delayed_work(xd->tb->wq,
-					   &xd->properties_changed_work,
-					   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
-		}
-		dev_err(&xd->dev, "failed to send properties changed notification\n");
+				"failed to send properties changed notification\n");
+
+		/*
+		 * Clamped at the ceiling: the counter only feeds the delay and
+		 * the rate-limit, both of which saturate there, and a counter
+		 * that grew forever would eventually overflow. The XDP sequence
+		 * nibble then stops rotating, which is safe because the request
+		 * timeout (1 s) is far inside the ceiling spacing (64 s), so two
+		 * attempts can never be in flight together.
+		 */
+		if (failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
+			WRITE_ONCE(xd->properties_changed_retries, failures + 1);
+		queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
+				   msecs_to_jiffies(tb_xdomain_announce_delay_ms(failures)));
 		return;
 	}
 
-	xd->properties_changed_retries = XDOMAIN_RETRIES;
+	if (READ_ONCE(xd->properties_changed_retries) !=
+	    TB_XDOMAIN_ANNOUNCE_STOPPED)
+		WRITE_ONCE(xd->properties_changed_retries, 0);
 }
 
 static ssize_t device_show(struct device *dev, struct device_attribute *attr,
