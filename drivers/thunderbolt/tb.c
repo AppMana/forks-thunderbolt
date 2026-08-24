@@ -3676,6 +3676,26 @@ static void tb_stop(struct tb *tb)
 	struct tb_tunnel *n;
 	struct tb_port *port;
 
+	/*
+	 * Close the re-arm gate FIRST, then cancel synchronously.
+	 *
+	 * The old order (cancel, then clear hotplug_active at the very end)
+	 * left a window in which tb_handle_event() could re-arm reconcile_work
+	 * with a 500 ms delay -- the control channel is still running here,
+	 * tb_domain_remove() only stops it after cm_ops->stop() returns. A
+	 * non-sync cancel_delayed_work() does not wait for a running instance
+	 * either. flush_workqueue() in tb_domain_remove() does not wait on an
+	 * armed timer, so the timer could fire after destroy_workqueue(tb->wq)
+	 * and kfree(tb): __queue_work() on a destroyed workqueue with a freed
+	 * tcm. Nothing in the tree sync-cancelled reconcile_work at all.
+	 *
+	 * The cancels stay NON-sync here on purpose: tb_stop() runs under
+	 * tb->lock (tb_domain_remove()) and both work items take tb->lock, so
+	 * a sync cancel here would be the appmana-008 inversion again. The
+	 * synchronous sweep is in tb_deinit(), which tb_domain_remove() calls
+	 * with the lock dropped.
+	 */
+	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
 	cancel_delayed_work(&tcm->reconcile_work);
 	cancel_delayed_work(&tcm->remove_work);
 	/*
@@ -3705,13 +3725,33 @@ static void tb_stop(struct tb *tb)
 		tb_tunnel_put(tunnel);
 	}
 	tb_switch_remove(tb->root_switch);
-	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
+	/*
+	 * tb_switch_remove() ends in device_unregister() -> kfree(sw), and
+	 * tb_remove_work() dereferences tb->root_switch with no
+	 * hotplug_active guard (tb_free_unplugged_xdomains() is called
+	 * unconditionally). Leaving the pointer dangling made an already
+	 * queued tb_remove_work run against freed memory when
+	 * tb_domain_remove()'s flush_workqueue() picked it up. icm_stop()
+	 * has always nulled it here; the software CM never did.
+	 */
+	tb->root_switch = NULL;
 }
 
 static void tb_deinit(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	int i;
+
+	/*
+	 * Synchronous sweep of everything tb_stop() could only cancel
+	 * non-synchronously (it runs under tb->lock and these take tb->lock).
+	 * tb_domain_remove() calls tb_deinit() with the lock dropped, so this
+	 * is the one place that can safely WAIT for them, and it must: an
+	 * armed delayed_work timer survives flush_workqueue() and would fire
+	 * after destroy_workqueue(tb->wq) and kfree(tb).
+	 */
+	cancel_delayed_work_sync(&tcm->reconcile_work);
+	cancel_delayed_work_sync(&tcm->remove_work);
 
 	/* Cancel all the release bandwidth workers */
 	for (i = 0; i < ARRAY_SIZE(tcm->groups); i++)

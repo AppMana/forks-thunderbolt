@@ -320,8 +320,16 @@ static void tb_domain_release(struct device *dev)
 	struct tb *tb = container_of(dev, struct tb, dev);
 	struct tb_nhi *nhi = tb->nhi;
 
-	tb_ctl_free(tb->ctl);
+	/*
+	 * destroy_workqueue() BEFORE tb_ctl_free(): work items on tb->wq
+	 * (icm_handle_notification, the xdomain state/properties works) reach
+	 * tb->ctl through tb_cfg_request_sync(), so freeing the ctl first left
+	 * them dereferencing freed memory. The old order was only survivable
+	 * because tb_domain_remove() flushes the queue first -- a one-shot
+	 * flush that does not disarm an armed delayed_work timer.
+	 */
 	destroy_workqueue(tb->wq);
+	tb_ctl_free(tb->ctl);
 	ida_free(&tb_domain_ida, tb->index);
 	mutex_destroy(&tb->lock);
 	kfree(tb);
@@ -435,6 +443,40 @@ err_free:
  *
  * Return: %0 in case of success and negative errno in case of error
  */
+/*
+ * Stop the control channel. MUST NOT be called with tb->lock held.
+ *
+ * appmana-008, kdump 202608241850 (kernel 6.17.0-42), a wedged-ICM board whose
+ * tb_domain_add() failed at driver_ready:
+ *
+ *   (udev-worker):365   nhi_probe -> tb_domain_add -> tb_ctl_stop
+ *                       -> tb_ring_stop -> flush_work -> wait_for_completion  [D]
+ *   kworker/u128:0:12   process_one_work -> icm_handle_notification
+ *                       -> mutex_lock(&tb->lock)                              [D]
+ *   INFO: task kworker/u128:0:12 is blocked on a mutex likely owned by
+ *         task (udev-worker):365
+ *   Kernel panic - not syncing: hung_task: blocked tasks
+ *
+ * tb_domain_add() takes tb->lock, starts the control channel (which starts
+ * event processing: icm_handle_event() queues icm_handle_notification onto
+ * tb->wq and that work takes tb->lock), and then, on failure, called
+ * tb_ctl_stop() -- which schedules and FLUSHES the ring work -- with tb->lock
+ * still held. Making a tb->lock-taking work item runnable and then waiting on
+ * it while holding tb->lock is an AB-BA that nothing can break; hung_task
+ * fired at 122 s and panic_on_hung_task took the node down. tb_domain_remove()
+ * had the identical shape, which is why unload hung too, and it is the same
+ * helper both use -- so the rule is enforced here rather than at each caller.
+ *
+ * The lockdep assertion is the actual guarantee: a future caller that
+ * reintroduces the inversion splats under the fork's lockdep KUnit run instead
+ * of wedging a production node.
+ */
+void tb_domain_ctl_stop(struct tb *tb)
+{
+	lockdep_assert_not_held(&tb->lock);
+	tb_ctl_stop(tb->ctl);
+}
+
 int tb_domain_add(struct tb *tb, bool reset)
 {
 	int ret;
@@ -486,8 +528,24 @@ int tb_domain_add(struct tb *tb, bool reset)
 err_domain_del:
 	device_del(&tb->dev);
 err_ctl_stop:
-	tb_ctl_stop(tb->ctl);
+	/*
+	 * Drop the lock BEFORE stopping the control channel. This is the
+	 * appmana-008 panic path: everything between tb_ctl_start() above and
+	 * here runs with event processing live, so a notification work item
+	 * that takes tb->lock can already be queued and blocked on us, and
+	 * tb_ctl_stop() flushes ring work. See tb_domain_ctl_stop().
+	 */
 	mutex_unlock(&tb->lock);
+	tb_domain_ctl_stop(tb);
+
+	/*
+	 * ...and drain what the live window queued, with the lock dropped, so
+	 * no work item survives to touch the domain the caller is about to
+	 * release. This is the failure path a wedged-ICM board takes on every
+	 * probe, and the v2.44 software-CM takeover deliberately routes
+	 * through it twice.
+	 */
+	flush_workqueue(tb->wq);
 
 	return ret;
 }
@@ -504,9 +562,10 @@ void tb_domain_remove(struct tb *tb)
 	mutex_lock(&tb->lock);
 	if (tb->cm_ops->stop)
 		tb->cm_ops->stop(tb);
-	/* Stop the domain control traffic */
-	tb_ctl_stop(tb->ctl);
 	mutex_unlock(&tb->lock);
+
+	/* Stop the domain control traffic; see tb_domain_ctl_stop(). */
+	tb_domain_ctl_stop(tb);
 
 	flush_workqueue(tb->wq);
 
@@ -795,6 +854,104 @@ int tb_domain_disconnect_pcie_paths(struct tb *tb)
 	return tb->cm_ops->disconnect_pcie_paths(tb);
 }
 
+/*
+ * Unload guard (operator backstop; the fleet playbook has its own,
+ * higher-level deferral mechanism).
+ *
+ * A live chain link means DMA paths are programmed in the routers and rings
+ * are running against this NHI. Unloading the core underneath that state is
+ * the one teardown shape this driver cannot prove safe without hardware: it is
+ * where nhi_shutdown() finds "ring is still active" and where pcim devres then
+ * unmaps the BAR under a live ring. So refuse it rather than gamble.
+ *
+ * The mechanism is the module refcount, because that is the only thing rmmod
+ * consults: while any XDomain DMA tunnel is programmed the core holds a
+ * reference on itself, and `rmmod thunderbolt` fails with -EWOULDBLOCK
+ * ("Module thunderbolt is in use") instead of tearing the NHI out. A module
+ * cannot intercept its own unload to print at refusal time, so the
+ * explanatory line is emitted when the guard ARMS and when it disarms; that
+ * is what tells an operator why the rmmod was refused and what to do.
+ *
+ * This does NOT change the fleet's documented hot-reload default. The service
+ * modules (thunderbolt_frame, thunderbolt_net) unbind before the core can be
+ * unloaded at all -- the module dependency guarantees it -- and their unbind
+ * disables the paths, so the count is zero by the time the core's turn comes.
+ * The guard only fires when a tunnel was left programmed, which is exactly the
+ * unprovable case.
+ *
+ * unload_guard=0 is the escape hatch for an operator who has decided to take
+ * the risk; writing 0 releases the references immediately.
+ */
+static DEFINE_MUTEX(tb_unload_guard_lock);
+static unsigned int tb_unload_guard_count;
+static bool tb_unload_guard_held;
+static bool tb_unload_guard_enabled = true;
+
+static void tb_unload_guard_sync(void)
+{
+	bool want = tb_unload_guard_enabled && tb_unload_guard_count;
+
+	lockdep_assert_held(&tb_unload_guard_lock);
+	if (want == tb_unload_guard_held)
+		return;
+
+	if (want) {
+		__module_get(THIS_MODULE);
+		tb_unload_guard_held = true;
+		pr_info("thunderbolt: unload guard armed: %u XDomain DMA tunnel(s) programmed; `rmmod thunderbolt` will be refused (-EWOULDBLOCK) until the service drivers (thunderbolt_frame / thunderbolt_net) are unloaded first. Override with thunderbolt.unload_guard=0.\n",
+			tb_unload_guard_count);
+	} else {
+		tb_unload_guard_held = false;
+		module_put(THIS_MODULE);
+		pr_info("thunderbolt: unload guard released; the core can be unloaded\n");
+	}
+}
+
+static void tb_unload_guard_get(void)
+{
+	mutex_lock(&tb_unload_guard_lock);
+	tb_unload_guard_count++;
+	tb_unload_guard_sync();
+	mutex_unlock(&tb_unload_guard_lock);
+}
+
+/*
+ * Clamped rather than WARN_ON'd: tbnet_tear_down() calls
+ * tb_xdomain_disable_paths() whenever the login handshake completed, which
+ * can be true even though tbnet_connected_work()'s enable_paths failed. An
+ * unmatched put is a normal outcome there, not a bug.
+ */
+static void tb_unload_guard_put(void)
+{
+	mutex_lock(&tb_unload_guard_lock);
+	if (tb_unload_guard_count)
+		tb_unload_guard_count--;
+	tb_unload_guard_sync();
+	mutex_unlock(&tb_unload_guard_lock);
+}
+
+static int tb_unload_guard_set(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+
+	mutex_lock(&tb_unload_guard_lock);
+	ret = param_set_bool(val, kp);
+	if (!ret)
+		tb_unload_guard_sync();
+	mutex_unlock(&tb_unload_guard_lock);
+	return ret;
+}
+
+static const struct kernel_param_ops tb_unload_guard_ops = {
+	.set = tb_unload_guard_set,
+	.get = param_get_bool,
+};
+
+module_param_cb(unload_guard, &tb_unload_guard_ops, &tb_unload_guard_enabled,
+		0644);
+MODULE_PARM_DESC(unload_guard,
+		 "Refuse to unload the core while XDomain DMA tunnels are programmed (default: true)");
+
 /**
  * tb_domain_approve_xdomain_paths() - Enable DMA paths for XDomain
  * @tb: Domain enabling the DMA paths
@@ -815,11 +972,16 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				    int transmit_path, int transmit_ring,
 				    int receive_path, int receive_ring)
 {
+	int ret;
+
 	if (!tb->cm_ops->approve_xdomain_paths)
 		return -ENOTSUPP;
 
-	return tb->cm_ops->approve_xdomain_paths(tb, xd, transmit_path,
+	ret = tb->cm_ops->approve_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
+	if (!ret)
+		tb_unload_guard_get();
+	return ret;
 }
 
 /**
@@ -845,6 +1007,7 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	if (!tb->cm_ops->disconnect_xdomain_paths)
 		return -ENOTSUPP;
 
+	tb_unload_guard_put();
 	return tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
 }

@@ -54,7 +54,21 @@ MODULE_PARM_DESC(teardown_warn_ms,
 static unsigned int teardown_force_ms = 10000;
 module_param(teardown_force_ms, uint, 0644);
 MODULE_PARM_DESC(teardown_force_ms,
-		 "Hard cap (ms) after which link teardown force-proceeds with a deliberate leak; 0 = wait forever");
+		 "Hard cap (ms) after which link teardown force-proceeds with a deliberate leak; 0 = use the built-in ceiling (teardown NEVER waits forever)");
+
+/*
+ * Refuse to declare a session UP until a frame has actually crossed the data
+ * ring. Off restores the pre-2.46 behaviour, in which every health signal the
+ * driver published came from the control plane or from reading hop-entry
+ * enable bits, so a link whose bulk path moved zero bytes still reported link
+ * up and published an HCA (measured on 5 of 10 chain links after the
+ * 2026-08-23 live migration). Left as a parameter only so a peer population
+ * that cannot supply keepalives has an escape hatch; leave it on.
+ */
+static bool data_proof = true;
+module_param(data_proof, bool, 0644);
+MODULE_PARM_DESC(data_proof,
+		 "Require a frame to be received on the data ring before declaring a link up (default y)");
 
 static struct tbframe tbframe_global;
 static bool tbframe_global_ready;
@@ -89,6 +103,7 @@ static int __init tbframe_init(void)
 	tf->xmit_drain_ms = xmit_drain_ms;
 	tf->teardown_warn_ms = teardown_warn_ms;
 	tf->teardown_force_ms = teardown_force_ms;
+	tf->data_proof = data_proof;
 
 	/*
 	 * Not WQ_MEM_RECLAIM: session work issues tb_xdomain_request(),
@@ -114,8 +129,10 @@ static int __init tbframe_init(void)
 	}
 	tbframe_global_ready = true;
 
-	pr_info("initialized ring_entries=%u e2e=%u keepalive=%u\n",
-		tf->ring_entries, tf->e2e, tf->keepalive);
+	pr_info("initialized ring_entries=%u e2e=%u keepalive=%u data_proof=%u\n",
+		tf->ring_entries, tf->e2e, tf->keepalive, tf->data_proof);
+	if (data_proof && !keepalive)
+		pr_warn("data_proof is on but keepalive is off: no link can ever be validated, so every link will be declared up UNVERIFIED\n");
 	return 0;
 }
 module_init(tbframe_init);

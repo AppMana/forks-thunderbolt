@@ -57,6 +57,8 @@ thunderbolt_frame-$(CONFIG_KUNIT) += tests/window_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/teardown_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/lifecycle_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/selfloop_test.o
+thunderbolt_frame-$(CONFIG_KUNIT) += tests/datapath_test.o
+thunderbolt_frame-$(CONFIG_KUNIT) += tests/unload_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 

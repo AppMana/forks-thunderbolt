@@ -41,6 +41,60 @@
 /* Min spacing between property re-announces (control-channel thrash guard). */
 #define TBFRAME_REANNOUNCE_MIN_MS	10000
 
+/*
+ * Data-path proof (the appmana 2026-08-23/24 "dead bulk datapath" class).
+ *
+ * Everything the driver reported about a link was derived from the CONTROL
+ * plane (XDomain ring 0) or from reading hop-entry enable bits back out of the
+ * routers. Neither observes a single byte crossing the DMA data rings, so a
+ * link whose data path is dead reports link up, PORT_ACTIVE, populated GIDs
+ * and "READY confirmed" while ib_send_bw moves 0.00 MB/s. These constants
+ * bound an explicit proof: after READY (which certifies BOTH ends' paths are
+ * enabled) the session refuses to declare itself UP until at least one good
+ * frame has actually been RECEIVED on the data ring.
+ *
+ * The prover needs no new wire op and no capability negotiation: both ends
+ * already emit a keepalive frame on the data ring once per verify interval
+ * when keepalive is negotiated (the default), so a peer running an older
+ * build that reaches UP on its own still supplies the evidence within one of
+ * its verify intervals. The budget is therefore sized to outlast a peer
+ * verify interval comfortably: 30 * 500 ms = 15 s vs a 5 s default.
+ */
+#define TBFRAME_PROBE_INTERVAL_MS	500
+#define TBFRAME_PROBE_RETRIES		30
+/*
+ * Level-triggered silence detector for an ESTABLISHED session: with keepalive
+ * negotiated a healthy link delivers at least one frame per verify interval,
+ * so N consecutive silent intervals is conclusive evidence of a dead data
+ * path even though the hop entries still read back enabled.
+ */
+#define TBFRAME_DATA_SILENCE_TICKS	3
+/*
+ * A failed proof cycles the session hardware (rings, paths, in-HopID) and
+ * retries. If the fabric is genuinely wedged that must not become a hot loop,
+ * so consecutive failures back off exponentially to this cap.
+ */
+#define TBFRAME_PROBE_BACKOFF_MAX_MS	30000
+
+/*
+ * Hard ceiling on the teardown refs wait. teardown_force_ms=0 used to mean
+ * "wait forever", which is an unbounded wait by configuration: a client (or
+ * dead hardware that never cancels a frame) holding one reference wedges an
+ * rmmod, and the same code runs from the shutdown path where wedging strands a
+ * node that an operator believed they were rebooting. 0 now means "use this
+ * ceiling"; on expiry teardown force-proceeds with the documented deliberate
+ * leak, which is strictly better than not returning.
+ */
+#define TBFRAME_TEARDOWN_FORCE_MAX_MS	10000
+/*
+ * Shutdown-mode budgets. On a reboot the machine is going down either way, so
+ * refusal is not available and every peer wait collapses: no BYE at all (the
+ * peer's own session verify collects the stale session), a short publisher
+ * drain, and a short refs wait before the forced leak. Bounded-and-proceed.
+ */
+#define TBFRAME_SHUTDOWN_DRAIN_MS	200
+#define TBFRAME_SHUTDOWN_FORCE_MS	500
+
 enum tbframe_link_state {
 	TBFRAME_STATE_INIT,		/* handshake not complete */
 	TBFRAME_STATE_UP,		/* established, data admitted */
@@ -124,6 +178,19 @@ struct tbframe {
 	unsigned int		teardown_warn_ms;
 	unsigned int		teardown_force_ms;
 	/*
+	 * The machine is going down (reboot notifier). Refusal is not an
+	 * option on this path, so every peer wait collapses to its shutdown
+	 * budget and teardown proceeds regardless of the outcome.
+	 */
+	bool			shutdown_mode;
+	/*
+	 * Refuse to declare a session UP until at least one good frame has
+	 * actually been received on the data ring (see TBFRAME_PROBE_*).
+	 * Default on; a peer that does not negotiate keepalive cannot supply
+	 * the evidence, and that case is logged rather than silently skipped.
+	 */
+	bool			data_proof;
+	/*
 	 * Max frames resident in the hardware TX ring per link; the excess
 	 * waits in the link's software queues where ctrl frames (rxe ACKs,
 	 * keepalives) overtake bulk data. Bounds ACK queueing delay to
@@ -195,6 +262,26 @@ struct tbframe_link {
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
 
+	/*
+	 * Data-path proof state. ->data_rx counts GOOD frames the hardware
+	 * actually delivered on this session's RX ring (keepalives included,
+	 * cancellations and CRC-flagged frames excluded); it is the only
+	 * signal in this driver that observes the bulk path rather than the
+	 * control plane or the routers' hop-entry enable bits.
+	 *
+	 * ->data_proven latches once ->data_rx moves and gates the transition
+	 * to UP, so a session over a dead data path never reaches the client
+	 * and never publishes an HCA. ->silent_ticks is the level-triggered
+	 * detector for a path that dies AFTER it was proven.
+	 */
+	u64			data_rx;
+	u64			data_rx_tick_mark;
+	bool			data_proven;
+	bool			data_proof_waived;
+	unsigned int		probe_attempts;
+	unsigned int		probe_failures;
+	unsigned int		silent_ticks;
+
 	bool			needs_down;
 	enum tbframe_down_reason down_reason;
 	bool			announce_pending; /* replay link_up to a late client */
@@ -261,6 +348,12 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 					 bool autostart);
 int tbframe_link_destroy(struct tbframe_link *link,
 			 enum tbframe_down_reason reason);
+/*
+ * System-shutdown quiesce: park the session and tear its hardware down with
+ * every peer wait collapsed, leaving the link object alive. Never refuses,
+ * never waits on the peer, always returns.
+ */
+void tbframe_link_shutdown(struct tbframe_link *link);
 void tbframe_link_session_step(struct tbframe_link *link);
 void tbframe_link_verify_step(struct tbframe_link *link);
 int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
