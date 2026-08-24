@@ -174,6 +174,9 @@ static void tbframe_verify_sends_keepalive(struct kunit *test)
 
 	tbframe_mock_link_up(test, fx);
 
+	/* Keep the keepalive in the ring so its contents can be inspected. */
+	fx->mock.hold_keepalives = true;
+
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_queued);
 	tbframe_link_verify_step(fx->link);
 	KUNIT_ASSERT_EQ(test, 1u, fx->mock.tx_queued);

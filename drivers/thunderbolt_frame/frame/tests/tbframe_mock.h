@@ -15,6 +15,16 @@
 
 #include "../tbframe_priv.h"
 
+/*
+ * Lockstep lever with main.c's data_proof module parameter: 1 = the shipped
+ * driver refuses to declare a link up until a frame has crossed the data ring,
+ * 0 = the pre-2.46 driver, which went up on the control plane alone. Flip to 0
+ * to run the tbframe_datapath suite RED against the old behaviour.
+ */
+#ifndef TBFRAME_DATA_PROOF
+#define TBFRAME_DATA_PROOF 1
+#endif
+
 #define TBFRAME_MOCK_MAX_REQS	16
 #define TBFRAME_MOCK_MAX_EVENTS	32
 
@@ -26,6 +36,23 @@ struct tbframe_mock {
 	bool		fail_ready;	/* fail only READY requests */
 	bool		never_cancel;	/* dead hw: stop_rings returns nothing */
 	int		paths_active_ret;
+	/*
+	 * Dead bulk data path with a perfectly healthy control plane: rings
+	 * allocate and start, hop entries read back enabled (paths_active_ret
+	 * stays 1), HELLO/READY/BYE are all answered -- and not one byte
+	 * crosses the data ring. This is the measured 2026-08-23 post-reload
+	 * state on 5 of 10 chain links. Default false: a healthy modelled peer
+	 * answers each keepalive with one of its own, which is what a real
+	 * peer's verify cadence does.
+	 */
+	bool		datapath_dead;
+	/*
+	 * Leave our own keepalives sitting in tx_queue instead of completing
+	 * them the way hardware would, so a test can inspect the frame.
+	 */
+	bool		hold_keepalives;
+	unsigned int	peer_keepalives;	/* frames the model peer sent */
+	unsigned int	keepalives_sent;	/* keepalives WE put on the ring */
 
 	bool		rings_alloced;
 	bool		rings_started;
@@ -290,12 +317,56 @@ static int tbframe_mock_post_rx(void *data, struct tbframe_frame_priv *f)
 	return 0;
 }
 
+/*
+ * Model peer keepalive cadence: a live peer emits a keepalive frame on the
+ * data ring once per verify interval, so our own keepalive going out is a
+ * good proxy for "a peer frame is about to arrive". Deliver one into a posted
+ * RX descriptor, carrying the PEER's session cookie (our own cookie would
+ * read as a peer restart and supersede the session).
+ *
+ * @datapath_dead suppresses it, modelling exactly the field failure: the
+ * control plane and the hop entries are healthy, the bulk path moves nothing.
+ */
+static void tbframe_mock_peer_keepalive(struct tbframe_mock *m)
+{
+	struct tbframe_frame_priv *f;
+	struct ring_frame *rf;
+
+	if (m->datapath_dead || list_empty(&m->rx_posted))
+		return;
+
+	rf = list_first_entry(&m->rx_posted, struct ring_frame, list);
+	list_del_init(&rf->list);
+	m->rx_posted_count--;
+	f = container_of(rf, struct tbframe_frame_priv, rf);
+	tbframe_wire_put_le64(f->frame.data, m->peer.session_cookie);
+	m->peer_keepalives++;
+	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+				 TBFRAME_PDF_KEEPALIVE, false);
+}
+
 static int tbframe_mock_ring_tx(void *data, struct tbframe_frame_priv *f)
 {
 	struct tbframe_mock *m = data;
+	bool keepalive = f->frame.pdf == TBFRAME_PDF_KEEPALIVE;
 
 	if (!m->rings_started)
 		return -ESHUTDOWN;
+
+	if (keepalive) {
+		m->keepalives_sent++;
+		tbframe_mock_peer_keepalive(m);
+		/*
+		 * Complete it the way the hardware does, so a keepalive never
+		 * distorts the TX-ring arithmetic the window/budget tests
+		 * measure. hold_keepalives opts out for tests that want to
+		 * inspect the frame itself.
+		 */
+		if (!m->hold_keepalives) {
+			tbframe_core_tx_complete(f, false);
+			return 0;
+		}
+	}
 	INIT_LIST_HEAD(&f->rf.list);
 	list_add_tail(&f->rf.list, &m->tx_queue);
 	m->tx_queued++;
@@ -458,6 +529,7 @@ static int tbframe_mock_fixture_init(struct kunit *test,
 	fx->tf.xmit_drain_ms = 200;
 	fx->tf.teardown_warn_ms = 50;
 	fx->tf.teardown_force_ms = 100;
+	fx->tf.data_proof = TBFRAME_DATA_PROOF;
 	fx->tf.wq = alloc_workqueue("tbframe-kunit",
 				    WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
 	if (!fx->tf.wq)
@@ -535,6 +607,18 @@ tbframe_mock_complete_tx(struct tbframe_mock_fixture *fx)
 	tbframe_core_tx_complete(container_of(rf, struct tbframe_frame_priv,
 					      rf), false);
 	return true;
+}
+
+/* How many control requests of @op the link has issued so far. */
+static __maybe_unused unsigned int
+tbframe_mock_count_req_op(const struct tbframe_mock *m, u16 op)
+{
+	unsigned int i, n = 0;
+
+	for (i = 0; i < m->req_count; i++)
+		if (m->req_ops[i] == op)
+			n++;
+	return n;
 }
 
 static __maybe_unused int

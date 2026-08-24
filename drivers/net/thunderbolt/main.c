@@ -197,6 +197,12 @@ struct tbnet {
 	const struct tb_service *svc;
 	struct tb_xdomain *xd;
 	struct tb_protocol_handler handler;
+	/*
+	 * Both the shutdown and the unbind path fence inbound dispatch before
+	 * touching the data path, and shutdown is followed by unbind on a
+	 * driver unload, so the unregister must be idempotent and observable.
+	 */
+	bool handler_registered;
 	struct net_device *dev;
 	struct napi_struct napi;
 	struct tbnet_stats stats;
@@ -230,6 +236,9 @@ static const uuid_t tbnet_svc_uuid =
 	UUID_INIT(0x798f589e, 0x3616, 0x8a47,
 		  0x97, 0xc6, 0x56, 0x64, 0xa9, 0x20, 0xc8, 0xdd);
 
+static void tbnet_fence_handler(struct tbnet *net);
+static void tbnet_cancel_all_work(struct tbnet *net);
+
 static struct tb_property_dir *tbnet_dir;
 
 static bool tbnet_e2e = true;
@@ -251,6 +260,19 @@ static uint tbnet_session_verify_ms = 5000;
 module_param_named(session_verify_ms, tbnet_session_verify_ms, uint, 0644);
 MODULE_PARM_DESC(session_verify_ms,
 		 "Re-check the DMA tunnel behind an established ThunderboltIP session every N ms; re-login when it died (0 disables)");
+
+/*
+ * Hard deadline for the orderly LOGOUT handshake in tbnet_tear_down(). The
+ * retry count alone (TBNET_LOGOUT_RETRIES * TBNET_LOGOUT_TIMEOUT = 10 s) is a
+ * bound in name only for the paths that matter: ndo_stop holds RTNL across it,
+ * and device_shutdown() runs it once per link while the machine is trying to
+ * reboot. On expiry the teardown proceeds unchanged; only the courtesy notice
+ * to the peer is skipped.
+ */
+static uint tbnet_logout_budget_ms = 3000;
+module_param_named(logout_budget_ms, tbnet_logout_budget_ms, uint, 0644);
+MODULE_PARM_DESC(logout_budget_ms,
+		 "Hard deadline (ms) for the LOGOUT handshake during teardown; on expiry the teardown proceeds without it");
 
 static void tbnet_fill_header(struct thunderbolt_ip_header *hdr, u64 route,
 	u8 sequence, const uuid_t *initiator_uuid, const uuid_t *target_uuid,
@@ -421,6 +443,22 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	if (tb_xdomain_handshake_complete(&net->login_hs)) {
 		int ret, retries = TBNET_LOGOUT_RETRIES;
+		unsigned long deadline;
+
+		/*
+		 * Hard deadline on the peer wait, on top of the retry count.
+		 * TBNET_LOGOUT_RETRIES * TBNET_LOGOUT_TIMEOUT is 10 s against a
+		 * peer that never answers, and this runs from ndo_stop (under
+		 * RTNL, so every rtnl_lock() user on the box stalls with it),
+		 * from device_shutdown() during a reboot, and once per link on
+		 * a chain node. A peer that is powered off or wedged must not
+		 * be able to buy that much of a shutdown. Defined failure
+		 * action on expiry: log once and proceed with the local
+		 * teardown exactly as if the logout had been refused -- the
+		 * peer's own session verify collects the stale session.
+		 */
+		deadline = jiffies +
+			   msecs_to_jiffies(READ_ONCE(tbnet_logout_budget_ms));
 
 		while (send_logout && retries-- > 0) {
 			netdev_dbg(net->dev, "sending logout request %u\n",
@@ -428,6 +466,12 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 			ret = tbnet_logout_request(net);
 			if (ret != -ETIMEDOUT)
 				break;
+			if (time_after_eq(jiffies, deadline)) {
+				netdev_warn(net->dev,
+					    "logout unacknowledged within %u ms; proceeding with teardown\n",
+					    READ_ONCE(tbnet_logout_budget_ms));
+				break;
+			}
 		}
 
 		tb_ring_stop(net->rx_ring.ring);
@@ -1620,13 +1664,14 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	net->rx_ring_size = TBNET_DEFAULT_RING_SIZE;
 	net->tx_ring_size = TBNET_DEFAULT_RING_SIZE;
 	net->int_coalesce_usecs = TBNET_DEFAULT_INT_COALESCE_USECS;
-	tb_register_protocol_handler(&net->handler);
+	if (!tb_register_protocol_handler(&net->handler))
+		net->handler_registered = true;
 
 	tb_service_set_drvdata(svc, net);
 
 	ret = register_netdev(dev);
 	if (ret) {
-		tb_unregister_protocol_handler(&net->handler);
+		tbnet_fence_handler(net);
 		free_netdev(dev);
 		return ret;
 	}
@@ -1634,18 +1679,123 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	return 0;
 }
 
+/*
+ * Cancel every work item this instance can own. Only meaningful once the
+ * protocol handler is gone: tbnet_handle_packet() queues login_work,
+ * connected_work and disconnect_work from the XDomain dispatch context, so a
+ * cancel that races a still-registered handler proves nothing.
+ */
+/*
+ * Fence inbound XDomain dispatch for this instance. Idempotent: shutdown runs
+ * before unbind on a driver unload and both need the fence.
+ *
+ * tb_unregister_protocol_handler() takes the core's xdomain_dispatch_lock,
+ * which tb_xdomain_handle_request() holds across the handler callbacks, so on
+ * return tbnet_handle_packet() is neither running nor startable. That is the
+ * only thing that makes a subsequent work cancel meaningful.
+ */
+static void tbnet_fence_handler(struct tbnet *net)
+{
+	if (!net->handler_registered)
+		return;
+	net->handler_registered = false;
+	tb_unregister_protocol_handler(&net->handler);
+}
+
+static void tbnet_cancel_all_work(struct tbnet *net)
+{
+	cancel_delayed_work_sync(&net->login_work);
+	cancel_work_sync(&net->connected_work);
+	cancel_delayed_work_sync(&net->verify_work);
+	cancel_work_sync(&net->disconnect_work);
+}
+
+/*
+ * Unbind order is NOT the mirror of probe, deliberately -- the same rule
+ * thunderbolt_frame's service.c documents and for the same reason.
+ *
+ * The protocol handler goes FIRST. tb_unregister_protocol_handler() takes the
+ * core's xdomain_dispatch_lock, which tb_xdomain_handle_request() holds across
+ * the handler callbacks (drivers/thunderbolt/xdomain.c), so its return is a
+ * hard guarantee that tbnet_handle_packet() is not running and can never run
+ * again. Everything after it therefore runs with inbound XDomain requests
+ * structurally excluded.
+ *
+ * The old order (unregister_netdev() first) left the handler live across the
+ * whole of ndo_stop. That path is long: tbnet_stop() -> tbnet_tear_down(true)
+ * sends up to TBNET_LOGOUT_RETRIES (10) logout requests at TBNET_LOGOUT_TIMEOUT
+ * (1000 ms) each, all under RTNL. tbnet_stop() cancels verify_work and
+ * disconnect_work at the START of that window; an inbound LOGIN or LOGOUT
+ * arriving any time afterwards re-queued login_work / connected_work /
+ * disconnect_work on system_long_wq, and nothing cancelled them again before
+ * free_netdev() freed the netdev that netdev_priv() hands those handlers.
+ * tbnet_connected_work() then calls tb_ring_start(net->tx_ring.ring) and
+ * tbnet_disconnect_work() -> tbnet_tear_down() calls tb_ring_stop() on freed
+ * struct tbnet state, i.e. NHI MMIO writes derived from freed ring pointers --
+ * a use-after-free that presents as a hard, unrecoverable machine hang rather
+ * than a clean oops, and only when a peer happens to be mid-handshake during
+ * the unload. That is the appmana-019 2026-08-24 signature (hang on
+ * `modprobe -r thunderbolt_net` with both chain links live, while the same
+ * sequence on appmana-021 completed cleanly).
+ *
+ * Unregistering the handler first is safe for our own in-flight requests: an
+ * XDomain RESPONSE is matched by tb_cfg_request_find() in ctl.c, which runs
+ * only when no protocol handler CONSUMED the packet (tb_ctl_rx_callback() ->
+ * tb_ctl_handle_event() -> tb_domain_event_cb() -> tb_xdomain_handle_request()).
+ * With no handler registered the walk consumes nothing, so the logout response
+ * still completes tbnet_logout_request(). The only cost is that a peer
+ * mid-handshake sees one retry interval of unanswered requests, which its own
+ * retry budget already absorbs.
+ */
 static void tbnet_remove(struct tb_service *svc)
 {
 	struct tbnet *net = tb_service_get_drvdata(svc);
 
+	tbnet_fence_handler(net);
+
 	unregister_netdev(net->dev);
-	tb_unregister_protocol_handler(&net->handler);
+
+	/*
+	 * Hard fence before the netdev (and with it struct tbnet) is freed.
+	 * unregister_netdev() only runs ndo_stop for an interface that was UP,
+	 * and even then tbnet_stop() cancels just two of the four work items;
+	 * with the handler gone nothing can re-queue, so this sweep is final.
+	 */
+	tbnet_cancel_all_work(net);
+
 	free_netdev(net->dev);
 }
 
+/*
+ * System shutdown / reboot (device_shutdown()), NOT a driver unbind.
+ *
+ * Refusing is not an option here -- the machine is going down either way -- so
+ * the rule is bounded-and-proceed: every peer wait must have a deadline and a
+ * defined failure action, and nothing may be left able to re-arm the data path
+ * behind us.
+ *
+ * The fence is the whole point. The old shutdown left the protocol handler
+ * registered across tbnet_tear_down(), and a peer that is HELLO-ing/LOGIN-ing
+ * at us (the appmana-008 2026-08-24 configuration: peer had been powered off
+ * at boot, came back, and was retrying the login endlessly) re-queues
+ * connected_work on system_long_wq as fast as tear_down's stop_login() cancels
+ * it. tbnet_connected_work() then re-runs tb_ring_start() and
+ * tb_xdomain_enable_paths(), re-arming DMA into rings that the shutdown
+ * sequence is about to take away underneath nhi_shutdown() -- which then walks
+ * every hop and dev_WARNs "ring is still active" before disabling interrupts.
+ * Fencing first makes the tear-down monotonic: nothing can put the data path
+ * back after it has been taken down.
+ */
 static void tbnet_shutdown(struct tb_service *svc)
 {
-	tbnet_tear_down(tb_service_get_drvdata(svc), true);
+	struct tbnet *net = tb_service_get_drvdata(svc);
+
+	if (!net)
+		return;
+
+	tbnet_fence_handler(net);
+	tbnet_tear_down(net, true);
+	tbnet_cancel_all_work(net);
 }
 
 static int tbnet_suspend(struct device *dev)
@@ -1653,14 +1803,21 @@ static int tbnet_suspend(struct device *dev)
 	struct tb_service *svc = tb_to_service(dev);
 	struct tbnet *net = tb_service_get_drvdata(svc);
 
+	/*
+	 * Fence first, same rule as shutdown/unbind: an inbound LOGIN during
+	 * the tear-down re-queues connected_work, which would re-enable the
+	 * paths we just disabled and leave a live DMA tunnel across a suspend.
+	 */
+	tbnet_fence_handler(net);
+
 	stop_login(net);
 	cancel_delayed_work_sync(&net->verify_work);
 	if (netif_running(net->dev)) {
 		netif_device_detach(net->dev);
 		tbnet_tear_down(net, true);
 	}
+	tbnet_cancel_all_work(net);
 
-	tb_unregister_protocol_handler(&net->handler);
 	return 0;
 }
 
@@ -1669,7 +1826,8 @@ static int tbnet_resume(struct device *dev)
 	struct tb_service *svc = tb_to_service(dev);
 	struct tbnet *net = tb_service_get_drvdata(svc);
 
-	tb_register_protocol_handler(&net->handler);
+	if (!tb_register_protocol_handler(&net->handler))
+		net->handler_registered = true;
 
 	netif_carrier_off(net->dev);
 	if (netif_running(net->dev)) {

@@ -31,6 +31,11 @@
 static void tbframe_session_workfn(struct work_struct *work);
 static void tbframe_tx_released_workfn(struct work_struct *work);
 static void tbframe_verify_workfn(struct work_struct *work);
+static int __tbframe_alloc_frame(struct tbframe_link *link, u16 len,
+				 bool is_ctrl, bool pre_up,
+				 struct tbframe_frame **frame);
+static int __tbframe_xmit(struct tbframe_link *link,
+			  struct tbframe_frame *frame, bool pre_up);
 
 void tbframe_state_init(struct tbframe *tf)
 {
@@ -332,6 +337,129 @@ err_free_rings:
 	return ret;
 }
 
+/*
+ * Put one keepalive frame on the DATA ring. @pre_up admits it over rings that
+ * are up but a session that has not been declared UP: that is what makes the
+ * data-path proof possible at all, and it is safe because the READY ack
+ * certifies the peer's paths are enabled before the prover ever runs.
+ *
+ * Charged to the control reserve, so a full data window never starves it.
+ * Returns 0 when a frame reached the ring.
+ */
+static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
+{
+	struct tbframe_frame *f;
+	int ret;
+
+	ret = __tbframe_alloc_frame(link, TBFRAME_KEEPALIVE_LEN, true, pre_up,
+				    &f);
+	if (ret)
+		return ret;
+	f->pdf = TBFRAME_PDF_KEEPALIVE;
+	tbframe_wire_put_le64(f->data, link->local_cookie);
+	ret = __tbframe_xmit(link, f, pre_up);
+	if (ret)
+		tbframe_frame_free(link, f);
+	return ret;
+}
+
+/*
+ * Prove the bulk data path before declaring the session UP.
+ *
+ * Field shape being closed (appmana chain, 2026-08-23 live v2.43 migration):
+ * after a core/leaf reload, 5 of 10 links came back with "link up",
+ * tbr-<peer> present, usb4_rdma* published, ports PORT_ACTIVE, GIDs
+ * populated, "READY confirmed" in dmesg, hop entries reading back enabled --
+ * and a completely dead RDMA data path (ib_send_bw connected the QPs,
+ * exchanged GIDs, then completed ZERO iterations at 0.00 MB/s, against
+ * 1450-1924 MB/s on the healthy links). A reboot restored it every time.
+ * Every signal the driver had was a CONTROL-plane or config-space signal, so
+ * the driver confidently published a dead link.
+ *
+ * The proof needs no new wire op and no capability negotiation: both ends
+ * already emit a keepalive on the data ring once per verify interval when
+ * keepalive is negotiated, so evidence arrives from a peer running an older
+ * build too (within one of its verify intervals, once it reaches UP on its
+ * own). This side sends one keepalive per attempt so a peer that is itself
+ * still pre-UP -- and therefore not yet on its verify cadence -- is proven by
+ * OUR frames landing in its ring and its reply cadence starting.
+ *
+ * Returns true when the session may proceed to UP.
+ */
+static bool tbframe_link_prove_data_path(struct tbframe_link *link)
+{
+	struct tbframe *tf = link->tf;
+	unsigned long flags;
+	unsigned int attempts;
+	bool proven, waived;
+	u32 remote_caps;
+
+	spin_lock_irqsave(&link->lock, flags);
+	proven = link->data_proven;
+	waived = link->data_proof_waived;
+	remote_caps = link->remote_caps;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	if (proven || waived || !tf->data_proof)
+		return true;
+
+	/*
+	 * A peer that does not negotiate keepalive cannot be made to emit
+	 * anything on its own, so there is nothing to wait for. Waive the gate
+	 * for this session rather than refuse the link forever -- but say so,
+	 * because the link is then exactly as unverified as every link was
+	 * before this gate existed.
+	 */
+	if (!tf->keepalive || !(remote_caps & TBFRAME_WIRE_CAP_KEEPALIVE)) {
+		spin_lock_irqsave(&link->lock, flags);
+		link->data_proof_waived = true;
+		spin_unlock_irqrestore(&link->lock, flags);
+		pr_warn("%s: peer does not negotiate keepalive; the data path CANNOT be validated and this link is being declared up unverified\n",
+			link->name);
+		return true;
+	}
+
+	/* Best effort: a full ring or a wedged TX just costs this attempt. */
+	tbframe_link_send_keepalive(link, true);
+
+	spin_lock_irqsave(&link->lock, flags);
+	proven = link->data_proven;
+	attempts = proven ? 0 : ++link->probe_attempts;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (proven)
+		return true;
+
+	if (attempts < TBFRAME_PROBE_RETRIES) {
+		tbframe_link_kick(link,
+				  msecs_to_jiffies(TBFRAME_PROBE_INTERVAL_MS));
+		return false;
+	}
+
+	/*
+	 * Budget exhausted: the control plane is healthy, both ends' paths are
+	 * enabled, and not one frame has crossed the data ring. This is the
+	 * dead-path state. Refuse to go UP (so no link_up, no HCA, no false
+	 * health), say so unmistakably, and cycle the session hardware --
+	 * rings, hop entries and the in-HopID are all rebuilt by the retry,
+	 * which is the only in-driver repair available for it.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	link->probe_attempts = 0;
+	link->probe_failures++;
+	link->data_proof_waived = false;
+	if (!link->needs_down) {
+		link->needs_down = true;
+		link->down_reason = TBFRAME_DOWN_VERIFY;
+		tbframe_link_kick_locked(link, 0);
+	}
+	spin_unlock_irqrestore(&link->lock, flags);
+	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no frame crossed the data ring in %u probes over %u ms; refusing to declare the link up and rebuilding the session hardware\n",
+	       link->name, link->local_hopid, link->active_remote_hopid,
+	       TBFRAME_PROBE_RETRIES,
+	       TBFRAME_PROBE_RETRIES * TBFRAME_PROBE_INTERVAL_MS);
+	return false;
+}
+
 static int tbframe_link_ready_once(struct tbframe_link *link)
 {
 	u8 req[TBFRAME_WIRE_HELLO_MSG_SIZE];
@@ -502,6 +630,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	unsigned long flags;
 	bool was_up, deliver_down, terminal, hold;
 	bool had_rings, had_paths, had_hopid;
+	unsigned int drain_ms;
 	u16 remote_hopid;
 	int active;
 
@@ -541,6 +670,17 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->needs_down = false;
 	link->tx_blocked = false;
 	link->hello_attempts = 0;
+	/*
+	 * The proof is per-session: the next session gets fresh rings, a fresh
+	 * in-HopID and freshly programmed hop entries, so evidence from the
+	 * old one says nothing about it.
+	 */
+	link->data_proven = false;
+	link->data_proof_waived = false;
+	link->data_rx = 0;
+	link->data_rx_tick_mark = 0;
+	link->silent_ticks = 0;
+	link->probe_attempts = 0;
 	tb_xdomain_handshake_reset(&link->hs);
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -549,10 +689,16 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	/*
 	 * Admission is closed above; wait out the publishers that already
 	 * passed their state check and are inside ring_tx()/post_rx().
-	 * Bounded: hardware that wedges a publisher poisons the link.
+	 * Bounded: hardware that wedges a publisher poisons the link. On the
+	 * shutdown path the budget collapses -- the machine is going down and
+	 * a poisoned link costs nothing, while waiting strands the reboot.
 	 */
+	drain_ms = tf->shutdown_mode ?
+		   min_t(unsigned int, tf->xmit_drain_ms,
+			 TBFRAME_SHUTDOWN_DRAIN_MS) :
+		   tf->xmit_drain_ms;
 	if (read_poll_timeout(atomic_read, active, !active, 100,
-			      (u64)tf->xmit_drain_ms * 1000, false,
+			      (u64)drain_ms * 1000, false,
 			      &link->hw_active)) {
 		spin_lock_irqsave(&link->lock, flags);
 		link->state = TBFRAME_STATE_DEAD;
@@ -614,8 +760,17 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * TX is quiesced; only after that (or the bounded budget) do we
 	 * disable the paths its flush drains into.
 	 */
-	if (was_up && (reason == TBFRAME_DOWN_CLOSED ||
-		       reason == TBFRAME_DOWN_VERIFY))
+	/*
+	 * ...and never on the shutdown path: BYE is a courtesy that costs
+	 * TBFRAME_BYE_RETRIES * TBFRAME_BYE_TIMEOUT_MS (4 s) per link against
+	 * a peer that does not answer, which is exactly the peer state during
+	 * a fleet-wide reboot. The peer's own session verify collects the
+	 * stale session. Bounded-and-proceed is mandatory here: unlike an
+	 * rmmod, a shutdown cannot be refused.
+	 */
+	if (was_up && !tf->shutdown_mode &&
+	    (reason == TBFRAME_DOWN_CLOSED ||
+	     reason == TBFRAME_DOWN_VERIFY))
 		tbframe_link_bye(link);
 
 	/*
@@ -693,14 +848,33 @@ deliver:
 	 * A safety re-kick at the settle interval covers a peer whose
 	 * return HELLO was lost.
 	 */
-	if (reason == TBFRAME_DOWN_LOGOUT)
+	if (reason == TBFRAME_DOWN_LOGOUT) {
 		tbframe_link_kick(link,
 				  msecs_to_jiffies(TBFRAME_BYE_SETTLE_MS));
-	else if (reason != TBFRAME_DOWN_CLOSED &&
-		 reason != TBFRAME_DOWN_DEAD_HW &&
-		 reason != TBFRAME_DOWN_UNPLUG)
-		tbframe_link_kick(link,
-				  msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
+	} else if (reason != TBFRAME_DOWN_CLOSED &&
+		   reason != TBFRAME_DOWN_DEAD_HW &&
+		   reason != TBFRAME_DOWN_UNPLUG) {
+		unsigned int delay = TBFRAME_RETRY_DELAY_MS;
+		unsigned int fails;
+
+		/*
+		 * A session torn down because the data path could not be
+		 * proven rebuilds rings, hop entries and the in-HopID on the
+		 * retry. If the fabric is genuinely wedged that must not
+		 * become a hot loop of path enable/disable cycles (each one is
+		 * a shot at the router-level egress wedge), so consecutive
+		 * proof failures back off exponentially to a cap.
+		 */
+		spin_lock_irqsave(&link->lock, flags);
+		fails = link->probe_failures;
+		spin_unlock_irqrestore(&link->lock, flags);
+		if (fails)
+			delay = min_t(unsigned int,
+				      TBFRAME_PROBE_BACKOFF_MAX_MS,
+				      TBFRAME_RETRY_DELAY_MS <<
+				      min(fails, 8u));
+		tbframe_link_kick(link, msecs_to_jiffies(delay));
+	}
 }
 
 static void __tbframe_link_session_step(struct tbframe_link *link)
@@ -827,6 +1001,14 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 		}
 	}
 
+	/*
+	 * READY is confirmed, which certifies BOTH ends' paths are enabled --
+	 * the earliest point at which a frame CAN cross. Nothing goes UP until
+	 * one actually has.
+	 */
+	if (!tbframe_link_prove_data_path(link))
+		return;
+
 	tbframe_link_maybe_up(link);
 }
 
@@ -886,15 +1068,48 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 		return;
 
 	if (tf->keepalive && (remote_caps & TBFRAME_WIRE_CAP_KEEPALIVE)) {
-		struct tbframe_frame *f;
+		bool silent;
+		u64 seen;
 
 		/* Charged to the control reserve; skip a tick when full. */
-		if (!tbframe_alloc_frame(link, TBFRAME_KEEPALIVE_LEN, true,
-					 &f)) {
-			f->pdf = TBFRAME_PDF_KEEPALIVE;
-			tbframe_wire_put_le64(f->data, link->local_cookie);
-			if (tbframe_xmit(link, f))
-				tbframe_frame_free(link, f);
+		tbframe_link_send_keepalive(link, false);
+
+		/*
+		 * Level-triggered dead-path detector for an ESTABLISHED
+		 * session. With keepalive negotiated both ends emit a frame
+		 * per verify interval, so a run of intervals in which nothing
+		 * at all arrived is conclusive evidence that the bulk path is
+		 * dead -- the one condition paths_active() above cannot see,
+		 * because the hop entries of a dead path still read back
+		 * enabled. Without this, the 2026-08-23 dead links would have
+		 * stayed "healthy" until an operator ran ib_send_bw.
+		 */
+		spin_lock_irqsave(&link->lock, flags);
+		seen = link->data_rx;
+		if (seen != link->data_rx_tick_mark) {
+			link->data_rx_tick_mark = seen;
+			link->silent_ticks = 0;
+			silent = false;
+		} else {
+			silent = ++link->silent_ticks >=
+				 TBFRAME_DATA_SILENCE_TICKS;
+		}
+		if (silent && link->state == TBFRAME_STATE_UP &&
+		    !link->needs_down) {
+			link->needs_down = true;
+			link->down_reason = TBFRAME_DOWN_VERIFY;
+			link->data_proven = false;
+			link->silent_ticks = 0;
+			tbframe_link_kick_locked(link, 0);
+		} else {
+			silent = false;
+		}
+		spin_unlock_irqrestore(&link->lock, flags);
+		if (silent) {
+			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; tearing the session down\n",
+			       link->name, TBFRAME_DATA_SILENCE_TICKS,
+			       TBFRAME_DATA_SILENCE_TICKS * tf->verify_ms);
+			return;
 		}
 	}
 
@@ -1320,6 +1535,30 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	}
 
 	spin_lock_irqsave(&link->lock, flags);
+	/*
+	 * Data-path proof. This is the ONE place in the driver that observes
+	 * a byte actually crossing the DMA data ring: every other health
+	 * signal (HELLO/READY over the control channel, paths_active() reading
+	 * hop-entry enable bits, link_attrs, GIDs) is satisfied by a link
+	 * whose bulk path moves nothing at all -- the measured 2026-08-23
+	 * post-reload state on 5 of 10 chain links, where ib_send_bw ran
+	 * 0.00 MB/s while every indicator read healthy.
+	 *
+	 * Counted BEFORE the UP gate on purpose: the frames that prove a fresh
+	 * session's path (the peer's keepalives, arriving while this side is
+	 * still pre-UP) are exactly the ones the UP gate would discard. CRC /
+	 * overrun frames are excluded -- they prove the wire moves, not that
+	 * the path is usable.
+	 */
+	if (!bad && len <= TBFRAME_MAX_FRAME) {
+		link->data_rx++;
+		if (!link->data_proven) {
+			link->data_proven = true;
+			link->probe_attempts = 0;
+			link->probe_failures = 0;
+		}
+		link->silent_ticks = 0;
+	}
 	up = link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -1364,8 +1603,15 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 
 /* Public client API. */
 
-int tbframe_alloc_frame(struct tbframe_link *link, u16 len, bool is_ctrl,
-			struct tbframe_frame **frame)
+/*
+ * @pre_up admits a frame over rings that are up but a session that has not
+ * been declared UP yet. Only the data-path prover uses it: the proof has to
+ * run BEFORE the client is told the link is usable, or it proves nothing.
+ * Every public entry point passes false, so client traffic still needs UP.
+ */
+static int __tbframe_alloc_frame(struct tbframe_link *link, u16 len,
+				 bool is_ctrl, bool pre_up,
+				 struct tbframe_frame **frame)
 {
 	struct tbframe_frame_priv *f;
 	unsigned long flags;
@@ -1374,7 +1620,10 @@ int tbframe_alloc_frame(struct tbframe_link *link, u16 len, bool is_ctrl,
 		return -EINVAL;
 
 	spin_lock_irqsave(&link->lock, flags);
-	if (link->state != TBFRAME_STATE_UP) {
+	if (pre_up ? (!link->rings_up || !link->paths_enabled ||
+		      link->removing || link->parked ||
+		      link->state == TBFRAME_STATE_DEAD) :
+		     link->state != TBFRAME_STATE_UP) {
 		spin_unlock_irqrestore(&link->lock, flags);
 		return -ENETDOWN;
 	}
@@ -1406,9 +1655,16 @@ nospc:
 	spin_unlock_irqrestore(&link->lock, flags);
 	return -ENOSPC;
 }
+
+int tbframe_alloc_frame(struct tbframe_link *link, u16 len, bool is_ctrl,
+			struct tbframe_frame **frame)
+{
+	return __tbframe_alloc_frame(link, len, is_ctrl, false, frame);
+}
 EXPORT_SYMBOL_GPL(tbframe_alloc_frame);
 
-int tbframe_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
+static int __tbframe_xmit(struct tbframe_link *link,
+			  struct tbframe_frame *frame, bool pre_up)
 {
 	struct tbframe_frame_priv *f;
 	unsigned long flags;
@@ -1427,7 +1683,18 @@ int tbframe_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 	 */
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
-	ok = link->state == TBFRAME_STATE_UP && link->rings_up;
+	ok = link->rings_up &&
+	     (pre_up ? !link->removing && !link->parked &&
+		       link->state != TBFRAME_STATE_DEAD :
+		       link->state == TBFRAME_STATE_UP);
+	/*
+	 * A pre-UP prober puts real frames on the wire, so this side's TX is
+	 * no longer certifiably silent: an inbound BYE must now withhold its
+	 * ack until the teardown has actually quiesced us, exactly as it does
+	 * for an established session.
+	 */
+	if (ok && pre_up)
+		link->tx_quiesced = false;
 	/*
 	 * Bounded ring residency: over budget, the frame waits in the
 	 * software queue (ctrl ahead of data at refill) instead of behind
@@ -1457,6 +1724,11 @@ int tbframe_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 	}
 	atomic_dec(&link->hw_active);
 	return ret;
+}
+
+int tbframe_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
+{
+	return __tbframe_xmit(link, frame, false);
 }
 EXPORT_SYMBOL_GPL(tbframe_xmit);
 
@@ -1680,13 +1952,29 @@ err_free:
  * Bounded wait for every client-held frame ref to drain; the rings were
  * already fenced, so this normally completes on the first tick. Copies the
  * legacy rail-teardown discipline: warn each interval, force at the cap.
+ *
+ * The cap is now unconditional. teardown_force_ms=0 used to mean "wait
+ * forever", which is an unbounded wait by configuration: one reference held
+ * by a client or by hardware that never cancels a frame wedges an rmmod, and
+ * the identical code runs from the shutdown path, where wedging strands a node
+ * that an operator believed they were rebooting. Nothing here may block
+ * indefinitely, so 0 now selects TBFRAME_TEARDOWN_FORCE_MAX_MS and the
+ * shutdown path clamps it further. On expiry the caller force-proceeds with
+ * the documented deliberate leak -- leaking a ring is strictly better than
+ * not returning.
  */
 static bool tbframe_link_wait_refs_zero(struct tbframe_link *link)
 {
 	struct tbframe *tf = link->tf;
 	unsigned int warn = tf->teardown_warn_ms ? tf->teardown_warn_ms : 2000;
-	unsigned int cap = tf->teardown_force_ms;
+	unsigned int cap = tf->teardown_force_ms ? tf->teardown_force_ms :
+			   TBFRAME_TEARDOWN_FORCE_MAX_MS;
 	unsigned int waited = 0;
+
+	if (tf->shutdown_mode) {
+		cap = min_t(unsigned int, cap, TBFRAME_SHUTDOWN_FORCE_MS);
+		warn = min_t(unsigned int, warn, cap);
+	}
 
 	for (;;) {
 		if (wait_for_completion_timeout(&link->refs_zero,
@@ -1694,10 +1982,9 @@ static bool tbframe_link_wait_refs_zero(struct tbframe_link *link)
 			return true;
 
 		waited += warn;
-		pr_err("%s: teardown waiting for frame refs=%u (%ums%s)\n",
-		       link->name, refcount_read(&link->refcnt), waited,
-		       cap ? "" : ", no cap");
-		if (cap && waited >= cap)
+		pr_err("%s: teardown waiting for frame refs=%u (%ums of %ums)\n",
+		       link->name, refcount_read(&link->refcnt), waited, cap);
+		if (waited >= cap)
 			return false;
 	}
 }
@@ -1822,6 +2109,44 @@ static void tbframe_link_park(struct tbframe_link *link)
 	mutex_lock(&link->session_lock);
 	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
 	mutex_unlock(&link->session_lock);
+}
+
+/*
+ * System shutdown / reboot quiesce for one link.
+ *
+ * device_shutdown() used to run NOTHING for a tbframe service: the service
+ * driver had no ->shutdown, so a rebooting node went into nhi_shutdown() with
+ * this link's TX and RX rings still started and its hop entries still enabled.
+ * nhi_shutdown() then dev_WARNs "TX ring N is still active" for each of them
+ * and disables the NHI interrupts underneath live DMA, while a peer that is
+ * still HELLO-ing at us keeps the session work re-arming. That is the
+ * appmana-008 2026-08-24 configuration (leaf-only reload, 019-facing XDomain
+ * in the failed/retrying state, peer HELLO-ing endlessly, then a plain
+ * `systemctl reboot` that never came back).
+ *
+ * Refusing is not available on this path, so the contract is
+ * bounded-and-proceed: park first (so nothing can re-arm behind us), cancel
+ * the session work, then take the hardware down with every peer wait
+ * collapsed by tf->shutdown_mode. The link object stays alive -- a later
+ * unbind still destroys it, and on a reboot there is no later unbind.
+ */
+void tbframe_link_shutdown(struct tbframe_link *link)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&link->lock, flags);
+	link->parked = true;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	timer_shutdown_sync(&link->verify_timer);
+	cancel_delayed_work_sync(&link->session_work);
+	cancel_work_sync(&link->verify_work);
+
+	mutex_lock(&link->session_lock);
+	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
+	mutex_unlock(&link->session_lock);
+
+	cancel_work_sync(&link->tx_released_work);
 }
 
 void tbframe_unregister_client_tf(struct tbframe *tf)

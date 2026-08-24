@@ -3389,6 +3389,236 @@ static void tb_test_icm_wedged_takeover_selects_software(struct kunit *test)
 }
 
 /*
+ * ---------------------------------------------------------------------------
+ * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
+ *
+ * A wedged-ICM board failed tb_domain_add() at driver_ready, and the FAILURE
+ * CLEANUP deadlocked:
+ *
+ *   (udev-worker):365   nhi_probe -> tb_domain_add -> tb_ctl_stop
+ *                       -> tb_ring_stop -> flush_work -> wait_for_completion [D]
+ *   kworker/u128:0:12   process_one_work -> icm_handle_notification
+ *                       -> mutex_lock(&tb->lock)                            [D]
+ *   INFO: task kworker/u128:0:12 is blocked on a mutex likely owned by
+ *         task (udev-worker):365
+ *   Kernel panic - not syncing: hung_task: blocked tasks
+ *
+ * tb_domain_add() takes tb->lock, then tb_ctl_start() opens event processing:
+ * icm_handle_event() queues icm_handle_notification onto tb->wq, and that work
+ * takes tb->lock. The failure path then called tb_ctl_stop() -- which
+ * schedules AND FLUSHES ring work -- with tb->lock still held. Making a
+ * tb->lock-taking work item runnable and then waiting on it while holding
+ * tb->lock is an AB-BA nothing can break. tb_domain_remove() had the same
+ * shape, which is why unload hung too, and tb_stop()/icm_stop() both ran their
+ * only cancels under the same lock.
+ *
+ * This models the ORDER as observable state rather than trying to reproduce a
+ * real deadlock: a wait-for-work while holding a lock that the work takes is
+ * recorded as a violation. Lever TB_DOMAIN_TEARDOWN_UNLOCKED=0 models the
+ * pre-2.46 driver and makes every case below fail.
+ * ---------------------------------------------------------------------------
+ */
+#ifndef TB_DOMAIN_TEARDOWN_UNLOCKED
+#define TB_DOMAIN_TEARDOWN_UNLOCKED 1
+#endif
+
+struct tb_lockorder_model {
+	bool		lock_held;
+	bool		ctl_running;
+	/* a tb->lock-taking work item is queued on tb->wq */
+	bool		notif_queued;
+	bool		notif_ran;
+	bool		wq_destroyed;
+	/* armed delayed_work that flush_workqueue() does not wait for */
+	bool		timer_armed;
+	bool		hotplug_active;
+
+	unsigned int	deadlocks;	/* waited on lock-taking work under lock */
+	unsigned int	uaf;		/* work ran after the domain went away */
+	unsigned int	queue_after_destroy;
+};
+
+static void lo_lock(struct tb_lockorder_model *m) { m->lock_held = true; }
+static void lo_unlock(struct tb_lockorder_model *m) { m->lock_held = false; }
+
+/* Control channel live: the peer/ICM can queue a tb->lock-taking work item. */
+static void lo_ctl_event(struct tb_lockorder_model *m)
+{
+	if (m->ctl_running)
+		m->notif_queued = true;
+}
+
+/* tb_ctl_stop() -> tb_ring_stop() -> flush_work(): a WAIT. */
+static void lo_ctl_stop(struct tb_lockorder_model *m)
+{
+	if (m->lock_held && m->notif_queued)
+		m->deadlocks++;
+	m->ctl_running = false;
+}
+
+/* tb_handle_event() re-arming reconcile_work while hotplug is still active. */
+static void lo_maybe_rearm(struct tb_lockorder_model *m)
+{
+	if (m->hotplug_active && m->ctl_running)
+		m->timer_armed = true;
+}
+
+static void lo_flush_wq(struct tb_lockorder_model *m)
+{
+	/* Runs queued work; does NOT disarm an armed delayed_work timer. */
+	if (m->notif_queued) {
+		m->notif_queued = false;
+		m->notif_ran = true;
+	}
+}
+
+/* ->deinit, called with the lock dropped: the only place a sync cancel fits. */
+static void lo_deinit(struct tb_lockorder_model *m)
+{
+	if (!TB_DOMAIN_TEARDOWN_UNLOCKED)
+		return;		/* pre-2.46: nothing sync-cancelled these at all */
+	if (m->lock_held && m->timer_armed) {
+		m->deadlocks++;
+		return;
+	}
+	m->timer_armed = false;
+}
+
+static void lo_destroy_wq(struct tb_lockorder_model *m)
+{
+	m->wq_destroyed = true;
+	if (m->timer_armed) {
+		/* __queue_work() on a destroyed wq, with tb already freed. */
+		m->queue_after_destroy++;
+		m->uaf++;
+	}
+	if (m->notif_queued)
+		m->uaf++;
+}
+
+/* tb_domain_add() up to and including its failure cleanup. */
+static void lo_domain_add_fails(struct tb_lockorder_model *m)
+{
+	memset(m, 0, sizeof(*m));
+	lo_lock(m);
+	m->ctl_running = true;		/* tb_ctl_start() */
+	m->hotplug_active = true;
+	lo_ctl_event(m);		/* driver_ready window: ICM notification */
+	/* driver_ready() fails -> err_ctl_stop */
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		lo_unlock(m);
+		lo_ctl_stop(m);
+		lo_flush_wq(m);
+	} else {
+		lo_ctl_stop(m);
+		lo_unlock(m);
+	}
+	m->hotplug_active = false;
+	lo_deinit(m);
+	lo_destroy_wq(m);
+}
+
+/* tb_domain_remove(): cm_ops->stop under the lock, ctl stop outside it. */
+static void lo_domain_remove(struct tb_lockorder_model *m, bool peer_active)
+{
+	lo_lock(m);
+	/* cm_ops->stop(): close the re-arm gate FIRST, then non-sync cancel. */
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		m->hotplug_active = false;
+		lo_maybe_rearm(m);	/* gate closed: cannot re-arm */
+	} else {
+		lo_maybe_rearm(m);	/* gate still open: re-arms behind us */
+		m->hotplug_active = false;
+	}
+	if (peer_active)
+		lo_ctl_event(m);
+
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		lo_unlock(m);
+		lo_ctl_stop(m);
+	} else {
+		lo_ctl_stop(m);
+		lo_unlock(m);
+	}
+	lo_flush_wq(m);
+	lo_deinit(m);			/* lock dropped: sync cancel is safe */
+	lo_destroy_wq(m);
+}
+
+/*
+ * The exact appmana-008 panic: probe failure cleanup with an ICM notification
+ * in flight.
+ */
+static void tb_test_domain_add_failure_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	lo_domain_add_fails(&m);
+
+	KUNIT_EXPECT_EQ(test, 0u, m.deadlocks);
+	/* The in-flight notification must have been drained, not abandoned. */
+	KUNIT_EXPECT_TRUE(test, m.notif_ran);
+	KUNIT_EXPECT_EQ(test, 0u, m.uaf);
+	KUNIT_EXPECT_FALSE(test, m.lock_held);
+}
+
+/* The same cleanup reached through module unload, peer still talking. */
+static void tb_test_domain_remove_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	memset(&m, 0, sizeof(m));
+	m.ctl_running = true;
+	m.hotplug_active = true;
+	lo_domain_remove(&m, true);
+
+	KUNIT_EXPECT_EQ(test, 0u, m.deadlocks);
+	KUNIT_EXPECT_EQ(test, 0u, m.uaf);
+	KUNIT_EXPECT_EQ(test, 0u, m.queue_after_destroy);
+	KUNIT_EXPECT_FALSE(test, m.lock_held);
+}
+
+/*
+ * An armed delayed_work timer survives flush_workqueue(). Closing the re-arm
+ * gate before the cancels, and sync-cancelling from ->deinit with the lock
+ * dropped, is what stops it firing after destroy_workqueue() and kfree(tb).
+ */
+static void tb_test_domain_remove_no_work_after_destroy(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	memset(&m, 0, sizeof(m));
+	m.ctl_running = true;
+	m.hotplug_active = true;
+	lo_domain_remove(&m, false);
+
+	KUNIT_EXPECT_FALSE(test, m.timer_armed);
+	KUNIT_EXPECT_EQ(test, 0u, m.queue_after_destroy);
+}
+
+/*
+ * The v2.44 wedged-ICM takeover routes a wedged board through the
+ * tb_domain_add() failure cleanup TWICE (ICM attempt, then software CM), so it
+ * multiplies exposure to this path rather than avoiding it. Both passes must
+ * be clean.
+ */
+static void tb_test_icm_takeover_teardown_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+	unsigned int deadlocks = 0, uaf = 0;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		lo_domain_add_fails(&m);
+		deadlocks += m.deadlocks;
+		uaf += m.uaf;
+	}
+
+	KUNIT_EXPECT_EQ(test, 0u, deadlocks);
+	KUNIT_EXPECT_EQ(test, 0u, uaf);
+}
+
+/*
  * The takeover fallback must NOT trigger for a healthy responding ICM
  * (that one really does answer ring 0 itself) nor rewrite the plain
  * no-firmware software path.
@@ -4830,6 +5060,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_wedged_takeover_selects_software),
+	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
+	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
+	KUNIT_CASE(tb_test_domain_remove_no_work_after_destroy),
+	KUNIT_CASE(tb_test_icm_takeover_teardown_no_deadlock),
 	KUNIT_CASE(tb_test_icm_healthy_keeps_firmware_cm),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),

@@ -3100,6 +3100,22 @@ static void icm_stop(struct tb *tb)
 	icm->last_nvm_auth = NULL;
 }
 
+/*
+ * ICM never had a ->deinit, so icm_stop()'s non-sync cancel of rescan_work was
+ * the only cancel in the whole path. icm_stop() runs under tb->lock and
+ * icm_rescan_work() takes tb->lock, so it CANNOT wait there (that is the
+ * appmana-008 inversion). tb_domain_remove() calls ->deinit with the lock
+ * dropped, which is where the wait belongs: an armed delayed_work timer
+ * survives flush_workqueue() and would otherwise fire after
+ * destroy_workqueue(tb->wq) and kfree(tb).
+ */
+static void icm_deinit(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+
+	cancel_delayed_work_sync(&icm->rescan_work);
+}
+
 static int icm_disconnect_pcie_paths(struct tb *tb)
 {
 	return nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DISCONNECT_PCIE_PATHS, 0);
@@ -3269,6 +3285,7 @@ static const struct tb_cm_ops icm_fr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.handle_event = icm_handle_event,
@@ -3285,6 +3302,7 @@ static const struct tb_cm_ops icm_ar_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -3307,6 +3325,7 @@ static const struct tb_cm_ops icm_tr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -3332,6 +3351,7 @@ static const struct tb_cm_ops icm_icl_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.deinit = icm_deinit,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
 	.runtime_resume = icm_runtime_resume,

@@ -122,6 +122,25 @@ static void tbframe_service_remove(struct tb_service *svc)
 	kfree(binding);
 }
 
+/*
+ * System shutdown / reboot. Not a mirror of remove: the link object is NOT
+ * destroyed (there is no later unbind on a reboot, and destroying would run
+ * the full negotiated teardown), only quiesced, with every peer wait
+ * collapsed. See tbframe_link_shutdown() for why this callback has to exist
+ * at all -- without it a rebooting node reached nhi_shutdown() with live
+ * rings and enabled hop entries.
+ */
+static void tbframe_service_shutdown(struct tb_service *svc)
+{
+	struct tbframe_service_binding *binding = tb_service_get_drvdata(svc);
+
+	if (!binding)
+		return;
+	if (tbframe_service_tf)
+		WRITE_ONCE(tbframe_service_tf->shutdown_mode, true);
+	tbframe_link_shutdown(binding->link);
+}
+
 static const struct tb_service_id tbframe_service_ids[] = {
 	{ TB_SERVICE(TBFRAME_PROTOCOL_KEY, TBFRAME_PRTCID) },
 	{ },
@@ -135,6 +154,7 @@ static struct tb_service_driver tbframe_service_driver = {
 	},
 	.probe = tbframe_service_probe,
 	.remove = tbframe_service_remove,
+	.shutdown = tbframe_service_shutdown,
 	.id_table = tbframe_service_ids,
 };
 

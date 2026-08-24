@@ -1391,6 +1391,22 @@ static int nhi_runtime_resume(struct device *dev)
 	return tb_domain_runtime_resume(tb);
 }
 
+/*
+ * Bound on every wait for the domain's last reference to go away. A domain
+ * reference is held by, among others, tb_xdp_handle_request() work items --
+ * i.e. by a peer that is still sending XDomain requests at us, which is
+ * precisely the state a chain node is in during a reload or a reboot. An
+ * unbounded wait_for_completion() here strands nhi_probe(), nhi_remove() and
+ * the reboot path indefinitely.
+ */
+#define NHI_DOMAIN_RELEASE_MS	5000
+
+static bool nhi_wait_domain_released(struct tb_nhi *nhi)
+{
+	return wait_for_completion_timeout(&nhi->domain_released,
+					   msecs_to_jiffies(NHI_DOMAIN_RELEASE_MS)) != 0;
+}
+
 static void nhi_shutdown(struct tb_nhi *nhi)
 {
 	int i;
@@ -1406,6 +1422,17 @@ static void nhi_shutdown(struct tb_nhi *nhi)
 				 "RX ring %d is still active\n", i);
 	}
 	nhi_disable_interrupts(nhi);
+	/*
+	 * Past this point nothing may touch the BAR: pcim devres will iounmap
+	 * it and release the IRQ vectors as soon as nhi_remove() returns, and
+	 * the WARNs above establish that a straggler ring can still exist.
+	 * Poison the MMIO funnel so every remaining read returns ~0U and every
+	 * ring/interrupt path takes its going_away bail-out, instead of
+	 * touching an unmapped BAR -- the shape that presents as a silent MMIO
+	 * stall rather than a clean fault. Also correct for the reboot path,
+	 * where this is the last thing the driver does.
+	 */
+	WRITE_ONCE(nhi->going_away, true);
 	/*
 	 * We have to release the irq before calling flush_work. Otherwise an
 	 * already executing IRQ handler could call schedule_work again.
@@ -1717,7 +1744,18 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_warn(dev,
 			 "wedged ICM detected; taking over with software connection manager\n");
 		tb_domain_put(tb);
-		wait_for_completion(&nhi->domain_released);
+		/*
+		 * Bounded, and here refusal IS available: this is probe, not
+		 * teardown. Reusing the NHI while the previous domain still
+		 * holds references to its ctl and rings is the unprovable case,
+		 * so fail the probe cleanly instead of gambling.
+		 */
+		if (!nhi_wait_domain_released(nhi)) {
+			nhi_shutdown(nhi);
+			return dev_err_probe(dev, -EBUSY,
+				"ICM domain did not release within %u ms; refusing the software-CM takeover rather than reusing the NHI under it\n",
+				NHI_DOMAIN_RELEASE_MS);
+		}
 		reinit_completion(&nhi->domain_released);
 
 		tb = tb_probe(nhi);
@@ -1733,7 +1771,10 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		 * activated. Do a proper shutdown.
 		 */
 		tb_domain_put(tb);
-		wait_for_completion(&nhi->domain_released);
+		if (!nhi_wait_domain_released(nhi))
+			dev_err(dev,
+				"domain did not release within %u ms; poisoning NHI MMIO and abandoning it rather than blocking probe\n",
+				NHI_DOMAIN_RELEASE_MS);
 		nhi_shutdown(nhi);
 		return res;
 	}
@@ -1759,7 +1800,19 @@ static void nhi_remove(struct pci_dev *pdev)
 	pm_runtime_forbid(&pdev->dev);
 
 	tb_domain_remove(tb);
-	wait_for_completion(&nhi->domain_released);
+	/*
+	 * Bounded, with a defined failure action. Refusing is not available on
+	 * this path -- the PCI core is removing us, and the identical code runs
+	 * from the reboot path -- so on expiry we proceed. nhi_shutdown()
+	 * poisons MMIO first thing, so a straggler that still holds a domain
+	 * reference can no longer reach the BAR that pcim devres is about to
+	 * unmap. Leaking the domain allocation is strictly better than never
+	 * returning from an rmmod or a shutdown.
+	 */
+	if (!nhi_wait_domain_released(nhi))
+		dev_err(&pdev->dev,
+			"domain did not release within %u ms; proceeding with NHI teardown and leaking it\n",
+			NHI_DOMAIN_RELEASE_MS);
 	nhi_shutdown(nhi);
 }
 

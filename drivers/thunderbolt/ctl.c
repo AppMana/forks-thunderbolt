@@ -20,6 +20,12 @@
 
 #define TB_CTL_RX_PKG_COUNT	10
 #define TB_CTL_RETRIES		4
+/*
+ * Bound on the tb_ctl_free() wait for outstanding request completion work.
+ * Nothing on a teardown path may wait indefinitely; on expiry the control
+ * channel allocation is deliberately leaked instead (see tb_ctl_free()).
+ */
+#define TB_CTL_REQ_WORK_DRAIN_MS 2000
 
 /**
  * struct tb_ctl - Thunderbolt control channel
@@ -46,6 +52,15 @@ struct tb_ctl {
 	struct mutex request_queue_lock;
 	struct list_head request_queue;
 	bool running;
+	/*
+	 * Requests whose ->work has been accepted by system_wq and has not
+	 * finished. tb_cfg_request_work() dereferences req->ctl AFTER the
+	 * callback (tb_cfg_request_dequeue() takes ctl->request_queue_lock),
+	 * so the ctl must outlive every such item. Nothing else ties them
+	 * together: the kref counts the REQUEST, the ctl has no refcount, and
+	 * neither tb_ctl_stop() nor tb_ctl_free() used to flush them.
+	 */
+	atomic_t req_works;
 
 	int timeout_msec;
 	event_cb callback;
@@ -72,6 +87,8 @@ struct tb_ctl {
 
 #define tb_ctl_dbg_once(ctl, format, arg...) \
 	dev_dbg_once(&(ctl)->nhi->pdev->dev, format, ## arg)
+
+static void tb_ctl_schedule_req_work(struct tb_cfg_request *req);
 
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
 /* Serializes access to request kref_get/put */
@@ -511,7 +528,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 
 	if (req) {
 		if (req->copy(req, pkg))
-			schedule_work(&req->work);
+			tb_ctl_schedule_req_work(req);
 		tb_cfg_request_put(req);
 	}
 
@@ -519,15 +536,36 @@ rx:
 	tb_ctl_rx_submit(pkg);
 }
 
+/*
+ * Schedule a request's completion work and account for it, so tb_ctl_free()
+ * can fence the ctl against items that are still going to dereference it.
+ * schedule_work() is a no-op on an already-pending item (req->work is a single
+ * work_struct scheduled from the RX callback, the no-response fast path and
+ * cancel), so the counter may only move when the queue actually accepted it.
+ */
+static void tb_ctl_schedule_req_work(struct tb_cfg_request *req)
+{
+	struct tb_ctl *ctl = req->ctl;
+
+	if (ctl)
+		atomic_inc(&ctl->req_works);
+	if (!schedule_work(&req->work) && ctl)
+		atomic_dec(&ctl->req_works);
+}
+
 static void tb_cfg_request_work(struct work_struct *work)
 {
 	struct tb_cfg_request *req = container_of(work, typeof(*req), work);
+	struct tb_ctl *ctl = req->ctl;
 
 	if (!test_bit(TB_CFG_REQUEST_CANCELED, &req->flags))
 		req->callback(req->callback_data);
 
 	tb_cfg_request_dequeue(req);
 	tb_cfg_request_put(req);
+	/* Last touch of @ctl: after this the ctl may be freed. */
+	if (ctl)
+		atomic_dec(&ctl->req_works);
 }
 
 /**
@@ -562,7 +600,7 @@ int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 		goto err_dequeue;
 
 	if (!req->response)
-		schedule_work(&req->work);
+		tb_ctl_schedule_req_work(req);
 
 	return 0;
 
@@ -585,7 +623,7 @@ err_put:
 void tb_cfg_request_cancel(struct tb_cfg_request *req, int err)
 {
 	set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
-	schedule_work(&req->work);
+	tb_ctl_schedule_req_work(req);
 	wait_event(tb_cfg_request_cancel_queue, !tb_cfg_request_is_active(req));
 	req->result.err = err;
 }
@@ -697,10 +735,43 @@ err:
  */
 void tb_ctl_free(struct tb_ctl *ctl)
 {
+	unsigned int waited = 0;
 	int i;
 
 	if (!ctl)
 		return;
+
+	/*
+	 * Bounded fence against completion work that still dereferences this
+	 * ctl. tb_cfg_request_work() calls tb_cfg_request_dequeue(), which
+	 * takes ctl->request_queue_lock, AFTER the callback -- and those work
+	 * items run on system_wq with no reference on the ctl or the domain,
+	 * so kfree(ctl) below could race them. The reachable case on the
+	 * teardown path is a peer that is still sending XDomain requests at
+	 * us: tb_xdp_handle_request() -> tb_xdomain_response() ->
+	 * tb_cfg_request() with a NULL response schedules the work
+	 * immediately.
+	 *
+	 * Not done in tb_ctl_stop(): that runs under tb->lock, and one of the
+	 * callbacks (icm_usb4_switch_nvm_auth_complete()) takes tb->lock, so
+	 * waiting there would be the very lock inversion this series exists to
+	 * remove. Here the lock is not held.
+	 *
+	 * Bounded with a defined failure action, per the no-unbounded-waits
+	 * rule: on expiry, warn and proceed. Leaking the ctl allocation is
+	 * strictly better than never returning from a module unload or a
+	 * shutdown.
+	 */
+	while (atomic_read(&ctl->req_works)) {
+		if (waited >= TB_CTL_REQ_WORK_DRAIN_MS) {
+			tb_ctl_WARN(ctl,
+				    "%d request work items still outstanding after %u ms; leaking the control channel rather than blocking teardown\n",
+				    atomic_read(&ctl->req_works), waited);
+			return;
+		}
+		msleep(20);
+		waited += 20;
+	}
 
 	if (ctl->rx)
 		tb_ring_free(ctl->rx);
@@ -750,9 +821,30 @@ void tb_ctl_stop(struct tb_ctl *ctl)
 	tb_ring_stop(ctl->rx);
 	tb_ring_stop(ctl->tx);
 
-	if (!list_empty(&ctl->request_queue))
+	/*
+	 * Retire the dangling requests properly instead of re-heading the
+	 * list. INIT_LIST_HEAD() left every dangling request LINKED to its
+	 * stale neighbours with TB_CFG_REQUEST_ACTIVE still set, so the next
+	 * tb_cfg_request_dequeue() for one of them did list_del() through
+	 * freed neighbour pointers -- list corruption on a teardown path,
+	 * which is the worst place to have it. The WARN below documents that
+	 * this state is expected to occur, so it has to be handled, not just
+	 * reported. Also wake anyone inside tb_cfg_request_cancel(), which
+	 * waits on TB_CFG_REQUEST_ACTIVE clearing and would otherwise wait
+	 * forever for a request the ctl has just abandoned.
+	 */
+	mutex_lock(&ctl->request_queue_lock);
+	if (!list_empty(&ctl->request_queue)) {
+		struct tb_cfg_request *req, *n;
+
 		tb_ctl_WARN(ctl, "dangling request in request_queue\n");
-	INIT_LIST_HEAD(&ctl->request_queue);
+		list_for_each_entry_safe(req, n, &ctl->request_queue, list) {
+			list_del_init(&req->list);
+			clear_bit(TB_CFG_REQUEST_ACTIVE, &req->flags);
+		}
+		wake_up(&tb_cfg_request_cancel_queue);
+	}
+	mutex_unlock(&ctl->request_queue_lock);
 	tb_ctl_dbg(ctl, "control channel stopped\n");
 }
 
