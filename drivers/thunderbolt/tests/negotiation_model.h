@@ -975,6 +975,16 @@ static inline void cm_reconcile(struct cm_host *h)
 #define IDENT_STATE_PROPERTIES	0
 #define IDENT_STATE_UUID	1
 
+/*
+ * A UUID read back off a link with no powered peer behind it: every config
+ * dword reads all-ones, so the identity's low half is 0xffff'ffff'ffff'ffff.
+ * The live samples all carry this exact tail (385a8780-0004-402c-ffff-
+ * ffffffffffff, 66518780-00e3-212c-ffff-ffffffffffff). Lockstep with
+ * tb_xdomain_uuid_is_placeholder() in thunderbolt_negotiation.h; the model
+ * keeps identities in one u32 so the sentinel is the all-ones word.
+ */
+#define IDENT_UUID_PLACEHOLDER	0xffffffffu
+
 struct ident_peer {
 	u32 true_uuid;		/* identity the peer answers with */
 	bool answers;		/* peer booted/responsive */
@@ -1026,10 +1036,22 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 				xd->unplugged = true;
 			break;
 		}
-		if (xd->cached_uuid != peer->true_uuid)
-			xd->unplugged = true;	/* tb_xdomain_get_uuid mismatch */
-		else
+		if (xd->cached_uuid == peer->true_uuid) {
 			xd->state = IDENT_STATE_PROPERTIES;
+		} else if (xd->cached_uuid == IDENT_UUID_PLACEHOLDER) {
+			/*
+			 * Not "another domain connected" -- this domain finally
+			 * answering. The CM can hand us an XDomain for a link
+			 * whose peer is powered off, and the identity it carries
+			 * is then the all-ones-tail read. Adopt the real one
+			 * (tb_xdomain_uuid_is_placeholder in
+			 * tb_xdomain_get_uuid).
+			 */
+			xd->cached_uuid = peer->true_uuid;
+			xd->state = IDENT_STATE_PROPERTIES;
+		} else {
+			xd->unplugged = true;	/* tb_xdomain_get_uuid mismatch */
+		}
 		break;
 	}
 }
@@ -1060,6 +1082,122 @@ static inline bool ident_run(struct ident_xd *xd, const struct ident_peer *peer,
 			return true;
 	}
 	return xd->enumerated;
+}
+
+/*
+ * ---- Properties-changed announcement to an absent peer ----
+ *
+ * Live 2026-08-24: appmana-008 (Maple Ridge AM5 chain node) booted while its
+ * chain neighbour appmana-019 was POWERED OFF. 008's port facing 019 still
+ * enumerated an XDomain (0-3) and logged, repeatedly,
+ *
+ *   thunderbolt 0-3: failed to send properties changed notification
+ *   thunderbolt 0-3: failed read XDomain properties from
+ *                    385a8780-0004-402c-ffff-ffffffffffff
+ *
+ * tb_xdomain_properties_changed() re-queues itself only while
+ * properties_changed_retries lasts (XDOMAIN_RETRIES attempts at a fixed
+ * XDOMAIN_DEFAULT_TIMEOUT spacing). Against an unpowered peer the whole budget
+ * burns in ~10 s, after which the work is NEVER queued again and the host stops
+ * announcing its property directory for the life of the XDomain. When 019
+ * finally powered on, nothing on 008 re-announced, so 019's ICM never saw an
+ * inbound XDP request, 019 sent tbframe HELLOs forever and 008 never answered.
+ * A leaf-only reload of the frame drivers cannot fix this: the announce lives
+ * below them, in the core.
+ *
+ * The dev_err was unconditional too -- emitted on the retrying path as well as
+ * the giving-up path -- which is why one absent peer produced a burst of
+ * identical lines rather than a single give-up notice.
+ *
+ * A chain neighbour powering on later is normal operation, so the announce must
+ * never stop; but an absent peer must not cost a control packet per second nor
+ * a log line per attempt forever. Modelled against a virtual clock so a test can
+ * assert persistence AND cost. Kept in LOCKSTEP with
+ * tb_xdomain_properties_changed() and calling the SAME production policy
+ * functions it does (tb_xdomain_announce_delay_ms(),
+ * tb_xdomain_announce_should_warn()), so the two cannot drift on the numbers.
+ */
+struct announce_state {
+	unsigned int now_ms;	/* virtual clock */
+	unsigned int attempts;	/* wire attempts made */
+	unsigned int errs;	/* dev_err lines emitted */
+	unsigned int failures;	/* xd->properties_changed_retries */
+	bool armed;		/* properties_changed_work is queued */
+	bool delivered;		/* the peer acknowledged the notification */
+	bool stopped;		/* TB_XDOMAIN_ANNOUNCE_STOPPED published */
+};
+
+/* tb_xdomain_queue_properties_changed(): arm (or re-arm) the announcement. */
+static inline void announce_arm(struct announce_state *a)
+{
+	a->armed = true;
+	a->stopped = false;
+	a->failures = 0;
+}
+
+/* __stop_handshake(): publish the marker, then cancel. */
+static inline void announce_stop(struct announce_state *a)
+{
+	a->stopped = true;
+	a->armed = false;
+}
+
+/* One scheduled run of properties_changed_work. */
+static inline void announce_tick(struct announce_state *a, bool peer_present)
+{
+	if (!a->armed)
+		return;
+
+	a->now_ms += tb_xdomain_announce_delay_ms(a->failures);
+	a->attempts++;
+
+	if (peer_present) {
+		a->delivered = true;
+		a->failures = 0;
+		a->armed = false;	/* nothing left to announce */
+		return;
+	}
+
+	/*
+	 * The stop marker is re-read AFTER the bounded wire wait, so a stop that
+	 * lands while this attempt is in flight wins and the work does not
+	 * re-arm past its cancel_delayed_work_sync().
+	 */
+	if (a->stopped) {
+		a->armed = false;
+		return;
+	}
+
+	if (tb_xdomain_announce_should_warn(a->failures))
+		a->errs++;
+	if (a->failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
+		a->failures++;
+	a->armed = true;		/* the announce never gives up */
+}
+
+/* An attempt whose bounded wire wait overlaps a __stop_handshake(). */
+static inline void announce_tick_stopped_midflight(struct announce_state *a)
+{
+	if (!a->armed)
+		return;
+
+	a->now_ms += tb_xdomain_announce_delay_ms(a->failures);
+	a->attempts++;
+	announce_stop(a);		/* the marker lands inside the wait */
+	a->armed = false;
+}
+
+/* Run properties_changed_work for @wall_ms of virtual time. */
+static inline void announce_run(struct announce_state *a, bool peer_present,
+				unsigned int wall_ms)
+{
+	unsigned int end = a->now_ms + wall_ms;
+
+	while (a->armed && a->now_ms < end) {
+		announce_tick(a, peer_present);
+		if (a->delivered)
+			return;
+	}
 }
 
 /*

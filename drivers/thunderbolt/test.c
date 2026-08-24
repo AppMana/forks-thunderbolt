@@ -3989,6 +3989,292 @@ static void tb_test_xdomain_silent_stale_identity_recovery(struct kunit *test)
 }
 
 /*
+ * Live 2026-08-24, appmana-008 <-> appmana-019 (Maple Ridge AM5 chain nodes):
+ * 008 booted while 019 was POWERED OFF. The port facing 019 enumerated an
+ * XDomain (0-3) whose remote UUID was the all-ones-tail placeholder a link with
+ * no powered peer behind it reads back (385a8780-0004-402c-ffff-ffffffffffff).
+ * That placeholder was latched as the XDomain's final identity, so:
+ *
+ *   - every property read failed (XDP requests carry dst_uuid), and
+ *   - when 019 finally powered on and answered with its REAL UUID,
+ *     tb_xdomain_get_uuid() read the difference as "another domain connected",
+ *     set is_unplugged and drove the XDomain terminal.
+ *
+ * Under a resident ICM no tb.c reconcile pass runs to replace the condemned
+ * object, so 0-3 never registered, no tbframe service ever bound, and 019 sent
+ * unanswered HELLOs until 008 was rebooted with 019 already up.
+ *
+ * A chain neighbour powering on later is normal operation. Lockstep with
+ * tb_xdomain_get_uuid(): while the driver treats a placeholder as an identity,
+ * ident_tick() must too, and these expectations go red.
+ */
+static void tb_test_xdomain_late_peer_powered_on_after_boot(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = {
+		.cached_uuid = IDENT_UUID_PLACEHOLDER,
+		.cached_properties = false,	/* first boot: never enumerated */
+	};
+
+	/*
+	 * Neighbour powered off at boot: the handshake keeps re-verifying and
+	 * must not condemn itself (the f876653 co-reset contract).
+	 */
+	KUNIT_EXPECT_FALSE(test, ident_run(&xd, &peer, 16,
+					   /*cm_reconciles=*/false));
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+
+	/*
+	 * Neighbour powers on. The XDomain must adopt the real identity and
+	 * enumerate WITHOUT a connection-manager replacement: a Maple Ridge
+	 * chain node runs a resident ICM and never executes the tb.c reconcile
+	 * that would replace a condemned object.
+	 */
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+}
+
+/*
+ * The placeholder is not a peer identity, so it can never be the identity a
+ * mismatch is judged against: the first REAL answer replaces it. A genuine
+ * cached UUID keeps the existing condemn-and-replace behaviour, which is what
+ * distinguishes this from the 2026-07-09 stale-identity case above.
+ */
+static void tb_test_xdomain_placeholder_uuid_never_final_identity(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x66518780u, .answers = true };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+
+	ident_tick(&xd, &peer);		/* PROPERTIES: dst_uuid mismatch */
+	KUNIT_EXPECT_EQ(test, xd.state, IDENT_STATE_UUID);
+
+	ident_tick(&xd, &peer);		/* UUID: adopt, do not condemn */
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+
+	/* The port is not poisoned: the adopted identity reads properties. */
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+
+	/* A real identity that genuinely changed is still condemned. */
+	memset(&xd, 0, sizeof(xd));
+	xd.cached_uuid = 0x11111111u;
+	xd.state = IDENT_STATE_UUID;
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.unplugged);
+}
+
+/*
+ * The responsive-peer path must not pay for any of the above: a peer whose
+ * identity we already hold enumerates on the first PROPERTIES tick, with no
+ * UUID detour and no re-verification churn.
+ */
+static void tb_test_xdomain_responsive_peer_registers_promptly(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = true };
+	struct ident_xd xd = { .cached_uuid = 0x385a8780u };
+
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+	KUNIT_EXPECT_EQ(test, xd.state, IDENT_STATE_PROPERTIES);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+}
+
+/*
+ * The other half of the 008 strand: the properties-changed announcement gave up
+ * after XDOMAIN_RETRIES and was never queued again, so 008 stopped announcing
+ * its property directory ~10 s into a boot whose neighbour was powered off.
+ * The announce must outlive an arbitrarily long absence, and must do so without
+ * a control packet per second or a log line per attempt.
+ */
+static void tb_test_xdomain_announce_survives_absent_peer(struct kunit *test)
+{
+	struct announce_state a = {};
+
+	announce_arm(&a);
+
+	/* Neighbour powered off for an hour. */
+	announce_run(&a, /*peer_present=*/false, 3600u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_LT(test, a.attempts, 100u);
+	KUNIT_EXPECT_LE(test, a.errs, 8u);
+
+	/* Neighbour powers on: the next scheduled attempt delivers. */
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * A neighbour that NEVER powers on. Nothing may accumulate: the spacing must
+ * saturate at the ceiling rather than grow the attempt rate, the diagnostics
+ * must stop entirely, and the XDomain must sit in a well-defined
+ * not-registered, not-condemned state -- no latch that would block the
+ * negotiation if the neighbour were powered on afterwards.
+ */
+static void tb_test_xdomain_peer_never_answers_leaves_no_latch(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+	struct announce_state a = {};
+	unsigned int day_ms = 24u * 3600u * 1000u;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, day_ms);
+
+	/* Still trying, at the ceiling, in silence. */
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_FALSE(test, a.delivered);
+	KUNIT_EXPECT_LE(test, a.errs, TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1u);
+	KUNIT_EXPECT_EQ(test, tb_xdomain_announce_delay_ms(a.failures),
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				TB_XDOMAIN_ANNOUNCE_MAX_SHIFT);
+	/* A day of absence costs one packet per ceiling period, no more. */
+	KUNIT_EXPECT_LE(test, a.attempts,
+			day_ms / (TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				  TB_XDOMAIN_ANNOUNCE_MAX_SHIFT) + 8u);
+
+	/* The XDomain is unregistered but not condemned and not terminal. */
+	KUNIT_EXPECT_FALSE(test, ident_run(&xd, &peer, 512,
+					   /*cm_reconciles=*/false));
+	KUNIT_EXPECT_FALSE(test, xd.enumerated);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+
+	/* And none of that absence latched anything: the peer arriving works. */
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * The field case as it actually happened: the neighbour was powered on hours
+ * after the local host booted. Both halves must still converge.
+ */
+static void tb_test_xdomain_peer_answers_after_many_attempts(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+	struct announce_state a = {};
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 6u * 3600u * 1000u);
+	ident_run(&xd, &peer, 2048, /*cm_reconciles=*/false);
+	KUNIT_EXPECT_FALSE(test, xd.enumerated);
+
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * A link/peer-present event arriving mid-backoff must restore the fast cadence
+ * rather than leave the announcement parked at the 64 s ceiling: the peer that
+ * just appeared should not wait a minute to hear from us.
+ */
+static void tb_test_xdomain_announce_rearms_mid_backoff(struct kunit *test)
+{
+	struct announce_state a = {};
+	unsigned int before;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 30u * 60u * 1000u);
+	KUNIT_EXPECT_EQ(test, tb_xdomain_announce_delay_ms(a.failures),
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				TB_XDOMAIN_ANNOUNCE_MAX_SHIFT);
+
+	/* tb_xdomain_queue_properties_changed() on the peer-present event. */
+	announce_arm(&a);
+	KUNIT_EXPECT_EQ(test, a.failures, 0u);
+
+	before = a.now_ms;
+	announce_tick(&a, /*peer_present=*/true);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+	KUNIT_EXPECT_EQ(test, a.now_ms - before,
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS);
+}
+
+/*
+ * An announcement that never gives up re-queues its own delayed work, so it
+ * must still stop DETERMINISTICALLY: __stop_handshake() publishes the stop
+ * marker before cancel_delayed_work_sync(), and an attempt already inside its
+ * bounded wire wait re-reads that marker instead of re-arming past the cancel.
+ * Otherwise a delayed work outlives suspend or module unload.
+ */
+static void tb_test_xdomain_announce_stops_deterministically(struct kunit *test)
+{
+	struct announce_state a = {};
+	unsigned int attempts;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.armed);
+
+	/* Stop lands while an attempt is in flight: the stop wins. */
+	announce_tick_stopped_midflight(&a);
+	KUNIT_EXPECT_FALSE(test, a.armed);
+
+	/* Nothing runs afterwards, however long the domain lives. */
+	attempts = a.attempts;
+	announce_run(&a, /*peer_present=*/false, 24u * 3600u * 1000u);
+	KUNIT_EXPECT_EQ(test, a.attempts, attempts);
+	KUNIT_EXPECT_FALSE(test, a.armed);
+
+	/* Resume re-arms it (tb_xdomain_resume -> start_handshake). */
+	announce_arm(&a);
+	KUNIT_EXPECT_FALSE(test, a.stopped);
+	announce_tick(&a, /*peer_present=*/true);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * The placeholder predicate itself, against the identities actually captured on
+ * the fleet. Only the all-ones low half is a placeholder; a genuine identity
+ * that merely shares the vendor-assigned high half is not.
+ */
+static void tb_test_xdomain_placeholder_uuid_predicate(struct kunit *test)
+{
+	/* 385a8780-0004-402c-ffff-ffffffffffff (appmana-008 -> 019). */
+	static const u8 absent_peer[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* 66518780-00e3-212c-ffff-ffffffffffff (appmana-008 port 1). */
+	static const u8 half_trained[16] = {
+		0x66, 0x51, 0x87, 0x80, 0x00, 0xe3, 0x21, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* Same high half, real low half. */
+	static const u8 real_peer[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
+		0x9d, 0x31, 0x6b, 0x3f, 0x2a, 0x7c, 0x1e, 0x05,
+	};
+	/* One byte short of all-ones: still a real identity. */
+	static const u8 nearly[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+	};
+	/* All-ones HIGH half with a real low half is not this failure mode. */
+	static const u8 high_ones[16] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x9d, 0x31, 0x6b, 0x3f, 0x2a, 0x7c, 0x1e, 0x05,
+	};
+
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_uuid_is_placeholder(absent_peer));
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_uuid_is_placeholder(half_trained));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_peer));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(nearly));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(high_ones));
+}
+
+/*
  * NHI ring callbacks can consume an entire completed descriptor batch. The
  * 32-QP USB4 RDMA reproducer observed ring_work monopolizing a bound worker
  * for >10 ms before the first transport loss. Keep that potentially long
@@ -4516,6 +4802,15 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_late_second_link),
 	KUNIT_CASE(tb_test_xdomain_stale_identity_recovery),
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
+	KUNIT_CASE(tb_test_xdomain_late_peer_powered_on_after_boot),
+	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_never_final_identity),
+	KUNIT_CASE(tb_test_xdomain_responsive_peer_registers_promptly),
+	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),
+	KUNIT_CASE(tb_test_xdomain_peer_never_answers_leaves_no_latch),
+	KUNIT_CASE(tb_test_xdomain_peer_answers_after_many_attempts),
+	KUNIT_CASE(tb_test_xdomain_announce_rearms_mid_backoff),
+	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
+	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
