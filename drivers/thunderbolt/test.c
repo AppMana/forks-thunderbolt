@@ -5028,6 +5028,13 @@ static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
 
 	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_uuid(tb, &uuid), NULL);
 	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_link_depth(tb, 1, 1), NULL);
+	/*
+	 * The route lookup is the one the appmana-023 oops actually came
+	 * through: tb_xdomain_handle_request -> tb_xdomain_find_by_route_locked
+	 * -> tb_xdomain_find_by_route. Cover the reported path, not just its
+	 * siblings.
+	 */
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_route(tb, 0x301), NULL);
 }
 
 static struct kunit_case tb_test_cases[] = {

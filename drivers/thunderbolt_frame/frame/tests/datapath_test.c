@@ -234,6 +234,56 @@ static void tbframe_datapath_proof_does_not_survive_a_session(struct kunit *test
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.down_count);
 }
 
+/*
+ * A frame that lands during teardown must not prove the NEXT session.
+ *
+ * down_session resets the proof state at the top, under link->lock, but the
+ * RX ring is not stopped until much later -- after the publisher drain, the
+ * TX flush, quiesce_tx() and (off the shutdown path) a bounded BYE exchange.
+ * Any good frame the peer delivers inside that window re-latches
+ * data_proven, and nothing clears it again before the next bring_up. The
+ * rebuilt session then has fresh rings, a fresh in-HopID and freshly
+ * programmed hop entries, and is declared UP on evidence that belongs to the
+ * session that just died -- defeating the gate precisely at the session
+ * boundary it exists to guard.
+ */
+static void tbframe_datapath_late_frame_cannot_prove_next_session(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	tbframe_mock_link_up(test, fx);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.up_count);
+
+	/*
+	 * The path dies, and one frame the peer had already committed to the
+	 * wire arrives while we are tearing the session down.
+	 */
+	fx->mock.datapath_dead = true;
+	fx->mock.deliver_on_quiesce = true;
+	{
+		u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+		KUNIT_ASSERT_GE(test,
+				tbframe_mock_build_peer_msg(fx,
+							    TBFRAME_WIRE_OP_HELLO,
+							    msg, sizeof(msg)),
+				0);
+		tbframe_link_handle_packet(fx->link, msg, sizeof(msg));
+	}
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES + 3; i++)
+		tbframe_link_session_step(fx->link);
+
+	/*
+	 * The rebuilt session moves nothing, so it must never be declared up.
+	 * Before the fix the stale proof carried across and it was.
+	 */
+	KUNIT_EXPECT_FALSE(test, fx->link->data_proven);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.down_count);
+}
+
 static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
@@ -242,6 +292,7 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_silence_after_up_tears_down),
 	KUNIT_CASE(tbframe_datapath_healthy_survives_verify),
 	KUNIT_CASE(tbframe_datapath_proof_does_not_survive_a_session),
+	KUNIT_CASE(tbframe_datapath_late_frame_cannot_prove_next_session),
 	{}
 };
 

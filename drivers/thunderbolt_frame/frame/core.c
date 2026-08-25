@@ -259,6 +259,23 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	remote_hopid = link->remote_hopid;
 	/* Mode B only when both HELLOs advertised capability bit 0. */
 	e2e = tf->e2e && (link->remote_caps & TBFRAME_WIRE_CAP_E2E);
+	/*
+	 * Clear the data-path proof HERE, at the session boundary, not only
+	 * in down_session. down_session resets it at the top but does not
+	 * stop the RX ring until after the publisher drain, the TX flush,
+	 * quiesce_tx() and a bounded BYE exchange; a frame the peer had
+	 * already committed to the wire can land anywhere in that window and
+	 * re-latch it. Nothing cleared it again, so the rebuilt session --
+	 * fresh rings, fresh in-HopID, freshly programmed hop entries -- was
+	 * declared up on evidence belonging to the session that just died.
+	 * This is the last point before the new session can receive anything,
+	 * so it is the only place the invariant actually holds.
+	 */
+	link->data_proven = false;
+	link->data_proof_waived = false;
+	link->data_rx = 0;
+	link->data_rx_tick_mark = 0;
+	link->silent_ticks = 0;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	ret = link->ops->alloc_rings(link->hw, tf->ring_entries,

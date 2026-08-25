@@ -1759,9 +1759,20 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		reinit_completion(&nhi->domain_released);
 
 		tb = tb_probe(nhi);
-		if (!tb)
+		if (!tb) {
+			/*
+			 * The takeover already ran a tb_domain_add(), so the
+			 * control channel and its rings have been up on this
+			 * NHI. Returning straight out leaves interrupts
+			 * enabled and the MSI-X ida populated while pcim
+			 * devres unmaps the BAR underneath them. Every other
+			 * failure branch here shuts the NHI down first; so
+			 * must this one.
+			 */
+			nhi_shutdown(nhi);
 			return dev_err_probe(dev, -ENODEV,
 				"failed to determine connection manager, aborting\n");
+		}
 
 		res = tb_domain_add(tb, host_reset);
 	}

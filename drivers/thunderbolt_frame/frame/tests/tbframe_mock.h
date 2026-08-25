@@ -47,6 +47,15 @@ struct tbframe_mock {
 	 */
 	bool		datapath_dead;
 	/*
+	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
+	 * the teardown window after the session state has been reset but
+	 * before stop_rings() cancels the posted descriptors. Models a frame
+	 * the peer had already put on the wire before it learned the session
+	 * was going down, which is why it ignores @datapath_dead -- the frame
+	 * predates the path dying.
+	 */
+	bool		deliver_on_quiesce;
+	/*
 	 * Leave our own keepalives sitting in tx_queue instead of completing
 	 * them the way hardware would, so a test can inspect the frame.
 	 */
@@ -256,11 +265,17 @@ static void tbframe_mock_start_rings(void *data)
 	m->rings_started = true;
 }
 
+static void __tbframe_mock_deliver_peer_keepalive(struct tbframe_mock *m);
+
 static void tbframe_mock_quiesce_tx(void *data)
 {
 	struct tbframe_mock *m = data;
 
 	tbframe_mock_hw_call(m, TBFRAME_HW_QUIESCE_TX);
+	if (m->deliver_on_quiesce) {
+		m->deliver_on_quiesce = false;
+		__tbframe_mock_deliver_peer_keepalive(m);
+	}
 }
 
 static void tbframe_mock_stop_rings(void *data)
@@ -327,12 +342,12 @@ static int tbframe_mock_post_rx(void *data, struct tbframe_frame_priv *f)
  * @datapath_dead suppresses it, modelling exactly the field failure: the
  * control plane and the hop entries are healthy, the bulk path moves nothing.
  */
-static void tbframe_mock_peer_keepalive(struct tbframe_mock *m)
+static void __tbframe_mock_deliver_peer_keepalive(struct tbframe_mock *m)
 {
 	struct tbframe_frame_priv *f;
 	struct ring_frame *rf;
 
-	if (m->datapath_dead || list_empty(&m->rx_posted))
+	if (list_empty(&m->rx_posted))
 		return;
 
 	rf = list_first_entry(&m->rx_posted, struct ring_frame, list);
@@ -343,6 +358,14 @@ static void tbframe_mock_peer_keepalive(struct tbframe_mock *m)
 	m->peer_keepalives++;
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
+}
+
+static void tbframe_mock_peer_keepalive(struct tbframe_mock *m)
+{
+	if (m->datapath_dead)
+		return;
+
+	__tbframe_mock_deliver_peer_keepalive(m);
 }
 
 static int tbframe_mock_ring_tx(void *data, struct tbframe_frame_priv *f)
