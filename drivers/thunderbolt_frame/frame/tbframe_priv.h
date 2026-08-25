@@ -276,6 +276,20 @@ struct tbframe_link {
 	 */
 	u64			data_rx;
 	u64			data_rx_tick_mark;
+	/*
+	 * Diagnostic only -- never gate anything on these. A dead data path
+	 * says nothing about WHY it is dead, and the distinction matters:
+	 * frames arriving corrupt (->data_rx_bad moving) means the wire moves
+	 * and signal integrity is the fault, while nothing arriving at all
+	 * (every counter flat) means frames never leave or are dropped in the
+	 * fabric. rx_complete() discards bad frames before ->data_rx, so
+	 * without a separate counter that evidence is thrown away and both
+	 * cases look identical in the DATA PATH DEAD diagnostic.
+	 */
+	u64			data_rx_bad;
+	u64			data_rx_oversize;
+	u64			data_tx_done;
+	u64			data_tx_canceled;
 	bool			data_proven;
 	bool			data_proof_waived;
 	unsigned int		probe_attempts;

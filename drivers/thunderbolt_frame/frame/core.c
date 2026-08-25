@@ -470,10 +470,18 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 		tbframe_link_kick_locked(link, 0);
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
-	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no frame crossed the data ring in %u probes over %u ms; refusing to declare the link up and rebuilding the session hardware\n",
+	/*
+	 * Report the counters, not just the verdict. rx_bad moving means the
+	 * wire carried frames and the signal did not survive -- a cable or
+	 * connector fault. Everything flat means nothing arrived at all. Both
+	 * present as "dead" and the remedies are completely different.
+	 */
+	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no frame crossed the data ring in %u probes over %u ms; tx_done=%llu tx_canceled=%llu rx_bad=%llu rx_oversize=%llu; refusing to declare the link up and rebuilding the session hardware\n",
 	       link->name, link->local_hopid, link->active_remote_hopid,
 	       TBFRAME_PROBE_RETRIES,
-	       TBFRAME_PROBE_RETRIES * TBFRAME_PROBE_INTERVAL_MS);
+	       TBFRAME_PROBE_RETRIES * TBFRAME_PROBE_INTERVAL_MS,
+	       link->data_tx_done, link->data_tx_canceled,
+	       link->data_rx_bad, link->data_rx_oversize);
 	return false;
 }
 
@@ -1123,9 +1131,18 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 		}
 		spin_unlock_irqrestore(&link->lock, flags);
 		if (silent) {
-			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; tearing the session down\n",
+			/*
+			 * Counters read outside the lock on purpose: they are
+			 * monotonic u64 diagnostics on a 64-bit target, so a
+			 * skewed sample costs nothing, and taking the lock
+			 * again here just to print would be the only reason
+			 * to reacquire it.
+			 */
+			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; tx_done=%llu tx_canceled=%llu rx_bad=%llu rx_oversize=%llu; tearing the session down\n",
 			       link->name, TBFRAME_DATA_SILENCE_TICKS,
-			       TBFRAME_DATA_SILENCE_TICKS * tf->verify_ms);
+			       TBFRAME_DATA_SILENCE_TICKS * tf->verify_ms,
+			       link->data_tx_done, link->data_tx_canceled,
+			       link->data_rx_bad, link->data_rx_oversize);
 			return;
 		}
 	}
@@ -1466,6 +1483,11 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
+	/* Diagnostic only: did our frames actually leave the ring? */
+	if (canceled)
+		link->data_tx_canceled++;
+	else
+		link->data_tx_done++;
 	if (f->hw_posted) {
 		f->hw_posted = false;
 		if (!WARN_ON(!link->ring_posted))
@@ -1575,6 +1597,11 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			link->probe_failures = 0;
 		}
 		link->silent_ticks = 0;
+	} else if (bad) {
+		/* Wire moved, signal did not survive it. Diagnostic only. */
+		link->data_rx_bad++;
+	} else {
+		link->data_rx_oversize++;
 	}
 	up = link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);

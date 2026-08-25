@@ -4465,43 +4465,63 @@ static void tb_test_xdomain_announce_stops_deterministically(struct kunit *test)
 }
 
 /*
- * The placeholder predicate itself, against the identities actually captured on
- * the fleet. Only the all-ones low half is a placeholder; a genuine identity
- * that merely shares the vendor-assigned high half is not.
+ * The placeholder predicate, against the identities actually read off the
+ * fleet on 2026-08-25. Only an ALL-ones UUID is the absence of a peer: with no
+ * powered router behind the link every config dword reads back all-ones, so
+ * all 16 bytes are 0xff.
+ *
+ * The low half alone is NOT a placeholder signal on this hardware. Maple Ridge
+ * controllers genuinely report an all-ones low half and distinguish themselves
+ * in the high half. Testing the low half classified every one of them as "no
+ * peer", which folded a successful UUID read into -ENODATA and left the
+ * XDomain looping in state UUID forever -- appmana-019 against appmana-027,
+ * while 027's announcements were arriving normally the whole time.
  */
 static void tb_test_xdomain_placeholder_uuid_predicate(struct kunit *test)
 {
-	/* 385a8780-0004-402c-ffff-ffffffffffff (appmana-008 -> 019). */
+	/* No powered router behind the link: every dword reads all-ones. */
 	static const u8 absent_peer[16] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* appmana-019's OWN root switch: 385a8780-0004-402c-ffff-ffffffffffff */
+	static const u8 real_019[16] = {
 		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 	};
-	/* 66518780-00e3-212c-ffff-ffffffffffff (appmana-008 port 1). */
-	static const u8 half_trained[16] = {
-		0x66, 0x51, 0x87, 0x80, 0x00, 0xe3, 0x21, 0x2c,
+	/* appmana-027: 5bdf8780-004d-b184-ffff-ffffffffffff */
+	static const u8 real_027[16] = {
+		0x5b, 0xdf, 0x87, 0x80, 0x00, 0x4d, 0xb1, 0x84,
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 	};
-	/* Same high half, real low half. */
-	static const u8 real_peer[16] = {
-		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
-		0x9d, 0x31, 0x6b, 0x3f, 0x2a, 0x7c, 0x1e, 0x05,
+	/* appmana-008: 385a8780-0025-7a2c-ffff-ffffffffffff */
+	static const u8 real_008[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x25, 0x7a, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 	};
-	/* One byte short of all-ones: still a real identity. */
+	/* appmana-004 (Titan Ridge, no all-ones tail at all). */
+	static const u8 real_004[16] = {
+		0xcc, 0x03, 0x00, 0x00, 0x00, 0x70, 0x7c, 0x0e,
+		0x83, 0xa2, 0xd8, 0x22, 0x06, 0xa4, 0x89, 0x24,
+	};
+	/* One byte short of all-ones: still an answer, not an absence. */
 	static const u8 nearly[16] = {
-		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-	};
-	/* All-ones HIGH half with a real low half is not this failure mode. */
-	static const u8 high_ones[16] = {
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0x9d, 0x31, 0x6b, 0x3f, 0x2a, 0x7c, 0x1e, 0x05,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
 	};
 
 	KUNIT_EXPECT_TRUE(test, tb_xdomain_uuid_is_placeholder(absent_peer));
-	KUNIT_EXPECT_TRUE(test, tb_xdomain_uuid_is_placeholder(half_trained));
-	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_peer));
+
+	/* Every one of these is a live peer that must be reachable. */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_019));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_027));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_008));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_004));
 	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(nearly));
-	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(high_ones));
+
+	/* Distinct boards must not collapse to the same "identity". */
+	KUNIT_EXPECT_NE(test, 0, memcmp(real_019, real_027, 16));
+	KUNIT_EXPECT_NE(test, 0, memcmp(real_019, real_008, 16));
 }
 
 /*

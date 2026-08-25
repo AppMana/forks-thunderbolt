@@ -1681,9 +1681,20 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 				"failed to request remote properties, retrying\n");
 			return -EAGAIN;
 		}
-		/* Give up now */
-		dev_err(&xd->dev, "failed read XDomain properties from %pUb\n",
-			xd->remote_uuid);
+		/*
+		 * Give up now. Log the errno: this message is the only
+		 * record of why a peer never became reachable, and without
+		 * it -ETIMEDOUT (the peer's CM never answered) is
+		 * indistinguishable from -EIO (it answered with an error) or
+		 * -ENODATA (it answered with nothing). Observed on
+		 * appmana-019 and appmana-018 against the same peer, where
+		 * the XDomain was created, this failed, and the device was
+		 * torn back down leaving the peer permanently invisible
+		 * while it kept announcing.
+		 */
+		dev_err(&xd->dev,
+			"failed read XDomain properties from %pUb: %d (route %llx, retries exhausted)\n",
+			xd->remote_uuid, ret, xd->route);
 
 		return ret;
 	}
@@ -2258,10 +2269,12 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		 */
 		if (tb_xdomain_announce_should_warn(failures))
 			dev_err(&xd->dev,
-				"failed to send properties changed notification\n");
+				"failed to send properties changed notification: %d (route %llx, failure %u)\n",
+				ret, xd->route, failures);
 		else
 			dev_dbg(&xd->dev,
-				"failed to send properties changed notification\n");
+				"failed to send properties changed notification: %d (route %llx, failure %u)\n",
+				ret, xd->route, failures);
 
 		/*
 		 * Clamped at the ceiling: the counter only feeds the delay and

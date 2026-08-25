@@ -85,14 +85,31 @@ static inline bool tb_xdomain_generation_stale(bool have_remote, u32 remote_gen,
  * @uuid: the 16 raw UUID bytes in wire order (as printed by %pUb)
  *
  * A Thunderbolt peer's UUID is assembled from router config-space reads. With
- * no POWERED router behind the link those reads return all-ones, so the
- * identity comes back with its low 64 bits set to 0xffff'ffff'ffff'ffff. Every
- * live sample of this has that exact tail:
+ * no POWERED router behind the link EVERY dword reads back all-ones, so the
+ * absent-peer identity is all-ones across all 16 bytes.
  *
- *   385a8780-0004-402c-ffff-ffffffffffff  (appmana-008 -> 019, 2026-08-24,
- *                                          neighbour powered off at boot)
- *   66518780-00e3-212c-ffff-ffffffffffff  (appmana-008 port 1, 2026-07-09,
- *                                          half-trained link)
+ * This used to test only the low 64 bits, and that was wrong on this fleet.
+ * The Maple Ridge controllers genuinely report an identity whose low half is
+ * all-ones; the high half is what distinguishes one board from another. Read
+ * live 2026-08-25:
+ *
+ *   385a8780-0004-402c-ffff-ffffffffffff  (appmana-019, its OWN root switch)
+ *   5bdf8780-004d-b184-ffff-ffffffffffff  (appmana-027)
+ *   385a8780-0025-7a2c-ffff-ffffffffffff  (appmana-008)
+ *   6bbc8780-00c1-11c0-ffff-ffffffffffff  (appmana-021)
+ *
+ * The old docstring cited the first of those as a placeholder sample; it is
+ * appmana-019's real identity. Testing the low half alone therefore classified
+ * every Maple Ridge peer as "no peer": tb_xdomain_get_uuid() folded a
+ * SUCCESSFUL read into -ENODATA, the XDomain never left state UUID, no
+ * property exchange ever ran, and no service ever bound. Captured on
+ * appmana-019 against appmana-027 as an endless
+ * "requesting remote UUID / failed to request UUID, retrying" loop while
+ * appmana-027's announcements were arriving normally.
+ *
+ * appmana-004 is the control: a Titan Ridge board whose UUID
+ * (cc030000-0070-7c0e-83a2-d82206a48924) has no all-ones tail, and whose link
+ * never exhibited this failure.
  *
  * Such a value must never be latched as an XDomain's final identity. XDP
  * property requests carry dst_uuid and a healthy peer ignores a mismatch, so a
@@ -111,7 +128,7 @@ static inline bool tb_xdomain_uuid_is_placeholder(const u8 *uuid)
 {
 	int i;
 
-	for (i = 8; i < 16; i++)
+	for (i = 0; i < 16; i++)
 		if (uuid[i] != 0xff)
 			return false;
 
