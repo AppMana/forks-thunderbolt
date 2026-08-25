@@ -797,6 +797,67 @@ static void rxe_port_event(struct rxe_dev *rxe,
 	ib_dispatch_event(&ev);
 }
 
+/* IB has no encoding for a 20 Gb/s single lane, so express the link's real
+ * aggregate rate as QDR (10 Gb/s) lanes: the product active_speed x
+ * active_width is the only thing consumers read, and it lands on the truth.
+ *   20 Gb/s x1 -> QDR x 2X = 20000    (Thunderbolt 4, single lane)
+ *   20 Gb/s x2 -> QDR x 4X = 40000    (bonded)
+ *   10 Gb/s x1 -> QDR x 1X = 10000
+ * An unknown or sub-QDR rate keeps the conservative SDR/1X scaffold rather
+ * than inventing bandwidth.
+ */
+void tbrxe_link_ib_rate(u8 tb_speed_gbps, u8 tb_lanes,
+			u8 *active_speed, u8 *active_width)
+{
+	unsigned int lanes = tb_lanes ? tb_lanes : 1;
+	unsigned int total = (unsigned int)tb_speed_gbps * lanes;
+	unsigned int qdr_lanes = total / 10;
+
+	*active_speed = IB_SPEED_QDR;
+	switch (qdr_lanes) {
+	case 1:
+		*active_width = IB_WIDTH_1X;
+		break;
+	case 2:
+	case 3:
+		*active_width = IB_WIDTH_2X;
+		break;
+	case 4:
+	case 5:
+	case 6:
+	case 7:
+		*active_width = IB_WIDTH_4X;
+		break;
+	case 8:
+	case 9:
+	case 10:
+	case 11:
+		*active_width = IB_WIDTH_8X;
+		break;
+	default:
+		if (qdr_lanes >= 12) {
+			*active_width = IB_WIDTH_12X;
+			break;
+		}
+		/* Below one QDR lane: keep the scaffold's honest floor. */
+		*active_speed = RXE_PORT_ACTIVE_SPEED;
+		*active_width = RXE_PORT_ACTIVE_WIDTH;
+		break;
+	}
+}
+
+void tbrxe_rxe_set_link_rate(struct rxe_dev *rxe, u8 tb_speed_gbps, u8 tb_lanes)
+{
+	u8 speed, width;
+
+	tbrxe_link_ib_rate(tb_speed_gbps, tb_lanes, &speed, &width);
+
+	mutex_lock(&rxe->usdev_lock);
+	rxe->port.attr.active_speed = speed;
+	rxe->port.attr.active_width = width;
+	mutex_unlock(&rxe->usdev_lock);
+}
+
 void rxe_port_up(struct rxe_dev *rxe)
 {
 	rxe_port_event(rxe, IB_EVENT_PORT_ACTIVE);
@@ -941,6 +1002,11 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 	if (link) {
+		/* A re-established session can have renegotiated speed or
+		 * width, so refresh the rate before announcing the port
+		 * active -- consumers re-read the attributes on the event.
+		 */
+		tbrxe_rxe_set_link_rate(link->rxe, info->speed, info->width);
 		rxe_port_up(link->rxe);
 		mutex_unlock(&tbrxe.publish_lock);
 		return;
@@ -969,6 +1035,11 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 	rxe_add(rxe, info->max_payload, ndev->dev_addr);
 	rxe->tbl_link = link;
 	link->rxe = rxe;
+	/* Before registration, so the device never appears with the scaffold
+	 * rate: a consumer that enumerates on the add event reads the port
+	 * attributes once and sizes its topology from them.
+	 */
+	tbrxe_rxe_set_link_rate(rxe, info->speed, info->width);
 
 	err = rxe_register_device(rxe, "usb4_rdma%d", ndev);
 	if (err) {
