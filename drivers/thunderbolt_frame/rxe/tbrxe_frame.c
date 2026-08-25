@@ -419,14 +419,74 @@ static void tbrxe_mac_from_eui64(u64 eui64, u8 mac[ETH_ALEN])
 	mac[5] = eui64;
 }
 
+/*
+ * Build the rail's final interface name, byte-identical to what
+ * /usr/lib/usb4-rdma/tbv-rdma-ifname derives for udev:
+ *
+ *	"tbr-" + last 11 alphanumeric characters of the peer's name
+ *
+ * ("appmana-019" -> strip non-alnum -> "appmana019" -> "tbr-appmana019".)
+ * IFNAMSIZ is 16, and 4 + 11 + NUL is exactly 16.
+ *
+ * Naming the device here rather than letting udev rename it is what closes
+ * the race that stranded rails all of 2026-08-25. tbrxe_link_unpublish()
+ * tears the old device down ASYNCHRONOUSLY -- deliberately, because
+ * ib_unregister_device_queued() must outlive its userspace users -- so a
+ * session that re-establishes promptly creates its replacement while the
+ * dying interface still holds the peer name. udev's rename then fails:
+ *
+ *   u4r0: Failed to rename network interface 61 from 'u4r0' to
+ *         'tbr-appmana019': File exists
+ *   u4r0: Failed to process device, ignoring: File exists
+ *
+ * and "ignoring" is the damage: it abandons the whole uevent, including
+ * the SEPARATE rule that assigns the rail ULA. The device is left with no
+ * address, so ib_core derives no GID, so the ib_device comes up with a
+ * zero GID and an unbound netdev -- ACTIVE, and incapable of carrying one
+ * byte of RDMA. udev never retries, so the rail stays dead until the next
+ * session churn happens to win the race.
+ *
+ * With the name assigned at alloc time the u4r* rename rule no longer
+ * matches at all, so it cannot fail and cannot abort the event; the
+ * address rule keys off ATTR{tbv_peer_uuid} and runs regardless.
+ */
+static void tbrxe_ndev_name(const struct tbframe_link_info *info,
+			    char *buf, size_t buflen)
+{
+	char alnum[IFNAMSIZ];
+	size_t n = 0;
+	size_t start;
+	int i;
+
+	for (i = 0; info->remote_name[i] && n < sizeof(alnum) - 1; i++) {
+		if (isalnum(info->remote_name[i]))
+			alnum[n++] = info->remote_name[i];
+	}
+	alnum[n] = '\0';
+
+	/* Last 11 characters, matching the helper's `tail -c 11`. */
+	start = n > 11 ? n - 11 : 0;
+	snprintf(buf, buflen, "tbr-%s", alnum + start);
+}
+
 static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info)
 {
 	struct tbrxe_ndev_priv *priv;
 	struct net_device *ndev;
+	char name[IFNAMSIZ];
 	u8 mac[ETH_ALEN];
 	int err;
 
-	ndev = alloc_netdev(sizeof(*priv), "u4r%d", NET_NAME_ENUM,
+	tbrxe_ndev_name(info, name, sizeof(name));
+
+	/*
+	 * Fall back to the enumerated kernel name only when the peer supplied
+	 * nothing usable; udev's helper covers that case from the UUID.
+	 */
+	if (strlen(name) <= 4)
+		strscpy(name, "u4r%d", sizeof(name));
+
+	ndev = alloc_netdev(sizeof(*priv), name, NET_NAME_PREDICTABLE,
 			    tbrxe_ndev_setup);
 	if (!ndev)
 		return ERR_PTR(-ENOMEM);
@@ -443,6 +503,21 @@ static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info
 	ndev->sysfs_groups[0] = &tbrxe_ndev_group;
 
 	err = register_netdev(ndev);
+	if (err == -EEXIST && strcmp(name, "u4r%d")) {
+		/*
+		 * The previous session's interface has not finished its
+		 * asynchronous teardown yet and still owns the peer name.
+		 * Take an enumerated name instead of failing the publish:
+		 * udev's helper then renames it once the old one is gone,
+		 * and -- crucially -- the address rule still runs, so the
+		 * rail gets its ULA either way. Loud, because a rail under
+		 * the wrong name is invisible to peer-directed tooling.
+		 */
+		pr_warn("tbrxe: %s still held during re-publish; registering enumerated instead\n",
+			name);
+		strscpy(ndev->name, "u4r%d", IFNAMSIZ);
+		err = register_netdev(ndev);
+	}
 	if (err) {
 		free_netdev(ndev);
 		return ERR_PTR(err);

@@ -1525,7 +1525,19 @@ static int tb_xdomain_get_link_status(struct tb_xdomain *xd)
 				"failed to request remote link status, retrying\n");
 			return -EAGAIN;
 		}
-		dev_dbg(&xd->dev, "failed to receive remote link status\n");
+		/*
+		 * Log the errno. -EOPNOTSUPP means the peer answered
+		 * ERROR_NOT_SUPPORTED and bonding is simply unavailable;
+		 * -ETIMEDOUT means it never answered at all. Those demand
+		 * opposite responses -- stop asking, versus keep retrying --
+		 * and without the code they are indistinguishable. Observed
+		 * on appmana-019 against appmana-027 as an unbounded re-arm
+		 * loop that never printed the retry line, which is only
+		 * reachable on -EOPNOTSUPP or exhausted retries.
+		 */
+		dev_err(&xd->dev,
+			"failed to receive remote link status: %d (retries left %d, rearm %u)\n",
+			ret, xd->state_retries, xd->bonding_rearm_attempts);
 		return ret;
 	}
 

@@ -43,6 +43,24 @@
 
 #define ICM_TIMEOUT			5000	/* ms */
 #define ICM_RETRIES			3
+
+/*
+ * How long __icm_driver_ready() waits for the root switch config space to
+ * become readable. Each pass costs a 100 ms read timeout plus a 50 ms
+ * sleep, so the default 50 is about 7.5 s.
+ *
+ * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
+ * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
+ * advertises running but does not respond; wedged firmware", after which
+ * the domain is taken over by the software CM. So a budget that is merely
+ * too short for a particular boot is indistinguishable, in the log and in
+ * the driver's behaviour, from genuinely dead firmware. Tunable at runtime
+ * so the two can actually be told apart on hardware instead of inferred.
+ */
+static unsigned int icm_cfg_space_retries = 50;
+module_param(icm_cfg_space_retries, uint, 0644);
+MODULE_PARM_DESC(icm_cfg_space_retries,
+		 "root switch config-space readiness passes, ~150ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -2540,7 +2558,8 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 		   u8 *proto_version, size_t *nboot_acl, bool *rpm)
 {
 	struct icm *icm = tb_priv(tb);
-	unsigned int retries = 50;
+	unsigned int retries = icm_cfg_space_retries;
+	unsigned long started = jiffies;
 	int ret;
 
 	ret = icm->driver_ready(tb, security_level, proto_version, nboot_acl,
@@ -2566,7 +2585,17 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 		msleep(50);
 	} while (--retries);
 
-	tb_err(tb, "failed to read root switch config space, giving up\n");
+	/*
+	 * Say what was actually observed. This timeout is the sole input to
+	 * the "wedged firmware" verdict, so recording the budget spent and
+	 * the last config-space error is what distinguishes "firmware is
+	 * dead" from "this boot needed longer than we allowed".
+	 */
+	tb_err(tb,
+	       "failed to read root switch config space after %u passes / %u ms (fw_sts %#x); giving up\n",
+	       icm_cfg_space_retries,
+	       jiffies_to_msecs(jiffies - started),
+	       ioread32(tb->nhi->iobase + REG_FW_STS));
 	return -ETIMEDOUT;
 }
 
