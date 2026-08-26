@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/dmapool.h>
+#include <linux/semaphore.h>
 #include <linux/workqueue.h>
 
 #include "ctl.h"
@@ -26,6 +27,8 @@
  * channel allocation is deliberately leaked instead (see tb_ctl_free()).
  */
 #define TB_CTL_REQ_WORK_DRAIN_MS 2000
+/* Windows waits this long for the independent local ring command. */
+#define TB_CTL_XDOMAIN_TX_TIMEOUT_MS 25000
 
 /**
  * struct tb_ctl - Thunderbolt control channel
@@ -51,10 +54,14 @@ struct tb_ctl {
 	struct ctl_pkg *rx_packets[TB_CTL_RX_PKG_COUNT];
 	struct mutex request_queue_lock;
 	struct list_head request_queue;
+	/* PDF 0xc has no sequence token, so local commands share one slot. */
+	struct semaphore xdomain_tx_sem;
+	bool xdomain_tx_occupied;
 	bool running;
 	/*
-	 * Requests whose ->work has been accepted by system_wq and has not
-	 * finished. tb_cfg_request_work() dereferences req->ctl AFTER the
+	 * Requests whose ->work has been accepted by system_wq and synchronous
+	 * local-slot owners that have not finished. tb_cfg_request_work()
+	 * dereferences req->ctl AFTER the
 	 * callback (tb_cfg_request_dequeue() takes ctl->request_queue_lock),
 	 * so the ctl must outlive every such item. Nothing else ties them
 	 * together: the kref counts the REQUEST, the ctl has no refcount, and
@@ -130,8 +137,11 @@ struct tb_ctl {
 	dev_warn_ratelimited(&(ctl)->nhi->pdev->dev, format, ## arg)
 
 static void tb_ctl_schedule_req_work(struct tb_cfg_request *req);
+static struct tb_cfg_request_state
+tb_cfg_request_read_state(struct tb_cfg_request *req);
 
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
+static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_local_queue);
 /* Serializes access to request kref_get/put */
 static DEFINE_MUTEX(tb_cfg_request_lock);
 
@@ -257,6 +267,8 @@ tb_cfg_request_find_intermediate(struct tb_ctl *ctl, struct ctl_pkg *pkg,
 	list_for_each_entry(iter, &ctl->request_queue, list) {
 		if (!iter->intermediate)
 			continue;
+		if (!tb_cfg_local_slot_is_owned(tb_cfg_request_read_state(iter).local))
+			continue;
 
 		*event = iter->intermediate(iter, pkg);
 		if (*event == TB_CFG_REQUEST_EVENT_NONE)
@@ -296,6 +308,17 @@ tb_cfg_request_read_state(struct tb_cfg_request *req)
 	spin_unlock_irqrestore(&req->state_lock, flags);
 
 	return state;
+}
+
+static void tb_cfg_request_release_local_slot(struct tb_cfg_request *req)
+{
+	struct tb_ctl *ctl = req->ctl;
+
+	if (!ctl || !test_and_clear_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags))
+		return;
+
+	WRITE_ONCE(ctl->xdomain_tx_occupied, false);
+	up(&ctl->xdomain_tx_sem);
 }
 
 /* utility functions */
@@ -672,6 +695,8 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 		if (intermediate_req) {
 			action = tb_cfg_request_update_state(intermediate_req,
 							     event);
+			tb_cfg_request_release_local_slot(intermediate_req);
+			wake_up_all(&tb_cfg_request_local_queue);
 			if (action == TB_CFG_REQUEST_ACTION_FAIL) {
 				intermediate_req->result.err = -EIO;
 				tb_ctl_schedule_req_work(intermediate_req);
@@ -741,8 +766,10 @@ static void tb_cfg_request_work(struct work_struct *work)
 	if (!test_bit(TB_CFG_REQUEST_CANCELED, &req->flags))
 		req->callback(req->callback_data);
 
-	tb_cfg_request_dequeue(req);
-	tb_cfg_request_put(req);
+	if (!test_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags)) {
+		tb_cfg_request_dequeue(req);
+		tb_cfg_request_put(req);
+	}
 	/* Last touch of @ctl: after this the ctl may be freed. */
 	if (ctl)
 		atomic_dec(&ctl->req_works);
@@ -763,7 +790,9 @@ int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 {
 	int ret;
 
-	req->flags = 0;
+	req->flags &= BIT(TB_CFG_REQUEST_LOCAL_SLOT);
+	if (req->state.local != TB_CFG_LOCAL_DISABLED)
+		set_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags);
 	req->callback = callback;
 	req->callback_data = callback_data;
 	INIT_WORK(&req->work, tb_cfg_request_work);
@@ -830,14 +859,31 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					 int timeout_msec)
 {
 	unsigned long timeout = msecs_to_jiffies(timeout_msec);
+	unsigned long local_deadline = 0;
 	struct tb_cfg_request_state state;
 	struct tb_cfg_result res = { 0 };
 	DECLARE_COMPLETION_ONSTACK(done);
+	bool hold_local;
 	int ret;
+
+	hold_local = req->state.local != TB_CFG_LOCAL_DISABLED;
+	if (hold_local) {
+		down(&ctl->xdomain_tx_sem);
+		WARN_ON(!tb_cfg_local_slot_may_claim(READ_ONCE(ctl->xdomain_tx_occupied)));
+		WRITE_ONCE(ctl->xdomain_tx_occupied, true);
+		set_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags);
+		atomic_inc(&ctl->req_works);
+		local_deadline = jiffies +
+			msecs_to_jiffies(TB_CTL_XDOMAIN_TX_TIMEOUT_MS);
+	}
 
 	ret = tb_cfg_request(ctl, req, tb_cfg_request_complete, &done);
 	if (ret) {
 		res.err = ret;
+		if (hold_local)
+			tb_cfg_request_release_local_slot(req);
+		if (hold_local)
+			atomic_dec(&ctl->req_works);
 		return res;
 	}
 
@@ -879,10 +925,42 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 			tb_ctl_warn_ratelimited(ctl,
 						"peer response timed out after local XDomain transmit acceptance\n");
 		atomic_inc(&ctl->consec_timeouts);
-		tb_cfg_request_cancel(req, -ETIMEDOUT);
+		if (hold_local) {
+			set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
+			req->result.err = -ETIMEDOUT;
+		} else {
+			tb_cfg_request_cancel(req, -ETIMEDOUT);
+		}
 	}
 
 	flush_work(&req->work);
+	if (hold_local) {
+		unsigned long remaining = time_before(jiffies, local_deadline) ?
+			local_deadline - jiffies : 0;
+
+		state = tb_cfg_request_read_state(req);
+		if (state.local == TB_CFG_LOCAL_WAITING && remaining) {
+			wait_event_timeout(tb_cfg_request_local_queue,
+					   tb_cfg_request_read_state(req).local !=
+						TB_CFG_LOCAL_WAITING,
+					   remaining);
+		}
+		state = tb_cfg_request_read_state(req);
+		if (state.local == TB_CFG_LOCAL_WAITING) {
+			tb_cfg_request_update_state(req,
+						    TB_CFG_REQUEST_EVENT_LOCAL_TIMED_OUT);
+			tb_ctl_warn_ratelimited(ctl,
+						"local XDomain transmit completion timed out after %d ms\n",
+						TB_CTL_XDOMAIN_TX_TIMEOUT_MS);
+		}
+
+		clear_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags);
+		tb_cfg_request_dequeue(req);
+		tb_cfg_request_release_local_slot(req);
+		tb_cfg_request_put(req);
+		/* Last touch of @ctl: tb_ctl_free() may proceed after this. */
+		atomic_dec(&ctl->req_works);
+	}
 
 	return req->result;
 }
@@ -942,6 +1020,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 	ctl->callback_data = cb_data;
 
 	mutex_init(&ctl->request_queue_lock);
+	sema_init(&ctl->xdomain_tx_sem, 1);
 	INIT_LIST_HEAD(&ctl->request_queue);
 	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", &nhi->pdev->dev,
 					 TB_FRAME_SIZE, 4, 0);

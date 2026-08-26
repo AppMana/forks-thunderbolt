@@ -5341,6 +5341,40 @@ static void tb_test_ctl_split_state_preserves_accept_on_peer_timeout(struct kuni
 	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
 }
 
+static void tb_test_ctl_peer_timeout_keeps_local_command_waiting(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+
+	/* The peer deadline cannot stand in for the independent local deadline. */
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_WAITING);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
+	KUNIT_EXPECT_TRUE(test, tb_cfg_local_slot_is_owned(state.local));
+}
+
+static void tb_test_ctl_local_status_slot_blocks_reuse(struct kunit *test)
+{
+	/* The first command can claim an empty completion slot. */
+	KUNIT_EXPECT_TRUE(test, tb_cfg_local_slot_may_claim(false));
+	/* An unsequenced completion makes reuse while occupied unsafe. */
+	KUNIT_EXPECT_FALSE(test, tb_cfg_local_slot_may_claim(true));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_WAITING));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_ACCEPTED));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_FAILED));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_TIMED_OUT));
+}
+
 static void tb_test_ctl_split_state_terminal_transitions(struct kunit *test)
 {
 	struct tb_cfg_request_state state = {
@@ -5595,6 +5629,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_classification),
 	KUNIT_CASE(tb_test_ctl_split_state_records_local_acceptance),
 	KUNIT_CASE(tb_test_ctl_split_state_preserves_accept_on_peer_timeout),
+	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),
+	KUNIT_CASE(tb_test_ctl_local_status_slot_blocks_reuse),
 	KUNIT_CASE(tb_test_ctl_split_state_terminal_transitions),
 	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),

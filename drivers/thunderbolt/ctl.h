@@ -69,6 +69,7 @@ enum tb_cfg_request_event {
 	TB_CFG_REQUEST_EVENT_NONE,
 	TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED,
 	TB_CFG_REQUEST_EVENT_LOCAL_FAILED,
+	TB_CFG_REQUEST_EVENT_LOCAL_TIMED_OUT,
 	TB_CFG_REQUEST_EVENT_PEER_MATCHED,
 	TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT,
 	TB_CFG_REQUEST_EVENT_CANCELED,
@@ -109,6 +110,11 @@ tb_cfg_request_state_step(struct tb_cfg_request_state *state,
 		}
 		return TB_CFG_REQUEST_ACTION_NONE;
 
+	case TB_CFG_REQUEST_EVENT_LOCAL_TIMED_OUT:
+		if (state->local == TB_CFG_LOCAL_WAITING)
+			state->local = TB_CFG_LOCAL_TIMED_OUT;
+		return TB_CFG_REQUEST_ACTION_NONE;
+
 	case TB_CFG_REQUEST_EVENT_PEER_MATCHED:
 		if (state->peer != TB_CFG_PEER_WAITING)
 			return TB_CFG_REQUEST_ACTION_NONE;
@@ -119,8 +125,6 @@ tb_cfg_request_state_step(struct tb_cfg_request_state *state,
 		if (state->peer != TB_CFG_PEER_WAITING)
 			return TB_CFG_REQUEST_ACTION_NONE;
 		state->peer = TB_CFG_PEER_TIMED_OUT;
-		if (state->local == TB_CFG_LOCAL_WAITING)
-			state->local = TB_CFG_LOCAL_TIMED_OUT;
 		return TB_CFG_REQUEST_ACTION_FAIL;
 
 	case TB_CFG_REQUEST_EVENT_CANCELED:
@@ -133,6 +137,17 @@ tb_cfg_request_state_step(struct tb_cfg_request_state *state,
 	default:
 		return TB_CFG_REQUEST_ACTION_NONE;
 	}
+}
+
+/* An unsequenced local completion channel can have only one owner. */
+static inline bool tb_cfg_local_slot_may_claim(bool occupied)
+{
+	return !occupied;
+}
+
+static inline bool tb_cfg_local_slot_is_owned(enum tb_cfg_local_state state)
+{
+	return state == TB_CFG_LOCAL_WAITING;
 }
 
 /**
@@ -191,6 +206,8 @@ struct tb_cfg_request {
 
 #define TB_CFG_REQUEST_ACTIVE		0
 #define TB_CFG_REQUEST_CANCELED		1
+#define TB_CFG_REQUEST_HOLD_LOCAL	2
+#define TB_CFG_REQUEST_LOCAL_SLOT	3
 
 struct tb_cfg_request *tb_cfg_request_alloc(void);
 void tb_cfg_request_get(struct tb_cfg_request *req);
