@@ -3694,6 +3694,25 @@ static void tb_stop(struct tb *tb)
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
 	struct tb_port *port;
+	bool ctl_live;
+
+	/*
+	 * Everything below that touches config space is best-effort cleanup of
+	 * hardware that is about to be re-initialised by the next driver load.
+	 * When the control channel has stopped answering, those transactions
+	 * cannot succeed -- and are not merely wasted. On appmana-019
+	 * (2026-08-25 17:30:26) a live rmmod+modprobe ran while the software CM
+	 * was already failing reads; tb_stop() pushed its teardown I/O into the
+	 * unresponsive controller and the CIO went permanently mute (rx_total=0
+	 * thereafter, surviving module reloads and warm reboots; only power
+	 * removal clears it). So: ask first, and skip the hardware half of the
+	 * teardown when nobody is listening. The software half (freeing tunnel
+	 * objects, unregistering the switch) always runs.
+	 */
+	ctl_live = tb_ctl_is_responsive(tb->ctl);
+	if (!ctl_live)
+		tb_warn(tb,
+			"control channel unresponsive; skipping config space teardown to avoid hanging the controller\n");
 
 	/*
 	 * Close the re-arm gate FIRST, then cancel synchronously.
@@ -3725,7 +3744,7 @@ static void tb_stop(struct tb *tb)
 	 */
 	if (tb->root_switch) {
 		tb_switch_for_each_port(tb->root_switch, port) {
-			if (port->replug_phase == TB_REPLUG_HELD) {
+			if (ctl_live && port->replug_phase == TB_REPLUG_HELD) {
 				tb_port_enable(port);
 				tb_port_enable(port->dual_link_port);
 			}
@@ -3739,7 +3758,7 @@ static void tb_stop(struct tb *tb)
 		 * tear them down. Other protocol tunnels can be left
 		 * intact.
 		 */
-		if (tb_tunnel_is_dma(tunnel))
+		if (ctl_live && tb_tunnel_is_dma(tunnel))
 			tb_tunnel_deactivate(tunnel);
 		tb_tunnel_put(tunnel);
 	}

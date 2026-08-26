@@ -79,6 +79,22 @@ struct tb_ctl {
 	atomic_t rx_unmatched;
 	atomic_t rx_dropped;
 
+	/*
+	 * Consecutive request timeouts with no matched reply in between, and
+	 * the basis of tb_ctl_is_responsive(). Not diagnostic: the teardown
+	 * path consults it before pushing config space I/O at the controller.
+	 *
+	 * appmana-019, 2026-08-25 17:30:26: the software CM was already
+	 * failing reads ("0: timeout reading config space 1 from 0x37") when a
+	 * live rmmod+modprobe ran. tb_stop() then issued its unconditional
+	 * teardown writes into a controller that was not answering, and the
+	 * CIO went from degraded to permanently mute -- rx_total=0 from that
+	 * second onward, surviving module reloads AND warm reboots (only power
+	 * removal clears it). Every one of those writes is a 250 ms..5 s
+	 * timeout that accomplishes nothing when nothing is listening.
+	 */
+	atomic_t consec_timeouts;
+
 	int timeout_msec;
 	event_cb callback;
 	void *callback_data;
@@ -563,6 +579,16 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 
 	if (req) {
 		atomic_inc(&pkg->ctl->rx_matched);
+		/*
+		 * A reply we asked for came back: the controller is answering,
+		 * so the run of timeouts (if any) is over. Only a MATCHED reply
+		 * clears this -- unmatched ones mean ring 0 moves packets but
+		 * the request/response pairing is broken, which is exactly the
+		 * degraded state that must still gate teardown I/O.
+		 */
+		atomic_set(&pkg->ctl->consec_timeouts,
+			   tb_ctl_liveness_next(atomic_read(&pkg->ctl->consec_timeouts),
+						TB_CTL_EVENT_REPLY_MATCHED));
 	} else {
 		atomic_inc(&pkg->ctl->rx_unmatched);
 		/*
@@ -748,12 +774,39 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					atomic_read(&ctl->rx_matched),
 					atomic_read(&ctl->rx_unmatched),
 					atomic_read(&ctl->rx_dropped));
+		atomic_inc(&ctl->consec_timeouts);
 		tb_cfg_request_cancel(req, -ETIMEDOUT);
 	}
 
 	flush_work(&req->work);
 
 	return req->result;
+}
+
+/**
+ * tb_ctl_is_responsive() - Is the control channel still answering?
+ * @ctl: Control channel
+ *
+ * Reports whether ring 0 has produced a MATCHED reply recently enough to be
+ * worth talking to. Intended for paths that are about to issue config space
+ * I/O they do not strictly need -- above all teardown, which otherwise fires
+ * a burst of writes at a controller that has stopped answering and can push a
+ * merely degraded CIO into a permanent hang (appmana-019, see consec_timeouts).
+ *
+ * This is deliberately one-directional: it may report a live channel as dead
+ * for a few requests after a transient stall, which only costs some skipped
+ * cleanup on a controller that is being torn down anyway. It must never report
+ * a dead channel as live, so the counter is cleared ONLY by a matched reply.
+ *
+ * Return: %true when the channel is worth using, %false when it has failed
+ * %TB_CTL_DEAD_TIMEOUTS requests in a row without a matched reply.
+ */
+bool tb_ctl_is_responsive(struct tb_ctl *ctl)
+{
+	if (!ctl)
+		return false;
+
+	return !tb_ctl_timeouts_indicate_dead(atomic_read(&ctl->consec_timeouts));
 }
 
 /* public interface, alloc/start/stop/free */

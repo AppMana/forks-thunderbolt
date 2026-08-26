@@ -5088,6 +5088,82 @@ static void tb_test_icm_warm_restart_is_maple_ridge_only(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0xffff));
 }
 
+/*
+ * Control-channel liveness (ctl.h). These gate whether tb_stop() is allowed to
+ * push config space I/O at the controller during teardown -- see the
+ * appmana-019 CIO hang recorded there.
+ */
+static void tb_test_ctl_liveness_threshold(struct kunit *test)
+{
+	/* A quiet channel and short stalls are not "dead". */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(0));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(1));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(2));
+
+	/* Three in a row is the verdict, and it stays put above it. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(3));
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(4));
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(9999));
+}
+
+static void tb_test_ctl_liveness_matched_reply_clears(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	for (i = 0; i < 5; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, n, 5);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/* One reply we actually asked for and the channel is live again. */
+	n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_MATCHED);
+	KUNIT_EXPECT_EQ(test, n, 0);
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
+static void tb_test_ctl_liveness_unmatched_reply_does_not_clear(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	for (i = 0; i < TB_CTL_DEAD_TIMEOUTS; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/*
+	 * Ring 0 still moves packets, but they pair with nothing. That is the
+	 * degraded state, not recovery: the verdict must NOT be cleared, or
+	 * teardown resumes writing into a controller that is already going.
+	 */
+	for (i = 0; i < 20; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_UNMATCHED);
+	KUNIT_EXPECT_EQ(test, n, TB_CTL_DEAD_TIMEOUTS);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
+static void tb_test_ctl_liveness_appmana_019_sequence(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	/* 16:26 -- software CM healthy, matched replies flowing. */
+	for (i = 0; i < 900; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_MATCHED);
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/*
+	 * 17:21..17:30 -- rx_matched frozen, rx_unmatched climbing, every
+	 * request timing out. This is where the old code would still have run
+	 * a full config space teardown on rmmod.
+	 */
+	for (i = 0; i < 112; i++) {
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_UNMATCHED);
+	}
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -5187,6 +5263,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_property_parse),
 	KUNIT_CASE(tb_test_property_format),
 	KUNIT_CASE(tb_test_property_copy),
+	KUNIT_CASE(tb_test_ctl_liveness_threshold),
+	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
+	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
+	KUNIT_CASE(tb_test_ctl_liveness_appmana_019_sequence),
 	{ }
 };
 

@@ -140,4 +140,64 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 		 enum tb_cfg_space space, u32 offset, u32 length);
 int tb_cfg_get_upstream_port(struct tb_ctl *ctl, u64 route);
 
+/*
+ * Consecutive unanswered control requests after which the channel is treated
+ * as dead by tb_ctl_is_responsive(). Three, because a single timeout is
+ * routine under contention and two can happen across a link retrain, but a
+ * controller that has ignored three requests in a row with no matched reply
+ * in between is not coming back inside a teardown.
+ */
+#define TB_CTL_DEAD_TIMEOUTS 3
+
+/* Ring 0 events that move the control-channel liveness counter. */
+enum tb_ctl_ring_event {
+	TB_CTL_EVENT_TIMEOUT,
+	TB_CTL_EVENT_REPLY_MATCHED,
+	TB_CTL_EVENT_REPLY_UNMATCHED,
+};
+
+/**
+ * tb_ctl_liveness_next() - Liveness counter transition
+ * @consec_timeouts: Current run of unanswered requests
+ * @ev: What ring 0 just did
+ *
+ * The whole liveness policy, kept pure so KUnit drives the same code the
+ * driver runs instead of a re-implementation of it.
+ *
+ * Only a MATCHED reply clears the run. An UNMATCHED reply deliberately does
+ * not: replies arriving that pair with nothing means ring 0 moves packets
+ * while request/response matching is broken, which is precisely the degraded
+ * state that must still gate teardown I/O. appmana-019 sat in exactly that
+ * state (rx_total climbing, rx_matched frozen at 170, rx_unmatched at 112)
+ * for the nine minutes before its CIO hung for good.
+ *
+ * Return: the new consecutive-timeout count.
+ */
+static inline int tb_ctl_liveness_next(int consec_timeouts,
+				       enum tb_ctl_ring_event ev)
+{
+	switch (ev) {
+	case TB_CTL_EVENT_TIMEOUT:
+		return consec_timeouts + 1;
+	case TB_CTL_EVENT_REPLY_MATCHED:
+		return 0;
+	case TB_CTL_EVENT_REPLY_UNMATCHED:
+	default:
+		return consec_timeouts;
+	}
+}
+
+/**
+ * tb_ctl_timeouts_indicate_dead() - Liveness verdict for a timeout run
+ * @consec_timeouts: Run of unanswered requests, from tb_ctl_liveness_next()
+ *
+ * Return: %true when config space I/O should be skipped.
+ */
+static inline bool tb_ctl_timeouts_indicate_dead(int consec_timeouts)
+{
+	return consec_timeouts >= TB_CTL_DEAD_TIMEOUTS;
+}
+
+bool tb_ctl_is_responsive(struct tb_ctl *ctl);
+
 #endif
