@@ -1159,6 +1159,21 @@ static void tbframe_verify_workfn(struct work_struct *work)
 	struct tbframe_link *link = container_of(work, struct tbframe_link,
 						 verify_work);
 
+	/*
+	 * Per-tick counters, dyndbg-gated. The DATA PATH DEAD diagnostic only
+	 * fires on the side that FAILS its proof, which is exactly the side
+	 * that cannot tell you what the other end is doing: on a one-way
+	 * failure the healthy end stays silent and its transmit counters are
+	 * unreadable. Emitting them on the verify tick makes both directions
+	 * observable at once, which is what separates "the peer never sends"
+	 * from "the peer sends and we never receive".
+	 */
+	pr_debug("%s: verify tick: data_rx=%llu tx_sub=%llu tx_refused=%llu tx_ringerr=%llu tx_done=%llu tx_canceled=%llu rx_bad=%llu silent=%u proven=%d\n",
+		 link->name, link->data_rx, link->data_tx_submitted,
+		 link->data_tx_refused, link->data_tx_ring_err, link->data_tx_done,
+		 link->data_tx_canceled, link->data_rx_bad,
+		 link->silent_ticks, link->data_proven);
+
 	tbframe_link_verify_step(link);
 }
 
@@ -1756,11 +1771,29 @@ static int __tbframe_xmit(struct tbframe_link *link,
 	if (ok) {
 		f->hw_posted = true;
 		link->ring_posted++;
+		link->data_tx_submitted++;
+	} else {
+		/*
+		 * Admission refused before the ring. Counted separately from
+		 * ring_tx() failing, because "we never tried" and "we tried
+		 * and the ring rejected it" look identical downstream -- both
+		 * end as a peer that receives nothing -- and only this gate
+		 * can tell them apart.
+		 */
+		link->data_tx_refused++;
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
 	ret = ok ? link->ops->ring_tx(link->hw, f) : -ENETDOWN;
 	if (ret && ok) {
 		spin_lock_irqsave(&link->lock, flags);
+		/*
+		 * The ring itself rejected the frame. Distinct from a frame
+		 * the ring ACCEPTED and never completed: the first is a
+		 * closed/!started ring, the second is a stalled egress. Both
+		 * leave the peer receiving nothing, and tx_sub alone (counted
+		 * before this call) cannot tell them apart.
+		 */
+		link->data_tx_ring_err++;
 		f->hw_posted = false;
 		if (!WARN_ON(!link->ring_posted))
 			link->ring_posted--;

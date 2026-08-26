@@ -62,6 +62,23 @@ struct tb_ctl {
 	 */
 	atomic_t req_works;
 
+	/*
+	 * Ring 0 liveness, diagnostic only. When a control request times out
+	 * the driver reports "no answer", which is three different faults
+	 * wearing one face: the packet never left, it left and nothing came
+	 * back, or replies are arriving and not matching. REG_FW_STS cannot
+	 * separate them -- it reads 0x800001a1 on healthy and failing hosts
+	 * alike (appmana-019 vs -021/-023, 2026-08-25) -- so the counters
+	 * that distinguish "the firmware is not executing" from "we are not
+	 * transmitting" have to come from the ring itself.
+	 */
+	atomic_t tx_done;
+	atomic_t tx_canceled;
+	atomic_t rx_total;
+	atomic_t rx_matched;
+	atomic_t rx_unmatched;
+	atomic_t rx_dropped;
+
 	int timeout_msec;
 	event_cb callback;
 	void *callback_data;
@@ -87,6 +104,13 @@ struct tb_ctl {
 
 #define tb_ctl_dbg_once(ctl, format, arg...) \
 	dev_dbg_once(&(ctl)->nhi->pdev->dev, format, ## arg)
+
+/*
+ * A stalled handshake retries forever, so the ring-0 diagnostic below has
+ * to be rate limited or it becomes the fault.
+ */
+#define tb_ctl_warn_ratelimited(ctl, format, arg...) \
+	dev_warn_ratelimited(&(ctl)->nhi->pdev->dev, format, ## arg)
 
 static void tb_ctl_schedule_req_work(struct tb_cfg_request *req);
 
@@ -368,6 +392,13 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			       bool canceled)
 {
 	struct ctl_pkg *pkg = container_of(frame, typeof(*pkg), frame);
+
+	if (pkg->ctl) {
+		if (canceled)
+			atomic_inc(&pkg->ctl->tx_canceled);
+		else
+			atomic_inc(&pkg->ctl->tx_done);
+	}
 	tb_ctl_pkg_free(pkg);
 }
 
@@ -470,7 +501,11 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			 * ctl->rx_packets.
 			 */
 
+	/* Anything at all arriving on ring 0 counts here. */
+	atomic_inc(&pkg->ctl->rx_total);
+
 	if (frame->size < 4 || frame->size % 4 != 0) {
+		atomic_inc(&pkg->ctl->rx_dropped);
 		tb_ctl_err(pkg->ctl, "RX: invalid size %#x, dropping packet\n",
 			   frame->size);
 		goto rx;
@@ -487,6 +522,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	case TB_CFG_PKG_OVERRIDE:
 	case TB_CFG_PKG_RESET:
 		if (*(__be32 *)(pkg->buffer + frame->size) != crc32) {
+			atomic_inc(&pkg->ctl->rx_dropped);
 			tb_ctl_err(pkg->ctl,
 				   "RX: checksum mismatch, dropping packet\n");
 			goto rx;
@@ -502,6 +538,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	case TB_CFG_PKG_XDOMAIN_RESP:
 	case TB_CFG_PKG_XDOMAIN_REQ:
 		if (*(__be32 *)(pkg->buffer + frame->size) != crc32) {
+			atomic_inc(&pkg->ctl->rx_dropped);
 			tb_ctl_err(pkg->ctl,
 				   "RX: checksum mismatch, dropping packet\n");
 			goto rx;
@@ -523,6 +560,29 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	 * triggered from messing with the active requests.
 	 */
 	req = tb_cfg_request_find(pkg->ctl, pkg);
+
+	if (req) {
+		atomic_inc(&pkg->ctl->rx_matched);
+	} else {
+		atomic_inc(&pkg->ctl->rx_unmatched);
+		/*
+		 * A reply nobody claimed. Ring 0 is alive -- it arrived, it
+		 * was well formed -- and the request that wanted it is going
+		 * to time out anyway, so print what it was. eof is the packet
+		 * type the matchers key on, and the first dword carries the
+		 * ICM code / config-space route, which is the other half of
+		 * every match predicate.
+		 */
+		{
+			const u32 *dw = pkg->buffer;
+
+			tb_ctl_warn_ratelimited(pkg->ctl,
+						"RX: unmatched reply eof=%#x size=%u dw0=%#010x dw1=%#010x\n",
+						pkg->frame.eof, frame->size,
+						frame->size >= 4 ? dw[0] : 0,
+						frame->size >= 8 ? dw[1] : 0);
+		}
+	}
 
 	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size, !req);
 
@@ -659,8 +719,37 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		return res;
 	}
 
-	if (!wait_for_completion_timeout(&done, timeout))
+	if (!wait_for_completion_timeout(&done, timeout)) {
+		/*
+		 * Say which of the three "no answer" faults this actually is.
+		 * tx_done advancing but rx_total flat means we transmitted and
+		 * the far side produced nothing -- the firmware really is not
+		 * executing. rx_total advancing with rx_unmatched climbing
+		 * means replies ARE arriving and being discarded, which is a
+		 * matching/sequence bug on our side, not dead firmware.
+		 * tx_done flat means we never got the packet onto the ring at
+		 * all. Rate-limited: a wedged handshake retries forever.
+		 */
+		{
+			const u32 *rdw = req->request;
+
+			tb_ctl_warn_ratelimited(ctl,
+						"request timed out: want eof=%#x req_dw0=%#010x size=%zu\n",
+						req->response_type,
+						req->request_size >= 4 ? rdw[0] : 0,
+						req->request_size);
+		}
+		tb_ctl_warn_ratelimited(ctl,
+					"request timed out after %d ms; ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_dropped=%d\n",
+					timeout_msec,
+					atomic_read(&ctl->tx_done),
+					atomic_read(&ctl->tx_canceled),
+					atomic_read(&ctl->rx_total),
+					atomic_read(&ctl->rx_matched),
+					atomic_read(&ctl->rx_unmatched),
+					atomic_read(&ctl->rx_dropped));
 		tb_cfg_request_cancel(req, -ETIMEDOUT);
+	}
 
 	flush_work(&req->work);
 

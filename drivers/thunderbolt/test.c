@@ -5057,6 +5057,37 @@ static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_route(tb, 0x301), NULL);
 }
 
+/*
+ * The warm-restart escape hatch is silicon-gated, and getting the gate wrong
+ * is expensive in both directions: allowing it on Titan Ridge returns an
+ * UNAUTHENTICATED controller (the reverted tbfix 1.7/1.8), while refusing it
+ * on Maple Ridge strands a host until someone physically pulls its power
+ * (appmana-019, 2026-08-25).
+ *
+ * Maple Ridge is the one family our decompiles clear for this: mr_bank0.c has
+ * zero references to the 0xCA41/0xCB5E warm/cold reset-cause registers that
+ * Titan's tr_bank0.c hits 310 times, and its resident image has a real reset
+ * vector and no warm gate (out/ICM_PROTOCOL.md section 6).
+ */
+static void tb_test_icm_warm_restart_is_maple_ridge_only(struct kunit *test)
+{
+	/* Cleared: a real reset vector, no warm gate. */
+	KUNIT_EXPECT_TRUE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI));
+	KUNIT_EXPECT_TRUE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI));
+
+	/* Titan/Alpine Ridge: mask-ROM-only re-auth, warm restart is terminal. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI));
+	KUNIT_EXPECT_FALSE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_4C_NHI));
+
+	/* Anything unexamined stays refused: the default must be the safe one. */
+	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0x0000));
+	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0xffff));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -5111,6 +5142,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_wedged_takeover_selects_software),
+	KUNIT_CASE(tb_test_icm_warm_restart_is_maple_ridge_only),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_work_after_destroy),

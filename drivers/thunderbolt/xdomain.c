@@ -1231,8 +1231,24 @@ static int remove_missing_service(struct device *dev, void *data)
 		return 0;
 
 	if (!tb_property_find(xd->remote_properties, svc->key,
-			      TB_PROPERTY_TYPE_DIRECTORY))
+			      TB_PROPERTY_TYPE_DIRECTORY)) {
+		/*
+		 * Unbinding a service destroys everything built on it: for
+		 * tbframe that is the session, the rail netdev and the
+		 * ib_device, and the client sees TBFRAME_DOWN_UNPLUG even
+		 * though no cable moved and no XDomain was removed. If a
+		 * property re-read ever lands a block that merely OMITS a key
+		 * -- a truncated or stale directory rather than a peer that
+		 * genuinely dropped the service -- this silently tears down a
+		 * working link and the next good read builds it again, which
+		 * is an endless publish/unpublish cycle no session survives.
+		 * Say so, so that case is distinguishable from a real removal.
+		 */
+		dev_warn(&xd->dev,
+			 "unregistering service '%s': absent from the peer's property block\n",
+			 svc->key);
 		device_unregister(dev);
+	}
 
 	return 0;
 }

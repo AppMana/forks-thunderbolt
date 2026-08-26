@@ -170,6 +170,8 @@ struct icm {
 	int vnd_cap;
 	bool safe_mode;
 	bool wedged;
+	/* One warm firmware restart per domain, never a loop. */
+	bool warm_restart_tried;
 	size_t max_boot_acl;
 	bool rpm;
 	bool can_upgrade_nvm;
@@ -2213,17 +2215,77 @@ static struct pci_dev *get_upstream_port(struct pci_dev *pdev)
 	case PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_BRIDGE:
+	/*
+	 * Maple Ridge carries the same CIO-reset VSEC on its upstream
+	 * bridge, but was never added to this allowlist, so every caller
+	 * that needs pcie2cio -- icm_firmware_reset() above all -- got a
+	 * NULL port and gave up with -ENODEV on this silicon.
+	 */
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_BRIDGE:
 		return parent;
 	}
 
 	return NULL;
 }
 
+/*
+ * Locate the PCIe upstream port and its vendor-specific capability -- the
+ * pair pcie2cio_read()/pcie2cio_write() need in order to reach CIO config
+ * space, and therefore the precondition for icm_firmware_reset().
+ *
+ * Split out of icm_ar_is_supported() so the Maple Ridge probe path can arm
+ * the same reset machinery; see the MAPLE_RIDGE case in icm_probe().
+ * Idempotent, so probing twice is harmless.
+ */
+static bool icm_find_upstream_vsec(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+	struct pci_dev *upstream_port;
+	int cap;
+
+	if (icm->upstream_port)
+		return true;
+
+	upstream_port = get_upstream_port(tb->nhi->pdev);
+	if (!upstream_port)
+		return false;
+
+	/*
+	 * A Maple Ridge bridge exposes TWO vendor-specific extended
+	 * capabilities, and the first one is NOT the Intel block pcie2cio
+	 * drives (observed on 019: VSEC ID 0x1234 at 0x500, the Intel
+	 * ID 0x8086 one at 0x600; the 0x1234 block is present on the NHI
+	 * function too, so it is not the controller's). Taking whichever
+	 * comes first would aim every CIO read/write at the wrong window,
+	 * so select by VSEC ID and only then fall back to the historical
+	 * first-match for parts that predate this.
+	 */
+	cap = 0;
+	while ((cap = pci_find_next_ext_capability(upstream_port, cap,
+						   PCI_EXT_CAP_ID_VNDR))) {
+		u32 hdr;
+
+		if (pci_read_config_dword(upstream_port,
+					  cap + PCI_VNDR_HEADER, &hdr))
+			break;
+		if (PCI_VNDR_HEADER_ID(hdr) == PCI_VENDOR_ID_INTEL) {
+			icm->upstream_port = upstream_port;
+			icm->vnd_cap = cap;
+			return true;
+		}
+	}
+
+	cap = pci_find_ext_capability(upstream_port, PCI_EXT_CAP_ID_VNDR);
+	if (cap <= 0)
+		return false;
+
+	icm->upstream_port = upstream_port;
+	icm->vnd_cap = cap;
+	return true;
+}
+
 static bool icm_ar_is_supported(struct tb *tb)
 {
-	struct pci_dev *upstream_port;
-	struct icm *icm = tb_priv(tb);
-
 	/*
 	 * Starting from Alpine Ridge we can use ICM on Apple machines
 	 * as well. We just need to reset and re-enable it first.
@@ -2238,21 +2300,7 @@ static bool icm_ar_is_supported(struct tb *tb)
 	 * Find the upstream PCIe port in case we need to do reset
 	 * through its vendor specific registers.
 	 */
-	upstream_port = get_upstream_port(tb->nhi->pdev);
-	if (upstream_port) {
-		int cap;
-
-		cap = pci_find_ext_capability(upstream_port,
-					      PCI_EXT_CAP_ID_VNDR);
-		if (cap > 0) {
-			icm->upstream_port = upstream_port;
-			icm->vnd_cap = cap;
-
-			return true;
-		}
-	}
-
-	return false;
+	return icm_find_upstream_vsec(tb);
 }
 
 static int icm_ar_cio_reset(struct tb *tb)
@@ -2889,6 +2937,69 @@ static int icm_driver_ready(struct tb *tb)
 		 * a power cycle (appmana-009). KUnit:
 		 * tb_test_icm_wedged_takeover_selects_software.
 		 */
+		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS)) &&
+		    tb_icm_warm_restart_supported(tb->nhi->pdev->device) &&
+		    !icm->warm_restart_tried) {
+			/*
+			 * Maple Ridge has a real reset vector and no warm gate
+			 * (see tb_icm_warm_restart_supported()), so a stuck
+			 * firmware here is recoverable without pulling power.
+			 * Restart the ARC and retry the handshake exactly
+			 * once: if the restart itself is what breaks
+			 * authentication on some board we have not seen, the
+			 * second failure still lands on the terminal path
+			 * below rather than looping.
+			 */
+			icm->warm_restart_tried = true;
+			tb_warn(tb,
+				"ICM not responding; restarting firmware (Maple Ridge supports a warm restart) and retrying\n");
+			if (!icm_firmware_reset(tb, tb->nhi)) {
+				unsigned int retries = 10;
+				u32 val;
+
+				/*
+				 * Do NOT poll NVM_AUTH_DONE to decide the ARC
+				 * is back: that bit is sticky across the CIO
+				 * reset, so it is still set from the previous
+				 * boot and the very first read returns
+				 * immediately -- we then re-sent DRIVER_READY
+				 * milliseconds after kicking the reset, long
+				 * before the core had rebooted, and concluded
+				 * the controller was unrecoverable.
+				 *
+				 * Give the reset an unconditional settle and
+				 * only then wait for the firmware to
+				 * re-advertise itself, the way
+				 * icm_firmware_start() does on a cold start.
+				 */
+				msleep(1000);
+				do {
+					if (icm_firmware_running(tb->nhi))
+						break;
+					msleep(300);
+				} while (--retries);
+				val = ioread32(tb->nhi->iobase + REG_FW_STS);
+
+				tb_info(tb,
+					"firmware restart: fw_sts %#x auth=%s running=%s; retrying driver ready\n",
+					val,
+					(val & REG_FW_STS_NVM_AUTH_DONE) ?
+						"yes" : "NO",
+					tb_icm_fw_sts_running(val) ?
+						"yes" : "NO");
+
+				ret = __icm_driver_ready(tb, &tb->security_level,
+							 &icm->proto_version,
+							 &tb->nboot_acl,
+							 &icm->rpm);
+				if (!ret) {
+					tb_info(tb,
+						"ICM recovered after warm firmware restart\n");
+					goto ready;
+				}
+			}
+		}
+
 		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS))) {
 			icm->wedged = true;
 			tb_err(tb,
@@ -2897,6 +3008,7 @@ static int icm_driver_ready(struct tb *tb)
 		return ret;
 	}
 
+ready:
 	/*
 	 * Make sure the number of supported preboot ACL matches what we
 	 * expect or disable the whole feature.
@@ -3531,6 +3643,27 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 		icm->device_disconnected = icm_tr_device_disconnected;
 		icm->xdomain_connected = icm_tr_xdomain_connected;
 		icm->xdomain_disconnected = icm_tr_xdomain_disconnected;
+		/*
+		 * Maple Ridge takes the entire Titan Ridge op set above, but
+		 * upstream never gave it ->cio_reset, and only
+		 * icm_ar_is_supported() ever discovers the upstream-port VSEC
+		 * that pcie2cio needs. Both omissions land in the same place:
+		 * icm_firmware_reset() returns -ENODEV on this silicon, so the
+		 * firmware-restart recovery in icm_start() cannot run at all.
+		 *
+		 * That is only invisible while the firmware is healthy.
+		 * icm_firmware_start() decides "already running" from the
+		 * ICM_EN status bit, and when the ICM latches ICM_EN but stops
+		 * answering DRIVER_READY -- ring 0 transmitting normally,
+		 * rx_total pinned at 0 across every retry, seen on 019 -- the
+		 * driver has no path left that can restart the ARC core, and
+		 * a PCIe secondary bus reset does not clear it either
+		 * (measured: config space returns, the ICM stays mute).
+		 *
+		 * Wire up both so the existing restart is reachable here.
+		 */
+		icm->cio_reset = icm_tr_cio_reset;
+		icm_find_upstream_vsec(tb);
 		tb->cm_ops = &icm_tr_ops;
 		break;
 	}

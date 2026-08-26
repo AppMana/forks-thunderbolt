@@ -3393,6 +3393,17 @@ void tb_switch_remove(struct tb_switch *sw)
 			tb_switch_remove(port->remote->sw);
 			port->remote = NULL;
 		} else if (port->xdomain) {
+			/*
+			 * Removing the switch takes its XDomains with it, and
+			 * that unbinds every service on them -- for tbframe
+			 * that is the session, the rail and the ib_device,
+			 * reported to the client as TBFRAME_DOWN_UNPLUG. If a
+			 * link is cycling with no cable event, this is one of
+			 * the few places that can be doing it.
+			 */
+			tb_port_warn(port,
+				     "removing XDomain %llx: parent switch %llx is being removed\n",
+				     port->xdomain->route, tb_route(sw));
 			port->xdomain->is_unplugged = true;
 			tb_xdomain_remove(port->xdomain);
 			port->xdomain = NULL;
@@ -3429,12 +3440,25 @@ void tb_sw_set_unplugged(struct tb_switch *sw)
 		tb_sw_WARN(sw, "is_unplugged already set\n");
 		return;
 	}
+	tb_sw_warn(sw, "marking router %llx unplugged\n", tb_route(sw));
 	sw->is_unplugged = true;
 	tb_switch_for_each_port(sw, port) {
 		if (tb_port_has_remote(port))
 			tb_sw_set_unplugged(port->remote->sw);
-		else if (port->xdomain)
+		else if (port->xdomain) {
+			/*
+			 * Flipping this alone is enough to change what the
+			 * client is told: tbframe_service_remove() reads
+			 * xd->is_unplugged to decide between UNPLUG and
+			 * CLOSED, and UNPLUG is terminal -- it drops the
+			 * client's record and forces a full republish rather
+			 * than a session bounce.
+			 */
+			tb_port_warn(port,
+				     "marking XDomain %llx unplugged (router unplugged)\n",
+				     port->xdomain->route);
 			port->xdomain->is_unplugged = true;
+		}
 	}
 }
 

@@ -289,6 +289,9 @@ struct tbframe_link {
 	u64			data_rx_bad;
 	u64			data_rx_oversize;
 	u64			data_tx_done;
+	u64			data_tx_submitted;
+	u64			data_tx_refused;
+	u64			data_tx_ring_err;
 	u64			data_tx_canceled;
 	bool			data_proven;
 	bool			data_proof_waived;

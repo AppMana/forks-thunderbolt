@@ -168,6 +168,7 @@ static inline bool tb_icm_wedged(int driver_ready_err, u32 fw_sts)
 	return driver_ready_err && tb_icm_fw_sts_running(fw_sts);
 }
 
+
 /*
  * Must nhi_select_cm() hand the domain straight to the software connection
  * manager, without trying the firmware one? Single source for

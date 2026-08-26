@@ -56,6 +56,12 @@ extern const struct tb_nhi_ops icl_nhi_ops;
  * hardware.
  */
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI		0x1134
+/*
+ * Both the 2C and the 4C Maple Ridge parts present their PCIe upstream
+ * bridge as 0x1136; get_upstream_port() needs it to reach the CIO reset
+ * VSEC, which is the precondition for icm_firmware_reset() on this silicon.
+ */
+#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_BRIDGE		0x1136
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI		0x1137
 #define PCI_DEVICE_ID_INTEL_WIN_RIDGE_2C_NHI            0x157d
 #define PCI_DEVICE_ID_INTEL_WIN_RIDGE_2C_BRIDGE         0x157e
@@ -99,5 +105,43 @@ extern const struct tb_nhi_ops icl_nhi_ops;
 #define PCI_DEVICE_ID_INTEL_PTL_P_NHI1			0xe434
 
 #define PCI_CLASS_SERIAL_USB_USB4			0x0c0340
+
+/*
+ * tb_icm_warm_restart_supported() - may a stuck ICM be restarted in software?
+ * @nhi_device_id: PCI device id of the NHI
+ *
+ * The blanket "never icm_firmware_reset() an ICM that advertises running" rule
+ * came from Alpine/Titan Ridge, where NVM_AUTH_DONE is asserted only by the
+ * on-die mask ROM at a true chip reset: a warm ICM_EN_CPU restart there comes
+ * back UNAUTHENTICATED, which is terminal, and is why tbfix 1.7/1.8 were
+ * reverted.
+ *
+ * That is silicon-specific and does NOT hold for Maple Ridge. Our own
+ * decompiles (AppMana/intel-thunderbolt-firmwares, out/ICM_PROTOCOL.md §6)
+ * found mr_bank0.c carries ZERO references to the 0xCA41/0xCB5E warm/cold
+ * reset-cause registers, against 310 in Titan's tr_bank0.c -- "Maple's
+ * resident image has a real reset vector and no warm gate, consistent with it
+ * surviving a live rmmod/modprobe reset where Titan wedges."
+ *
+ * Refusing to try therefore costs a Maple Ridge host until someone physically
+ * pulls its power. Measured on appmana-019 (8086:1137, Maple Ridge 4C) on
+ * 2026-08-25: ring 0 alive in BOTH directions (tx_done 938, tx_canceled 0,
+ * rx_total 970, rx_dropped 0) while the firmware endlessly re-emitted a single
+ * undefined ICM_RESP with code 0x08 and answered no request. Executing, but
+ * stuck -- exactly what a restart is for. A healthy sibling on the same image
+ * (appmana-027) showed zero unmatched replies and zero timeouts.
+ *
+ * Pure predicate, exercised by KUnit.
+ */
+static inline bool tb_icm_warm_restart_supported(u16 nhi_device_id)
+{
+	switch (nhi_device_id) {
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
+		return true;
+	default:
+		return false;
+	}
+}
 
 #endif

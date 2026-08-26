@@ -1449,6 +1449,18 @@ static void tb_scan_port(struct tb_port *port)
 	 * alone no longer does.
 	 */
 	if (port->xdomain) {
+		/*
+		 * Loud, because this is a REPLACEMENT, not a hotplug: a scan
+		 * found a router where an XDomain already existed. Every pass
+		 * through here destroys the peer object and everything built
+		 * on it -- tbframe sees TBFRAME_DOWN_UNPLUG, tears the session
+		 * down and republishes a fresh usb4_rdmaN. If the reconcile is
+		 * synthesizing plugs on a port that is already enumerated,
+		 * this becomes a churn loop that no session can outlive.
+		 */
+		tb_port_warn(port,
+			     "replacing existing XDomain %llx on scan (route %llx)\n",
+			     port->xdomain->route, tb_route(sw));
 		port->xdomain->is_unplugged = true;
 		tb_xdomain_remove(port->xdomain);
 		tb_port_unconfigure_xdomain(port);
@@ -2618,7 +2630,14 @@ static void tb_handle_hotplug(struct work_struct *work)
 		} else if (port->xdomain) {
 			struct tb_xdomain *xd = tb_xdomain_get(port->xdomain);
 
-			tb_port_dbg(port, "xdomain unplugged\n");
+			/*
+			 * Warn, not dbg: this is the other way a peer object
+			 * dies, and telling the two apart is the whole
+			 * question when a link cycles. This one is a real
+			 * unplug event from the fabric; the scan-replacement
+			 * path above is not.
+			 */
+			tb_port_warn(port, "xdomain unplugged (hotplug event)\n");
 			/*
 			 * Service drivers are unbound during
 			 * tb_xdomain_remove() so setting XDomain as
