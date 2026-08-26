@@ -2252,29 +2252,22 @@ static bool icm_find_upstream_vsec(struct tb *tb)
 
 	/*
 	 * A Maple Ridge bridge exposes TWO vendor-specific extended
-	 * capabilities, and the first one is NOT the Intel block pcie2cio
-	 * drives (observed on 019: VSEC ID 0x1234 at 0x500, the Intel
-	 * ID 0x8086 one at 0x600; the 0x1234 block is present on the NHI
-	 * function too, so it is not the controller's). Taking whichever
-	 * comes first would aim every CIO read/write at the wrong window,
-	 * so select by VSEC ID and only then fall back to the historical
-	 * first-match for parts that predate this.
+	 * capabilities, and picking between them by VSEC ID is a trap. It
+	 * looks like the one whose id reads 0x8086 must be "the Intel block",
+	 * but that is NOT the pcie2cio window. Measured on 019's bridge
+	 * (05:00.0):
+	 *
+	 *   VSEC @0x500 id=0x1234 -- PCIE2CIO_CMD is writable; a command
+	 *                            written here is accepted and latched
+	 *   VSEC @0x600 id=0x8086 -- PCIE2CIO_CMD reads back 0 after a write
+	 *
+	 * So the first VNDR capability, which is what upstream has always
+	 * taken, is the correct one. Worse, choosing 0x600 fails SILENTLY:
+	 * pcie2cio_write() stores the command, then pci2cio_wait_completion()
+	 * reads CMD back as 0, sees PCIE2CIO_CMD_START clear and reports
+	 * success -- so icm_firmware_reset() returns 0 having done nothing at
+	 * all, and the caller logs a firmware restart that never happened.
 	 */
-	cap = 0;
-	while ((cap = pci_find_next_ext_capability(upstream_port, cap,
-						   PCI_EXT_CAP_ID_VNDR))) {
-		u32 hdr;
-
-		if (pci_read_config_dword(upstream_port,
-					  cap + PCI_VNDR_HEADER, &hdr))
-			break;
-		if (PCI_VNDR_HEADER_ID(hdr) == PCI_VENDOR_ID_INTEL) {
-			icm->upstream_port = upstream_port;
-			icm->vnd_cap = cap;
-			return true;
-		}
-	}
-
 	cap = pci_find_ext_capability(upstream_port, PCI_EXT_CAP_ID_VNDR);
 	if (cap <= 0)
 		return false;
