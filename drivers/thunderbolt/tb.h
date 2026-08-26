@@ -847,7 +847,6 @@ static inline int tb_port_write(struct tb_port *port, const void *buffer,
 	__TB_PORT_PRINT(tb_dbg, port, fmt, ##arg)
 
 struct tb *icm_probe(struct tb_nhi *nhi);
-bool icm_domain_wedged(struct tb *tb);
 struct tb *tb_probe(struct tb_nhi *nhi);
 
 /* Set by the force_sw_cm module parameter (nhi.c) */

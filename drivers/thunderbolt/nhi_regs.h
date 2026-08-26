@@ -157,11 +157,11 @@ static inline bool tb_icm_fw_sts_running(u32 fw_sts)
 /*
  * Is a firmware-CM probe failure the wedged-ICM signature? DRIVER_READY
  * failed (@driver_ready_err) while REG_FW_STS still advertises ICM_EN:
- * the status bit is latched but the message loop behind it is dead. Such
- * a firmware answers nothing on ring 0, so it cannot conflict with the
- * software connection manager taking the domain over. Single source for
- * icm_driver_ready() and the KUnit model
- * (tb_test_icm_wedged_takeover_selects_software).
+ * the status bit is latched but the command that failed is not a complete
+ * liveness probe. This is a diagnosis, not permission to replace the
+ * firmware connection manager: a partial failure may still own other ring-0
+ * traffic. Single source for icm_driver_ready() and the KUnit model
+ * (tb_test_icm_partial_wedge_refuses_software_takeover).
  */
 static inline bool tb_icm_wedged(int driver_ready_err, u32 fw_sts)
 {
