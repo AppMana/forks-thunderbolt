@@ -17,6 +17,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gated on the actor because this is a public repo and every step shells out
+  # to docker. A push by any other account still creates a run, but every job is
+  # skipped and the run reports green with no artifacts -- so a green run here is
+  # not by itself proof that the debs were built. Check for the "build deb" job,
+  # not just the run's conclusion.
   build:
     name: build deb
     if: ${{ github.actor == 'doctorpangloss' }}
