@@ -854,104 +854,6 @@ int tb_domain_disconnect_pcie_paths(struct tb *tb)
 	return tb->cm_ops->disconnect_pcie_paths(tb);
 }
 
-/*
- * Unload guard (operator backstop; the fleet playbook has its own,
- * higher-level deferral mechanism).
- *
- * A live chain link means DMA paths are programmed in the routers and rings
- * are running against this NHI. Unloading the core underneath that state is
- * the one teardown shape this driver cannot prove safe without hardware: it is
- * where nhi_shutdown() finds "ring is still active" and where pcim devres then
- * unmaps the BAR under a live ring. So refuse it rather than gamble.
- *
- * The mechanism is the module refcount, because that is the only thing rmmod
- * consults: while any XDomain DMA tunnel is programmed the core holds a
- * reference on itself, and `rmmod thunderbolt` fails with -EWOULDBLOCK
- * ("Module thunderbolt is in use") instead of tearing the NHI out. A module
- * cannot intercept its own unload to print at refusal time, so the
- * explanatory line is emitted when the guard ARMS and when it disarms; that
- * is what tells an operator why the rmmod was refused and what to do.
- *
- * This does NOT change the fleet's documented hot-reload default. The service
- * modules (thunderbolt_frame, thunderbolt_net) unbind before the core can be
- * unloaded at all -- the module dependency guarantees it -- and their unbind
- * disables the paths, so the count is zero by the time the core's turn comes.
- * The guard only fires when a tunnel was left programmed, which is exactly the
- * unprovable case.
- *
- * unload_guard=0 is the escape hatch for an operator who has decided to take
- * the risk; writing 0 releases the references immediately.
- */
-static DEFINE_MUTEX(tb_unload_guard_lock);
-static unsigned int tb_unload_guard_count;
-static bool tb_unload_guard_held;
-static bool tb_unload_guard_enabled = true;
-
-static void tb_unload_guard_sync(void)
-{
-	bool want = tb_unload_guard_enabled && tb_unload_guard_count;
-
-	lockdep_assert_held(&tb_unload_guard_lock);
-	if (want == tb_unload_guard_held)
-		return;
-
-	if (want) {
-		__module_get(THIS_MODULE);
-		tb_unload_guard_held = true;
-		pr_info("thunderbolt: unload guard armed: %u XDomain DMA tunnel(s) programmed; `rmmod thunderbolt` will be refused (-EWOULDBLOCK) until the service drivers (thunderbolt_frame / thunderbolt_net) are unloaded first. Override with thunderbolt.unload_guard=0.\n",
-			tb_unload_guard_count);
-	} else {
-		tb_unload_guard_held = false;
-		module_put(THIS_MODULE);
-		pr_info("thunderbolt: unload guard released; the core can be unloaded\n");
-	}
-}
-
-static void tb_unload_guard_get(void)
-{
-	mutex_lock(&tb_unload_guard_lock);
-	tb_unload_guard_count++;
-	tb_unload_guard_sync();
-	mutex_unlock(&tb_unload_guard_lock);
-}
-
-/*
- * Clamped rather than WARN_ON'd: tbnet_tear_down() calls
- * tb_xdomain_disable_paths() whenever the login handshake completed, which
- * can be true even though tbnet_connected_work()'s enable_paths failed. An
- * unmatched put is a normal outcome there, not a bug.
- */
-static void tb_unload_guard_put(void)
-{
-	mutex_lock(&tb_unload_guard_lock);
-	if (tb_unload_guard_count)
-		tb_unload_guard_count--;
-	tb_unload_guard_sync();
-	mutex_unlock(&tb_unload_guard_lock);
-}
-
-static int tb_unload_guard_set(const char *val, const struct kernel_param *kp)
-{
-	int ret;
-
-	mutex_lock(&tb_unload_guard_lock);
-	ret = param_set_bool(val, kp);
-	if (!ret)
-		tb_unload_guard_sync();
-	mutex_unlock(&tb_unload_guard_lock);
-	return ret;
-}
-
-static const struct kernel_param_ops tb_unload_guard_ops = {
-	.set = tb_unload_guard_set,
-	.get = param_get_bool,
-};
-
-module_param_cb(unload_guard, &tb_unload_guard_ops, &tb_unload_guard_enabled,
-		0644);
-MODULE_PARM_DESC(unload_guard,
-		 "Refuse to unload the core while XDomain DMA tunnels are programmed (default: true)");
-
 /**
  * tb_domain_approve_xdomain_paths() - Enable DMA paths for XDomain
  * @tb: Domain enabling the DMA paths
@@ -972,16 +874,11 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				    int transmit_path, int transmit_ring,
 				    int receive_path, int receive_ring)
 {
-	int ret;
-
 	if (!tb->cm_ops->approve_xdomain_paths)
 		return -ENOTSUPP;
 
-	ret = tb->cm_ops->approve_xdomain_paths(tb, xd, transmit_path,
+	return tb->cm_ops->approve_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
-	if (!ret)
-		tb_unload_guard_get();
-	return ret;
 }
 
 /**
@@ -1007,7 +904,6 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	if (!tb->cm_ops->disconnect_xdomain_paths)
 		return -ENOTSUPP;
 
-	tb_unload_guard_put();
 	return tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
 }
