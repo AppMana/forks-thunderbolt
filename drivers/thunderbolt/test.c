@@ -5088,6 +5088,143 @@ static void tb_test_icm_warm_restart_is_maple_ridge_only(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0xffff));
 }
 
+/* A trained lane whose peer router does not answer must remain retryable. */
+static void tb_test_cm_plug_synth_scan_fails_keeps_retrying(struct kunit *test)
+{
+	struct cm_host h;
+	int i;
+
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_peer_attach_router_mute(&h, 0);
+
+	for (i = 0; i < 200; i++)
+		cm_reconcile(&h);
+
+	/* Nothing can enumerate behind a mute router. */
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	/*
+	 * But the port must not be abandoned after one attempt: the peer can
+	 * start answering at any time (a neighbour finishing its boot), and
+	 * only a retry discovers that.
+	 */
+	KUNIT_EXPECT_GT(test, h.port[0].plug_synth_failed, 1);
+	/* Bounded, not a hot loop: one attempt per quiet window at most. */
+	KUNIT_EXPECT_LE(test, h.port[0].plug_synth_failed,
+			200 / CM_RETRAIN_QUIET_PASSES + 1);
+}
+
+/* A later response must let the bounded retry enumerate without a new edge. */
+static void tb_test_cm_plug_synth_recovers_when_router_answers(struct kunit *test)
+{
+	struct cm_host h;
+	int i;
+
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_peer_attach_router_mute(&h, 0);
+
+	for (i = 0; i < 60; i++)
+		cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+
+	/* The neighbour finishes booting; its router answers config space. */
+	h.port[0].router_mute = false;
+
+	for (i = 0; i < 60; i++)
+		cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+static void tb_test_xdomain_response_match_follows_protocol_model(struct kunit *test)
+{
+	const u32 protocol = 0x584450;
+	struct xdp_match_model_request request = {
+		.route = 0x3,
+		.type = UUID_REQUEST,
+		.sequence = 2,
+		.response_capacity = sizeof(struct tb_xdp_uuid_response),
+		.protocol = protocol,
+	};
+	struct xdp_match_model_response response = {
+		.route = 0x3,
+		.type = UUID_RESPONSE,
+		.sequence = 2,
+		.size = sizeof(struct tb_xdp_uuid_response),
+		.declared_size = sizeof(struct tb_xdp_uuid_response),
+		.protocol = protocol,
+	};
+#define EXPECT_MATCH_MODEL() do { \
+	bool expected = xdp_match_model_matches(&request, &response); \
+	bool actual = tb_test_xdomain_response_pkg_matches( \
+		request.route, request.type, request.sequence, \
+		request.response_capacity, response.route, response.type, \
+		response.sequence, response.size, response.declared_size, \
+		response.protocol == request.protocol); \
+	KUNIT_EXPECT_EQ(test, actual, expected); \
+} while (0)
+
+	/* Control: a complete response to the active request is accepted. */
+	EXPECT_MATCH_MODEL();
+
+	/* A late response from the previous sequence cannot complete this one. */
+	response.sequence = 1;
+	EXPECT_MATCH_MODEL();
+	response.sequence = request.sequence;
+
+	/* A response to another operation on the same route is not interchangeable. */
+	response.type = PROPERTIES_CHANGED_RESPONSE;
+	response.size = sizeof(struct tb_xdp_properties_changed_response);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.type = UUID_RESPONSE;
+
+	/* Lengths are bytes: reject both truncation and capacity overflow. */
+	response.size = sizeof(struct tb_xdp_header);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.size = request.response_capacity + sizeof(u32);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.size = sizeof(struct tb_xdp_uuid_response);
+	response.declared_size = response.size;
+
+	/* The header and received frame must agree on the packet length. */
+	response.declared_size -= sizeof(u32);
+	EXPECT_MATCH_MODEL();
+	response.declared_size = response.size;
+
+	response.route = 0x1;
+	EXPECT_MATCH_MODEL();
+	response.route = request.route;
+	response.protocol ^= 1;
+	EXPECT_MATCH_MODEL();
+
+	/* Properties replies are variable length and need not fill capacity. */
+	request.type = PROPERTIES_REQUEST;
+	request.response_capacity = sizeof(struct tb_xdp_properties_response) +
+				    16 * sizeof(u32);
+	response.type = PROPERTIES_RESPONSE;
+	response.size = sizeof(struct tb_xdp_properties_response);
+	response.declared_size = response.size;
+	response.protocol = request.protocol;
+	EXPECT_MATCH_MODEL();
+
+	/* A protocol error is a valid completion for the active request. */
+	response.type = ERROR_RESPONSE;
+	response.size = sizeof(struct tb_xdp_error_response);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+
+#undef EXPECT_MATCH_MODEL
+}
+
+static void tb_test_xdomain_native_error_fails_request(struct kunit *test)
+{
+	/* Native control errors complete the request, but never as success. */
+	KUNIT_EXPECT_EQ(test, tb_test_xdomain_native_error_result(), 1);
+}
+
 /*
  * Control-channel liveness (ctl.h). These gate whether tb_stop() is allowed to
  * push config space I/O at the controller during teardown -- see the
@@ -5263,6 +5400,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_property_parse),
 	KUNIT_CASE(tb_test_property_format),
 	KUNIT_CASE(tb_test_property_copy),
+	KUNIT_CASE(tb_test_cm_plug_synth_scan_fails_keeps_retrying),
+	KUNIT_CASE(tb_test_cm_plug_synth_recovers_when_router_answers),
+	KUNIT_CASE(tb_test_xdomain_response_match_follows_protocol_model),
+	KUNIT_CASE(tb_test_xdomain_native_error_fails_request),
 	KUNIT_CASE(tb_test_ctl_liveness_threshold),
 	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
 	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),

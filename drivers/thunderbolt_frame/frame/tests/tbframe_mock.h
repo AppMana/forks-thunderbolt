@@ -34,6 +34,7 @@ struct tbframe_mock {
 	u64		route;
 	int		control_err;	/* fail every control request */
 	bool		fail_ready;	/* fail only READY requests */
+	u16		response_op;	/* non-zero overrides the protocol reply op */
 	bool		never_cancel;	/* dead hw: stop_rings returns nothing */
 	int		paths_active_ret;
 	/*
@@ -467,6 +468,8 @@ static int tbframe_mock_control_request(void *data, const void *req,
 	default:
 		return -EPROTO;
 	}
+	if (m->response_op)
+		ack_op = m->response_op;
 	ret = tbframe_wire_build_hello(resp, resp_len, &m->peer, ack_op,
 				       info.seq, m->route,
 				       info.xdomain_sequence);

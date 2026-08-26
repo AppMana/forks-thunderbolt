@@ -109,6 +109,24 @@ static void tbframe_session_hello_retries_reannounce(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+static void tbframe_session_wrong_ack_cannot_advance_state(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+
+	/* A late ACK for another operation must not complete HELLO. */
+	fx->mock.response_op = TBFRAME_WIRE_OP_READY_ACK;
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+
+	/* The valid response then advances the ordinary session path. */
+	fx->mock.response_op = 0;
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_TRUE(test, fx->link->hello_done);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
 static void tbframe_session_event_ordering(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -189,6 +207,7 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_happy_path),
 	KUNIT_CASE(tbframe_session_ready_withheld_until_paths),
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
+	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}
 };

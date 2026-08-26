@@ -221,6 +221,57 @@ bool tb_is_xdomain_enabled(void)
 	return tb_xdomain_enabled && tb_acpi_is_xdomain_allowed();
 }
 
+static enum tb_xdp_type tb_xdomain_response_type(enum tb_xdp_type request_type)
+{
+	switch (request_type) {
+	case UUID_REQUEST_OLD:
+	case UUID_REQUEST:
+		return UUID_RESPONSE;
+	case PROPERTIES_REQUEST:
+		return PROPERTIES_RESPONSE;
+	case PROPERTIES_CHANGED_REQUEST:
+		return PROPERTIES_CHANGED_RESPONSE;
+	case LINK_STATE_STATUS_REQUEST:
+		return LINK_STATE_STATUS_RESPONSE;
+	case LINK_STATE_CHANGE_REQUEST:
+		return LINK_STATE_CHANGE_RESPONSE;
+	default:
+		return 0;
+	}
+}
+
+static size_t tb_xdomain_response_min_size(enum tb_xdp_type response_type)
+{
+	switch (response_type) {
+	case UUID_RESPONSE:
+		return sizeof(struct tb_xdp_uuid_response);
+	case PROPERTIES_RESPONSE:
+		return sizeof(struct tb_xdp_properties_response);
+	case PROPERTIES_CHANGED_RESPONSE:
+		return sizeof(struct tb_xdp_properties_changed_response);
+	case LINK_STATE_STATUS_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_status_response);
+	case LINK_STATE_CHANGE_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_change_response);
+	case ERROR_RESPONSE:
+		return sizeof(struct tb_xdp_error_response);
+	default:
+		return SIZE_MAX;
+	}
+}
+
+static u8 tb_xdomain_sequence(const struct tb_xdp_header *hdr)
+{
+	return (hdr->xd_hdr.length_sn & TB_XDOMAIN_SN_MASK) >>
+		TB_XDOMAIN_SN_SHIFT;
+}
+
+static size_t tb_xdomain_packet_size(const struct tb_xdp_header *hdr)
+{
+	return (hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK) * sizeof(u32) +
+	       sizeof(hdr->xd_hdr);
+}
+
 static bool tb_xdomain_match(const struct tb_cfg_request *req,
 			     const struct ctl_pkg *pkg)
 {
@@ -251,19 +302,34 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 	case TB_CFG_PKG_XDOMAIN_RESP: {
 		const struct tb_xdp_header *res_hdr = pkg->buffer;
 		const struct tb_xdp_header *req_hdr = req->request;
+		enum tb_xdp_type expected_type;
+		size_t min_size;
 
-		if (pkg->frame.size < req->response_size / 4)
+		if (pkg->frame.size < sizeof(*res_hdr) ||
+		    pkg->frame.size > req->response_size)
+			return false;
+		if (tb_xdomain_packet_size(res_hdr) != pkg->frame.size)
 			return false;
 
-		/* Make sure route matches */
 		if ((res_hdr->xd_hdr.route_hi & ~BIT(31)) !=
-		     req_hdr->xd_hdr.route_hi)
+		    (req_hdr->xd_hdr.route_hi & ~BIT(31)))
 			return false;
-		if ((res_hdr->xd_hdr.route_lo) != req_hdr->xd_hdr.route_lo)
+		if (res_hdr->xd_hdr.route_lo != req_hdr->xd_hdr.route_lo)
 			return false;
 
-		/* Check that the XDomain protocol matches */
 		if (!uuid_equal(&res_hdr->uuid, &req_hdr->uuid))
+			return false;
+		if (tb_xdomain_sequence(res_hdr) != tb_xdomain_sequence(req_hdr))
+			return false;
+
+		expected_type = tb_xdomain_response_type(req_hdr->type);
+		if (!expected_type ||
+		    (res_hdr->type != expected_type &&
+		     res_hdr->type != ERROR_RESPONSE))
+			return false;
+
+		min_size = tb_xdomain_response_min_size(res_hdr->type);
+		if (min_size == SIZE_MAX || pkg->frame.size < min_size)
 			return false;
 
 		return true;
@@ -277,7 +343,23 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 static bool tb_xdomain_copy(struct tb_cfg_request *req,
 			    const struct ctl_pkg *pkg)
 {
-	memcpy(req->response, pkg->buffer, req->response_size);
+	if (pkg->frame.eof == TB_CFG_PKG_ERROR) {
+		const struct cfg_error_pkg *error = pkg->buffer;
+
+		if (pkg->frame.size < sizeof(*error)) {
+			req->result.err = -EIO;
+			return true;
+		}
+
+		req->result.response_route = tb_cfg_get_route(&error->header);
+		req->result.response_port = error->port;
+		req->result.tb_error = error->error;
+		req->result.err = 1;
+		return true;
+	}
+
+	memset(req->response, 0, req->response_size);
+	memcpy(req->response, pkg->buffer, pkg->frame.size);
 	req->result.err = 0;
 	return true;
 }
@@ -2681,6 +2763,58 @@ bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route)
 	pkg.frame.size = sizeof(err);
 
 	return tb_xdomain_match(&req, &pkg);
+}
+
+/* Exercise the real response matcher with a synthetic XDP exchange. */
+bool tb_test_xdomain_response_pkg_matches(u64 req_route,
+					  u32 req_type,
+					  u8 req_sequence,
+					  size_t response_capacity,
+					  u64 response_route,
+					  u32 response_type,
+					  u8 response_sequence,
+					  size_t response_size,
+					  size_t response_declared_size,
+					  bool same_protocol)
+{
+	struct tb_xdp_header req_hdr = {};
+	struct tb_xdp_header response_hdr = {};
+	struct tb_cfg_request req = {};
+	struct ctl_pkg pkg = {};
+
+	tb_xdp_fill_header(&req_hdr, req_route, req_sequence, req_type,
+			   sizeof(req_hdr));
+	tb_xdp_fill_header(&response_hdr, response_route, response_sequence,
+			   response_type, response_declared_size);
+	if (!same_protocol)
+		response_hdr.uuid.b[0] ^= 0xff;
+
+	req.request = &req_hdr;
+	req.response_size = response_capacity;
+	pkg.buffer = &response_hdr;
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = response_size;
+
+	return tb_xdomain_match(&req, &pkg);
+}
+
+/* Return the completion status produced by the real copy path for an error. */
+int tb_test_xdomain_native_error_result(void)
+{
+	struct tb_xdp_uuid_response response = {};
+	struct cfg_error_pkg error = {};
+	struct tb_cfg_request req = {
+		.response = &response,
+		.response_size = sizeof(response),
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &error,
+	};
+
+	pkg.frame.eof = TB_CFG_PKG_ERROR;
+	pkg.frame.size = sizeof(error);
+	tb_xdomain_copy(&req, &pkg);
+	return req.result.err;
 }
 
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)

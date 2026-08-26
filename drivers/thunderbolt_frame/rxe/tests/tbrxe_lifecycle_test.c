@@ -245,11 +245,42 @@ static void tbrxe_lifecycle_unpublish_waits_for_refs(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, lifecycle_ndev_exists(name));
 }
 
+static void tbrxe_lifecycle_session_bounce_keeps_one_device(struct kunit *test)
+{
+	static int fake_link;
+	struct tbframe_link_info info = {
+		.rx_ring_entries = 2048,
+		.data_window = 1984,
+		.max_payload = TBFRAME_MAX_FRAME,
+		.width = 1,
+		.speed = 20,
+	};
+	const struct tbframe_client_ops *ops = tbrxe_frame_client_ops();
+	struct rxe_dev *before;
+
+	tbrxe_set_transport_ops(&lifecycle_transport);
+	ops->link_up(NULL, (struct tbframe_link *)&fake_link, &info);
+	before = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, before);
+
+	/* A recoverable frame-session rebuild only makes the port inactive. */
+	ops->link_down(NULL, (struct tbframe_link *)&fake_link,
+		       TBFRAME_DOWN_VERIFY);
+	KUNIT_EXPECT_PTR_EQ(test, tbrxe_test_dev(&fake_link), before);
+
+	/* Re-establishment reuses the same HCA rather than publishing a twin. */
+	ops->link_up(NULL, (struct tbframe_link *)&fake_link, &info);
+	KUNIT_EXPECT_PTR_EQ(test, tbrxe_test_dev(&fake_link), before);
+
+	tbrxe_test_link_down(&fake_link);
+}
+
 static struct kunit_case tbrxe_lifecycle_cases[] = {
 	KUNIT_CASE(tbrxe_lifecycle_owns_driver_id),
 	KUNIT_CASE(tbrxe_lifecycle_publish_cycles),
 	KUNIT_CASE(tbrxe_lifecycle_unregister_sweeps_live_links),
 	KUNIT_CASE(tbrxe_lifecycle_unpublish_waits_for_refs),
+	KUNIT_CASE(tbrxe_lifecycle_session_bounce_keeps_one_device),
 	{}
 };
 

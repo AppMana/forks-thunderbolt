@@ -309,6 +309,16 @@ struct cm_port {
 	/* Attached hardware that can never train (electrically dead). */
 	bool dead;
 	/*
+	 * The lane trains and samples UP, but the router behind it never
+	 * answers config space, so the scan the synthesized plug triggers
+	 * finds nothing. This is distinct from ->dead (which never trains)
+	 * and from ->latched_off (which samples UNPLUGGED): here the lane
+	 * says UP and only the router is mute.
+	 */
+	bool router_mute;
+	/* Synthesized plugs whose follow-up scan found nothing. */
+	int plug_synth_failed;
+	/*
 	 * Passes the resident ICM's port state machine is still
 	 * mid-transition after consuming a physical (or host-generated)
 	 * lane edge on this port. A host edge issued while this is
@@ -577,7 +587,19 @@ static inline bool cm_lane_sample_unplugged(const struct cm_host *h, int p)
  */
 static inline bool cm_peer_probe(const struct cm_host *h, int p)
 {
-	return h->port[p].link_up;
+	return h->port[p].link_up && !h->port[p].router_mute;
+}
+
+/*
+ * A peer whose lane trains but whose router never answers config space.
+ * The lane sample reads UP, so the reconcile synthesizes a plug; the scan
+ * that plug triggers then finds nothing, and the port stays unenumerated.
+ */
+static inline void cm_peer_attach_router_mute(struct cm_host *h, int p)
+{
+	h->port[p].link_up = true;
+	h->port[p].router_mute = true;
+	cm_icm_notices_edge(h, p);
 }
 
 /*
@@ -927,6 +949,20 @@ static inline void cm_reconcile(struct cm_host *h)
 			/* tb.c: if (gone) tb_port_kick_detection(port) */
 			cm_kick_detection(h, i);
 		} else if (!port->xdomain && sample == CM_SAMPLE_UP) {
+			/*
+			 * The synthesized plug only ENUMERATES if the scan it
+			 * triggers can reach the router. A lane that samples UP
+			 * behind a mute router yields nothing, and the reconcile
+			 * must keep retrying at its bounded rate rather than
+			 * latching the port unenumerated forever.
+			 */
+			if (!cm_peer_probe(h, i)) {
+				if (port->since_attempt < CM_RETRAIN_QUIET_PASSES)
+					continue;
+				port->since_attempt = 0;
+				port->plug_synth_failed++;
+				continue;
+			}
 			port->xdomain = true;	/* synthesized plug */
 			port->attempts = 0;	/* episode over: it trained */
 			/*
@@ -1318,6 +1354,95 @@ static inline void bond_model_run(struct bond_model_link *L,
 static inline bool bond_model_pair_bonded(const struct bond_model_link *L)
 {
 	return L->a.port[1].bonded && L->b.port[0].bonded;
+}
+
+/*
+ * ---- XDomain response demultiplexing ----
+ *
+ * A control response belongs to one request only when its route, protocol,
+ * sequence and response operation all agree. The receive size is expressed in
+ * bytes throughout: fixed responses fill their request buffer, while a
+ * properties response may be shorter than its capacity but must include its
+ * complete fixed header. This model is the protocol oracle for the production
+ * matcher tests; it does not call the production matcher.
+ */
+struct xdp_match_model_request {
+	u64 route;
+	enum tb_xdp_type type;
+	u8 sequence;
+	size_t response_capacity;
+	u32 protocol;
+};
+
+struct xdp_match_model_response {
+	u64 route;
+	enum tb_xdp_type type;
+	u8 sequence;
+	size_t size;
+	size_t declared_size;
+	u32 protocol;
+};
+
+static inline enum tb_xdp_type
+xdp_match_model_response_type(enum tb_xdp_type request_type)
+{
+	switch (request_type) {
+	case UUID_REQUEST_OLD:
+	case UUID_REQUEST:
+		return UUID_RESPONSE;
+	case PROPERTIES_REQUEST:
+		return PROPERTIES_RESPONSE;
+	case PROPERTIES_CHANGED_REQUEST:
+		return PROPERTIES_CHANGED_RESPONSE;
+	case LINK_STATE_STATUS_REQUEST:
+		return LINK_STATE_STATUS_RESPONSE;
+	case LINK_STATE_CHANGE_REQUEST:
+		return LINK_STATE_CHANGE_RESPONSE;
+	default:
+		return 0;
+	}
+}
+
+static inline size_t
+xdp_match_model_min_size(enum tb_xdp_type response_type)
+{
+	switch (response_type) {
+	case UUID_RESPONSE:
+		return sizeof(struct tb_xdp_uuid_response);
+	case PROPERTIES_RESPONSE:
+		return sizeof(struct tb_xdp_properties_response);
+	case PROPERTIES_CHANGED_RESPONSE:
+		return sizeof(struct tb_xdp_properties_changed_response);
+	case LINK_STATE_STATUS_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_status_response);
+	case LINK_STATE_CHANGE_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_change_response);
+	case ERROR_RESPONSE:
+		return sizeof(struct tb_xdp_error_response);
+	default:
+		return SIZE_MAX;
+	}
+}
+
+static inline bool
+xdp_match_model_matches(const struct xdp_match_model_request *request,
+			const struct xdp_match_model_response *response)
+{
+	enum tb_xdp_type expected = xdp_match_model_response_type(request->type);
+	size_t minimum = xdp_match_model_min_size(response->type);
+
+	if (!expected || minimum == SIZE_MAX)
+		return false;
+	if (response->route != request->route ||
+	    response->protocol != request->protocol ||
+	    response->sequence != request->sequence)
+		return false;
+	if (response->type != expected && response->type != ERROR_RESPONSE)
+		return false;
+	if (response->declared_size != response->size)
+		return false;
+	return response->size >= minimum &&
+	       response->size <= request->response_capacity;
 }
 
 /*

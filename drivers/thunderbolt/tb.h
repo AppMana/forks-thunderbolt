@@ -40,6 +40,17 @@ bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool bonded);
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
 bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
+bool tb_test_xdomain_response_pkg_matches(u64 req_route,
+					  u32 req_type,
+					  u8 req_sequence,
+					  size_t response_capacity,
+					  u64 response_route,
+					  u32 response_type,
+					  u8 response_sequence,
+					  size_t response_size,
+					  size_t response_declared_size,
+					  bool same_protocol);
+int tb_test_xdomain_native_error_result(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);
