@@ -539,6 +539,7 @@ int tb_path_activate(struct tb_path *path)
 	/* Activate hops. */
 	for (i = path->path_length - 1; i >= 0; i--) {
 		struct tb_regs_hop hop = { 0 };
+		struct tb_regs_hop check = { 0 };
 
 		/* If it is left active deactivate it first */
 		__tb_path_deactivate_hop(path->hops[i].in_port,
@@ -575,6 +576,41 @@ int tb_path_activate(struct tb_path *path)
 		res = tb_port_write(path->hops[i].in_port, &hop, TB_CFG_HOPS,
 				    2 * path->hops[i].in_hop_index, 2);
 		if (res) {
+			__tb_path_deactivate_hops(path, i);
+			__tb_path_deallocate_nfc(path, 0);
+			goto err;
+		}
+
+		/*
+		 * Read the hop back. A write that reports success but does not
+		 * stick leaves a path the control plane calls up and no bulk
+		 * frame ever crosses: tb_path_activate() only ever writes
+		 * enable=1 weight=%TB_DMA_WEIGHT, and __tb_path_deactivate_hop()
+		 * clears enable while leaving weight, so an entry reading
+		 * enable=0 weight=0 cannot have come from either and is not a
+		 * state this driver can reach. Measured on appmana-018/019
+		 * 2026-08-26: dw0 0x001c3801 dw1 0x01800500 on the live link,
+		 * against 0x801c3801/0x01800501 on every healthy node, with the
+		 * session negotiating cleanly 108 times and the data-path proof
+		 * failing 107 of them. Fail the activation instead of returning
+		 * success, so the consumer retries rather than declaring a dead
+		 * link up.
+		 */
+		res = tb_port_read(path->hops[i].in_port, &check, TB_CFG_HOPS,
+				   2 * path->hops[i].in_hop_index, 2);
+		if (res) {
+			__tb_path_deactivate_hops(path, i);
+			__tb_path_deallocate_nfc(path, 0);
+			goto err;
+		}
+		if (!check.enable || check.weight != path->weight) {
+			tb_port_warn(path->hops[i].in_port,
+				     "hop %d did not stick: wrote enable=1 weight=%u, read back enable=%u weight=%u (dw0 %#010x dw1 %#010x)\n",
+				     path->hops[i].in_hop_index, path->weight,
+				     check.enable, check.weight,
+				     ((const u32 *)&check)[0],
+				     ((const u32 *)&check)[1]);
+			res = -EIO;
 			__tb_path_deactivate_hops(path, i);
 			__tb_path_deallocate_nfc(path, 0);
 			goto err;
