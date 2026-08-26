@@ -124,12 +124,9 @@ extern const struct tb_nhi_ops icl_nhi_ops;
  * surviving a live rmmod/modprobe reset where Titan wedges."
  *
  * Refusing to try therefore costs a Maple Ridge host until someone physically
- * pulls its power. Measured on appmana-019 (8086:1137, Maple Ridge 4C) on
- * 2026-08-25: ring 0 alive in BOTH directions (tx_done 938, tx_canceled 0,
- * rx_total 970, rx_dropped 0) while the firmware endlessly re-emitted a single
- * undefined ICM_RESP with code 0x08 and answered no request. Executing, but
- * stuck -- exactly what a restart is for. A healthy sibling on the same image
- * (appmana-027) showed zero unmatched replies and zero timeouts.
+ * pulls its power. A controller may still acknowledge local XDomain
+ * transmissions while failing every peer-facing request, so local transmit
+ * status alone is not evidence that the connection manager is responsive.
  *
  * Pure predicate, exercised by KUnit.
  */

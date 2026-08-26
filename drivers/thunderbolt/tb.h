@@ -40,6 +40,9 @@ bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool bonded);
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
 bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
+enum tb_cfg_request_event
+tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,
+				   bool error);
 bool tb_test_xdomain_response_pkg_matches(u64 req_route,
 					  u32 req_type,
 					  u8 req_sequence,

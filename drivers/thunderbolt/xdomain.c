@@ -340,6 +340,30 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 	}
 }
 
+static enum tb_cfg_request_event
+tb_xdomain_intermediate(const struct tb_cfg_request *req,
+			const struct ctl_pkg *pkg)
+{
+	const struct icm_tr_pkg_xdomain_packet_response *status = pkg->buffer;
+	const struct tb_xdp_header *req_hdr = req->request;
+	u64 request_route, status_route;
+
+	if (!tb_ctl_is_xdomain_tx_status(pkg->frame.eof, pkg->buffer,
+					 pkg->frame.size))
+		return TB_CFG_REQUEST_EVENT_NONE;
+
+	request_route = ((u64)(req_hdr->xd_hdr.route_hi & ~BIT(31)) << 32) |
+			req_hdr->xd_hdr.route_lo;
+	status_route = ((u64)(status->route_hi & ~BIT(31)) << 32) |
+			status->route_lo;
+	if (request_route != status_route)
+		return TB_CFG_REQUEST_EVENT_NONE;
+
+	return status->hdr.flags & ICM_FLAGS_ERROR ?
+		TB_CFG_REQUEST_EVENT_LOCAL_FAILED :
+		TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED;
+}
+
 static bool tb_xdomain_copy(struct tb_cfg_request *req,
 			    const struct ctl_pkg *pkg)
 {
@@ -419,6 +443,7 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 		return -ENOMEM;
 
 	req->match = tb_xdomain_match;
+	req->intermediate = tb_xdomain_intermediate;
 	req->copy = tb_xdomain_copy;
 	req->request = request;
 	req->request_size = request_size;
@@ -426,6 +451,8 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	req->response = response;
 	req->response_size = response_size;
 	req->response_type = response_type;
+	req->state.local = TB_CFG_LOCAL_WAITING;
+	req->state.peer = TB_CFG_PEER_WAITING;
 
 	res = tb_cfg_request_sync(ctl, req, timeout_msec);
 
@@ -2763,6 +2790,35 @@ bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route)
 	pkg.frame.size = sizeof(err);
 
 	return tb_xdomain_match(&req, &pkg);
+}
+
+enum tb_cfg_request_event
+tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,
+				   bool error)
+{
+	struct icm_tr_pkg_xdomain_packet_response status = {
+		.hdr = {
+			.code = ICM_XDOMAIN_PACKET,
+			.flags = error ? ICM_FLAGS_ERROR : 0,
+			.total_packets = 1,
+		},
+		.route_hi = upper_32_bits(status_route),
+		.route_lo = lower_32_bits(status_route),
+	};
+	struct tb_xdp_header req_hdr = {};
+	struct tb_cfg_request req = {
+		.request = &req_hdr,
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &status,
+	};
+
+	req_hdr.xd_hdr.route_hi = upper_32_bits(req_route);
+	req_hdr.xd_hdr.route_lo = lower_32_bits(req_route);
+	pkg.frame.eof = TB_CFG_PKG_ICM_RESP;
+	pkg.frame.size = sizeof(status);
+
+	return tb_xdomain_intermediate(&req, &pkg);
 }
 
 /* Exercise the real response matcher with a synthetic XDP exchange. */

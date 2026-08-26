@@ -49,6 +49,92 @@ struct ctl_pkg {
 	struct ring_frame frame;
 };
 
+enum tb_cfg_local_state {
+	TB_CFG_LOCAL_DISABLED,
+	TB_CFG_LOCAL_WAITING,
+	TB_CFG_LOCAL_ACCEPTED,
+	TB_CFG_LOCAL_FAILED,
+	TB_CFG_LOCAL_TIMED_OUT,
+};
+
+enum tb_cfg_peer_state {
+	TB_CFG_PEER_DISABLED,
+	TB_CFG_PEER_WAITING,
+	TB_CFG_PEER_MATCHED,
+	TB_CFG_PEER_CANCELED,
+	TB_CFG_PEER_TIMED_OUT,
+};
+
+enum tb_cfg_request_event {
+	TB_CFG_REQUEST_EVENT_NONE,
+	TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED,
+	TB_CFG_REQUEST_EVENT_LOCAL_FAILED,
+	TB_CFG_REQUEST_EVENT_PEER_MATCHED,
+	TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT,
+	TB_CFG_REQUEST_EVENT_CANCELED,
+};
+
+enum tb_cfg_request_action {
+	TB_CFG_REQUEST_ACTION_NONE,
+	TB_CFG_REQUEST_ACTION_COMPLETE,
+	TB_CFG_REQUEST_ACTION_FAIL,
+};
+
+struct tb_cfg_request_state {
+	enum tb_cfg_local_state local;
+	enum tb_cfg_peer_state peer;
+};
+
+static inline enum tb_cfg_request_action
+tb_cfg_request_state_step(struct tb_cfg_request_state *state,
+			  enum tb_cfg_request_event event)
+{
+	if (state->local == TB_CFG_LOCAL_DISABLED ||
+	    state->peer == TB_CFG_PEER_DISABLED)
+		return TB_CFG_REQUEST_ACTION_NONE;
+
+	switch (event) {
+	case TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED:
+		if (state->local == TB_CFG_LOCAL_WAITING)
+			state->local = TB_CFG_LOCAL_ACCEPTED;
+		return TB_CFG_REQUEST_ACTION_NONE;
+
+	case TB_CFG_REQUEST_EVENT_LOCAL_FAILED:
+		if (state->local != TB_CFG_LOCAL_WAITING)
+			return TB_CFG_REQUEST_ACTION_NONE;
+		state->local = TB_CFG_LOCAL_FAILED;
+		if (state->peer == TB_CFG_PEER_WAITING) {
+			state->peer = TB_CFG_PEER_CANCELED;
+			return TB_CFG_REQUEST_ACTION_FAIL;
+		}
+		return TB_CFG_REQUEST_ACTION_NONE;
+
+	case TB_CFG_REQUEST_EVENT_PEER_MATCHED:
+		if (state->peer != TB_CFG_PEER_WAITING)
+			return TB_CFG_REQUEST_ACTION_NONE;
+		state->peer = TB_CFG_PEER_MATCHED;
+		return TB_CFG_REQUEST_ACTION_COMPLETE;
+
+	case TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT:
+		if (state->peer != TB_CFG_PEER_WAITING)
+			return TB_CFG_REQUEST_ACTION_NONE;
+		state->peer = TB_CFG_PEER_TIMED_OUT;
+		if (state->local == TB_CFG_LOCAL_WAITING)
+			state->local = TB_CFG_LOCAL_TIMED_OUT;
+		return TB_CFG_REQUEST_ACTION_FAIL;
+
+	case TB_CFG_REQUEST_EVENT_CANCELED:
+		if (state->peer != TB_CFG_PEER_WAITING)
+			return TB_CFG_REQUEST_ACTION_NONE;
+		state->peer = TB_CFG_PEER_CANCELED;
+		return TB_CFG_REQUEST_ACTION_FAIL;
+
+	case TB_CFG_REQUEST_EVENT_NONE:
+	default:
+		return TB_CFG_REQUEST_ACTION_NONE;
+	}
+}
+
 /**
  * struct tb_cfg_request - Control channel request
  * @kref: Reference count
@@ -61,10 +147,13 @@ struct ctl_pkg {
  * @response_type: Expected type of the response packet
  * @npackets: Number of packets expected to be returned with this request
  * @match: Function used to match the incoming packet
+ * @intermediate: Function used to classify a non-terminal packet
  * @copy: Function used to copy the incoming packet to @response
  * @callback: Callback called when the request is finished successfully
  * @callback_data: Data to be passed to @callback
  * @flags: Flags for the request
+ * @state_lock: Serializes the two request state machines
+ * @state: Independent local-submission and peer-protocol states
  * @work: Work item used to complete the request
  * @result: Result after the request has been completed
  * @list: Requests are queued using this field
@@ -85,10 +174,16 @@ struct tb_cfg_request {
 	size_t npackets;
 	bool (*match)(const struct tb_cfg_request *req,
 		      const struct ctl_pkg *pkg);
+	enum tb_cfg_request_event
+		(*intermediate)(const struct tb_cfg_request *req,
+				const struct ctl_pkg *pkg);
 	bool (*copy)(struct tb_cfg_request *req, const struct ctl_pkg *pkg);
 	void (*callback)(void *callback_data);
 	void *callback_data;
 	unsigned long flags;
+	/* Protects state transitions. */
+	spinlock_t state_lock;
+	struct tb_cfg_request_state state;
 	struct work_struct work;
 	struct tb_cfg_result result;
 	struct list_head list;
@@ -156,6 +251,19 @@ enum tb_ctl_ring_event {
 	TB_CTL_EVENT_REPLY_UNMATCHED,
 };
 
+static inline bool tb_ctl_is_xdomain_tx_status(enum tb_cfg_pkg_type type,
+					       const void *buf, size_t size)
+{
+	const struct icm_pkg_header *hdr = buf;
+
+	if (type != TB_CFG_PKG_ICM_RESP ||
+	    size != sizeof(struct icm_tr_pkg_xdomain_packet_response))
+		return false;
+
+	return hdr->code == ICM_XDOMAIN_PACKET && hdr->packet_id == 0 &&
+	       hdr->total_packets == 1;
+}
+
 /**
  * tb_ctl_liveness_next() - Liveness counter transition
  * @consec_timeouts: Current run of unanswered requests
@@ -167,9 +275,9 @@ enum tb_ctl_ring_event {
  * Only a MATCHED reply clears the run. An UNMATCHED reply deliberately does
  * not: replies arriving that pair with nothing means ring 0 moves packets
  * while request/response matching is broken, which is precisely the degraded
- * state that must still gate teardown I/O. appmana-019 sat in exactly that
- * state (rx_total climbing, rx_matched frozen at 170, rx_unmatched at 112)
- * for the nine minutes before its CIO hung for good.
+ * state that must still gate teardown I/O. XDomain transmit-status packets are
+ * classified separately because they acknowledge only local acceptance, not
+ * an end-to-end peer response.
  *
  * Return: the new consecutive-timeout count.
  */

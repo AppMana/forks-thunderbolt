@@ -5243,6 +5243,193 @@ static void tb_test_ctl_liveness_threshold(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(9999));
 }
 
+static void tb_test_ctl_xdomain_tx_status_classification(struct kunit *test)
+{
+	struct icm_tr_pkg_xdomain_packet_response status = {
+		.hdr = {
+			.code = ICM_XDOMAIN_PACKET,
+			.packet_id = 0,
+			.total_packets = 1,
+		},
+	};
+	struct ctl_rx_packet_model packet = {
+		.eof = TB_CFG_PKG_ICM_RESP,
+		.size = sizeof(status),
+		.code = status.hdr.code,
+		.flags = status.hdr.flags,
+		.packet_id = status.hdr.packet_id,
+		.total_packets = status.hdr.total_packets,
+	};
+#define EXPECT_TX_STATUS() do { \
+	bool expected = ctl_model_is_xdomain_tx_status(&packet); \
+	bool actual = tb_ctl_is_xdomain_tx_status(packet.eof, &status, \
+						     packet.size); \
+	KUNIT_EXPECT_EQ(test, actual, expected); \
+} while (0)
+
+	/* Success and error completions are both local transmit status. */
+	EXPECT_TX_STATUS();
+	status.hdr.flags = ICM_FLAGS_ERROR;
+	packet.flags = status.hdr.flags;
+	EXPECT_TX_STATUS();
+	status.hdr.flags = 0;
+	packet.flags = 0;
+
+	/* The peer's end-to-end response remains a separate packet. */
+	packet.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	EXPECT_TX_STATUS();
+	packet.eof = TB_CFG_PKG_ICM_RESP;
+
+	status.hdr.code = ICM_DISCONNECT_XDOMAIN;
+	packet.code = status.hdr.code;
+	EXPECT_TX_STATUS();
+	status.hdr.code = ICM_XDOMAIN_PACKET;
+	packet.code = status.hdr.code;
+
+	status.hdr.packet_id = 1;
+	packet.packet_id = status.hdr.packet_id;
+	EXPECT_TX_STATUS();
+	status.hdr.packet_id = 0;
+	packet.packet_id = 0;
+
+	status.hdr.total_packets = 2;
+	packet.total_packets = status.hdr.total_packets;
+	EXPECT_TX_STATUS();
+	status.hdr.total_packets = 1;
+	packet.total_packets = 1;
+
+	packet.size = sizeof(status) - sizeof(u32);
+	EXPECT_TX_STATUS();
+	packet.size = sizeof(status) + sizeof(u32);
+	EXPECT_TX_STATUS();
+
+#undef EXPECT_TX_STATUS
+}
+
+static void tb_test_ctl_split_state_records_local_acceptance(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_WAITING);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_split_state_preserves_accept_on_peer_timeout(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
+}
+
+static void tb_test_ctl_split_state_terminal_transitions(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_CANCELED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
+
+	/* A late peer response cannot reverse the failed transaction. */
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_CANCELED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_split_state_peer_response_is_independent(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_WAITING);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_COMPLETE);
+
+	/* The peer terminal state is first-wins. */
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_xdomain_tx_status_route_correlation(struct kunit *test)
+{
+	enum tb_cfg_request_event event;
+
+	event = tb_test_xdomain_intermediate_event(0x3, 0x3, false);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	event = tb_test_xdomain_intermediate_event(0x3, 0x3, true);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	event = tb_test_xdomain_intermediate_event(0x3, 0x1, false);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_NONE);
+	event = tb_test_xdomain_intermediate_event(0x1, 0x3, true);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_NONE);
+}
+
+static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test)
+{
+	struct ctl_transaction_model model = {
+		.submit = CTL_SUBMIT_MODEL_WAITING,
+		.peer = CTL_PEER_MODEL_WAITING,
+	};
+	struct tb_cfg_request_state actual = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum ctl_transaction_model_action model_action;
+	enum tb_cfg_request_action actual_action;
+
+	model_action = ctl_model_transaction_step(&model, CTL_TRANSACTION_MODEL_LOCAL_ACCEPTED);
+	actual_action = tb_cfg_request_state_step(&actual, TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, model.submit, CTL_SUBMIT_MODEL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, model.peer, CTL_PEER_MODEL_WAITING);
+	KUNIT_ASSERT_EQ(test, model_action, CTL_TRANSACTION_MODEL_NONE);
+	KUNIT_ASSERT_EQ(test, actual.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, actual.peer, TB_CFG_PEER_WAITING);
+	KUNIT_ASSERT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_NONE);
+
+	model_action = ctl_model_transaction_step(&model, CTL_TRANSACTION_MODEL_PEER_MATCHED);
+	actual_action = tb_cfg_request_state_step(&actual, TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, model.submit, CTL_SUBMIT_MODEL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, model.peer, CTL_PEER_MODEL_MATCHED);
+	KUNIT_EXPECT_EQ(test, model_action, CTL_TRANSACTION_MODEL_COMPLETE);
+	KUNIT_EXPECT_EQ(test, actual.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, actual.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_COMPLETE);
+}
+
 static void tb_test_ctl_liveness_matched_reply_clears(struct kunit *test)
 {
 	int n = 0;
@@ -5405,6 +5592,13 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_response_match_follows_protocol_model),
 	KUNIT_CASE(tb_test_xdomain_native_error_fails_request),
 	KUNIT_CASE(tb_test_ctl_liveness_threshold),
+	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_classification),
+	KUNIT_CASE(tb_test_ctl_split_state_records_local_acceptance),
+	KUNIT_CASE(tb_test_ctl_split_state_preserves_accept_on_peer_timeout),
+	KUNIT_CASE(tb_test_ctl_split_state_terminal_transitions),
+	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
+	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),
+	KUNIT_CASE(tb_test_ctl_split_state_matches_independent_model),
 	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
 	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
 	KUNIT_CASE(tb_test_ctl_liveness_appmana_019_sequence),

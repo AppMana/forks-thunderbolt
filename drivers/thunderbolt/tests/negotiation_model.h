@@ -1153,6 +1153,91 @@ static inline bool ident_run(struct ident_xd *xd, const struct ident_peer *peer,
  * functions it does (tb_xdomain_announce_delay_ms(),
  * tb_xdomain_announce_should_warn()), so the two cannot drift on the numbers.
  */
+struct ctl_rx_packet_model {
+	unsigned int eof;
+	unsigned int size;
+	u8 code;
+	u8 flags;
+	u8 packet_id;
+	u8 total_packets;
+};
+
+enum ctl_submit_model_state {
+	CTL_SUBMIT_MODEL_WAITING,
+	CTL_SUBMIT_MODEL_ACCEPTED,
+	CTL_SUBMIT_MODEL_FAILED,
+	CTL_SUBMIT_MODEL_TIMED_OUT,
+};
+
+enum ctl_peer_model_state {
+	CTL_PEER_MODEL_WAITING,
+	CTL_PEER_MODEL_MATCHED,
+	CTL_PEER_MODEL_CANCELED,
+	CTL_PEER_MODEL_TIMED_OUT,
+};
+
+enum ctl_transaction_model_event {
+	CTL_TRANSACTION_MODEL_LOCAL_ACCEPTED,
+	CTL_TRANSACTION_MODEL_LOCAL_FAILED,
+	CTL_TRANSACTION_MODEL_PEER_MATCHED,
+	CTL_TRANSACTION_MODEL_PEER_TIMED_OUT,
+};
+
+enum ctl_transaction_model_action {
+	CTL_TRANSACTION_MODEL_NONE,
+	CTL_TRANSACTION_MODEL_COMPLETE,
+	CTL_TRANSACTION_MODEL_FAIL,
+};
+
+struct ctl_transaction_model {
+	enum ctl_submit_model_state submit;
+	enum ctl_peer_model_state peer;
+};
+
+static inline enum ctl_transaction_model_action
+ctl_model_transaction_step(struct ctl_transaction_model *state,
+			   enum ctl_transaction_model_event event)
+{
+	switch (event) {
+	case CTL_TRANSACTION_MODEL_LOCAL_ACCEPTED:
+		if (state->submit == CTL_SUBMIT_MODEL_WAITING)
+			state->submit = CTL_SUBMIT_MODEL_ACCEPTED;
+		return CTL_TRANSACTION_MODEL_NONE;
+	case CTL_TRANSACTION_MODEL_LOCAL_FAILED:
+		if (state->submit != CTL_SUBMIT_MODEL_WAITING)
+			return CTL_TRANSACTION_MODEL_NONE;
+		state->submit = CTL_SUBMIT_MODEL_FAILED;
+		if (state->peer == CTL_PEER_MODEL_WAITING) {
+			state->peer = CTL_PEER_MODEL_CANCELED;
+			return CTL_TRANSACTION_MODEL_FAIL;
+		}
+		return CTL_TRANSACTION_MODEL_NONE;
+	case CTL_TRANSACTION_MODEL_PEER_MATCHED:
+		if (state->peer != CTL_PEER_MODEL_WAITING)
+			return CTL_TRANSACTION_MODEL_NONE;
+		state->peer = CTL_PEER_MODEL_MATCHED;
+		return CTL_TRANSACTION_MODEL_COMPLETE;
+	case CTL_TRANSACTION_MODEL_PEER_TIMED_OUT:
+		if (state->peer != CTL_PEER_MODEL_WAITING)
+			return CTL_TRANSACTION_MODEL_NONE;
+		state->peer = CTL_PEER_MODEL_TIMED_OUT;
+		if (state->submit == CTL_SUBMIT_MODEL_WAITING)
+			state->submit = CTL_SUBMIT_MODEL_TIMED_OUT;
+		return CTL_TRANSACTION_MODEL_FAIL;
+	default:
+		return CTL_TRANSACTION_MODEL_NONE;
+	}
+}
+
+/* Independent wire oracle: numeric values and length come from the capture. */
+static inline bool
+ctl_model_is_xdomain_tx_status(const struct ctl_rx_packet_model *packet)
+{
+	return packet->eof == 12 && packet->size == 28 &&
+	       packet->code == 8 && packet->packet_id == 0 &&
+	       packet->total_packets == 1;
+}
+
 struct announce_state {
 	unsigned int now_ms;	/* virtual clock */
 	unsigned int attempts;	/* wire attempts made */

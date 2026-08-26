@@ -77,6 +77,7 @@ struct tb_ctl {
 	atomic_t rx_total;
 	atomic_t rx_matched;
 	atomic_t rx_unmatched;
+	atomic_t rx_xdomain_tx_status;
 	atomic_t rx_dropped;
 
 	/*
@@ -149,6 +150,7 @@ struct tb_cfg_request *tb_cfg_request_alloc(void)
 		return NULL;
 
 	kref_init(&req->kref);
+	spin_lock_init(&req->state_lock);
 
 	return req;
 }
@@ -242,6 +244,58 @@ tb_cfg_request_find(struct tb_ctl *ctl, struct ctl_pkg *pkg)
 	mutex_unlock(&pkg->ctl->request_queue_lock);
 
 	return req;
+}
+
+static struct tb_cfg_request *
+tb_cfg_request_find_intermediate(struct tb_ctl *ctl, struct ctl_pkg *pkg,
+				 enum tb_cfg_request_event *event)
+{
+	struct tb_cfg_request *req = NULL, *iter;
+
+	*event = TB_CFG_REQUEST_EVENT_NONE;
+	mutex_lock(&ctl->request_queue_lock);
+	list_for_each_entry(iter, &ctl->request_queue, list) {
+		if (!iter->intermediate)
+			continue;
+
+		*event = iter->intermediate(iter, pkg);
+		if (*event == TB_CFG_REQUEST_EVENT_NONE)
+			continue;
+
+		tb_cfg_request_get(iter);
+		req = iter;
+		break;
+	}
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return req;
+}
+
+static enum tb_cfg_request_action
+tb_cfg_request_update_state(struct tb_cfg_request *req,
+			    enum tb_cfg_request_event event)
+{
+	enum tb_cfg_request_action action;
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	action = tb_cfg_request_state_step(&req->state, event);
+	spin_unlock_irqrestore(&req->state_lock, flags);
+
+	return action;
+}
+
+static struct tb_cfg_request_state
+tb_cfg_request_read_state(struct tb_cfg_request *req)
+{
+	struct tb_cfg_request_state state;
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	state = req->state;
+	spin_unlock_irqrestore(&req->state_lock, flags);
+
+	return state;
 }
 
 /* utility functions */
@@ -508,7 +562,10 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			       bool canceled)
 {
 	struct ctl_pkg *pkg = container_of(frame, typeof(*pkg), frame);
-	struct tb_cfg_request *req;
+	struct tb_cfg_request *req, *intermediate_req = NULL;
+	enum tb_cfg_request_event event;
+	enum tb_cfg_request_action action;
+	bool xdomain_tx_status;
 	__be32 crc32;
 
 	if (canceled)
@@ -576,6 +633,25 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	 * triggered from messing with the active requests.
 	 */
 	req = tb_cfg_request_find(pkg->ctl, pkg);
+	if (req) {
+		struct tb_cfg_request_state state;
+
+		state = tb_cfg_request_read_state(req);
+		if (state.local != TB_CFG_LOCAL_DISABLED) {
+			event = TB_CFG_REQUEST_EVENT_PEER_MATCHED;
+			action = tb_cfg_request_update_state(req, event);
+			if (action != TB_CFG_REQUEST_ACTION_COMPLETE) {
+				tb_cfg_request_put(req);
+				req = NULL;
+			}
+		}
+	}
+	xdomain_tx_status = !req && tb_ctl_is_xdomain_tx_status(frame->eof,
+								 pkg->buffer,
+								 frame->size);
+	if (xdomain_tx_status)
+		intermediate_req = tb_cfg_request_find_intermediate(pkg->ctl, pkg,
+								    &event);
 
 	if (req) {
 		atomic_inc(&pkg->ctl->rx_matched);
@@ -589,6 +665,21 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 		atomic_set(&pkg->ctl->consec_timeouts,
 			   tb_ctl_liveness_next(atomic_read(&pkg->ctl->consec_timeouts),
 						TB_CTL_EVENT_REPLY_MATCHED));
+	} else if (xdomain_tx_status) {
+		const struct icm_pkg_header *hdr = pkg->buffer;
+
+		atomic_inc(&pkg->ctl->rx_xdomain_tx_status);
+		if (intermediate_req) {
+			action = tb_cfg_request_update_state(intermediate_req,
+							     event);
+			if (action == TB_CFG_REQUEST_ACTION_FAIL) {
+				intermediate_req->result.err = -EIO;
+				tb_ctl_schedule_req_work(intermediate_req);
+			}
+		}
+		if (hdr->flags & ICM_FLAGS_ERROR)
+			tb_ctl_warn_ratelimited(pkg->ctl,
+						"XDomain transmit completion reported an error\n");
 	} else {
 		atomic_inc(&pkg->ctl->rx_unmatched);
 		/*
@@ -610,13 +701,16 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 		}
 	}
 
-	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size, !req);
+	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size,
+		    !req && !xdomain_tx_status);
 
 	if (req) {
 		if (req->copy(req, pkg))
 			tb_ctl_schedule_req_work(req);
 		tb_cfg_request_put(req);
 	}
+	if (intermediate_req)
+		tb_cfg_request_put(intermediate_req);
 
 rx:
 	tb_ctl_rx_submit(pkg);
@@ -708,6 +802,7 @@ err_put:
  */
 void tb_cfg_request_cancel(struct tb_cfg_request *req, int err)
 {
+	tb_cfg_request_update_state(req, TB_CFG_REQUEST_EVENT_CANCELED);
 	set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
 	tb_ctl_schedule_req_work(req);
 	wait_event(tb_cfg_request_cancel_queue, !tb_cfg_request_is_active(req));
@@ -735,6 +830,7 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					 int timeout_msec)
 {
 	unsigned long timeout = msecs_to_jiffies(timeout_msec);
+	struct tb_cfg_request_state state;
 	struct tb_cfg_result res = { 0 };
 	DECLARE_COMPLETION_ONSTACK(done);
 	int ret;
@@ -746,6 +842,9 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	}
 
 	if (!wait_for_completion_timeout(&done, timeout)) {
+		tb_cfg_request_update_state(req,
+					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+		state = tb_cfg_request_read_state(req);
 		/*
 		 * Say which of the three "no answer" faults this actually is.
 		 * tx_done advancing but rx_total flat means we transmitted and
@@ -766,14 +865,19 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 						req->request_size);
 		}
 		tb_ctl_warn_ratelimited(ctl,
-					"request timed out after %d ms; ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_dropped=%d\n",
+					"request timed out after %d ms; local_state=%u peer_state=%u ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_xdomain_tx_status=%d rx_dropped=%d\n",
 					timeout_msec,
+					state.local, state.peer,
 					atomic_read(&ctl->tx_done),
 					atomic_read(&ctl->tx_canceled),
 					atomic_read(&ctl->rx_total),
 					atomic_read(&ctl->rx_matched),
 					atomic_read(&ctl->rx_unmatched),
+					atomic_read(&ctl->rx_xdomain_tx_status),
 					atomic_read(&ctl->rx_dropped));
+		if (state.local == TB_CFG_LOCAL_ACCEPTED)
+			tb_ctl_warn_ratelimited(ctl,
+						"peer response timed out after local XDomain transmit acceptance\n");
 		atomic_inc(&ctl->consec_timeouts);
 		tb_cfg_request_cancel(req, -ETIMEDOUT);
 	}
