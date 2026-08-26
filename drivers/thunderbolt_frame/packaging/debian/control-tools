@@ -1,6 +1,4 @@
 Package: thunderbolt-frame-tools
-Conflicts: thunderbolt-ibverbs-tools
-Replaces: thunderbolt-ibverbs-tools
 Version: @VERSION@
 Section: net
 Priority: optional

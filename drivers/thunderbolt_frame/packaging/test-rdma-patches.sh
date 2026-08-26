@@ -3,7 +3,7 @@
 #
 # Pulls upstream rdma-core v62.0 source, applies our patch series, runs
 # the distro-native rdma-core CMake build, verifies that
-# `libusb4_rdma-rdmav*.so` and the `usb4_rdma.driver` config are produced.
+# `libtbrxe-rdmav*.so` and the `tbrxe.driver` config are produced.
 # Does not install or load anything — just confirms patches apply and
 # build succeeds in the distro's toolchain.
 #
@@ -70,7 +70,7 @@ $DOCKER run --rm \
 
         echo ""
         echo "=== Verify our providers were built ==="
-        for provider in usb4_rdma tbrxe; do
+        for provider in tbrxe; do
             ls -l lib/lib${provider}-rdmav*.so
             nm lib/lib${provider}-rdmav*.so |
                 awk -v sym="verbs_provider_${provider}" '\''$3 == sym { found = 1 }

@@ -2,7 +2,7 @@
 # Install a thunderbolt-frame-tools or usb4-rdma-provider package built by
 # the matching distro-package*.sh script. Verifies:
 #
-#   usb4-rdma-provider         — provider .so is installed at the expected path,
+#   usb4-rdma-provider         — tbrxe provider is installed at the expected path,
 #                                its dynamic deps resolve, and libibverbs does
 #                                not crash when its driver hint is present.
 #   thunderbolt-frame-tools    — the capture harness is installed, parses, and
@@ -110,7 +110,7 @@ verify_provider() {
 	install_provider_deps
 	install_package
 
-	local driver="/etc/libibverbs.d/usb4_rdma.driver"
+	local driver="/etc/libibverbs.d/tbrxe.driver"
 	[[ -f "$driver" ]] ||
 		{ printf 'error: driver hint missing at %s\n' "$driver" >&2; exit 1; }
 
@@ -120,7 +120,7 @@ verify_provider() {
 	local so=""
 	for d in /usr/lib/x86_64-linux-gnu/libibverbs /usr/lib64/libibverbs /usr/lib/libibverbs; do
 		[[ -d "$d" ]] || continue
-		so="$(find "$d" -maxdepth 1 -name 'libusb4_rdma-rdmav*.so' -print -quit)"
+		so="$(find "$d" -maxdepth 1 -name 'libtbrxe-rdmav*.so' -print -quit)"
 		[[ -n "$so" ]] && break
 	done
 	[[ -n "$so" ]] ||

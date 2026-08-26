@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the usb4_rdma libibverbs userspace provider and package it as a native
+# Build the tbrxe libibverbs userspace provider and package it as a native
 # .deb / .rpm / .pkg.tar.zst. The provider .so is built against the same
 # rdma-core source as the target distro's libibverbs so the PABI version
 # matches and apt/dnf/pacman can install the package as a drop-in.
@@ -136,10 +136,6 @@ build_provider() {
 
 	fetch_rdma_core_source "$src"
 
-	# Our patches were generated against v62.0 but apply (with offset/fuzz) to
-	# older rdma-core down to at least v39 (Ubuntu 22.04). Patch 1 only adds
-	# new files; 2 and 3 absorb hunk drift automatically.
-	#
 	# 0004 patches the in-tree rxe provider in place and serves the
 	# full-distro-rebuild path only. The standalone package ships the
 	# dedicated tbrxe provider from 0005 instead, leaving the build's librxe
@@ -152,7 +148,7 @@ build_provider() {
 	# The patch series is a distributable snapshot of the canonical provider
 	# sources. Refuse to package if it has drifted; otherwise a syntactically
 	# valid stale patch can quietly build a useless provider.
-	for provider in usb4_rdma tbrxe; do
+	for provider in tbrxe; do
 		if ! diff -ru "$repo_root/userspace/$provider" \
 				"$src/providers/$provider"; then
 			printf 'error: rdma-core provider patch is stale; run packaging/regen-rdma-core-patches.sh\n' >&2
@@ -168,7 +164,7 @@ build_provider() {
 	( cd "$build" && cmake -GNinja -DNO_PYVERBS=1 -DNO_MAN_PAGES=1 .. >/dev/null && ninja )
 
 	local so
-	for provider in usb4_rdma tbrxe; do
+	for provider in tbrxe; do
 		so="$(find "$build/lib" -maxdepth 1 -name "lib${provider}-rdmav*.so" -print -quit)"
 		[[ -n "$so" ]] || { printf 'error: %s provider .so not produced\n' "$provider" >&2; exit 1; }
 		if ! nm "$so" | awk -v sym="verbs_provider_${provider}" \
@@ -185,11 +181,9 @@ build_provider() {
 		printf '==> Built provider: %s\n' "$(basename "$so")"
 	done
 
-	# Both .sos must carry the same PABI suffix or libibverbs would refuse
-	# to load one of them.
+	# Refuse a provider name that does not carry an rdma-core PABI suffix.
 	local pabis
-	pabis="$(find "$build/lib" -maxdepth 1 \
-			\( -name 'libusb4_rdma-rdmav*.so' -o -name 'libtbrxe-rdmav*.so' \) |
+	pabis="$(find "$build/lib" -maxdepth 1 -name 'libtbrxe-rdmav*.so' |
 		sed 's/.*-rdmav\([0-9]*\)\.so/\1/' | sort -u)"
 	[[ "$(wc -l <<<"$pabis")" -eq 1 ]] ||
 		{ printf 'error: provider PABI mismatch: %s\n' "$pabis" >&2; exit 1; }
@@ -203,7 +197,7 @@ stage_provider_files() {
 	install -d -m 0755 "$stage"
 
 	local provider so
-	for provider in usb4_rdma tbrxe; do
+	for provider in tbrxe; do
 		so="$(find "$build/lib" -maxdepth 1 -name "lib${provider}-rdmav*.so" -print -quit)"
 		[[ -n "$so" ]] || { printf 'error: %s provider .so not in build tree\n' "$provider" >&2; exit 1; }
 
@@ -232,10 +226,8 @@ build_deb() {
 	local files="$work_dir/files"
 	stage_provider_files "$files"
 
-	install -m 0644 "$files"/libusb4_rdma-rdmav*.so "$files"/libtbrxe-rdmav*.so \
+	install -m 0644 "$files"/libtbrxe-rdmav*.so \
 		"$deb_stage/usr/lib/$arch/libibverbs/"
-	install -m 0644 "$files/usb4_rdma.driver" \
-		"$deb_stage/etc/libibverbs.d/usb4_rdma.driver"
 	install -m 0644 "$files/tbrxe.driver" \
 		"$deb_stage/etc/libibverbs.d/tbrxe.driver"
 
@@ -290,7 +282,7 @@ build_arch_as_builder() {
 	stage_provider_files "$stage"
 
 	local soname
-	soname="$(basename "$(find "$stage" -name 'libusb4_rdma-rdmav*.so' -print -quit)")"
+	soname="$(basename "$(find "$stage" -name 'libtbrxe-rdmav*.so' -print -quit)")"
 	[[ -n "$soname" ]] || { printf 'error: staged .so missing\n' >&2; exit 1; }
 
 	sed -e "s/@VERSION@/${version}/g" -e "s/@SONAME@/${soname}/g" \
