@@ -164,8 +164,6 @@ struct icm {
 	struct pci_dev *upstream_port;
 	int vnd_cap;
 	bool safe_mode;
-	/* One warm firmware restart per domain, never a loop. */
-	bool warm_restart_tried;
 	size_t max_boot_acl;
 	bool rpm;
 	bool can_upgrade_nvm;
@@ -2896,96 +2894,19 @@ static int icm_driver_ready(struct tb *tb)
 				 &tb->nboot_acl, &icm->rpm);
 	if (ret) {
 		/*
-		 * The wedged-but-running ICM: REG_FW_STS still advertises
-		 * ICM_EN, so icm_firmware_start() skipped the reset, but the
-		 * firmware's message loop is dead and DRIVER_READY timed out.
-		 * Do NOT force icm_firmware_reset() here: on Alpine/Titan
-		 * Ridge the NVM authentication asserting NVM_AUTH_DONE is
-		 * performed only by the on-die mask ROM at a true chip reset
-		 * (AppMana/intel-thunderbolt-firmwares,
-		 * out/ICM_8051_FINDINGS.md), so a warm ICM_EN_CPU restart
-		 * comes back UNAUTHENTICATED -- it converts "wedged" into an
-		 * equally terminal "not authenticated" plus a multi-second
-		 * stall (the reverted tbfix 1.7/1.8 experiment). Tell the
-		 * operator the truth instead of a generic timeout. KUnit:
-		 * tb_test_icm_wedged_running.
-		 *
-		 * A DRIVER_READY timeout is not proof that every firmware path
-		 * is dead. In particular, a partial failure may continue to own
-		 * XDomain responses even when config-space requests time out, so
-		 * the caller must not replace this domain with a software CM.
+		 * ICM_EN is not a liveness signal, and a DRIVER_READY timeout is
+		 * not proof that every firmware path has stopped. A partial
+		 * failure may still own XDomain responses while config requests
+		 * time out. Neither software takeover nor an undocumented live
+		 * firmware restart can establish exclusive ownership here.
 		 */
-		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS)) &&
-		    tb_icm_warm_restart_supported(tb->nhi->pdev->device) &&
-		    !icm->warm_restart_tried) {
-			/*
-			 * Maple Ridge has a real reset vector and no warm gate
-			 * (see tb_icm_warm_restart_supported()), so a stuck
-			 * firmware here is recoverable without pulling power.
-			 * Restart the ARC and retry the handshake exactly
-			 * once: if the restart itself is what breaks
-			 * authentication on some board we have not seen, the
-			 * second failure still lands on the terminal path
-			 * below rather than looping.
-			 */
-			icm->warm_restart_tried = true;
-			tb_warn(tb,
-				"ICM not responding; restarting firmware (Maple Ridge supports a warm restart) and retrying\n");
-			if (!icm_firmware_reset(tb, tb->nhi)) {
-				unsigned int retries = 10;
-				u32 val;
-
-				/*
-				 * Do NOT poll NVM_AUTH_DONE to decide the ARC
-				 * is back: that bit is sticky across the CIO
-				 * reset, so it is still set from the previous
-				 * boot and the very first read returns
-				 * immediately -- we then re-sent DRIVER_READY
-				 * milliseconds after kicking the reset, long
-				 * before the core had rebooted, and concluded
-				 * the controller was unrecoverable.
-				 *
-				 * Give the reset an unconditional settle and
-				 * only then wait for the firmware to
-				 * re-advertise itself, the way
-				 * icm_firmware_start() does on a cold start.
-				 */
-				msleep(1000);
-				do {
-					if (icm_firmware_running(tb->nhi))
-						break;
-					msleep(300);
-				} while (--retries);
-				val = ioread32(tb->nhi->iobase + REG_FW_STS);
-
-				tb_info(tb,
-					"firmware restart: fw_sts %#x auth=%s running=%s; retrying driver ready\n",
-					val,
-					(val & REG_FW_STS_NVM_AUTH_DONE) ?
-						"yes" : "NO",
-					tb_icm_fw_sts_running(val) ?
-						"yes" : "NO");
-
-				ret = __icm_driver_ready(tb, &tb->security_level,
-							 &icm->proto_version,
-							 &tb->nboot_acl,
-							 &icm->rpm);
-				if (!ret) {
-					tb_info(tb,
-						"ICM recovered after warm firmware restart\n");
-					goto ready;
-				}
-			}
-		}
-
 		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS))) {
 			tb_err(tb,
-			       "ICM advertises running (ICM_EN) but does not respond; wedged firmware. A warm reset cannot re-authenticate this controller -- restoring FIRMWARE mode needs a board COLD power cycle\n");
+			       "ICM advertises running but does not respond; refusing an unproven live restart or software takeover\n");
 		}
 		return ret;
 	}
 
-ready:
 	/*
 	 * Make sure the number of supported preboot ACL matches what we
 	 * expect or disable the whole feature.
@@ -3196,22 +3117,10 @@ static void icm_stop(struct tb *tb)
 	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
 
 	/*
-	 * Do NOT try to reset the ICM firmware here to "clean up" for the next
-	 * driver load. On Alpine/Titan Ridge a live rmmod+modprobe wedges the
-	 * controller and CANNOT be recovered by any runtime reset: the NVM
-	 * authentication that asserts REG_FW_STS_NVM_AUTH_DONE is performed only
-	 * by the on-die mask ROM at a true chip reset. icm_firmware_reset()
-	 * (ICM_EN_CPU) is a warm CPU restart that re-enters the flashed
-	 * application image; that image reads read-only reset-cause registers
-	 * (CA41/CB5E), sees "warm", and skips re-init -- so it never
-	 * re-authenticates. A CIO reset here only swaps the "-110 driver-not-
-	 * ready" wedge for an equally terminal "firmware not authenticated"
-	 * (and costs a multi-second shutdown stall). These boards have no
-	 * D3cold, so only a board power cycle re-enters the ROM. AR/TR core
-	 * changes must therefore be deployed via reboot, not a live reload.
-	 * Proven by firmware reverse-engineering: AppMana/intel-thunderbolt-
-	 * firmwares (out/ICM_8051_FINDINGS.md). Maple Ridge has a real reset
-	 * vector and re-authenticates on a warm restart, so it is unaffected.
+	 * Do not reset resident firmware merely to clean up for the next load.
+	 * Alpine/Titan Ridge authentication is mask-ROM-only and is lost across
+	 * the available warm CPU restart. No other family has a documented and
+	 * independently validated live restart contract here.
 	 */
 
 	kfree(icm->last_nvm_auth);

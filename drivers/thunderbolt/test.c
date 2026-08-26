@@ -3004,12 +3004,8 @@ static void tb_test_xdomain_late_second_link(struct kunit *test)
  * kernel's icm_firmware_reset() (ICM_EN_CPU) is a warm CPU restart that
  * re-enters the application image, which reads READ-ONLY reset-cause registers
  * (CA41/CB5E), sees "warm", and skips re-init -- so on Alpine/Titan Ridge it
- * NEVER re-authenticates. Maple Ridge has a real reset vector and re-auths on a
- * warm restart. This is why a live rmmod+modprobe on AR/TR is terminal until a
- * board power cycle, and why icm_stop() does NOT attempt a runtime reset.
- *
- * ar_tr below is the genuine controller property (Alpine/Titan Ridge vs USB4/
- * Maple Ridge), not a toggle: the outcome follows from the modelled firmware.
+ * never re-authenticates. Other families are deliberately not assigned an
+ * outcome without a documented reset contract and direct hardware evidence.
  */
 struct icm_fw_model {
 	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
@@ -3041,15 +3037,13 @@ static void icm_fw_wedge(struct icm_fw_model *fw)
 }
 
 /*
- * Warm CPU restart (the driver's icm_firmware_reset / ICM_EN_CPU). The mask ROM
- * is NOT re-entered. AR/TR: the application image's read-only reset-cause gate
- * makes it skip re-init -> stays de-authenticated, forever, until a cold boot.
- * Maple Ridge: a real reset vector re-runs init -> re-authenticates.
+ * Alpine/Titan Ridge warm CPU restart. The mask ROM is not re-entered, so the
+ * application image's reset-cause gate leaves the controller unauthenticated.
  */
-static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
+static void icm_fw_warm_restart(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
-	fw->authed = !ar_tr;
+	fw->authed = false;
 	fw->responsive = true;
 	fw->warm_restarts++;
 }
@@ -3081,7 +3075,7 @@ static bool icm_fw_cfg_space_open(struct icm_fw_model *fw)
 	return !fw->icm_en || !fw->responsive || fw->cfg_open;
 }
 
-static void tb_test_icm_warm_restart_reauth(struct kunit *test)
+static void tb_test_icm_warm_restart_loses_auth(struct kunit *test)
 {
 	struct icm_fw_model fw;
 
@@ -3097,23 +3091,13 @@ static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 	 * until a board power cycle.
 	 */
 	icm_fw_cold_boot(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
+	icm_fw_warm_restart(&fw);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
 
 	/* Only a cold boot (reboot / power cycle) re-authenticates AR/TR. */
 	icm_fw_cold_boot(&fw);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
-	/*
-	 * Maple Ridge (e.g. appmana-019/020) has a real reset vector -> re-auths
-	 * on a warm restart. A module reload therefore does NOT wedge the ICM on
-	 * these nodes; a hang seen while (un)loading the module on a Maple Ridge
-	 * host is a driver-software fault (e.g. a lock taken in the load path),
-	 * not a firmware-terminal state.
-	 */
-	icm_fw_cold_boot(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
-	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 }
 
 /*
@@ -3144,18 +3128,8 @@ static void tb_test_icm_wedged_running(struct kunit *test)
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_wedge(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
+	icm_fw_warm_restart(&fw);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
-
-	/*
-	 * Maple Ridge would recover from the same forced reset (real reset
-	 * vector re-authenticates) -- relevant only if a Maple Ridge cio_reset
-	 * path is ever wired up; icm_probe() does not set one today.
-	 */
-	icm_fw_cold_boot(&fw);
-	icm_fw_wedge(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
-	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
 	/*
 	 * Dead NHI: MMIO reads all-ones, so REG_FW_STS spuriously asserts
@@ -5040,24 +5014,17 @@ static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
 }
 
 /*
- * The warm-restart escape hatch is silicon-gated, and getting the gate wrong
- * is expensive in both directions: allowing it on Titan Ridge returns an
- * UNAUTHENTICATED controller (the reverted tbfix 1.7/1.8), while refusing it
- * on Maple Ridge strands a host until someone physically pulls its power
- * (appmana-019, 2026-08-25).
- *
- * Maple Ridge is the one family our decompiles clear for this: mr_bank0.c has
- * zero references to the 0xCA41/0xCB5E warm/cold reset-cause registers that
- * Titan's tr_bank0.c hits 310 times, and its resident image has a real reset
- * vector and no warm gate (out/ICM_PROTOCOL.md section 6).
+ * A firmware image having a reset vector does not establish a supported live
+ * recovery contract. The reference driver uses the ARC bits only for startup
+ * and never attempts this reset after an ICM timeout, so every family must
+ * fail closed unless a documented and independently tested sequence exists.
  */
-static void tb_test_icm_warm_restart_is_maple_ridge_only(struct kunit *test)
+static void tb_test_icm_warm_restart_is_unsupported(struct kunit *test)
 {
-	/* Cleared: a real reset vector, no warm gate. */
-	KUNIT_EXPECT_TRUE(test,
-		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI));
-	KUNIT_EXPECT_TRUE(test,
-		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI));
 
 	/* Titan/Alpine Ridge: mask-ROM-only re-auth, warm restart is terminal. */
 	KUNIT_EXPECT_FALSE(test,
@@ -5553,12 +5520,12 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_connector_replug_bounded_when_lane1_dead),
 	KUNIT_CASE(tb_test_cm_connector_replug_defers_to_fresh_icm_event),
 	KUNIT_CASE(tb_test_cm_connector_replug_leaves_single_lane_cable),
-	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
+	KUNIT_CASE(tb_test_icm_warm_restart_loses_auth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
-	KUNIT_CASE(tb_test_icm_warm_restart_is_maple_ridge_only),
+	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_work_after_destroy),

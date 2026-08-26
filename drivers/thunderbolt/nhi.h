@@ -106,39 +106,11 @@ extern const struct tb_nhi_ops icl_nhi_ops;
 
 #define PCI_CLASS_SERIAL_USB_USB4			0x0c0340
 
-/*
- * tb_icm_warm_restart_supported() - may a stuck ICM be restarted in software?
- * @nhi_device_id: PCI device id of the NHI
- *
- * The blanket "never icm_firmware_reset() an ICM that advertises running" rule
- * came from Alpine/Titan Ridge, where NVM_AUTH_DONE is asserted only by the
- * on-die mask ROM at a true chip reset: a warm ICM_EN_CPU restart there comes
- * back UNAUTHENTICATED, which is terminal, and is why tbfix 1.7/1.8 were
- * reverted.
- *
- * That is silicon-specific and does NOT hold for Maple Ridge. Our own
- * decompiles (AppMana/intel-thunderbolt-firmwares, out/ICM_PROTOCOL.md §6)
- * found mr_bank0.c carries ZERO references to the 0xCA41/0xCB5E warm/cold
- * reset-cause registers, against 310 in Titan's tr_bank0.c -- "Maple's
- * resident image has a real reset vector and no warm gate, consistent with it
- * surviving a live rmmod/modprobe reset where Titan wedges."
- *
- * Refusing to try therefore costs a Maple Ridge host until someone physically
- * pulls its power. A controller may still acknowledge local XDomain
- * transmissions while failing every peer-facing request, so local transmit
- * status alone is not evidence that the connection manager is responsive.
- *
- * Pure predicate, exercised by KUnit.
- */
+/* No controller has a documented, independently validated live ICM restart. */
 static inline bool tb_icm_warm_restart_supported(u16 nhi_device_id)
 {
-	switch (nhi_device_id) {
-	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
-	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
-		return true;
-	default:
-		return false;
-	}
+	(void)nhi_device_id;
+	return false;
 }
 
 #endif
