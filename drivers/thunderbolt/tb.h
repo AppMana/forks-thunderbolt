@@ -59,6 +59,14 @@ bool tb_test_xdomain_response_pkg_matches(u64 req_route,
 					  size_t response_size,
 					  size_t response_declared_size,
 					  bool same_protocol);
+bool tb_test_xdomain_service_response_pkg_matches(u64 req_route,
+						  u8 req_sequence,
+						  size_t response_capacity,
+						  u64 response_route,
+						  u8 response_sequence,
+						  size_t response_size,
+						  size_t response_declared_size,
+						  bool same_protocol);
 int tb_test_xdomain_native_error_result(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,

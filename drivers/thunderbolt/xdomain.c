@@ -339,6 +339,15 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 		if (tb_xdomain_sequence(res_hdr) != tb_xdomain_sequence(req_hdr))
 			return false;
 
+		/*
+		 * Only the discovery protocol gives the word after the UUID the
+		 * enum tb_xdp_type meaning. Service protocols own their payload and
+		 * may put an address, identifier, or another private header there.
+		 * Their common XDomain envelope has already been checked above.
+		 */
+		if (!uuid_equal(&req_hdr->uuid, &tb_xdp_uuid))
+			return true;
+
 		expected_type = tb_xdomain_response_type(req_hdr->type);
 		if (!expected_type ||
 		    (res_hdr->type != expected_type &&
@@ -2937,6 +2946,60 @@ bool tb_test_xdomain_response_pkg_matches(u64 req_route,
 	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
 	pkg.frame.size = response_size;
 
+	return tb_xdomain_match(&req, &pkg);
+}
+
+/* Exercise the real matcher with an opaque service protocol exchange. */
+bool tb_test_xdomain_service_response_pkg_matches(u64 req_route,
+						  u8 req_sequence,
+						  size_t response_capacity,
+						  u64 response_route,
+						  u8 response_sequence,
+						  size_t response_size,
+						  size_t response_declared_size,
+						  bool same_protocol)
+{
+	static const uuid_t service_uuid =
+		UUID_INIT(0x798f589e, 0x3616, 0x8a47,
+			  0x97, 0xc6, 0x56, 0x64, 0xa9, 0x20, 0xc8, 0xdd);
+	struct {
+		struct tb_xdomain_header xd_hdr;
+		uuid_t uuid;
+		u32 opaque[16];
+	} request = {};
+	struct {
+		struct tb_xdomain_header xd_hdr;
+		uuid_t uuid;
+		u32 opaque[18];
+	} response = {};
+	struct tb_cfg_request req = {
+		.request = &request,
+		.response_size = response_capacity,
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &response,
+	};
+
+	request.xd_hdr.route_hi = upper_32_bits(req_route);
+	request.xd_hdr.route_lo = lower_32_bits(req_route);
+	request.xd_hdr.length_sn =
+		(sizeof(request) - sizeof(request.xd_hdr)) / sizeof(u32) |
+		(req_sequence << TB_XDOMAIN_SN_SHIFT);
+	request.uuid = service_uuid;
+	request.opaque[0] = 0x80875a38;
+
+	response.xd_hdr.route_hi = upper_32_bits(response_route);
+	response.xd_hdr.route_lo = lower_32_bits(response_route);
+	response.xd_hdr.length_sn =
+		(response_declared_size - sizeof(response.xd_hdr)) / sizeof(u32) |
+		(response_sequence << TB_XDOMAIN_SN_SHIFT);
+	response.uuid = service_uuid;
+	response.opaque[0] = 0x80875166;
+	if (!same_protocol)
+		response.uuid.b[0] ^= 0xff;
+
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = response_size;
 	return tb_xdomain_match(&req, &pkg);
 }
 

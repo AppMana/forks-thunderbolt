@@ -5672,6 +5672,43 @@ static void tb_test_xdomain_response_match_follows_protocol_model(struct kunit *
 #undef EXPECT_MATCH_MODEL
 }
 
+static void tb_test_xdomain_service_response_payload_is_opaque(struct kunit *test)
+{
+	const size_t request_size = 92;
+	const size_t response_size = 100;
+
+	/*
+	 * A service protocol owns everything after the common route/length/UUID
+	 * prefix. Its request and response need not use native XDP opcodes there.
+	 */
+	KUNIT_EXPECT_TRUE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size, 0x1, 0, response_size, response_size,
+			true));
+
+	/* The common XDomain envelope remains part of request ownership. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size, 0x3, 0, response_size, response_size,
+			true));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size, 0x1, 1, response_size, response_size,
+			true));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size, 0x1, 0, response_size, response_size,
+			false));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size, 0x1, 0, request_size,
+			response_size, true));
+	KUNIT_EXPECT_FALSE(test,
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+			response_size - sizeof(u32), 0x1, 0, response_size,
+			response_size, true));
+}
+
 static void tb_test_xdomain_native_error_fails_request(struct kunit *test)
 {
 	/* Native control errors complete the request, but never as success. */
@@ -6139,6 +6176,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_plug_synth_scan_fails_keeps_retrying),
 	KUNIT_CASE(tb_test_cm_plug_synth_recovers_when_router_answers),
 	KUNIT_CASE(tb_test_xdomain_response_match_follows_protocol_model),
+	KUNIT_CASE(tb_test_xdomain_service_response_payload_is_opaque),
 	KUNIT_CASE(tb_test_xdomain_native_error_fails_request),
 	KUNIT_CASE(tb_test_ctl_liveness_threshold),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_classification),
