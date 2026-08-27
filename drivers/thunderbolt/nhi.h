@@ -37,10 +37,21 @@ struct tb_ring_snapshot {
 	u16 in_flight;
 	u32 index_raw;
 	u32 options;
+	u32 tail_attributes;
 	bool running;
 	bool indices_valid;
 	bool full;
 };
+
+static inline bool
+tb_nhi_tx_descriptor_completed(const struct tb_ring_snapshot *snapshot)
+{
+	if (!snapshot || !snapshot->running || !snapshot->in_flight)
+		return false;
+
+	return snapshot->tail_attributes &
+		((u32)RING_DESC_COMPLETED << 20);
+}
 
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);

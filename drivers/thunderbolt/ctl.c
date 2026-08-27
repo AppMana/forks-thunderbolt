@@ -968,10 +968,12 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
 		if (!snapshot_ret)
 			tb_ctl_warn_ratelimited(ctl,
-						"ring0 TX snapshot: running=%u size=%u sw_head=%u sw_tail=%u queued=%u in_flight=%u index=%#010x hw_prod=%u hw_cons=%u indices_valid=%u full=%u options=%#010x\n",
+						"ring0 TX snapshot: running=%u size=%u sw_head=%u sw_tail=%u queued=%u in_flight=%u tail_attr=%#010x tail_complete=%u index=%#010x hw_prod=%u hw_cons=%u indices_valid=%u full=%u options=%#010x\n",
 					tx_snapshot.running, tx_snapshot.size,
 					tx_snapshot.sw_head, tx_snapshot.sw_tail,
 					tx_snapshot.queued, tx_snapshot.in_flight,
+					tx_snapshot.tail_attributes,
+					tb_nhi_tx_descriptor_completed(&tx_snapshot),
 					tx_snapshot.index_raw,
 					tx_snapshot.hw_producer,
 					tx_snapshot.hw_consumer,

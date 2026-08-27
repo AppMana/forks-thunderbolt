@@ -2994,7 +2994,7 @@ static int icm_root_power_cycle(struct tb *tb)
 		state, tb_icm_root_recovery_command_event(ret, tx_consumed));
 	if (state != TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED) {
 		tb_err(tb,
-		       "host-router power-cycle request was not consumed (error %d); refusing to claim dispatch\n",
+		       "host-router power-cycle request has no request-local TX completion proof (error %d); refusing to claim dispatch\n",
 		       ret);
 		return ret;
 	}

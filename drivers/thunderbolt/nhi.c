@@ -731,6 +731,9 @@ int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot)
 		snapshot->queued++;
 	list_for_each_entry(frame, &ring->in_flight, list)
 		snapshot->in_flight++;
+	if (snapshot->in_flight)
+		snapshot->tail_attributes =
+			READ_ONCE(ring->descriptors[ring->tail].attributes);
 	snapshot->hw_producer = index >> 16;
 	snapshot->hw_consumer = index & 0xffff;
 	snapshot->indices_valid = snapshot->size &&

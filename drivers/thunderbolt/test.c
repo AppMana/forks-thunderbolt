@@ -3499,6 +3499,22 @@ static void tb_test_cfg_tx_consumption_is_independent_and_monotonic(struct kunit
 	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_DISABLED);
 }
 
+static void tb_test_tx_index_progress_is_not_descriptor_completion(struct kunit *test)
+{
+	struct tb_ring_snapshot snapshot = {
+		.running = true,
+		.indices_valid = true,
+		.in_flight = 1,
+		.hw_producer = 3,
+		.hw_consumer = 3,
+	};
+
+	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_descriptor_completed(&snapshot));
+
+	snapshot.tail_attributes = (u32)RING_DESC_COMPLETED << 20;
+	KUNIT_EXPECT_TRUE(test, tb_nhi_tx_descriptor_completed(&snapshot));
+}
+
 static void tb_test_nhi_startup_recovery_requires_power_cycle_dispatch(struct kunit *test)
 {
 	enum tb_nhi_recovery_action action;
@@ -5985,6 +6001,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_recovery_command_failure_is_terminal),
 	KUNIT_CASE(tb_test_root_power_cycle_timeout_requires_consumption),
 	KUNIT_CASE(tb_test_cfg_tx_consumption_is_independent_and_monotonic),
+	KUNIT_CASE(tb_test_tx_index_progress_is_not_descriptor_completion),
 	KUNIT_CASE(tb_test_nhi_startup_recovery_requires_power_cycle_dispatch),
 	KUNIT_CASE(tb_test_maple_root_power_cycle_encoding),
 	KUNIT_CASE(tb_test_pcie2cio_completion_states),
