@@ -1054,12 +1054,13 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 
 	switch (xd->state) {
 	case IDENT_STATE_PROPERTIES:
-		if (!xd->uuid_verified)
-			xd->state = IDENT_STATE_UUID;
-		else if (ident_properties_read(xd, peer))
+		if (ident_properties_read(xd, peer)) {
+			/* A response addressed back to us proves the ICM claim. */
+			xd->uuid_verified = true;
 			xd->enumerated = true;
-		else
+		} else {
 			xd->state = IDENT_STATE_UUID;	/* re-verify identity */
+		}
 		break;
 	case IDENT_STATE_UUID:
 		if (!peer->answers) {

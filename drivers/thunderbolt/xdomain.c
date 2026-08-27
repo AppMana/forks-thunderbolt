@@ -524,6 +524,33 @@ static int tb_xdp_handle_error(const struct tb_xdp_error_response *res)
 	return 0;
 }
 
+static bool tb_xdp_properties_ids_ok(const struct tb_xdp_properties_response *res,
+				     const uuid_t *local_uuid,
+				     const uuid_t *remote_uuid)
+{
+	return uuid_equal(&res->src_uuid, remote_uuid) &&
+	       uuid_equal(&res->dst_uuid, local_uuid);
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_properties_identity(bool source_matches,
+					 bool destination_matches)
+{
+	uuid_t local = UUID_INIT(0x11111111, 0x2222, 0x3333,
+				 0x44, 0x44, 0x55, 0x55, 0x66, 0x66,
+				 0x77, 0x77);
+	uuid_t remote = UUID_INIT(0xaaaaaaaa, 0xbbbb, 0xcccc,
+				  0xdd, 0xdd, 0xee, 0xee, 0xff, 0xff,
+				  0x00, 0x00);
+	struct tb_xdp_properties_response res = {};
+
+	uuid_copy(&res.src_uuid, source_matches ? &remote : &local);
+	uuid_copy(&res.dst_uuid, destination_matches ? &local : &remote);
+
+	return tb_xdp_properties_ids_ok(&res, &local, &remote);
+}
+#endif
+
 static int tb_xdp_uuid_request(struct tb_ctl *ctl, u64 route, int retry,
 			       uuid_t *uuid, u64 *remote_route)
 {
@@ -619,6 +646,10 @@ static int tb_xdp_properties_request(struct tb_ctl *ctl, u64 route,
 		ret = tb_xdp_handle_error(&res->err);
 		if (ret)
 			goto err;
+		if (!tb_xdp_properties_ids_ok(res, src_uuid, dst_uuid)) {
+			ret = -EKEYREJECTED;
+			goto err;
+		}
 
 		/*
 		 * Package length includes the whole payload without the
@@ -1842,6 +1873,15 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 	}
 
 	mutex_lock(&xd->lock);
+	/*
+	 * Firmware-managed controllers own the UUID-discovery stage. The ICM
+	 * connect event supplies an address claim, and a properties response
+	 * that names the claimed peer as source and this domain as destination
+	 * is the route-local peer proof. Nothing may globally match or publish
+	 * the identity before this exchange succeeds.
+	 */
+	xd->uuid_verified = true;
+	xd->needs_uuid = false;
 
 	/* Only accept newer generation properties (cached_gen==0 forces accept) */
 	if (tb_xdomain_generation_stale(xd->remote_properties, gen,
@@ -2706,9 +2746,8 @@ static bool tb_xdomain_should_initialize_link(bool remote_uuid_known)
 
 static bool tb_xdomain_initial_needs_uuid(bool remote_uuid_known)
 {
-	/* Supplied identities originate in topology events, not peer replies. */
-	(void)remote_uuid_known;
-	return true;
+	/* Firmware-managed controllers own UUID discovery for known peers. */
+	return !remote_uuid_known;
 }
 
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)

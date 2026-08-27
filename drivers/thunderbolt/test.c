@@ -4278,18 +4278,24 @@ static void tb_test_xdomain_event_uuid_requires_peer_verification(struct kunit *
 	struct ident_peer peer = { .true_uuid = 0x12345678u, .answers = true };
 	struct ident_xd xd = { .cached_uuid = peer.true_uuid };
 
-	/* A firmware topology event is a candidate, not peer authentication. */
-	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_initial_needs_uuid(true));
-	ident_tick(&xd, &peer);
-	KUNIT_EXPECT_FALSE(test, xd.enumerated);
-	KUNIT_EXPECT_EQ(test, IDENT_STATE_UUID, xd.state);
-	KUNIT_EXPECT_FALSE(test, xd.uuid_verified);
-
+	/*
+	 * A firmware topology UUID is an address claim, not authentication.
+	 * Firmware-managed controllers own UUID discovery, so prove the claim
+	 * with the first route-local properties response instead of issuing a
+	 * host UUID request the resident ICM consumes locally.
+	 */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_initial_needs_uuid(true));
 	ident_tick(&xd, &peer);
 	KUNIT_EXPECT_TRUE(test, xd.uuid_verified);
-	KUNIT_EXPECT_FALSE(test, xd.enumerated);
-	ident_tick(&xd, &peer);
 	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+}
+
+static void tb_test_xdomain_properties_response_proves_both_identities(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_properties_identity(true, true));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(false, true));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(true, false));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(false, false));
 }
 
 static void tb_test_xdomain_unverified_uuid_cannot_alias_route(struct kunit *test)
@@ -5530,6 +5536,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_never_final_identity),
 	KUNIT_CASE(tb_test_xdomain_responsive_peer_registers_promptly),
 	KUNIT_CASE(tb_test_xdomain_event_uuid_requires_peer_verification),
+	KUNIT_CASE(tb_test_xdomain_properties_response_proves_both_identities),
 	KUNIT_CASE(tb_test_xdomain_unverified_uuid_cannot_alias_route),
 	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),
 	KUNIT_CASE(tb_test_xdomain_peer_never_answers_leaves_no_latch),
