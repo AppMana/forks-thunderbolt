@@ -17,6 +17,9 @@
 
 #include "../../../thunderbolt/thunderbolt_negotiation.h"
 
+bool tbnet_test_session_needs_teardown(bool handshake_complete,
+				       bool session_active);
+
 static void tbnet_test_login_connect(struct kunit *test)
 {
 	struct tb_xdomain_handshake hs = { 0 };
@@ -64,6 +67,23 @@ static void tbnet_test_login_reconnect(struct kunit *test)
 	hs.request_sent = true;
 	hs.peer_seen = true;
 	KUNIT_EXPECT_TRUE(test, tb_xdomain_handshake_complete(&hs));
+}
+
+static void tbnet_test_supersede_still_tears_down_owned_session(struct kunit *test)
+{
+	struct tb_xdomain_handshake hs = {
+		.request_sent = true,
+		.peer_seen = true,
+	};
+	bool session_active = true;
+
+	KUNIT_ASSERT_TRUE(test, tb_xdomain_handshake_supersede(&hs));
+	KUNIT_ASSERT_FALSE(test, tb_xdomain_handshake_complete(&hs));
+
+	/* Resource ownership survives the control-state reset. */
+	KUNIT_EXPECT_TRUE(test,
+		tbnet_test_session_needs_teardown(
+			tb_xdomain_handshake_complete(&hs), session_active));
 }
 
 /*
@@ -204,6 +224,7 @@ static struct kunit_case tbnet_login_test_cases[] = {
 	KUNIT_CASE(tbnet_test_login_connect),
 	KUNIT_CASE(tbnet_test_login_supersede_on_relogin),
 	KUNIT_CASE(tbnet_test_login_reconnect),
+	KUNIT_CASE(tbnet_test_supersede_still_tears_down_owned_session),
 	KUNIT_CASE(tbnet_test_session_zombie_recovers),
 	KUNIT_CASE(tbnet_test_session_verify_healthy_noop),
 	{}
