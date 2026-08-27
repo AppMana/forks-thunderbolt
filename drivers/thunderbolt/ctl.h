@@ -156,10 +156,12 @@ tb_cfg_request_state_step(struct tb_cfg_request_state *state,
 		if (state->local != TB_CFG_LOCAL_WAITING)
 			return TB_CFG_REQUEST_ACTION_NONE;
 		state->local = TB_CFG_LOCAL_FAILED;
-		if (state->peer == TB_CFG_PEER_WAITING) {
-			state->peer = TB_CFG_PEER_CANCELED;
-			return TB_CFG_REQUEST_ACTION_FAIL;
-		}
+		/*
+		 * The firmware completion has a route but no transaction token.
+		 * It can describe another XDomain packet sent concurrently on the
+		 * same route, so it is diagnostic and cannot own the sequenced peer
+		 * response state machine.
+		 */
 		return TB_CFG_REQUEST_ACTION_NONE;
 
 	case TB_CFG_REQUEST_EVENT_LOCAL_TIMED_OUT:

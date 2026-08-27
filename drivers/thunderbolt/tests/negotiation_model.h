@@ -1215,10 +1215,7 @@ ctl_model_transaction_step(struct ctl_transaction_model *state,
 		if (state->submit != CTL_SUBMIT_MODEL_WAITING)
 			return CTL_TRANSACTION_MODEL_NONE;
 		state->submit = CTL_SUBMIT_MODEL_FAILED;
-		if (state->peer == CTL_PEER_MODEL_WAITING) {
-			state->peer = CTL_PEER_MODEL_CANCELED;
-			return CTL_TRANSACTION_MODEL_FAIL;
-		}
+		/* The route-only local status cannot own the sequenced peer wait. */
 		return CTL_TRANSACTION_MODEL_NONE;
 	case CTL_TRANSACTION_MODEL_PEER_MATCHED:
 		if (state->peer != CTL_PEER_MODEL_WAITING)
