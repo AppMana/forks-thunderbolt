@@ -563,8 +563,9 @@ struct tb_path {
  * @stop: Stops the domain
  * @deinit: Perform any cleanup after the domain is stopped but before
  *	     it is unregistered. Called without @tb->lock taken. Optional.
- * @runtime_reset: Reset controller firmware after every domain, service and
- *		   ring has been quiesced. Optional.
+ * @quiesced_reset: Reset controller firmware after the control channel and
+ *		    asynchronous work have been quiesced. Used for both failed
+ *		    startup and runtime recovery. Optional.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -603,7 +604,7 @@ struct tb_cm_ops {
 	int (*start)(struct tb *tb, bool reset);
 	void (*stop)(struct tb *tb);
 	void (*deinit)(struct tb *tb);
-	int (*runtime_reset)(struct tb *tb);
+	int (*quiesced_reset)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);

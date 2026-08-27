@@ -583,8 +583,8 @@ int tb_domain_remove(struct tb *tb, bool runtime_reset)
 	if (tb->cm_ops->deinit)
 		tb->cm_ops->deinit(tb);
 	if (runtime_reset) {
-		if (tb->cm_ops->runtime_reset)
-			ret = tb->cm_ops->runtime_reset(tb);
+		if (tb->cm_ops->quiesced_reset)
+			ret = tb->cm_ops->quiesced_reset(tb);
 		else
 			ret = -EOPNOTSUPP;
 	}

@@ -2797,7 +2797,7 @@ static int icm_firmware_reset(struct tb *tb, struct tb_nhi *nhi)
 	return icm->cio_reset(tb);
 }
 
-static int icm_runtime_reset(struct tb *tb)
+static int icm_quiesced_reset(struct tb *tb)
 {
 	struct tb_nhi *nhi = tb->nhi;
 	u32 before, after;
@@ -2816,7 +2816,7 @@ static int icm_runtime_reset(struct tb *tb)
 	if (!(after & REG_FW_STS_NVM_AUTH_DONE))
 		return -ETIMEDOUT;
 
-	tb_info(tb, "runtime ARC/CIO reset completed (FW_STS %#010x -> %#010x)\n",
+	tb_info(tb, "quiesced ARC/CIO reset completed (FW_STS %#010x -> %#010x)\n",
 		before, after);
 	return 0;
 }
@@ -3454,7 +3454,7 @@ static const struct tb_cm_ops icm_tr_ops = {
 	.start = icm_start,
 	.stop = icm_stop,
 	.deinit = icm_deinit,
-	.runtime_reset = icm_runtime_reset,
+	.quiesced_reset = icm_quiesced_reset,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,

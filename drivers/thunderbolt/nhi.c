@@ -409,14 +409,15 @@ static void nhi_probe_reprobe_work(struct work_struct *work)
 	if (state != TB_NHI_RECOVERY_RETRYING ||
 	    nhi_probe_recovery_set(pdev, state)) {
 		dev_err(reprobe->dev,
-			"one-shot PCI recovery could not dispatch its reprobe\n");
+			"one-shot ARC/CIO recovery could not dispatch its reprobe\n");
 		goto out;
 	}
 
 	ret = device_attach(reprobe->dev);
 	if (ret != 1)
 		dev_err(reprobe->dev,
-			"one-shot PCI recovery reprobe did not bind: %d\n", ret);
+			"one-shot ARC/CIO recovery reprobe did not bind: %d\n",
+			ret);
 out:
 	put_device(reprobe->dev);
 	kfree(reprobe);
@@ -426,24 +427,10 @@ static void nhi_probe_recovery_release(void *data)
 {
 	struct nhi_probe_recovery_context *ctx = data;
 	struct nhi_probe_reprobe *reprobe;
-	enum tb_nhi_recovery_event event;
-	int ret;
 
-	if (ctx->state != TB_NHI_RECOVERY_RESET_PENDING)
+	if (tb_nhi_recovery_action(ctx->state) !=
+	    TB_NHI_RECOVERY_ACTION_REPROBE)
 		return;
-
-	/* All later devres and all domain/ring state have been released. */
-	ret = pci_reset_function_locked(ctx->pdev);
-	event = ret ? TB_NHI_RECOVERY_RESET_FAILED :
-		      TB_NHI_RECOVERY_RESET_SUCCEEDED;
-	ctx->state = tb_nhi_recovery_next(ctx->state, event);
-	nhi_probe_recovery_set(ctx->pdev, ctx->state);
-
-	if (ret) {
-		dev_err(&ctx->pdev->dev,
-			"one-shot PCI recovery reset failed: %d\n", ret);
-		return;
-	}
 
 	reprobe = kzalloc(sizeof(*reprobe), GFP_KERNEL);
 	if (!reprobe)
@@ -457,7 +444,7 @@ static void nhi_probe_recovery_release(void *data)
 	}
 
 	dev_warn(&ctx->pdev->dev,
-		 "PCI recovery reset completed; queued one reprobe\n");
+		 "ARC/CIO recovery reset completed; queued one reprobe\n");
 	return;
 
 err_queue:
@@ -465,7 +452,7 @@ err_queue:
 					  TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
 	nhi_probe_recovery_set(ctx->pdev, ctx->state);
 	dev_err(&ctx->pdev->dev,
-		"one-shot PCI recovery could not queue its reprobe\n");
+		"one-shot ARC/CIO recovery could not queue its reprobe\n");
 }
 
 /* Host interface quirks */
@@ -2222,10 +2209,45 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		recovery_next = tb_nhi_recovery_next(recovery->state,
 						     recovery_event);
 
-		/*
-		 * At this point the RX/TX rings might already have been
-		 * activated. Do a proper shutdown.
-		 */
+		if (tb_nhi_recovery_action(recovery_next) ==
+		    TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET) {
+			recovery_res = nhi_probe_recovery_set(pdev, recovery_next);
+			if (recovery_res) {
+				dev_err(dev,
+					"cannot reserve one-shot ARC/CIO recovery state: %d\n",
+					recovery_res);
+				goto release_domain;
+			}
+			recovery->state = recovery_next;
+
+			/*
+			 * tb_domain_add() stopped the control channel and flushed its
+			 * asynchronous work before returning. Reset ARC/CIO while the
+			 * connection-manager state and mapped NHI registers still exist;
+			 * a PCI secondary-bus reset does not clear this retained state.
+			 */
+			if (tb->cm_ops->quiesced_reset)
+				recovery_res = tb->cm_ops->quiesced_reset(tb);
+			else
+				recovery_res = -EOPNOTSUPP;
+			recovery_event = recovery_res ?
+				TB_NHI_RECOVERY_ARC_CIO_RESET_FAILED :
+				TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED;
+			recovery_next =
+				tb_nhi_recovery_next(recovery->state, recovery_event);
+			nhi_probe_recovery_set(pdev, recovery_next);
+			recovery->state = recovery_next;
+			if (recovery_res)
+				dev_err(dev,
+					"quiesced ARC/CIO startup recovery failed: %d\n",
+					recovery_res);
+			else
+				dev_warn(dev,
+					 "root-config proof failed; ARC/CIO reset succeeded and one reprobe will follow\n");
+		}
+
+release_domain:
+		/* Release every ring and mapping before the deferred reprobe. */
 		tb_domain_put(tb);
 		if (!nhi_wait_domain_released(nhi))
 			dev_err(dev,
@@ -2233,19 +2255,8 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 				NHI_DOMAIN_RELEASE_MS);
 		nhi_shutdown(nhi);
 
-		if (recovery_next == TB_NHI_RECOVERY_RESET_PENDING) {
-			recovery_res = nhi_probe_recovery_set(pdev, recovery_next);
-			if (recovery_res) {
-				dev_err(dev,
-					"cannot reserve one-shot PCI recovery state: %d\n",
-					recovery_res);
-				return res;
-			}
-			recovery->state = recovery_next;
-			dev_warn(dev,
-				 "root-config control path remained unresponsive after DriverReady; scheduling one quiesced PCI recovery reset\n");
+		if (recovery->state == TB_NHI_RECOVERY_REPROBE_PENDING)
 			return res;
-		}
 
 		if (recovery->state != TB_NHI_RECOVERY_IDLE)
 			nhi_probe_recovery_clear(pdev);
@@ -2253,7 +2264,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return res;
 	}
 	if (recovery->state == TB_NHI_RECOVERY_RETRYING)
-		dev_info(dev, "probe succeeded after one-shot PCI recovery reset\n");
+		dev_info(dev, "probe succeeded after one-shot ARC/CIO recovery reset\n");
 	nhi_probe_recovery_clear(pdev);
 	recovery->state = tb_nhi_recovery_next(recovery->state,
 					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);

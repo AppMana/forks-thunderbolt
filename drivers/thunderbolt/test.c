@@ -3398,9 +3398,10 @@ static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
 
 	state = tb_nhi_recovery_next(state,
 				     TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
-	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RESET_PENDING);
+	KUNIT_ASSERT_EQ(test, state,
+			TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING);
 	state = tb_nhi_recovery_next(state,
-				     TB_NHI_RECOVERY_RESET_SUCCEEDED);
+				     TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED);
 	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_REPROBE_PENDING);
 	state = tb_nhi_recovery_next(state,
 				     TB_NHI_RECOVERY_REPROBE_DISPATCHED);
@@ -3412,10 +3413,12 @@ static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
 
 static void tb_test_nhi_recovery_reset_failure_is_terminal(struct kunit *test)
 {
-	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_RESET_PENDING;
+	enum tb_nhi_recovery_state state =
+		TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING;
 	enum tb_nhi_recovery_state next;
 
-	state = tb_nhi_recovery_next(state, TB_NHI_RECOVERY_RESET_FAILED);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_ARC_CIO_RESET_FAILED);
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
 	next = tb_nhi_recovery_next(state,
 				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
@@ -3425,6 +3428,16 @@ static void tb_test_nhi_recovery_reset_failure_is_terminal(struct kunit *test)
 	state = tb_nhi_recovery_next(state,
 				     TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+}
+
+static void tb_test_nhi_startup_recovery_uses_arc_cio(struct kunit *test)
+{
+	enum tb_nhi_recovery_action action;
+
+	action = tb_nhi_recovery_action(TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING);
+	KUNIT_EXPECT_EQ(test, action, TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET);
+	action = tb_nhi_recovery_action(TB_NHI_RECOVERY_REPROBE_PENDING);
+	KUNIT_EXPECT_EQ(test, action, TB_NHI_RECOVERY_ACTION_REPROBE);
 }
 
 static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)
@@ -5863,6 +5876,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
 	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
 	KUNIT_CASE(tb_test_nhi_recovery_reset_failure_is_terminal),
+	KUNIT_CASE(tb_test_nhi_startup_recovery_uses_arc_cio),
 	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
 	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
 	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),
