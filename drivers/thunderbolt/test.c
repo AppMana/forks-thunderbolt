@@ -4882,6 +4882,21 @@ static void tb_test_xdomain_event_uuid_requires_peer_verification(struct kunit *
 	KUNIT_EXPECT_TRUE(test, xd.enumerated);
 }
 
+/*
+ * Discovery and announcement are independent state machines. A UUID supplied
+ * by firmware is only an address claim, so INIT may begin route-local
+ * discovery but must not start announcing until a response proves the peer.
+ */
+static void tb_test_xdomain_discovery_precedes_announcement(struct kunit *test)
+{
+	/* No claimed identity: UUID discovery runs by itself. */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_announce_ready(true, false));
+	/* Firmware claim present, but no route-local peer proof yet. */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_announce_ready(false, false));
+	/* The independent announcement machine may start after proof. */
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_announce_ready(false, true));
+}
+
 static void tb_test_xdomain_properties_response_proves_both_identities(struct kunit *test)
 {
 	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_properties_identity(true, true));
@@ -6315,6 +6330,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_never_final_identity),
 	KUNIT_CASE(tb_test_xdomain_responsive_peer_registers_promptly),
 	KUNIT_CASE(tb_test_xdomain_event_uuid_requires_peer_verification),
+	KUNIT_CASE(tb_test_xdomain_discovery_precedes_announcement),
 	KUNIT_CASE(tb_test_xdomain_properties_response_proves_both_identities),
 	KUNIT_CASE(tb_test_xdomain_unverified_uuid_cannot_alias_route),
 	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),

@@ -137,6 +137,7 @@ MODULE_PARM_DESC(xdomain, "allow XDomain protocol (default: true)");
 
 static bool tb_xdomain_initial_state_needs_link_status(bool needs_uuid,
 						       bool bonding_possible);
+static bool tb_xdomain_announce_ready(bool needs_uuid, bool uuid_verified);
 static bool
 tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 					     bool services_published,
@@ -2230,6 +2231,7 @@ static void tb_xdomain_failed(struct tb_xdomain *xd)
 static void tb_xdomain_state_work(struct work_struct *work)
 {
 	struct tb_xdomain *xd = container_of(work, typeof(*xd), state_work.work);
+	bool announcement_ready;
 	int ret, state = xd->state;
 
 	if (WARN_ON_ONCE(state < XDOMAIN_STATE_INIT ||
@@ -2243,7 +2245,9 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (xd->needs_uuid) {
 			tb_xdomain_queue_uuid(xd);
 		} else {
-			tb_xdomain_queue_properties_changed(xd);
+			if (tb_xdomain_announce_ready(xd->needs_uuid,
+						      xd->uuid_verified))
+				tb_xdomain_queue_properties_changed(xd);
 			if (tb_xdomain_initial_state_needs_link_status(
 					xd->needs_uuid, xd->bonding_possible))
 				tb_xdomain_queue_link_status(xd);
@@ -2398,6 +2402,9 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		break;
 
 	case XDOMAIN_STATE_PROPERTIES:
+		announcement_ready =
+			tb_xdomain_announce_ready(xd->needs_uuid,
+						  xd->uuid_verified);
 		ret = tb_xdomain_get_properties(xd);
 		if (ret) {
 			if (ret == -EAGAIN)
@@ -2431,6 +2438,17 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			else
 				tb_xdomain_queue_properties(xd);
 		} else {
+			/*
+			 * A firmware-supplied UUID is only an address claim. Its
+			 * first route-local properties response proves the peer and
+			 * starts the independent announcement machine. UUID discovery
+			 * already starts it after its own successful proof, so do not
+			 * re-arm that path here.
+			 */
+			if (!announcement_ready &&
+			    tb_xdomain_announce_ready(xd->needs_uuid,
+						      xd->uuid_verified))
+				tb_xdomain_queue_properties_changed(xd);
 			xd->state = XDOMAIN_STATE_ENUMERATED;
 			tb_xdomain_queue_bonding_rearm(xd);
 		}
@@ -2818,10 +2836,20 @@ static bool tb_xdomain_initial_needs_uuid(bool remote_uuid_known)
 	return !remote_uuid_known;
 }
 
+static bool tb_xdomain_announce_ready(bool needs_uuid, bool uuid_verified)
+{
+	return !needs_uuid && uuid_verified;
+}
+
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known)
 {
 	return tb_xdomain_initial_needs_uuid(remote_uuid_known);
+}
+
+bool tb_test_xdomain_announce_ready(bool needs_uuid, bool uuid_verified)
+{
+	return tb_xdomain_announce_ready(needs_uuid, uuid_verified);
 }
 #endif
 
