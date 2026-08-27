@@ -38,9 +38,10 @@
 
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
- * become readable. Each pass issues exactly one 100 ms read and then sleeps
- * 50 ms, so the default 50 is about 7.5 s. Completed descriptors are reaped
- * and reusable; this budget is independent of the ring size.
+ * become readable. Each pass retains the normal config-read retry sequence
+ * and then sleeps 50 ms, so the default 50 is about 22.5 s in the worst case.
+ * Completed descriptors are reaped and reusable; this budget is independent
+ * of the ring size.
  *
  * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
  * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
@@ -52,7 +53,7 @@
 static unsigned int icm_cfg_space_retries = 50;
 module_param(icm_cfg_space_retries, uint, 0644);
 MODULE_PARM_DESC(icm_cfg_space_retries,
-		 "single-request root config-space readiness passes, ~150ms each (default 50)");
+		 "root config-space readiness passes, up to ~450ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -2647,9 +2648,8 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	     pass++) {
 		u32 tmp;
 
-		res = tb_cfg_read_raw_once(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-					   0, 1,
-					   TB_ICM_ROOT_CONFIG_TIMEOUT_MS);
+		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
+				      0, 1, TB_ICM_ROOT_CONFIG_TIMEOUT_MS);
 		if (!res.err) {
 			tb_icm_startup_proof_advance(&proof,
 						     TB_ICM_PROOF_ROOT_CONFIG);
@@ -2679,7 +2679,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	 * matched config response prove the end-to-end control path.
 	 */
 	tb_err(tb,
-	       "root config proof exhausted %u single-request pass(es) / %u ms\n",
+	       "root config proof exhausted %u sequence-retry pass(es) / %u ms\n",
 	       tb_icm_root_config_request_count(pass),
 	       jiffies_to_msecs(jiffies - started));
 	icm->root_config_timed_out = res.err == -ETIMEDOUT;

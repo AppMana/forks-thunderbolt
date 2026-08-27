@@ -312,10 +312,6 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 				     u64 route, u32 port,
 				     enum tb_cfg_space space, u32 offset,
 				     u32 length, int timeout_msec);
-struct tb_cfg_result tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer,
-					  u64 route, u32 port,
-					  enum tb_cfg_space space, u32 offset,
-					  u32 length, int timeout_msec);
 struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 				      u64 route, u32 port,
 				      enum tb_cfg_space space, u32 offset,

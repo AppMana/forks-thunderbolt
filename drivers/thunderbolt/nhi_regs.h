@@ -256,10 +256,19 @@ tb_icm_root_config_request_count(unsigned int passes)
 	return passes;
 }
 
-static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)
+static inline unsigned int
+tb_icm_root_config_request_budget(unsigned int passes,
+				  unsigned int retries_per_pass)
+{
+	return tb_icm_root_config_request_count(passes) * retries_per_pass;
+}
+
+static inline u64
+tb_icm_root_config_budget_ms(unsigned int passes,
+			     unsigned int retries_per_pass)
 {
 	return (u64)tb_icm_root_config_request_count(passes) *
-		(TB_ICM_ROOT_CONFIG_TIMEOUT_MS +
+		(TB_ICM_ROOT_CONFIG_TIMEOUT_MS * retries_per_pass +
 		 TB_ICM_ROOT_CONFIG_INTERVAL_MS);
 }
 

@@ -3374,19 +3374,19 @@ static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
 }
 
 /*
- * A readiness pass is one physical request. The generic config helper retries
- * four times internally, so composing it with the outer readiness loop turns
- * 50 observations into 200 requests and a roughly 23 second request storm.
+ * The generic config helper's retry group advances the protocol sequence.
+ * Replacing it with independent one-request passes collapses that progression.
  */
-static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *test)
+static void tb_test_icm_root_config_probe_preserves_sequence_retries(struct kunit *test)
 {
 	/*
-	 * Completion reaping keeps ring capacity reusable. Do not truncate the
-	 * caller's readiness budget to reserve descriptors for a later command:
-	 * a slow but healthy controller may need more than eight observations.
+	 * Each readiness pass must retain the normal four-request sequence group.
+	 * Recreating a one-request helper on every pass sends sequence zero over
+	 * and over, which a controller may correctly treat as a duplicate.
 	 */
 	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 50u);
-	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 7500u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_budget(50, 4), 200u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50, 4), 22500u);
 }
 
 /*
@@ -5999,7 +5999,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
 	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
-	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
+	KUNIT_CASE(tb_test_icm_root_config_probe_preserves_sequence_retries),
 	KUNIT_CASE(tb_test_icm_root_recovery_is_separate_and_bounded),
 	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
 	KUNIT_CASE(tb_test_nhi_recovery_command_failure_is_terminal),

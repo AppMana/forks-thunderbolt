@@ -1498,29 +1498,6 @@ tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 }
 
 /**
- * tb_cfg_read_raw_once() - issue one config-space read without retrying
- * @ctl: Pointer to the control channel
- * @buffer: Buffer where the data is read
- * @route: Route string of the router
- * @port: Port number when reading from %TB_CFG_PORT, %0 otherwise
- * @space: Config space selector
- * @offset: Dword offset of the register to start reading
- * @length: Number of dwords to read
- * @timeout_msec: Timeout in ms how long to wait for the response
- *
- * Readiness polling owns its retry policy and must use this helper so a
- * caller's observation loop does not multiply the generic retry loop.
- */
-struct tb_cfg_result
-tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
-		     enum tb_cfg_space space, u32 offset, u32 length,
-		     int timeout_msec)
-{
-	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
-				       length, timeout_msec, 1);
-}
-
-/**
  * tb_cfg_write_raw() - write from buffer into config space
  * @ctl: Pointer to the control channel
  * @buffer: Data to write
