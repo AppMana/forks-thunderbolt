@@ -3401,6 +3401,9 @@ static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RESET_PENDING);
 	state = tb_nhi_recovery_next(state,
 				     TB_NHI_RECOVERY_RESET_SUCCEEDED);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_REPROBE_PENDING);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_DISPATCHED);
 	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RETRYING);
 	next = tb_nhi_recovery_next(state,
 				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
@@ -3417,6 +3420,11 @@ static void tb_test_nhi_recovery_reset_failure_is_terminal(struct kunit *test)
 	next = tb_nhi_recovery_next(state,
 				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
 	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+
+	state = TB_NHI_RECOVERY_REPROBE_PENDING;
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
 }
 
 static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)

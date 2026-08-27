@@ -55,8 +55,14 @@ struct nhi_probe_recovery_context {
 	enum tb_nhi_recovery_state state;
 };
 
+struct nhi_probe_reprobe {
+	struct work_struct work;
+	struct device *dev;
+};
+
 static LIST_HEAD(nhi_probe_recoveries);
 static DEFINE_MUTEX(nhi_probe_recoveries_lock);
+static struct workqueue_struct *nhi_probe_recovery_wq;
 
 static bool nhi_probe_recovery_matches(const struct nhi_probe_recovery_record *r,
 				       const struct pci_dev *pdev)
@@ -139,9 +145,37 @@ static void nhi_probe_recovery_clear_all(void)
 	mutex_unlock(&nhi_probe_recoveries_lock);
 }
 
+static void nhi_probe_reprobe_work(struct work_struct *work)
+{
+	struct nhi_probe_reprobe *reprobe = container_of(work, typeof(*reprobe),
+							 work);
+	struct pci_dev *pdev = to_pci_dev(reprobe->dev);
+	enum tb_nhi_recovery_state state;
+	int ret;
+
+	state = nhi_probe_recovery_get(pdev);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_DISPATCHED);
+	if (state != TB_NHI_RECOVERY_RETRYING ||
+	    nhi_probe_recovery_set(pdev, state)) {
+		dev_err(reprobe->dev,
+			"one-shot PCI recovery could not dispatch its reprobe\n");
+		goto out;
+	}
+
+	ret = device_attach(reprobe->dev);
+	if (ret != 1)
+		dev_err(reprobe->dev,
+			"one-shot PCI recovery reprobe did not bind: %d\n", ret);
+out:
+	put_device(reprobe->dev);
+	kfree(reprobe);
+}
+
 static void nhi_probe_recovery_release(void *data)
 {
 	struct nhi_probe_recovery_context *ctx = data;
+	struct nhi_probe_reprobe *reprobe;
 	enum tb_nhi_recovery_event event;
 	int ret;
 
@@ -155,12 +189,33 @@ static void nhi_probe_recovery_release(void *data)
 	ctx->state = tb_nhi_recovery_next(ctx->state, event);
 	nhi_probe_recovery_set(ctx->pdev, ctx->state);
 
-	if (ret)
+	if (ret) {
 		dev_err(&ctx->pdev->dev,
 			"one-shot PCI recovery reset failed: %d\n", ret);
-	else
-		dev_warn(&ctx->pdev->dev,
-			 "PCI recovery reset completed; retrying probe once\n");
+		return;
+	}
+
+	reprobe = kzalloc(sizeof(*reprobe), GFP_KERNEL);
+	if (!reprobe)
+		goto err_queue;
+	INIT_WORK(&reprobe->work, nhi_probe_reprobe_work);
+	reprobe->dev = get_device(&ctx->pdev->dev);
+	if (!queue_work(nhi_probe_recovery_wq, &reprobe->work)) {
+		put_device(reprobe->dev);
+		kfree(reprobe);
+		goto err_queue;
+	}
+
+	dev_warn(&ctx->pdev->dev,
+		 "PCI recovery reset completed; queued one reprobe\n");
+	return;
+
+err_queue:
+	ctx->state = tb_nhi_recovery_next(ctx->state,
+					  TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
+	nhi_probe_recovery_set(ctx->pdev, ctx->state);
+	dev_err(&ctx->pdev->dev,
+		"one-shot PCI recovery could not queue its reprobe\n");
 }
 
 /* Host interface quirks */
@@ -1811,6 +1866,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	enum tb_nhi_recovery_state recovery_next;
 	struct tb_nhi *nhi;
 	struct tb *tb;
+	int recovery_res;
 	int res;
 
 	if (!nhi_imr_valid(pdev))
@@ -1921,17 +1977,17 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		nhi_shutdown(nhi);
 
 		if (recovery_next == TB_NHI_RECOVERY_RESET_PENDING) {
-			res = nhi_probe_recovery_set(pdev, recovery_next);
-			if (res) {
+			recovery_res = nhi_probe_recovery_set(pdev, recovery_next);
+			if (recovery_res) {
 				dev_err(dev,
 					"cannot reserve one-shot PCI recovery state: %d\n",
-					res);
-				return -ETIMEDOUT;
+					recovery_res);
+				return res;
 			}
 			recovery->state = recovery_next;
 			dev_warn(dev,
 				 "root-config control path remained unresponsive after DriverReady; scheduling one quiesced PCI recovery reset\n");
-			return -EPROBE_DEFER;
+			return res;
 		}
 
 		if (recovery->state != TB_NHI_RECOVERY_IDLE)
@@ -2118,15 +2174,25 @@ static int __init nhi_init(void)
 	ret = tb_domain_init();
 	if (ret)
 		return ret;
-	ret = pci_register_driver(&nhi_driver);
-	if (ret)
+
+	nhi_probe_recovery_wq = alloc_ordered_workqueue("thunderbolt_recovery",
+							WQ_MEM_RECLAIM);
+	if (!nhi_probe_recovery_wq) {
 		tb_domain_exit();
+		return -ENOMEM;
+	}
+	ret = pci_register_driver(&nhi_driver);
+	if (ret) {
+		destroy_workqueue(nhi_probe_recovery_wq);
+		tb_domain_exit();
+	}
 	return ret;
 }
 
 static void __exit nhi_unload(void)
 {
 	pci_unregister_driver(&nhi_driver);
+	destroy_workqueue(nhi_probe_recovery_wq);
 	nhi_probe_recovery_clear_all();
 	tb_domain_exit();
 }
