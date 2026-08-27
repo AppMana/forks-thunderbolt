@@ -175,6 +175,7 @@ struct icm {
 	unsigned int pcie_rescan_retries;
 	bool pcie_rescan_reclaim_empty;
 	bool veto;
+	bool driver_ready_timed_out;
 	bool root_config_timed_out;
 	bool (*is_supported)(struct tb *tb);
 	int (*cio_reset)(struct tb *tb);
@@ -2637,6 +2638,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	u32 fw_sts, outmail;
 	int ret;
 
+	icm->driver_ready_timed_out = false;
 	icm->root_config_timed_out = false;
 
 	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
@@ -2648,9 +2650,11 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 
 	ret = icm->driver_ready(tb, security_level, proto_version, nboot_acl,
 				rpm);
-	if (ret)
+	if (ret) {
+		icm->driver_ready_timed_out = ret == -ETIMEDOUT;
 		return icm_log_startup_failure(tb, "DriverReady", ret, &proof,
 					       &before);
+	}
 	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
 
 	/*
@@ -3019,6 +3023,14 @@ bool icm_root_config_timed_out(struct tb *tb)
 		return false;
 
 	return ((struct icm *)tb_priv(tb))->root_config_timed_out;
+}
+
+bool icm_driver_ready_timed_out(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->driver_ready_timed_out;
 }
 
 static int icm_suspend(struct tb *tb)

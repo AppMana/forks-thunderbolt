@@ -3433,11 +3433,16 @@ static void tb_test_nhi_recovery_reset_failure_is_terminal(struct kunit *test)
 static void tb_test_nhi_startup_recovery_uses_arc_cio(struct kunit *test)
 {
 	enum tb_nhi_recovery_action action;
+	enum tb_nhi_recovery_state state;
 
 	action = tb_nhi_recovery_action(TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING);
 	KUNIT_EXPECT_EQ(test, action, TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET);
 	action = tb_nhi_recovery_action(TB_NHI_RECOVERY_REPROBE_PENDING);
 	KUNIT_EXPECT_EQ(test, action, TB_NHI_RECOVERY_ACTION_REPROBE);
+
+	state = tb_nhi_recovery_next(TB_NHI_RECOVERY_IDLE,
+				     TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING);
 }
 
 static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)

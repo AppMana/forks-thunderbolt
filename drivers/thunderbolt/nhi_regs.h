@@ -245,6 +245,7 @@ enum tb_nhi_recovery_state {
 };
 
 enum tb_nhi_recovery_event {
+	TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT,
 	TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT,
 	TB_NHI_RECOVERY_OTHER_FAILURE,
 	TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED,
@@ -341,7 +342,8 @@ tb_nhi_recovery_next(enum tb_nhi_recovery_state state,
 {
 	switch (state) {
 	case TB_NHI_RECOVERY_IDLE:
-		if (event == TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT)
+		if (event == TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT ||
+		    event == TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT)
 			return TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING;
 		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
 			return TB_NHI_RECOVERY_COMPLETE;

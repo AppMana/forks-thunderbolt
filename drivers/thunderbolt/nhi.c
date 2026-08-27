@@ -2201,11 +2201,18 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	res = tb_domain_add(tb, host_reset);
 	if (res) {
-		if (res == -ETIMEDOUT && icm_root_config_timed_out(tb) &&
-		    tb_nhi_recovery_supported(pdev->vendor, pdev->device))
-			recovery_event = TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT;
-		else
+		if (res == -ETIMEDOUT &&
+		    tb_nhi_recovery_supported(pdev->vendor, pdev->device)) {
+			if (icm_driver_ready_timed_out(tb))
+				recovery_event =
+					TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT;
+			else if (icm_root_config_timed_out(tb))
+				recovery_event = TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT;
+			else
+				recovery_event = TB_NHI_RECOVERY_OTHER_FAILURE;
+		} else {
 			recovery_event = TB_NHI_RECOVERY_OTHER_FAILURE;
+		}
 		recovery_next = tb_nhi_recovery_next(recovery->state,
 						     recovery_event);
 
