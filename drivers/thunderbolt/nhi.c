@@ -562,36 +562,14 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 	u32 old, new;
 
 	if (ring->irq > 0) {
-		u32 step, shift, ivr, misc;
+		u32 step, shift, ivr;
 		void __iomem *ivr_base;
-		bool auto_clear;
 		int index;
 
 		if (ring->is_tx)
 			index = ring->hop;
 		else
 			index = ring->hop + ring->nhi->hop_count;
-
-		/*
-		 * Intel routers support a bit that isn't part of
-		 * the USB4 spec to ask the hardware to clear
-		 * interrupt status bits automatically since
-		 * we already know which interrupt was triggered.
-		 *
-		 * Other routers explicitly disable auto-clear
-		 * to prevent conditions that may occur where two
-		 * MSIX interrupts are simultaneously active and
-		 * reading the register clears both of them.
-		 */
-		misc = nhi_read(ring->nhi, ring->nhi->iobase + REG_DMA_MISC);
-		auto_clear = ring->nhi->quirks & QUIRK_AUTO_CLEAR_INT;
-		new = tb_nhi_dma_misc_interrupt_policy(misc, auto_clear);
-		if (new != misc) {
-			iowrite32(new, ring->nhi->iobase + REG_DMA_MISC);
-			dev_dbg(&ring->nhi->pdev->dev,
-				"DMA_MISC interrupt policy %#010x -> %#010x\n",
-				misc, new);
-		}
 
 		ivr_base = ring->nhi->iobase + REG_INT_VEC_ALLOC_BASE;
 		step = index / REG_INT_VEC_ALLOC_REGS * REG_INT_VEC_ALLOC_BITS;
@@ -641,6 +619,25 @@ static void nhi_disable_interrupts(struct tb_nhi *nhi)
 	/* clear interrupt status bits */
 	for (i = 0; i < RING_NOTIFY_REG_COUNT(nhi); i++)
 		nhi_clear_interrupt(nhi, 4 * i);
+}
+
+static void nhi_mask_all_interrupts(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < RING_INTERRUPT_REG_COUNT(nhi); i++)
+		iowrite32(~0, nhi->iobase +
+			  REG_RING_INTERRUPT_MASK_CLEAR_BASE + 4 * i);
+}
+
+static void nhi_drain_interrupt_status(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < RING_NOTIFY_REG_COUNT(nhi); i++) {
+		nhi_read(nhi, nhi->iobase + REG_RING_NOTIFY_BASE + 4 * i);
+		iowrite32(~0, nhi->iobase + REG_RING_INT_CLEAR + 4 * i);
+	}
 }
 
 /* ring helper methods */
@@ -2033,10 +2030,16 @@ static int nhi_init_msi(struct tb_nhi *nhi)
 {
 	struct pci_dev *pdev = nhi->pdev;
 	struct device *dev = &pdev->dev;
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_RESET;
+	enum tb_nhi_irq_mode mode;
+	u32 misc, new, readback;
 	int res, irq, nvec;
 
-	/* In case someone left them on. */
-	nhi_disable_interrupts(nhi);
+	/* Establish a quiescent point before changing the global DMA policy. */
+	nhi_mask_all_interrupts(nhi);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_MASK_ALL);
+	nhi_drain_interrupt_status(nhi);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_DRAIN_STATUS);
 
 	nhi_enable_int_throttling(nhi);
 
@@ -2065,6 +2068,32 @@ static int nhi_init_msi(struct tb_nhi *nhi)
 				       IRQF_NO_SUSPEND, "thunderbolt", nhi);
 		if (res)
 			return dev_err_probe(dev, res, "request_irq failed, aborting\n");
+	} else {
+		/*
+		 * DMA_MISC is global to the NHI. Configure it once while every
+		 * cause is masked and drained, before any ring programs a vector or
+		 * enables its cause. Intel uses automatic status clearing; the
+		 * explicit W1C mode remains the non-Intel MSI-X policy.
+		 */
+		mode = nhi->quirks & QUIRK_AUTO_CLEAR_INT ?
+			TB_NHI_IRQ_AUTO_STATUS_CLEAR : TB_NHI_IRQ_EXPLICIT_W1C;
+		misc = nhi_read(nhi, nhi->iobase + REG_DMA_MISC);
+		new = tb_nhi_dma_misc_interrupt_policy(misc, mode);
+		if (new != misc)
+			iowrite32(new, nhi->iobase + REG_DMA_MISC);
+		phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+
+		/* Flush the posted policy write before vector routing can begin. */
+		readback = nhi_read(nhi, nhi->iobase + REG_DMA_MISC);
+		phase = tb_nhi_irq_setup_next(phase,
+					      TB_NHI_IRQ_SETUP_FLUSH_MODE);
+		if (READ_ONCE(nhi->going_away) || phase != TB_NHI_IRQ_SETUP_READY ||
+		    tb_nhi_dma_misc_interrupt_mode(readback) != mode) {
+			pci_free_irq_vectors(pdev);
+			return -EIO;
+		}
+		dev_dbg(dev, "DMA_MISC interrupt policy %#010x -> %#010x\n",
+			misc, readback);
 	}
 
 	return 0;

@@ -119,14 +119,84 @@ struct ring_desc {
 #define REG_DMA_MISC_INT_AUTO_CLEAR     BIT(2)
 #define REG_DMA_MISC_DISABLE_AUTO_CLEAR	BIT(17)
 
-static inline u32 tb_nhi_dma_misc_interrupt_policy(u32 value, bool auto_clear)
+enum tb_nhi_irq_mode {
+	TB_NHI_IRQ_AUTO_STATUS_CLEAR,
+	TB_NHI_IRQ_CLEAR_ON_READ,
+	TB_NHI_IRQ_EXPLICIT_W1C,
+	TB_NHI_IRQ_INVALID,
+};
+
+static inline enum tb_nhi_irq_mode tb_nhi_dma_misc_interrupt_mode(u32 value)
+{
+	bool auto_clear = value & REG_DMA_MISC_INT_AUTO_CLEAR;
+	bool disable_clear_on_read = value & REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+
+	if (auto_clear && disable_clear_on_read)
+		return TB_NHI_IRQ_INVALID;
+	if (auto_clear)
+		return TB_NHI_IRQ_AUTO_STATUS_CLEAR;
+	if (disable_clear_on_read)
+		return TB_NHI_IRQ_EXPLICIT_W1C;
+
+	return TB_NHI_IRQ_CLEAR_ON_READ;
+}
+
+static inline u32
+tb_nhi_dma_misc_interrupt_policy(u32 value, enum tb_nhi_irq_mode mode)
 {
 	value &= ~(REG_DMA_MISC_INT_AUTO_CLEAR |
 		   REG_DMA_MISC_DISABLE_AUTO_CLEAR);
-	if (auto_clear)
+	if (mode == TB_NHI_IRQ_AUTO_STATUS_CLEAR)
 		return value | REG_DMA_MISC_INT_AUTO_CLEAR;
+	if (mode == TB_NHI_IRQ_EXPLICIT_W1C)
+		return value | REG_DMA_MISC_DISABLE_AUTO_CLEAR;
 
-	return value | REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+	return value;
+}
+
+enum tb_nhi_irq_setup_phase {
+	TB_NHI_IRQ_SETUP_RESET,
+	TB_NHI_IRQ_SETUP_MASKED,
+	TB_NHI_IRQ_SETUP_STATUS_DRAINED,
+	TB_NHI_IRQ_SETUP_MODE_SET,
+	TB_NHI_IRQ_SETUP_READY,
+	TB_NHI_IRQ_SETUP_INVALID,
+};
+
+enum tb_nhi_irq_setup_event {
+	TB_NHI_IRQ_SETUP_MASK_ALL,
+	TB_NHI_IRQ_SETUP_DRAIN_STATUS,
+	TB_NHI_IRQ_SETUP_SET_MODE,
+	TB_NHI_IRQ_SETUP_FLUSH_MODE,
+};
+
+static inline enum tb_nhi_irq_setup_phase
+tb_nhi_irq_setup_next(enum tb_nhi_irq_setup_phase phase,
+		      enum tb_nhi_irq_setup_event event)
+{
+	switch (phase) {
+	case TB_NHI_IRQ_SETUP_RESET:
+		if (event == TB_NHI_IRQ_SETUP_MASK_ALL)
+			return TB_NHI_IRQ_SETUP_MASKED;
+		break;
+	case TB_NHI_IRQ_SETUP_MASKED:
+		if (event == TB_NHI_IRQ_SETUP_DRAIN_STATUS)
+			return TB_NHI_IRQ_SETUP_STATUS_DRAINED;
+		break;
+	case TB_NHI_IRQ_SETUP_STATUS_DRAINED:
+		if (event == TB_NHI_IRQ_SETUP_SET_MODE)
+			return TB_NHI_IRQ_SETUP_MODE_SET;
+		break;
+	case TB_NHI_IRQ_SETUP_MODE_SET:
+		if (event == TB_NHI_IRQ_SETUP_FLUSH_MODE)
+			return TB_NHI_IRQ_SETUP_READY;
+		break;
+	case TB_NHI_IRQ_SETUP_READY:
+	case TB_NHI_IRQ_SETUP_INVALID:
+		break;
+	}
+
+	return TB_NHI_IRQ_SETUP_INVALID;
 }
 
 #define REG_RESET			0x39898

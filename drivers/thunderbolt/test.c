@@ -3679,31 +3679,38 @@ static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *tes
 			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
 }
 
-static void tb_test_nhi_dma_misc_policy_is_mutually_exclusive(struct kunit *test)
+static void tb_test_nhi_dma_misc_policy_selects_requested_mode(struct kunit *test)
 {
 	u32 both = REG_DMA_MISC_INT_AUTO_CLEAR |
 		   REG_DMA_MISC_DISABLE_AUTO_CLEAR;
 	u32 unrelated = BIT(3) | BIT(27);
 	u32 value;
 
-	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated, true);
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_AUTO_STATUS_CLEAR);
 	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
 	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
 	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
 
-	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated, false);
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_EXPLICIT_W1C);
 	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
 	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
 	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
 
-	value = tb_nhi_dma_misc_interrupt_policy(0, true);
+	value = tb_nhi_dma_misc_interrupt_policy(0,
+						 TB_NHI_IRQ_AUTO_STATUS_CLEAR);
 	KUNIT_EXPECT_EQ(test, value, (u32)REG_DMA_MISC_INT_AUTO_CLEAR);
-	value = tb_nhi_dma_misc_interrupt_policy(0, false);
+	value = tb_nhi_dma_misc_interrupt_policy(0,
+						 TB_NHI_IRQ_EXPLICIT_W1C);
 	KUNIT_EXPECT_EQ(test, value,
 			(u32)REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_CLEAR_ON_READ);
+	KUNIT_EXPECT_EQ(test, value, unrelated);
 }
 
-static void tb_test_maple_ridge_uses_interrupt_clear_on_read(struct kunit *test)
+static void tb_test_maple_ridge_uses_interrupt_status_auto_clear(struct kunit *test)
 {
 	u16 device;
 	bool auto_clear;
@@ -3717,6 +3724,45 @@ static void tb_test_maple_ridge_uses_interrupt_clear_on_read(struct kunit *test)
 	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
 	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
 	KUNIT_EXPECT_TRUE(test, auto_clear);
+}
+
+static void tb_test_nhi_interrupt_modes_are_distinct(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_INT_AUTO_CLEAR),
+			TB_NHI_IRQ_AUTO_STATUS_CLEAR);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(0),
+			TB_NHI_IRQ_CLEAR_ON_READ);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_DISABLE_AUTO_CLEAR),
+			TB_NHI_IRQ_EXPLICIT_W1C);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_INT_AUTO_CLEAR |
+						       REG_DMA_MISC_DISABLE_AUTO_CLEAR),
+			TB_NHI_IRQ_INVALID);
+}
+
+static void tb_test_nhi_interrupt_setup_orders_global_policy(struct kunit *test)
+{
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_RESET;
+
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_MASK_ALL);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_MASKED);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_DRAIN_STATUS);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_STATUS_DRAINED);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_MODE_SET);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_FLUSH_MODE);
+	KUNIT_EXPECT_EQ(test, phase, TB_NHI_IRQ_SETUP_READY);
+}
+
+static void tb_test_nhi_interrupt_setup_rejects_late_mode_change(struct kunit *test)
+{
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_READY;
+
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+	KUNIT_EXPECT_EQ(test, phase, TB_NHI_IRQ_SETUP_INVALID);
 }
 
 static void tb_test_nhi_tx_stall_requires_hardware_consumer_proof(struct kunit *test)
@@ -6016,8 +6062,11 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
-	KUNIT_CASE(tb_test_nhi_dma_misc_policy_is_mutually_exclusive),
-	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_clear_on_read),
+	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
+	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),
+	KUNIT_CASE(tb_test_nhi_interrupt_modes_are_distinct),
+	KUNIT_CASE(tb_test_nhi_interrupt_setup_orders_global_policy),
+	KUNIT_CASE(tb_test_nhi_interrupt_setup_rejects_late_mode_change),
 	KUNIT_CASE(tb_test_nhi_tx_stall_requires_hardware_consumer_proof),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
