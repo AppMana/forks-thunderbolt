@@ -912,6 +912,18 @@ static struct workqueue_struct *ring_workqueue(void)
 	return system_unbound_wq;
 }
 
+int tb_ring_process_completions(struct tb_ring *ring)
+{
+	if (!ring)
+		return -EINVAL;
+	if (current_work() == &ring->work)
+		return -EDEADLK;
+
+	queue_work(ring_workqueue(), &ring->work);
+	flush_work(&ring->work);
+	return 0;
+}
+
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void)
 {

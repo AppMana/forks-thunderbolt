@@ -56,6 +56,7 @@ tb_nhi_tx_descriptor_completed(const struct tb_ring_snapshot *snapshot)
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
 int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
+int tb_ring_process_completions(struct tb_ring *ring);
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,

@@ -927,10 +927,22 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	if (!wait_for_completion_timeout(&done, timeout)) {
 		struct tb_ring_snapshot tx_snapshot;
 		int snapshot_ret;
+		int process_ret;
 
 		tb_cfg_request_update_state(req,
 					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+		snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
 		state = tb_cfg_request_read_state(req);
+		if (!snapshot_ret && state.tx == TB_CFG_TX_QUEUED &&
+		    tb_nhi_tx_descriptor_completed(&tx_snapshot)) {
+			process_ret = tb_ring_process_completions(ctl->tx);
+			if (process_ret)
+				tb_ctl_warn_ratelimited(ctl,
+							"ring0 TX completion processing failed: %d\n",
+							process_ret);
+			state = tb_cfg_request_read_state(req);
+			snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
+		}
 		/*
 		 * Say which of the three "no answer" faults this actually is.
 		 * tx_done advancing but rx_total flat means we transmitted and
@@ -965,7 +977,6 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					atomic_read(&ctl->rx_unmatched),
 					atomic_read(&ctl->rx_xdomain_tx_status),
 					atomic_read(&ctl->rx_dropped));
-		snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
 		if (!snapshot_ret)
 			tb_ctl_warn_ratelimited(ctl,
 						"ring0 TX snapshot: running=%u size=%u sw_head=%u sw_tail=%u queued=%u in_flight=%u tail_attr=%#010x tail_complete=%u index=%#010x hw_prod=%u hw_cons=%u indices_valid=%u full=%u options=%#010x\n",
