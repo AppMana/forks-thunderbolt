@@ -13,8 +13,6 @@
 #include "dma_port.h"
 #include "tb_regs.h"
 
-#define DMA_PORT_CAP			0x3e
-
 #define MAIL_DATA			1
 #define MAIL_DATA_DWORDS		16
 
@@ -455,4 +453,14 @@ int dma_port_power_cycle(struct tb_dma_port *dma)
 	in |= MAIL_IN_OP_REQUEST;
 
 	return dma_port_request(dma, in, 150);
+}
+
+int dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port)
+{
+	struct tb_cfg_result res;
+	u32 request = DMA_PORT_POWER_CYCLE_REQUEST;
+
+	res = tb_cfg_write_raw_once(ctl, &request, 0, port, TB_CFG_PORT,
+				    DMA_PORT_MAIL_IN, 1, 25000);
+	return res.err;
 }

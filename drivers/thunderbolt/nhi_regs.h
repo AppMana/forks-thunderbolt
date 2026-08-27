@@ -248,22 +248,58 @@ tb_icm_startup_proof_advance(struct tb_icm_startup_proof *proof,
 
 #define TB_ICM_ROOT_CONFIG_TIMEOUT_MS	100U
 #define TB_ICM_ROOT_CONFIG_INTERVAL_MS	50U
+#define TB_ICM_ROOT_CONFIG_MAX_REQUESTS	8U
 
 static inline unsigned int
 tb_icm_root_config_request_count(unsigned int passes)
 {
-	return passes;
+	return min(passes, TB_ICM_ROOT_CONFIG_MAX_REQUESTS);
 }
 
 static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)
 {
-	return (u64)passes * (TB_ICM_ROOT_CONFIG_TIMEOUT_MS +
-			      TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+	return (u64)tb_icm_root_config_request_count(passes) *
+		(TB_ICM_ROOT_CONFIG_TIMEOUT_MS +
+		 TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+}
+
+enum tb_icm_root_recovery_state {
+	TB_ICM_ROOT_RECOVERY_IDLE,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING,
+	TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED,
+	TB_ICM_ROOT_RECOVERY_TERMINAL,
+};
+
+enum tb_icm_root_recovery_event {
+	TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT,
+	TB_ICM_ROOT_RECOVERY_OTHER_FAILURE,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED,
+};
+
+static inline enum tb_icm_root_recovery_state
+tb_icm_root_recovery_next(enum tb_icm_root_recovery_state state,
+			  enum tb_icm_root_recovery_event event)
+{
+	switch (state) {
+	case TB_ICM_ROOT_RECOVERY_IDLE:
+		if (event == TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT)
+			return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING;
+		return TB_ICM_ROOT_RECOVERY_TERMINAL;
+	case TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING:
+		if (event == TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED)
+			return TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED;
+		return TB_ICM_ROOT_RECOVERY_TERMINAL;
+	case TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED:
+	case TB_ICM_ROOT_RECOVERY_TERMINAL:
+		return state;
+	}
+
+	return TB_ICM_ROOT_RECOVERY_TERMINAL;
 }
 
 enum tb_nhi_recovery_state {
 	TB_NHI_RECOVERY_IDLE,
-	TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING,
 	TB_NHI_RECOVERY_REPROBE_PENDING,
 	TB_NHI_RECOVERY_RETRYING,
 	TB_NHI_RECOVERY_COMPLETE,
@@ -274,8 +310,8 @@ enum tb_nhi_recovery_event {
 	TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT,
 	TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT,
 	TB_NHI_RECOVERY_OTHER_FAILURE,
-	TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED,
-	TB_NHI_RECOVERY_ARC_CIO_RESET_FAILED,
+	TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED,
+	TB_NHI_RECOVERY_ROOT_POWER_CYCLE_FAILED,
 	TB_NHI_RECOVERY_REPROBE_DISPATCHED,
 	TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED,
 	TB_NHI_RECOVERY_PROBE_SUCCEEDED,
@@ -283,7 +319,6 @@ enum tb_nhi_recovery_event {
 
 enum tb_nhi_recovery_action {
 	TB_NHI_RECOVERY_ACTION_NONE,
-	TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET,
 	TB_NHI_RECOVERY_ACTION_REPROBE,
 };
 
@@ -291,8 +326,6 @@ static inline enum tb_nhi_recovery_action
 tb_nhi_recovery_action(enum tb_nhi_recovery_state state)
 {
 	switch (state) {
-	case TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING:
-		return TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET;
 	case TB_NHI_RECOVERY_REPROBE_PENDING:
 		return TB_NHI_RECOVERY_ACTION_REPROBE;
 	default:
@@ -368,16 +401,10 @@ tb_nhi_recovery_next(enum tb_nhi_recovery_state state,
 {
 	switch (state) {
 	case TB_NHI_RECOVERY_IDLE:
-		if (event == TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT ||
-		    event == TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT)
-			return TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING;
+		if (event == TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED)
+			return TB_NHI_RECOVERY_REPROBE_PENDING;
 		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
 			return TB_NHI_RECOVERY_COMPLETE;
-		return TB_NHI_RECOVERY_EXHAUSTED;
-
-	case TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING:
-		if (event == TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED)
-			return TB_NHI_RECOVERY_REPROBE_PENDING;
 		return TB_NHI_RECOVERY_EXHAUSTED;
 
 	case TB_NHI_RECOVERY_REPROBE_PENDING:

@@ -1492,9 +1492,10 @@ tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
  *
  * Writes to router config space without translating the possible error.
  */
-struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
-		u64 route, u32 port, enum tb_cfg_space space,
-		u32 offset, u32 length, int timeout_msec)
+static struct tb_cfg_result
+tb_cfg_write_raw_retries(struct tb_ctl *ctl, const void *buffer, u64 route,
+			 u32 port, enum tb_cfg_space space, u32 offset,
+			 u32 length, int timeout_msec, unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_write_pkg request = {
@@ -1511,7 +1512,7 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 
 	memcpy(&request.data, buffer, length * 4);
 
-	while (retries < TB_CTL_RETRIES) {
+	while (retries < max_retries) {
 		struct tb_cfg_request *req;
 
 		req = tb_cfg_request_alloc();
@@ -1548,6 +1549,23 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 	res.response_port = reply.addr.port;
 	res.err = check_config_address(reply.addr, space, offset, length);
 	return res;
+}
+
+struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
+		u64 route, u32 port, enum tb_cfg_space space,
+		u32 offset, u32 length, int timeout_msec)
+{
+	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
+					length, timeout_msec, TB_CTL_RETRIES);
+}
+
+struct tb_cfg_result
+tb_cfg_write_raw_once(struct tb_ctl *ctl, const void *buffer, u64 route,
+			      u32 port, enum tb_cfg_space space, u32 offset,
+			      u32 length, int timeout_msec)
+{
+	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
+					length, timeout_msec, 1);
 }
 
 static int tb_cfg_get_error(struct tb_ctl *ctl, enum tb_cfg_space space,

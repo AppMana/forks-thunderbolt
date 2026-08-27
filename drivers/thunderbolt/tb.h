@@ -863,6 +863,7 @@ extern bool tb_force_sw_cm;
 int icm_unlock_config_space(struct tb *tb);
 bool icm_driver_ready_timed_out(struct tb *tb);
 bool icm_root_config_timed_out(struct tb *tb);
+bool icm_root_power_cycle_dispatched(struct tb *tb);
 
 extern const struct device_type tb_domain_type;
 extern const struct device_type tb_retimer_type;

@@ -20,6 +20,7 @@
 #include <linux/workqueue.h>
 
 #include "ctl.h"
+#include "dma_port.h"
 #include "nhi_regs.h"
 #include "tb.h"
 #include "tunnel.h"
@@ -38,7 +39,8 @@
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
  * become readable. Each pass issues exactly one 100 ms read and then sleeps
- * 50 ms, so the default 50 is about 7.5 s.
+ * 50 ms. The control TX ring has nine usable entries; keep the ninth free for
+ * a host-router recovery request if none of the reads completes locally.
  *
  * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
  * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
@@ -47,10 +49,10 @@
  * in the log from genuinely dead firmware. Tunable at runtime so the two can
  * actually be told apart on hardware instead of inferred.
  */
-static unsigned int icm_cfg_space_retries = 50;
+static unsigned int icm_cfg_space_retries = TB_ICM_ROOT_CONFIG_MAX_REQUESTS;
 module_param(icm_cfg_space_retries, uint, 0644);
 MODULE_PARM_DESC(icm_cfg_space_retries,
-		 "single-request root config-space readiness passes, ~150ms each (default 50)");
+		 "single-request root config-space readiness passes, ~150ms each (maximum 8)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -168,6 +170,7 @@ struct icm {
 	bool veto;
 	bool driver_ready_timed_out;
 	bool root_config_timed_out;
+	bool root_power_cycle_dispatched;
 	bool (*is_supported)(struct tb *tb);
 	int (*cio_reset)(struct tb *tb);
 	int (*get_mode)(struct tb *tb);
@@ -2617,6 +2620,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 
 	icm->driver_ready_timed_out = false;
 	icm->root_config_timed_out = false;
+	icm->root_power_cycle_dispatched = false;
 
 	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
 	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
@@ -2638,7 +2642,9 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	 * Hold on here until the switch config space is accessible so
 	 * that we can read root switch config successfully.
 	 */
-	for (pass = 0; pass < icm_cfg_space_retries; pass++) {
+	for (pass = 0;
+	     pass < tb_icm_root_config_request_count(icm_cfg_space_retries);
+	     pass++) {
 		u32 tmp;
 
 		res = tb_cfg_read_raw_once(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
@@ -2955,6 +2961,55 @@ static int icm_firmware_init(struct tb *tb)
 	return 0;
 }
 
+static int icm_root_power_cycle(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+	enum tb_icm_root_recovery_state state = TB_ICM_ROOT_RECOVERY_IDLE;
+	struct pci_dev *pdev = tb->nhi->pdev;
+	int port, ret;
+
+	state = tb_icm_root_recovery_next(
+		state, icm->root_config_timed_out ?
+		TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT :
+		TB_ICM_ROOT_RECOVERY_OTHER_FAILURE);
+	if (state != TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING)
+		return -EOPNOTSUPP;
+
+	port = dma_port_for_nhi(pdev->vendor, pdev->device);
+	if (port < 0)
+		return port;
+
+	/*
+	 * The normal reference path first changes a root-router plug-event-delay
+	 * bit, but that preflight itself needs the config service that failed here.
+	 * Its safe-mode path sends this same command without the preflight. A fresh
+	 * probe, not the write response, remains the recovery proof.
+	 */
+	tb_warn(tb,
+		"root config did not answer after DriverReady; issuing one host-router power-cycle request on DMA port %d\n",
+		port);
+	ret = dma_port_power_cycle_raw(tb->ctl, port);
+	state = tb_icm_root_recovery_next(
+		state, !ret || ret == -ETIMEDOUT ?
+		TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED :
+		TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
+	if (state != TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED) {
+		tb_err(tb, "host-router power-cycle request failed before dispatch: %d\n",
+		       ret);
+		return ret;
+	}
+
+	icm->root_power_cycle_dispatched = true;
+	if (ret == -ETIMEDOUT)
+		tb_warn(tb,
+			"host-router power-cycle request got no reply; treating execution as unproven and requiring a fresh probe\n");
+	else
+		tb_info(tb,
+			"host-router power-cycle request was acknowledged; requiring a fresh probe\n");
+
+	return 0;
+}
+
 static int icm_driver_ready(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
@@ -2974,6 +3029,11 @@ static int icm_driver_ready(struct tb *tb)
 	ret = __icm_driver_ready(tb, &tb->security_level, &icm->proto_version,
 				 &tb->nboot_acl, &icm->rpm);
 	if (ret) {
+		if (icm->root_config_timed_out &&
+		    tb_nhi_recovery_supported(tb->nhi->pdev->vendor,
+					      tb->nhi->pdev->device))
+			icm_root_power_cycle(tb);
+
 		/*
 		 * ICM_EN is not a liveness signal, and a DRIVER_READY timeout is
 		 * not proof that every firmware path has stopped. A partial
@@ -3007,6 +3067,14 @@ bool icm_root_config_timed_out(struct tb *tb)
 		return false;
 
 	return ((struct icm *)tb_priv(tb))->root_config_timed_out;
+}
+
+bool icm_root_power_cycle_dispatched(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->root_power_cycle_dispatched;
 }
 
 bool icm_driver_ready_timed_out(struct tb *tb)

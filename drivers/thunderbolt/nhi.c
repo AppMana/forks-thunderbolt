@@ -314,7 +314,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 	if (!nhi || !first || !last)
 		return -EINVAL;
 	pdev = nhi->pdev;
-	if (!tb_nhi_recovery_supported(pdev->vendor, pdev->device))
+	if (!tb_nhi_arc_cio_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
 	if (!tb_nhi_tx_stalled(first, last, control_healthy))
 		return -EAGAIN;
@@ -409,14 +409,14 @@ static void nhi_probe_reprobe_work(struct work_struct *work)
 	if (state != TB_NHI_RECOVERY_RETRYING ||
 	    nhi_probe_recovery_set(pdev, state)) {
 		dev_err(reprobe->dev,
-			"one-shot ARC/CIO recovery could not dispatch its reprobe\n");
+			"one-shot host-router recovery could not dispatch its reprobe\n");
 		goto out;
 	}
 
 	ret = device_attach(reprobe->dev);
 	if (ret != 1)
 		dev_err(reprobe->dev,
-			"one-shot ARC/CIO recovery reprobe did not bind: %d\n",
+			"one-shot host-router recovery reprobe did not bind: %d\n",
 			ret);
 out:
 	put_device(reprobe->dev);
@@ -444,7 +444,7 @@ static void nhi_probe_recovery_release(void *data)
 	}
 
 	dev_warn(&ctx->pdev->dev,
-		 "ARC/CIO recovery reset completed; queued one reprobe\n");
+		 "host-router power-cycle request dispatched; queued one proof reprobe\n");
 	return;
 
 err_queue:
@@ -452,7 +452,7 @@ err_queue:
 					  TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
 	nhi_probe_recovery_set(ctx->pdev, ctx->state);
 	dev_err(&ctx->pdev->dev,
-		"one-shot ARC/CIO recovery could not queue its reprobe\n");
+		"one-shot host-router recovery could not queue its reprobe\n");
 }
 
 /* Host interface quirks */
@@ -2203,7 +2203,10 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (res) {
 		if (res == -ETIMEDOUT &&
 		    tb_nhi_recovery_supported(pdev->vendor, pdev->device)) {
-			if (icm_driver_ready_timed_out(tb))
+			if (icm_root_power_cycle_dispatched(tb))
+				recovery_event =
+					TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED;
+			else if (icm_driver_ready_timed_out(tb))
 				recovery_event =
 					TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT;
 			else if (icm_root_config_timed_out(tb))
@@ -2217,40 +2220,15 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 						     recovery_event);
 
 		if (tb_nhi_recovery_action(recovery_next) ==
-		    TB_NHI_RECOVERY_ACTION_ARC_CIO_RESET) {
+		    TB_NHI_RECOVERY_ACTION_REPROBE) {
 			recovery_res = nhi_probe_recovery_set(pdev, recovery_next);
 			if (recovery_res) {
 				dev_err(dev,
-					"cannot reserve one-shot ARC/CIO recovery state: %d\n",
+					"cannot reserve one-shot host-router recovery state: %d\n",
 					recovery_res);
 				goto release_domain;
 			}
 			recovery->state = recovery_next;
-
-			/*
-			 * tb_domain_add() stopped the control channel and flushed its
-			 * asynchronous work before returning. Reset ARC/CIO while the
-			 * connection-manager state and mapped NHI registers still exist;
-			 * a PCI secondary-bus reset does not clear this retained state.
-			 */
-			if (tb->cm_ops->quiesced_reset)
-				recovery_res = tb->cm_ops->quiesced_reset(tb);
-			else
-				recovery_res = -EOPNOTSUPP;
-			recovery_event = recovery_res ?
-				TB_NHI_RECOVERY_ARC_CIO_RESET_FAILED :
-				TB_NHI_RECOVERY_ARC_CIO_RESET_SUCCEEDED;
-			recovery_next =
-				tb_nhi_recovery_next(recovery->state, recovery_event);
-			nhi_probe_recovery_set(pdev, recovery_next);
-			recovery->state = recovery_next;
-			if (recovery_res)
-				dev_err(dev,
-					"quiesced ARC/CIO startup recovery failed: %d\n",
-					recovery_res);
-			else
-				dev_warn(dev,
-					 "root-config proof failed; ARC/CIO reset succeeded and one reprobe will follow\n");
 		}
 
 release_domain:
@@ -2271,7 +2249,8 @@ release_domain:
 		return res;
 	}
 	if (recovery->state == TB_NHI_RECOVERY_RETRYING)
-		dev_info(dev, "probe succeeded after one-shot ARC/CIO recovery reset\n");
+		dev_info(dev,
+			 "probe succeeded after one-shot host-router power cycle\n");
 	nhi_probe_recovery_clear(pdev);
 	recovery->state = tb_nhi_recovery_next(recovery->state,
 					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);
