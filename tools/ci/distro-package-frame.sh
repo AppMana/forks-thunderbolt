@@ -20,6 +20,8 @@ Environment:
   WORK_DIR        Scratch directory. Defaults to mktemp.
   TBFIX_LINT      Run lintian if available. Defaults to 0.
   TBFIX_SKIP_DEPS Skip apt dependency install. Defaults to 0.
+  TBFIX_SOURCE_SHA      Override recorded source commit.
+  TBFIX_SOURCE_DESCRIBE Override recorded source description.
 USAGE
 }
 
@@ -45,6 +47,10 @@ skip_deps="${TBFIX_SKIP_DEPS:-0}"
 modname="thunderbolt-frame"
 pkgname="${modname}-dkms"
 frame_root="$repo_root/drivers/thunderbolt_frame"
+source_sha="${TBFIX_SOURCE_SHA:-$(git -c safe.directory="$repo_root" \
+	-C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)}"
+source_describe="${TBFIX_SOURCE_DESCRIBE:-$(git -c safe.directory="$repo_root" \
+	-C "$repo_root" describe --always --dirty 2>/dev/null || printf unknown)}"
 
 mkdir -p "$out_dir" "$work_dir"
 
@@ -99,8 +105,8 @@ stage_source() {
 	}
 	{
 		printf '# Auto-generated package source metadata\n'
-		printf 'fork-sha=%s\n' "$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)"
-		printf 'fork-describe=%s\n' "$(git -C "$repo_root" describe --always --dirty 2>/dev/null || printf unknown)"
+		printf 'fork-sha=%s\n' "$source_sha"
+		printf 'fork-describe=%s\n' "$source_describe"
 		printf 'packaged-at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} > "$stage/.thunderbolt-frame-source"
 	# Worktrees may be group-writable. A binary package must not preserve
