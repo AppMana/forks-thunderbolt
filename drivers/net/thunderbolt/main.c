@@ -171,7 +171,8 @@ struct tbnet_ring {
  *	      same way the core and the RDMA stack do)
  * @local_transmit_path: HopID we are using to send out packets
  * @remote_transmit_path: HopID the other end is using to send packets to us
- * @session_active: rings, paths, and the active input HopID are owned
+ * @session_active: DMA paths were enabled for the committed session
+ * @resources_owned: input HopID and started rings require local teardown
  * @active_remote_transmit_path: input HopID owned by the active session
  * @connection_lock: Lock serializing access to @login_hs and @transmit_path.
  * @login_retries: Number of login retries currently done
@@ -214,6 +215,7 @@ struct tbnet {
 	int local_transmit_path;
 	int remote_transmit_path;
 	bool session_active;
+	bool resources_owned;
 	int active_remote_transmit_path;
 	struct mutex connection_lock;
 	int login_retries;
@@ -430,20 +432,24 @@ static void tbnet_free_buffers(struct tbnet_ring *ring)
 }
 
 static bool tbnet_session_needs_teardown(bool handshake_complete,
-					 bool session_active)
+					 bool session_active,
+					 bool resources_owned)
 {
 	(void)handshake_complete;
-	return session_active;
+	return session_active || resources_owned;
 }
 
 #if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
 bool tbnet_test_session_needs_teardown(bool handshake_complete,
-				       bool session_active);
+				       bool session_active,
+				       bool resources_owned);
 
 bool tbnet_test_session_needs_teardown(bool handshake_complete,
-				       bool session_active)
+				       bool session_active,
+				       bool resources_owned)
 {
-	return tbnet_session_needs_teardown(handshake_complete, session_active);
+	return tbnet_session_needs_teardown(handshake_complete, session_active,
+					  resources_owned);
 }
 #endif
 
@@ -465,7 +471,7 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	if (tbnet_session_needs_teardown(
 			tb_xdomain_handshake_complete(&net->login_hs),
-			net->session_active)) {
+			net->session_active, net->resources_owned)) {
 		int ret, retries = TBNET_LOGOUT_RETRIES;
 		unsigned long deadline;
 		int remote_transmit_path = net->active_remote_transmit_path;
@@ -485,7 +491,7 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 		deadline = jiffies +
 			   msecs_to_jiffies(READ_ONCE(tbnet_logout_budget_ms));
 
-		while (send_logout && retries-- > 0) {
+		while (send_logout && net->session_active && retries-- > 0) {
 			netdev_dbg(net->dev, "sending logout request %u\n",
 				   retries);
 			ret = tbnet_logout_request(net);
@@ -499,21 +505,29 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 			}
 		}
 
-		tb_ring_stop(net->rx_ring.ring);
-		tb_ring_stop(net->tx_ring.ring);
-		tbnet_free_buffers(&net->rx_ring);
-		tbnet_free_buffers(&net->tx_ring);
+		if (net->resources_owned) {
+			tb_ring_stop(net->rx_ring.ring);
+			tb_ring_stop(net->tx_ring.ring);
+			tbnet_free_buffers(&net->rx_ring);
+			tbnet_free_buffers(&net->tx_ring);
+		}
 
-		ret = tb_xdomain_disable_paths(net->xd,
-					       net->local_transmit_path,
-					       net->tx_ring.ring->hop,
-					       remote_transmit_path,
-					       net->rx_ring.ring->hop);
-		if (ret)
-			netdev_warn(net->dev, "failed to disable DMA paths\n");
+		if (net->session_active) {
+			ret = tb_xdomain_disable_paths(net->xd,
+						       net->local_transmit_path,
+						       net->tx_ring.ring->hop,
+						       remote_transmit_path,
+						       net->rx_ring.ring->hop);
+			if (ret)
+				netdev_warn(net->dev,
+					    "failed to disable DMA paths\n");
+		}
 
-		tb_xdomain_release_in_hopid(net->xd, remote_transmit_path);
+		if (net->resources_owned)
+			tb_xdomain_release_in_hopid(net->xd,
+						    remote_transmit_path);
 		net->session_active = false;
+		net->resources_owned = false;
 		net->active_remote_transmit_path = 0;
 		net->remote_transmit_path = 0;
 	}
@@ -820,18 +834,21 @@ static void tbnet_connected_work(struct work_struct *work)
 	mutex_lock(&net->connection_lock);
 	connected = tb_xdomain_handshake_complete(&net->login_hs);
 	remote_transmit_path = net->remote_transmit_path;
-	mutex_unlock(&net->connection_lock);
 
-	if (!connected)
+	if (!connected) {
+		mutex_unlock(&net->connection_lock);
 		return;
+	}
 
 	netdev_dbg(net->dev, "login successful, enabling paths\n");
 
 	ret = tb_xdomain_alloc_in_hopid(net->xd, remote_transmit_path);
 	if (ret != remote_transmit_path) {
 		netdev_err(net->dev, "failed to allocate Rx HopID\n");
+		mutex_unlock(&net->connection_lock);
 		return;
 	}
+	net->active_remote_transmit_path = remote_transmit_path;
 
 	/* Both logins successful so enable the rings, high-speed DMA
 	 * paths and start the network device queue.
@@ -842,6 +859,7 @@ static void tbnet_connected_work(struct work_struct *work)
 	 */
 	tb_ring_start(net->tx_ring.ring);
 	tb_ring_start(net->rx_ring.ring);
+	net->resources_owned = true;
 
 	ret = tbnet_alloc_rx_buffers(net, net->rx_ring.size);
 	if (ret)
@@ -860,13 +878,11 @@ static void tbnet_connected_work(struct work_struct *work)
 		goto err_free_tx_buffers;
 	}
 
-	mutex_lock(&net->connection_lock);
-	net->active_remote_transmit_path = remote_transmit_path;
 	net->session_active = true;
-	mutex_unlock(&net->connection_lock);
 
 	netif_carrier_on(net->dev);
 	netif_start_queue(net->dev);
+	mutex_unlock(&net->connection_lock);
 
 	/* Level-triggered zombie detection while the session is established. */
 	tbnet_queue_verify(net);
@@ -882,6 +898,9 @@ err_stop_rings:
 	tb_ring_stop(net->rx_ring.ring);
 	tb_ring_stop(net->tx_ring.ring);
 	tb_xdomain_release_in_hopid(net->xd, remote_transmit_path);
+	net->resources_owned = false;
+	net->active_remote_transmit_path = 0;
+	mutex_unlock(&net->connection_lock);
 }
 
 static void tbnet_login_work(struct work_struct *work)

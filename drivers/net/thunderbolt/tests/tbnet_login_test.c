@@ -18,7 +18,8 @@
 #include "../../../thunderbolt/thunderbolt_negotiation.h"
 
 bool tbnet_test_session_needs_teardown(bool handshake_complete,
-				       bool session_active);
+				       bool session_active,
+				       bool resources_owned);
 
 static void tbnet_test_login_connect(struct kunit *test)
 {
@@ -83,7 +84,14 @@ static void tbnet_test_supersede_still_tears_down_owned_session(struct kunit *te
 	/* Resource ownership survives the control-state reset. */
 	KUNIT_EXPECT_TRUE(test,
 		tbnet_test_session_needs_teardown(
-			tb_xdomain_handshake_complete(&hs), session_active));
+			tb_xdomain_handshake_complete(&hs), session_active, true));
+}
+
+static void tbnet_test_partial_session_resources_are_torn_down(struct kunit *test)
+{
+	/* Ring start precedes the final active-session commit. */
+	KUNIT_EXPECT_TRUE(test,
+			  tbnet_test_session_needs_teardown(false, false, true));
 }
 
 /*
@@ -225,6 +233,7 @@ static struct kunit_case tbnet_login_test_cases[] = {
 	KUNIT_CASE(tbnet_test_login_supersede_on_relogin),
 	KUNIT_CASE(tbnet_test_login_reconnect),
 	KUNIT_CASE(tbnet_test_supersede_still_tears_down_owned_session),
+	KUNIT_CASE(tbnet_test_partial_session_resources_are_torn_down),
 	KUNIT_CASE(tbnet_test_session_zombie_recovers),
 	KUNIT_CASE(tbnet_test_session_verify_healthy_noop),
 	{}
