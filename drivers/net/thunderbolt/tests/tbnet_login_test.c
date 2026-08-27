@@ -16,10 +16,7 @@
 #include <kunit/test.h>
 
 #include "../../../thunderbolt/thunderbolt_negotiation.h"
-
-bool tbnet_test_session_needs_teardown(bool handshake_complete,
-				       bool session_active,
-				       bool resources_owned);
+#include "tbnet_test.h"
 
 static void tbnet_test_login_connect(struct kunit *test)
 {
@@ -77,14 +74,15 @@ static void tbnet_test_supersede_still_tears_down_owned_session(struct kunit *te
 		.peer_seen = true,
 	};
 	bool session_active = true;
+	bool needs_teardown;
 
 	KUNIT_ASSERT_TRUE(test, tb_xdomain_handshake_supersede(&hs));
 	KUNIT_ASSERT_FALSE(test, tb_xdomain_handshake_complete(&hs));
 
 	/* Resource ownership survives the control-state reset. */
-	KUNIT_EXPECT_TRUE(test,
-		tbnet_test_session_needs_teardown(
-			tb_xdomain_handshake_complete(&hs), session_active, true));
+	needs_teardown = tbnet_test_session_needs_teardown(false, session_active,
+							   true);
+	KUNIT_EXPECT_TRUE(test, needs_teardown);
 }
 
 static void tbnet_test_partial_session_resources_are_torn_down(struct kunit *test)

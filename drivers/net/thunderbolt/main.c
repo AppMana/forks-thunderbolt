@@ -29,6 +29,10 @@
 
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
+#include "tests/tbnet_test.h"
+#endif
+
 /* Protocol timeouts in ms */
 #define TBNET_LOGIN_DELAY	4500
 #define TBNET_LOGIN_TIMEOUT	500
@@ -431,25 +435,19 @@ static void tbnet_free_buffers(struct tbnet_ring *ring)
 	ring->prod = 0;
 }
 
-static bool tbnet_session_needs_teardown(bool handshake_complete,
-					 bool session_active,
+static bool tbnet_session_needs_teardown(bool session_active,
 					 bool resources_owned)
 {
-	(void)handshake_complete;
 	return session_active || resources_owned;
 }
 
 #if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
 bool tbnet_test_session_needs_teardown(bool handshake_complete,
 				       bool session_active,
-				       bool resources_owned);
-
-bool tbnet_test_session_needs_teardown(bool handshake_complete,
-				       bool session_active,
 				       bool resources_owned)
 {
-	return tbnet_session_needs_teardown(handshake_complete, session_active,
-					  resources_owned);
+	(void)handshake_complete;
+	return tbnet_session_needs_teardown(session_active, resources_owned);
 }
 #endif
 
@@ -469,9 +467,8 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	mutex_lock(&net->connection_lock);
 
-	if (tbnet_session_needs_teardown(
-			tb_xdomain_handshake_complete(&net->login_hs),
-			net->session_active, net->resources_owned)) {
+	if (tbnet_session_needs_teardown(net->session_active,
+					 net->resources_owned)) {
 		int ret, retries = TBNET_LOGOUT_RETRIES;
 		unsigned long deadline;
 		int remote_transmit_path = net->active_remote_transmit_path;

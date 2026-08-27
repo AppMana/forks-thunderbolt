@@ -5679,37 +5679,44 @@ static void tb_test_xdomain_service_response_payload_is_opaque(struct kunit *tes
 {
 	const size_t request_size = 92;
 	const size_t response_size = 100;
+	bool matches;
 
 	/*
 	 * A service protocol owns everything after the common route/length/UUID
 	 * prefix. Its request and response need not use native XDP opcodes there.
 	 */
-	KUNIT_EXPECT_TRUE(test,
-		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size, 0x1, 0, response_size, response_size,
-			true));
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_TRUE(test, matches);
 
 	/* The common XDomain envelope remains part of request ownership. */
-	KUNIT_EXPECT_FALSE(test,
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x3, 0, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 1, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, response_size,
+							     response_size, false);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, request_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
 		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size, 0x3, 0, response_size, response_size,
-			true));
-	KUNIT_EXPECT_FALSE(test,
-		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size, 0x1, 1, response_size, response_size,
-			true));
-	KUNIT_EXPECT_FALSE(test,
-		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size, 0x1, 0, response_size, response_size,
-			false));
-	KUNIT_EXPECT_FALSE(test,
-		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size, 0x1, 0, request_size,
-			response_size, true));
-	KUNIT_EXPECT_FALSE(test,
-		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
-			response_size - sizeof(u32), 0x1, 0, response_size,
-			response_size, true));
+							     response_size - sizeof(u32), 0x1, 0,
+							     response_size, response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
 }
 
 static void tb_test_xdomain_native_error_fails_request(struct kunit *test)
@@ -5984,10 +5991,12 @@ static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test
 	KUNIT_EXPECT_EQ(test, actual.peer, TB_CFG_PEER_MATCHED);
 	KUNIT_EXPECT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_COMPLETE);
 
-	model_action = ctl_model_transaction_step(&failed_model,
-						  CTL_TRANSACTION_MODEL_LOCAL_FAILED);
-	actual_action = tb_cfg_request_state_step(&failed_actual,
-						  TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	model_action =
+		ctl_model_transaction_step(&failed_model,
+					   CTL_TRANSACTION_MODEL_LOCAL_FAILED);
+	actual_action =
+		tb_cfg_request_state_step(&failed_actual,
+					  TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
 	KUNIT_ASSERT_EQ(test, failed_model.submit, CTL_SUBMIT_MODEL_FAILED);
 	KUNIT_ASSERT_EQ(test, failed_model.peer, CTL_PEER_MODEL_WAITING);
 	KUNIT_ASSERT_EQ(test, model_action, CTL_TRANSACTION_MODEL_NONE);
@@ -5995,10 +6004,12 @@ static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test
 	KUNIT_ASSERT_EQ(test, failed_actual.peer, TB_CFG_PEER_WAITING);
 	KUNIT_ASSERT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_NONE);
 
-	model_action = ctl_model_transaction_step(&failed_model,
-						  CTL_TRANSACTION_MODEL_PEER_MATCHED);
-	actual_action = tb_cfg_request_state_step(&failed_actual,
-						  TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	model_action =
+		ctl_model_transaction_step(&failed_model,
+					   CTL_TRANSACTION_MODEL_PEER_MATCHED);
+	actual_action =
+		tb_cfg_request_state_step(&failed_actual,
+					  TB_CFG_REQUEST_EVENT_PEER_MATCHED);
 	KUNIT_EXPECT_EQ(test, failed_model.peer, CTL_PEER_MODEL_MATCHED);
 	KUNIT_EXPECT_EQ(test, model_action, CTL_TRANSACTION_MODEL_COMPLETE);
 	KUNIT_EXPECT_EQ(test, failed_actual.peer, TB_CFG_PEER_MATCHED);
