@@ -43,6 +43,45 @@ struct tb_ring_snapshot {
 	bool full;
 };
 
+enum tb_nhi_ring_stop_step {
+	TB_NHI_RING_STOP_DISABLE	= BIT(0),
+	TB_NHI_RING_STOP_CLEAR_STATE	= BIT(1),
+	TB_NHI_RING_STOP_FLUSH_WRITES	= BIT(2),
+};
+
+/*
+ * Model the device-visible lifetime of a ring across posted MMIO writes.
+ * Until a read flushes the disable and state-clear writes, software cannot
+ * prove that the device has released the old coherent descriptor memory.
+ */
+static inline unsigned int tb_nhi_ring_stop_steps(void)
+{
+	return TB_NHI_RING_STOP_DISABLE | TB_NHI_RING_STOP_CLEAR_STATE |
+	       TB_NHI_RING_STOP_FLUSH_WRITES;
+}
+
+static inline bool tb_nhi_ring_stop_reuse_safe(void)
+{
+	unsigned int steps = tb_nhi_ring_stop_steps();
+	bool device_enabled = true;
+	bool device_has_state = true;
+	bool disable_posted = false;
+	bool clear_posted = false;
+
+	if (steps & TB_NHI_RING_STOP_DISABLE)
+		disable_posted = true;
+	if (steps & TB_NHI_RING_STOP_CLEAR_STATE)
+		clear_posted = true;
+	if (steps & TB_NHI_RING_STOP_FLUSH_WRITES) {
+		if (disable_posted)
+			device_enabled = false;
+		if (clear_posted)
+			device_has_state = false;
+	}
+
+	return !device_enabled && !device_has_state;
+}
+
 static inline bool
 tb_nhi_tx_descriptor_completed(const struct tb_ring_snapshot *snapshot)
 {

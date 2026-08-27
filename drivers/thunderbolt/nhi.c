@@ -1495,12 +1495,28 @@ void tb_ring_stop(struct tb_ring *ring)
 	 * above.
 	 */
 	if (!ring->nhi->going_away) {
+		u32 count;
+
 		ring_interrupt_active(ring, false);
 
 		ring_iowrite32options(ring, 0, 0);
 		ring_iowrite64desc(ring, 0, 0);
 		ring_iowrite32desc(ring, 0, 8);
 		ring_iowrite32desc(ring, 0, 12);
+		/*
+		 * The writes above are posted.  Do not let callbacks release the
+		 * frame mappings, or tb_ring_free() release the coherent descriptor
+		 * array, until the device has observed both the disable and every
+		 * state clear.  Reusing the same HopID before this ownership transfer
+		 * can make the replacement ring replay the prior ring's descriptors.
+		 */
+		if (tb_nhi_ring_stop_steps() & TB_NHI_RING_STOP_FLUSH_WRITES) {
+			count = nhi_read(ring->nhi, ring_desc_base(ring) + 12);
+			if (count && !ring->nhi->going_away)
+				dev_warn(&ring->nhi->pdev->dev,
+					 "%s %d did not clear descriptor count: %#x\n",
+					 RING_TYPE(ring), ring->hop, count);
+		}
 	}
 	ring->head = 0;
 	ring->tail = 0;

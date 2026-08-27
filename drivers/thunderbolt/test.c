@@ -5176,6 +5176,17 @@ static void tb_test_ring_descriptor_is_one_complete_word(struct kunit *test)
 }
 
 /*
+ * Stopping a ring transfers descriptor ownership back to software.  Posted
+ * disable/clear writes alone do not complete that transfer: freeing or
+ * reusing the coherent ring before a readback can replay the old descriptor
+ * state through the replacement ring.
+ */
+static void tb_test_ring_stop_flushes_before_descriptor_reuse(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tb_nhi_ring_stop_reuse_safe());
+}
+
+/*
  * Maple Ridge host-to-host links on the live TB4 chain identify as Gen 4 but
  * initially train at 20 Gb/s x1. The XDomain handshake must not treat the
  * generation alone as proof that both lanes are already bonded.
@@ -6302,6 +6313,7 @@ static void tb_test_icm_phy_reset_covers_single_lane_links(struct kunit *test)
 
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
+	KUNIT_CASE(tb_test_ring_stop_flushes_before_descriptor_reuse),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
 	KUNIT_CASE(tb_test_xdomain_gen4_single_lane_negotiates_bonding),
 	KUNIT_CASE(tb_test_xdomain_icm_still_initializes_link),
