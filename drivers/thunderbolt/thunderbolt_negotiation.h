@@ -47,6 +47,20 @@
 #include <linux/types.h>
 
 /**
+ * tb_icm_phy_port_needs_reset() - is either lane of a connector active?
+ * @lane0_up: first lane reports TB_PORT_UP
+ * @lane1_up: second lane reports TB_PORT_UP
+ *
+ * The resident connection manager resets a physical connector during startup
+ * when it is already carrying a link. A single-lane link is active even though
+ * its paired lane remains disabled.
+ */
+static inline bool tb_icm_phy_port_needs_reset(bool lane0_up, bool lane1_up)
+{
+	return lane0_up || lane1_up;
+}
+
+/**
  * tb_xdomain_generation_stale() - should a freshly-read remote block be dropped?
  * @have_remote: whether we already hold this peer's properties/identity
  * @remote_gen:  generation reported with the just-read block

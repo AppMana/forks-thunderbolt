@@ -5657,6 +5657,14 @@ static void tb_test_ctl_liveness_appmana_019_sequence(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
 }
 
+static void tb_test_icm_phy_reset_covers_single_lane_links(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, tb_icm_phy_port_needs_reset(false, false));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(true, false));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(false, true));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(true, true));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
@@ -5784,6 +5792,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
 	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
 	KUNIT_CASE(tb_test_ctl_liveness_appmana_019_sequence),
+	KUNIT_CASE(tb_test_icm_phy_reset_covers_single_lane_links),
 	{ }
 };
 

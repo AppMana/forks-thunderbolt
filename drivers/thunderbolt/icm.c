@@ -2861,8 +2861,9 @@ static int icm_reset_phy_port(struct tb *tb, int phy_port)
 	state1 = val1 & PHY_PORT_CS1_LINK_STATE_MASK;
 	state1 >>= PHY_PORT_CS1_LINK_STATE_SHIFT;
 
-	/* If they are both up we need to reset them now */
-	if (state0 != TB_PORT_UP || state1 != TB_PORT_UP)
+	/* One trained lane is enough to make the physical connector active. */
+	if (!tb_icm_phy_port_needs_reset(state0 == TB_PORT_UP,
+					 state1 == TB_PORT_UP))
 		return 0;
 
 	val0 |= PHY_PORT_CS1_LINK_DISABLE;
