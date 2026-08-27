@@ -27,8 +27,24 @@ enum nhi_mailbox_cmd {
 	NHI_MAILBOX_ALLOW_ALL_DEVS = 0x23,
 };
 
+struct tb_ring_snapshot {
+	u16 size;
+	u16 sw_head;
+	u16 sw_tail;
+	u16 hw_producer;
+	u16 hw_consumer;
+	u16 queued;
+	u16 in_flight;
+	u32 index_raw;
+	u32 options;
+	bool running;
+	bool indices_valid;
+	bool full;
+};
+
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
+int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
 
 /**
  * struct tb_nhi_ops - NHI specific optional operations

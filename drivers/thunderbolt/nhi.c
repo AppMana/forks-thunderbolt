@@ -281,6 +281,47 @@ static void ring_iowrite32options(struct tb_ring *ring, u32 value, u32 offset)
 	iowrite32(value, ring_options_base(ring) + offset);
 }
 
+int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot)
+{
+	struct ring_frame *frame;
+	unsigned long flags;
+	u32 index;
+
+	if (!ring || !snapshot)
+		return -EINVAL;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	spin_lock_irqsave(&ring->nhi->lock, flags);
+	if (ring->nhi->going_away) {
+		spin_unlock_irqrestore(&ring->nhi->lock, flags);
+		return -ENODEV;
+	}
+	spin_lock(&ring->lock);
+	index = ioread32(ring_desc_base(ring) + 8);
+	snapshot->index_raw = index;
+	snapshot->options = ioread32(ring_options_base(ring));
+	snapshot->size = ring->size;
+	snapshot->sw_head = ring->head;
+	snapshot->sw_tail = ring->tail;
+	snapshot->running = ring->running;
+	list_for_each_entry(frame, &ring->queue, list)
+		snapshot->queued++;
+	list_for_each_entry(frame, &ring->in_flight, list)
+		snapshot->in_flight++;
+	snapshot->hw_producer = index >> 16;
+	snapshot->hw_consumer = index & 0xffff;
+	snapshot->indices_valid = snapshot->size &&
+		snapshot->hw_producer < snapshot->size &&
+		snapshot->hw_consumer < snapshot->size;
+	if (ring->is_tx && snapshot->indices_valid)
+		snapshot->full = (snapshot->hw_producer + 1) % snapshot->size ==
+			snapshot->hw_consumer;
+	spin_unlock(&ring->lock);
+	spin_unlock_irqrestore(&ring->nhi->lock, flags);
+
+	return 0;
+}
+
 static bool ring_full(struct tb_ring *ring)
 {
 	return ((ring->head + 1) % ring->size) == ring->tail;

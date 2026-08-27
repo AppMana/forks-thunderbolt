@@ -888,6 +888,9 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	}
 
 	if (!wait_for_completion_timeout(&done, timeout)) {
+		struct tb_ring_snapshot tx_snapshot;
+		int snapshot_ret;
+
 		tb_cfg_request_update_state(req,
 					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
 		state = tb_cfg_request_read_state(req);
@@ -921,6 +924,22 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					atomic_read(&ctl->rx_unmatched),
 					atomic_read(&ctl->rx_xdomain_tx_status),
 					atomic_read(&ctl->rx_dropped));
+		snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
+		if (!snapshot_ret)
+			tb_ctl_warn_ratelimited(ctl,
+						"ring0 TX snapshot: running=%u size=%u sw_head=%u sw_tail=%u queued=%u in_flight=%u index=%#010x hw_prod=%u hw_cons=%u indices_valid=%u full=%u options=%#010x\n",
+					tx_snapshot.running, tx_snapshot.size,
+					tx_snapshot.sw_head, tx_snapshot.sw_tail,
+					tx_snapshot.queued, tx_snapshot.in_flight,
+					tx_snapshot.index_raw,
+					tx_snapshot.hw_producer,
+					tx_snapshot.hw_consumer,
+					tx_snapshot.indices_valid,
+					tx_snapshot.full, tx_snapshot.options);
+		else
+			tb_ctl_warn_ratelimited(ctl,
+						"ring0 TX snapshot unavailable: %d\n",
+				snapshot_ret);
 		if (state.local == TB_CFG_LOCAL_ACCEPTED)
 			tb_ctl_warn_ratelimited(ctl,
 						"peer response timed out after local XDomain transmit acceptance\n");
