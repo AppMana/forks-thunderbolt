@@ -3428,6 +3428,10 @@ static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
 	next = tb_nhi_recovery_next(state,
 				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
 	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+	KUNIT_EXPECT_TRUE(test,
+		tb_nhi_startup_recovery_may_dispatch(TB_NHI_RECOVERY_IDLE));
+	KUNIT_EXPECT_FALSE(test,
+		tb_nhi_startup_recovery_may_dispatch(TB_NHI_RECOVERY_RETRYING));
 }
 
 static void tb_test_nhi_recovery_command_failure_is_terminal(struct kunit *test)

@@ -49,6 +49,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
 				    bool control_healthy);
+bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi);
 
 static inline bool

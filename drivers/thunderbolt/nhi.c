@@ -116,6 +116,15 @@ nhi_probe_recovery_get(struct pci_dev *pdev)
 	return state;
 }
 
+bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi)
+{
+	if (!nhi)
+		return false;
+
+	return tb_nhi_startup_recovery_may_dispatch(
+		nhi_probe_recovery_get(nhi->pdev));
+}
+
 static int nhi_probe_recovery_set(struct pci_dev *pdev,
 				  enum tb_nhi_recovery_state state)
 {

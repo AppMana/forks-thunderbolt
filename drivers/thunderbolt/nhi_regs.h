@@ -322,6 +322,12 @@ enum tb_nhi_recovery_action {
 	TB_NHI_RECOVERY_ACTION_REPROBE,
 };
 
+static inline bool
+tb_nhi_startup_recovery_may_dispatch(enum tb_nhi_recovery_state state)
+{
+	return state == TB_NHI_RECOVERY_IDLE;
+}
+
 static inline enum tb_nhi_recovery_action
 tb_nhi_recovery_action(enum tb_nhi_recovery_state state)
 {

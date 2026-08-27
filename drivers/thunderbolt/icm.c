@@ -3030,6 +3030,7 @@ static int icm_driver_ready(struct tb *tb)
 				 &tb->nboot_acl, &icm->rpm);
 	if (ret) {
 		if (icm->root_config_timed_out &&
+		    tb_nhi_startup_recovery_allowed(tb->nhi) &&
 		    tb_nhi_recovery_supported(tb->nhi->pdev->vendor,
 					      tb->nhi->pdev->device))
 			icm_root_power_cycle(tb);
