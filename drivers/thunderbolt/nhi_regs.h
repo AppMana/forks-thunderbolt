@@ -149,6 +149,32 @@ static inline u32 tb_nhi_dma_misc_interrupt_policy(u32 value, bool auto_clear)
 #define REG_FW_STS_ICM_EN_INVERT	BIT(1)
 #define REG_FW_STS_ICM_EN		BIT(0)
 
+#define PCIE2CIO_CMD			0x30
+#define PCIE2CIO_CMD_TIMEOUT		BIT(31)
+#define PCIE2CIO_CMD_START		BIT(30)
+#define PCIE2CIO_CMD_WRITE		BIT(21)
+#define PCIE2CIO_CMD_CS_MASK		GENMASK(20, 19)
+#define PCIE2CIO_CMD_CS_SHIFT		19
+#define PCIE2CIO_CMD_PORT_MASK		GENMASK(18, 13)
+#define PCIE2CIO_CMD_PORT_SHIFT		13
+
+enum tb_pcie2cio_completion_state {
+	TB_PCIE2CIO_COMPLETION_BUSY,
+	TB_PCIE2CIO_COMPLETION_COMPLETE,
+	TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT,
+};
+
+static inline enum tb_pcie2cio_completion_state
+tb_pcie2cio_completion_state(u32 cmd)
+{
+	if (cmd & PCIE2CIO_CMD_START)
+		return TB_PCIE2CIO_COMPLETION_BUSY;
+	if (cmd & PCIE2CIO_CMD_TIMEOUT)
+		return TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT;
+
+	return TB_PCIE2CIO_COMPLETION_COMPLETE;
+}
+
 /*
  * Is the ICM firmware running, judged from a raw REG_FW_STS read? Single
  * source for icm_firmware_running() and the KUnit model.

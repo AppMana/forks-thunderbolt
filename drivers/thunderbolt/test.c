@@ -3445,6 +3445,18 @@ static void tb_test_nhi_startup_recovery_uses_arc_cio(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_ARC_CIO_RESET_PENDING);
 }
 
+static void tb_test_pcie2cio_completion_states(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			tb_pcie2cio_completion_state(PCIE2CIO_CMD_START),
+			TB_PCIE2CIO_COMPLETION_BUSY);
+	KUNIT_EXPECT_EQ(test, tb_pcie2cio_completion_state(0),
+			TB_PCIE2CIO_COMPLETION_COMPLETE);
+	KUNIT_EXPECT_EQ(test,
+			tb_pcie2cio_completion_state(PCIE2CIO_CMD_TIMEOUT),
+			TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT);
+}
+
 static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)
 {
 	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_RETRYING;
@@ -3466,10 +3478,10 @@ static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *tes
 
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
-	KUNIT_EXPECT_TRUE(test, supported);
+	KUNIT_EXPECT_FALSE(test, supported);
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
-	KUNIT_EXPECT_TRUE(test, supported);
+	KUNIT_EXPECT_FALSE(test, supported);
 	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_FALSE(test, supported);
@@ -5882,6 +5894,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
 	KUNIT_CASE(tb_test_nhi_recovery_reset_failure_is_terminal),
 	KUNIT_CASE(tb_test_nhi_startup_recovery_uses_arc_cio),
+	KUNIT_CASE(tb_test_pcie2cio_completion_states),
 	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
 	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
 	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),

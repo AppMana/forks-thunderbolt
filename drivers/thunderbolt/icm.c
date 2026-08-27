@@ -24,15 +24,6 @@
 #include "tb.h"
 #include "tunnel.h"
 
-#define PCIE2CIO_CMD			0x30
-#define PCIE2CIO_CMD_TIMEOUT		BIT(31)
-#define PCIE2CIO_CMD_START		BIT(30)
-#define PCIE2CIO_CMD_WRITE		BIT(21)
-#define PCIE2CIO_CMD_CS_MASK		GENMASK(20, 19)
-#define PCIE2CIO_CMD_CS_SHIFT		19
-#define PCIE2CIO_CMD_PORT_MASK		GENMASK(18, 13)
-#define PCIE2CIO_CMD_PORT_SHIFT		13
-
 #define PCIE2CIO_WRDATA			0x34
 #define PCIE2CIO_RDDATA			0x38
 
@@ -293,20 +284,40 @@ static void icm_schedule_native_pcie_hotplug_rescan(struct tb *tb,
 static int pci2cio_wait_completion(struct icm *icm, unsigned long timeout_msec)
 {
 	unsigned long end = jiffies + msecs_to_jiffies(timeout_msec);
+	struct pci_dev *pdev = icm->upstream_port;
+	enum tb_pcie2cio_completion_state state;
+	int ret;
 	u32 cmd;
 
 	do {
-		pci_read_config_dword(icm->upstream_port,
-				      icm->vnd_cap + PCIE2CIO_CMD, &cmd);
-		if (!(cmd & PCIE2CIO_CMD_START)) {
-			if (cmd & PCIE2CIO_CMD_TIMEOUT)
-				break;
+		ret = pci_read_config_dword(pdev,
+					    icm->vnd_cap + PCIE2CIO_CMD, &cmd);
+		if (ret != PCIBIOS_SUCCESSFUL) {
+			pci_err(pdev,
+				"PCIe2CIO command status read failed: VSEC %#x status %#x\n",
+				icm->vnd_cap, ret);
+			return -EIO;
+		}
+
+		state = tb_pcie2cio_completion_state(cmd);
+		switch (state) {
+		case TB_PCIE2CIO_COMPLETION_COMPLETE:
 			return 0;
+		case TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT:
+			pci_err(pdev,
+				"PCIe2CIO target timed out: VSEC %#x command %#010x\n",
+				icm->vnd_cap, cmd);
+			return -ETIMEDOUT;
+		case TB_PCIE2CIO_COMPLETION_BUSY:
+			break;
 		}
 
 		msleep(50);
 	} while (time_before(jiffies, end));
 
+	pci_err(pdev,
+		"PCIe2CIO command remained busy: VSEC %#x command %#010x after %lu ms\n",
+		icm->vnd_cap, cmd, timeout_msec);
 	return -ETIMEDOUT;
 }
 
@@ -2210,28 +2221,12 @@ static struct pci_dev *get_upstream_port(struct pci_dev *pdev)
 	case PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_BRIDGE:
-	/*
-	 * Maple Ridge carries the same CIO-reset VSEC on its upstream
-	 * bridge, but was never added to this allowlist, so every caller
-	 * that needs pcie2cio -- icm_firmware_reset() above all -- got a
-	 * NULL port and gave up with -ENODEV on this silicon.
-	 */
-	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_BRIDGE:
 		return parent;
 	}
 
 	return NULL;
 }
 
-/*
- * Locate the PCIe upstream port and its vendor-specific capability -- the
- * pair pcie2cio_read()/pcie2cio_write() need in order to reach CIO config
- * space, and therefore the precondition for icm_firmware_reset().
- *
- * Split out of icm_ar_is_supported() so the Maple Ridge probe path can arm
- * the same reset machinery; see the MAPLE_RIDGE case in icm_probe().
- * Idempotent, so probing twice is harmless.
- */
 static bool icm_find_upstream_vsec(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
@@ -2245,24 +2240,6 @@ static bool icm_find_upstream_vsec(struct tb *tb)
 	if (!upstream_port)
 		return false;
 
-	/*
-	 * A Maple Ridge bridge exposes TWO vendor-specific extended
-	 * capabilities, and picking between them by VSEC ID is a trap. It
-	 * looks like the one whose id reads 0x8086 must be "the Intel block",
-	 * but that is NOT the pcie2cio window. Measured on 019's bridge
-	 * (05:00.0):
-	 *
-	 *   VSEC @0x500 id=0x1234 -- PCIE2CIO_CMD is writable; a command
-	 *                            written here is accepted and latched
-	 *   VSEC @0x600 id=0x8086 -- PCIE2CIO_CMD reads back 0 after a write
-	 *
-	 * So the first VNDR capability, which is what upstream has always
-	 * taken, is the correct one. Worse, choosing 0x600 fails SILENTLY:
-	 * pcie2cio_write() stores the command, then pci2cio_wait_completion()
-	 * reads CMD back as 0, sees PCIE2CIO_CMD_START clear and reports
-	 * success -- so icm_firmware_reset() returns 0 having done nothing at
-	 * all, and the caller logs a firmware restart that never happened.
-	 */
 	cap = pci_find_ext_capability(upstream_port, PCI_EXT_CAP_ID_VNDR);
 	if (cap <= 0)
 		return false;
@@ -2781,21 +2758,28 @@ int icm_unlock_config_space(struct tb *tb)
 static int icm_firmware_reset(struct tb *tb, struct tb_nhi *nhi)
 {
 	struct icm *icm = tb_priv(tb);
-	u32 val;
+	u32 before, reset_requested, arc_restarted, val;
 
 	if (!icm->upstream_port)
 		return -ENODEV;
 
 	/* Put ARC to wait for CIO reset event to happen */
-	val = ioread32(nhi->iobase + REG_FW_STS);
+	before = ioread32(nhi->iobase + REG_FW_STS);
+	val = before;
 	val |= REG_FW_STS_CIO_RESET_REQ;
 	iowrite32(val, nhi->iobase + REG_FW_STS);
+	reset_requested = ioread32(nhi->iobase + REG_FW_STS);
 
 	/* Re-start ARC */
 	val = ioread32(nhi->iobase + REG_FW_STS);
 	val |= REG_FW_STS_ICM_EN_INVERT;
 	val |= REG_FW_STS_ICM_EN_CPU;
 	iowrite32(val, nhi->iobase + REG_FW_STS);
+	arc_restarted = ioread32(nhi->iobase + REG_FW_STS);
+
+	tb_info(tb,
+		"ARC/CIO reset request: FW_STS %#010x -> %#010x -> %#010x\n",
+		before, reset_requested, arc_restarted);
 
 	/* Trigger CIO reset now */
 	return icm->cio_reset(tb);
@@ -3487,6 +3471,32 @@ static const struct tb_cm_ops icm_tr_ops = {
 		icm_usb4_switch_nvm_authenticate_status,
 };
 
+/* Maple Ridge uses Titan Ridge messages but has no host PCIe2CIO reset. */
+static const struct tb_cm_ops icm_mr_ops = {
+	.driver_ready = icm_driver_ready,
+	.start = icm_start,
+	.stop = icm_stop,
+	.deinit = icm_deinit,
+	.suspend = icm_suspend,
+	.complete = icm_complete,
+	.runtime_suspend = icm_runtime_suspend,
+	.runtime_resume = icm_runtime_resume,
+	.runtime_suspend_switch = icm_runtime_suspend_switch,
+	.runtime_resume_switch = icm_runtime_resume_switch,
+	.handle_event = icm_handle_event,
+	.get_boot_acl = icm_ar_get_boot_acl,
+	.set_boot_acl = icm_ar_set_boot_acl,
+	.approve_switch = icm_tr_approve_switch,
+	.add_switch_key = icm_tr_add_switch_key,
+	.challenge_switch_key = icm_tr_challenge_switch_key,
+	.disconnect_pcie_paths = icm_disconnect_pcie_paths,
+	.approve_xdomain_paths = icm_tr_approve_xdomain_paths,
+	.disconnect_xdomain_paths = icm_tr_disconnect_xdomain_paths,
+	.usb4_switch_op = icm_usb4_switch_op,
+	.usb4_switch_nvm_authenticate_status =
+		icm_usb4_switch_nvm_authenticate_status,
+};
+
 /* Ice Lake */
 static const struct tb_cm_ops icm_icl_ops = {
 	.driver_ready = icm_driver_ready,
@@ -3620,28 +3630,7 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 		icm->device_disconnected = icm_tr_device_disconnected;
 		icm->xdomain_connected = icm_tr_xdomain_connected;
 		icm->xdomain_disconnected = icm_tr_xdomain_disconnected;
-		/*
-		 * Maple Ridge takes the entire Titan Ridge op set above, but
-		 * upstream never gave it ->cio_reset, and only
-		 * icm_ar_is_supported() ever discovers the upstream-port VSEC
-		 * that pcie2cio needs. Both omissions land in the same place:
-		 * icm_firmware_reset() returns -ENODEV on this silicon, so the
-		 * firmware-restart recovery in icm_start() cannot run at all.
-		 *
-		 * That is only invisible while the firmware is healthy.
-		 * icm_firmware_start() decides "already running" from the
-		 * ICM_EN status bit, and when the ICM latches ICM_EN but stops
-		 * answering DRIVER_READY -- ring 0 transmitting normally,
-		 * rx_total pinned at 0 across every retry, seen on 019 -- the
-		 * driver has no path left that can restart the ARC core, and
-		 * a PCIe secondary bus reset does not clear it either
-		 * (measured: config space returns, the ICM stays mute).
-		 *
-		 * Wire up both so the existing restart is reachable here.
-		 */
-		icm->cio_reset = icm_tr_cio_reset;
-		icm_find_upstream_vsec(tb);
-		tb->cm_ops = &icm_tr_ops;
+		tb->cm_ops = &icm_mr_ops;
 		break;
 	}
 

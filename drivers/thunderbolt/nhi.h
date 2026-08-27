@@ -93,12 +93,6 @@ extern const struct tb_nhi_ops icl_nhi_ops;
  * hardware.
  */
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI		0x1134
-/*
- * Both the 2C and the 4C Maple Ridge parts present their PCIe upstream
- * bridge as 0x1136; get_upstream_port() needs it to reach the CIO reset
- * VSEC, which is the precondition for icm_firmware_reset() on this silicon.
- */
-#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_BRIDGE		0x1136
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI		0x1137
 #define PCI_DEVICE_ID_INTEL_WIN_RIDGE_2C_NHI            0x157d
 #define PCI_DEVICE_ID_INTEL_WIN_RIDGE_2C_BRIDGE         0x157e
@@ -145,11 +139,9 @@ extern const struct tb_nhi_ops icl_nhi_ops;
 
 static inline bool tb_nhi_recovery_supported(u16 vendor, u16 device)
 {
-	if (vendor != PCI_VENDOR_ID_INTEL)
-		return false;
-
-	return device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI ||
-	       device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	(void)vendor;
+	(void)device;
+	return false;
 }
 
 static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)
