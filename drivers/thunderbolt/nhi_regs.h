@@ -249,12 +249,11 @@ tb_icm_startup_proof_advance(struct tb_icm_startup_proof *proof,
 
 #define TB_ICM_ROOT_CONFIG_TIMEOUT_MS	100U
 #define TB_ICM_ROOT_CONFIG_INTERVAL_MS	50U
-#define TB_ICM_ROOT_CONFIG_MAX_REQUESTS	8U
 
 static inline unsigned int
 tb_icm_root_config_request_count(unsigned int passes)
 {
-	return min(passes, TB_ICM_ROOT_CONFIG_MAX_REQUESTS);
+	return passes;
 }
 
 static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)

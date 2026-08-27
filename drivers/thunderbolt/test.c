@@ -3380,9 +3380,13 @@ static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
  */
 static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *test)
 {
-	/* Leave one usable ring-0 descriptor for the recovery command. */
-	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 8u);
-	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 1200u);
+	/*
+	 * Completion reaping keeps ring capacity reusable. Do not truncate the
+	 * caller's readiness budget to reserve descriptors for a later command:
+	 * a slow but healthy controller may need more than eight observations.
+	 */
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 50u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 7500u);
 }
 
 /*

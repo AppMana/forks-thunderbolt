@@ -39,8 +39,8 @@
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
  * become readable. Each pass issues exactly one 100 ms read and then sleeps
- * 50 ms. The control TX ring has nine usable entries; keep the ninth free for
- * a host-router recovery request if none of the reads completes locally.
+ * 50 ms, so the default 50 is about 7.5 s. Completed descriptors are reaped
+ * and reusable; this budget is independent of the ring size.
  *
  * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
  * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
@@ -49,10 +49,10 @@
  * in the log from genuinely dead firmware. Tunable at runtime so the two can
  * actually be told apart on hardware instead of inferred.
  */
-static unsigned int icm_cfg_space_retries = TB_ICM_ROOT_CONFIG_MAX_REQUESTS;
+static unsigned int icm_cfg_space_retries = 50;
 module_param(icm_cfg_space_retries, uint, 0644);
 MODULE_PARM_DESC(icm_cfg_space_retries,
-		 "single-request root config-space readiness passes, ~150ms each (maximum 8)");
+		 "single-request root config-space readiness passes, ~150ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
