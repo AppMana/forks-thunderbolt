@@ -4113,11 +4113,14 @@ static void tb_remove_work(struct work_struct *work)
 	struct tb *tb = tcm_to_tb(tcm);
 
 	mutex_lock(&tb->lock);
-	if (tb->root_switch)
+	if (tb->root_switch) {
 		tb_free_unplugged_children(tb->root_switch);
+		tb_free_unplugged_xdomains(tb->root_switch);
+	}
 	mutex_unlock(&tb->lock);
 
-	tb_free_unplugged_xdomains(tb->root_switch);
+	/* Service-driver unbind callbacks must run without the domain lock. */
+	tb_domain_unregister_unplugged_xdomains(tb);
 }
 
 static int tb_runtime_resume(struct tb *tb)

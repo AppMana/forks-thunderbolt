@@ -2308,7 +2308,7 @@ EXPORT_SYMBOL_GPL(tbframe_register_client);
  * stop (tb_ring_stop() flushes the ring's work item), which must never be
  * done under the lock the inbound dispatch path needs.
  */
-static void tbframe_link_park(struct tbframe_link *link)
+static void tbframe_link_mark_parked(struct tbframe_link *link)
 {
 	unsigned long flags;
 
@@ -2324,9 +2324,22 @@ static void tbframe_link_park(struct tbframe_link *link)
 	spin_lock_irqsave(&link->lock, flags);
 	link->parked = true;
 	spin_unlock_irqrestore(&link->lock, flags);
+}
 
+static void tbframe_link_cancel_activity(struct tbframe_link *link,
+					 bool permanent)
+{
+	if (permanent)
+		timer_shutdown_sync(&link->verify_timer);
+	else
+		timer_delete_sync(&link->verify_timer);
 	cancel_delayed_work_sync(&link->session_work);
+	cancel_work_sync(&link->verify_work);
+	cancel_work_sync(&link->tx_released_work);
+}
 
+static void tbframe_link_down_parked(struct tbframe_link *link)
+{
 	mutex_lock(&link->session_lock);
 	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
 	mutex_unlock(&link->session_lock);
@@ -2372,24 +2385,44 @@ void tbframe_link_shutdown(struct tbframe_link *link)
 
 void tbframe_unregister_client_tf(struct tbframe *tf)
 {
+	struct tbframe_link *link;
 	unsigned int skip = 0;
 
 	if (!tf)
 		return;
 
-	/*
-	 * Close every link for the departing client: sessions drop to the
-	 * negotiation floor and are parked (CLOSED does not re-handshake);
-	 * a later register unparks and kicks them again. One link at a time,
-	 * referenced, with tf->lock dropped across the teardown.
-	 */
-	for (;;) {
-		struct tbframe_link *link;
+	/* Close every re-arm gate before any link starts negotiated teardown. */
+	mutex_lock(&tf->lock);
+	list_for_each_entry(link, &tf->links, node)
+		tbframe_link_mark_parked(link);
+	mutex_unlock(&tf->lock);
 
+	/* Join every control-producing activity before the first BYE. */
+	for (;;) {
 		link = tbframe_dispatch_next(tf, NULL, &skip);
 		if (!link)
 			break;
-		tbframe_link_park(link);
+		tbframe_link_cancel_activity(link, false);
+		tbframe_link_put(link);
+	}
+
+	/* Sessions are globally quiet; hardware teardown can now run per link. */
+	skip = 0;
+	for (;;) {
+		link = tbframe_dispatch_next(tf, NULL, &skip);
+		if (!link)
+			break;
+		tbframe_link_down_parked(link);
+		tbframe_link_put(link);
+	}
+
+	/* Ring cancellation can complete frames; join resulting callbacks too. */
+	skip = 0;
+	for (;;) {
+		link = tbframe_dispatch_next(tf, NULL, &skip);
+		if (!link)
+			break;
+		tbframe_link_cancel_activity(link, false);
 		tbframe_link_put(link);
 	}
 
@@ -2398,6 +2431,46 @@ void tbframe_unregister_client_tf(struct tbframe *tf)
 	tf->client_ops = NULL;
 	tf->client_ctx = NULL;
 	up_write(&tf->client_rwsem);
+}
+
+static void tbframe_prepare_quiesce(struct tbframe *tf, bool removing)
+{
+	struct tbframe_link *link;
+	unsigned int skip = 0;
+	unsigned long flags;
+
+	if (!tf)
+		return;
+
+	/* Permanently close every re-arm gate before any service is removed. */
+	mutex_lock(&tf->lock);
+	list_for_each_entry(link, &tf->links, node) {
+		spin_lock_irqsave(&link->lock, flags);
+		link->parked = true;
+		if (removing)
+			link->removing = true;
+		spin_unlock_irqrestore(&link->lock, flags);
+	}
+	mutex_unlock(&tf->lock);
+
+	/* Then join every timer and work item across the complete link set. */
+	for (;;) {
+		link = tbframe_dispatch_next(tf, NULL, &skip);
+		if (!link)
+			break;
+		tbframe_link_cancel_activity(link, true);
+		tbframe_link_put(link);
+	}
+}
+
+void tbframe_prepare_stop(struct tbframe *tf)
+{
+	tbframe_prepare_quiesce(tf, true);
+}
+
+void tbframe_prepare_shutdown(struct tbframe *tf)
+{
+	tbframe_prepare_quiesce(tf, false);
 }
 
 void tbframe_unregister_client(void)

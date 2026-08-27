@@ -100,6 +100,12 @@ struct tbframe_mock {
 	unsigned int	bye_count;
 	bool		bye_rings_started;
 	unsigned int	bye_hw_calls_at;
+	struct tbframe_link *must_be_parked_before_bye;
+	bool		bye_started_before_all_links_parked;
+	bool		bye_started_before_all_session_work_stopped;
+	struct tbframe_link *must_be_quiet_before_disable;
+	bool		disable_started_before_all_links_parked;
+	bool		disable_started_before_all_activity_stopped;
 
 	/* teardown call order (enum tbframe_mock_hw_call tokens) */
 	u8		hw_calls[TBFRAME_MOCK_MAX_EVENTS];
@@ -414,6 +420,23 @@ static int tbframe_mock_disable_paths(void *data, int local_hopid,
 				      int remote_hopid)
 {
 	struct tbframe_mock *m = data;
+	unsigned long flags;
+	bool parked;
+
+	if (m->must_be_quiet_before_disable) {
+		struct tbframe_link *link = m->must_be_quiet_before_disable;
+
+		spin_lock_irqsave(&link->lock, flags);
+		parked = link->parked;
+		spin_unlock_irqrestore(&link->lock, flags);
+		if (!parked)
+			m->disable_started_before_all_links_parked = true;
+		if (work_busy(&link->session_work.work) ||
+		    work_busy(&link->verify_work) ||
+		    work_busy(&link->tx_released_work) ||
+		    timer_pending(&link->verify_timer))
+			m->disable_started_before_all_activity_stopped = true;
+	}
 
 	tbframe_mock_hw_call(m, TBFRAME_HW_DISABLE_PATHS);
 	m->paths_on = false;
@@ -497,6 +520,22 @@ static int tbframe_mock_control_request(void *data, const void *req,
 		ack_op = TBFRAME_WIRE_OP_READY_ACK;
 		break;
 	case TBFRAME_WIRE_OP_BYE:
+		if (m->must_be_parked_before_bye) {
+			struct tbframe_link *link = m->must_be_parked_before_bye;
+			unsigned long flags;
+			bool parked;
+
+			spin_lock_irqsave(&link->lock, flags);
+			parked = link->parked;
+			spin_unlock_irqrestore(&link->lock, flags);
+			if (!parked)
+				m->bye_started_before_all_links_parked = true;
+			if (work_busy(&link->session_work.work) ||
+			    work_busy(&link->verify_work) ||
+			    work_busy(&link->tx_released_work) ||
+			    timer_pending(&link->verify_timer))
+				m->bye_started_before_all_session_work_stopped = true;
+		}
 		/* Quiesce contract: BYE leaves after our TX drained but
 		 * before any ring stop or path teardown, so the receiving
 		 * side's rings still absorb our residue and ours theirs. */

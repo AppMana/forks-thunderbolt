@@ -47,7 +47,7 @@ rsync -a --delete --exclude='.git' "$REPO/drivers/thunderbolt/" "$TREE/drivers/t
 rsync -a --delete --exclude='.git' "$REPO/drivers/net/thunderbolt/" "$TREE/drivers/net/thunderbolt/"
 # Patch the overlay's public header via the SAME shim the DKMS build uses, so
 # the KUnit tree and the shipped package never drift on the header additions
-# (completion.h, callback_xd/TB_PROTOCOL_HANDLER_HAS_XDOMAIN, domain_released).
+# (callback_xd/TB_PROTOCOL_HANDLER_HAS_XDOMAIN and XDomain extensions).
 # The shim reads <ksrc>/include/linux/thunderbolt.h and writes <out>/linux/;
 # here ksrc == the overlay tree, and we copy the result back in place.
 # Restore the pristine upstream header first: a previous run overwrote it

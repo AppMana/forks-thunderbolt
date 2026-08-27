@@ -2,7 +2,7 @@
 
 # The fork replaces the whole thunderbolt subsystem and owns its public header:
 # the vendored .c reference struct members the stock <linux/thunderbolt.h>
-# lacks (tb_nhi::domain_released, tb_protocol_handler::callback_xd). The tbfix
+# lacks (tb_protocol_handler::callback_xd). The tbfix
 # build generates a patched copy from the kernel's own header and passes its
 # directory here; prepending it to LINUXINCLUDE shadows the kernel's copy for
 # a <linux/...> include (verified: LINUXINCLUDE is searched before the stock

@@ -21,12 +21,6 @@
 
 #define TB_CTL_RX_PKG_COUNT	10
 #define TB_CTL_RETRIES		4
-/*
- * Bound on the tb_ctl_free() wait for outstanding request completion work.
- * Nothing on a teardown path may wait indefinitely; on expiry the control
- * channel allocation is deliberately leaked instead (see tb_ctl_free()).
- */
-#define TB_CTL_REQ_WORK_DRAIN_MS 2000
 /* Windows waits this long for the independent local ring command. */
 #define TB_CTL_XDOMAIN_TX_TIMEOUT_MS 25000
 
@@ -68,6 +62,7 @@ struct tb_ctl {
 	 * neither tb_ctl_stop() nor tb_ctl_free() used to flush them.
 	 */
 	atomic_t req_works;
+	wait_queue_head_t req_work_wait;
 
 	/*
 	 * Ring 0 liveness, diagnostic only. When a control request times out
@@ -155,6 +150,12 @@ static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_local_queue);
 /* Serializes access to request kref_get/put */
 static DEFINE_MUTEX(tb_cfg_request_lock);
+
+static void tb_ctl_req_work_put(struct tb_ctl *ctl)
+{
+	if (atomic_dec_and_test(&ctl->req_works))
+		wake_up_all(&ctl->req_work_wait);
+}
 
 /**
  * tb_cfg_request_alloc() - Allocates a new config request
@@ -791,7 +792,7 @@ static void tb_ctl_schedule_req_work(struct tb_cfg_request *req)
 	if (ctl)
 		atomic_inc(&ctl->req_works);
 	if (!schedule_work(&req->work) && ctl)
-		atomic_dec(&ctl->req_works);
+		tb_ctl_req_work_put(ctl);
 }
 
 static void tb_cfg_request_work(struct work_struct *work)
@@ -799,7 +800,7 @@ static void tb_cfg_request_work(struct work_struct *work)
 	struct tb_cfg_request *req = container_of(work, typeof(*req), work);
 	struct tb_ctl *ctl = req->ctl;
 
-	if (!test_bit(TB_CFG_REQUEST_CANCELED, &req->flags))
+	if (tb_cfg_request_work_runs_callback(req->flags))
 		req->callback(req->callback_data);
 
 	if (!test_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags)) {
@@ -808,7 +809,7 @@ static void tb_cfg_request_work(struct work_struct *work)
 	}
 	/* Last touch of @ctl: after this the ctl may be freed. */
 	if (ctl)
-		atomic_dec(&ctl->req_works);
+		tb_ctl_req_work_put(ctl);
 }
 
 /**
@@ -904,11 +905,14 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 
 	hold_local = req->state.local != TB_CFG_LOCAL_DISABLED;
 	if (hold_local) {
+		/* Account before sleeping so control teardown cannot free ctl
+		 * while this request is queued behind the unsequenced local slot.
+		 */
+		atomic_inc(&ctl->req_works);
 		down(&ctl->xdomain_tx_sem);
 		WARN_ON(!tb_cfg_local_slot_may_claim(READ_ONCE(ctl->xdomain_tx_occupied)));
 		WRITE_ONCE(ctl->xdomain_tx_occupied, true);
 		set_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags);
-		atomic_inc(&ctl->req_works);
 		local_deadline = jiffies +
 			msecs_to_jiffies(TB_CTL_XDOMAIN_TX_TIMEOUT_MS);
 	}
@@ -920,7 +924,7 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		if (hold_local)
 			tb_cfg_request_release_local_slot(req);
 		if (hold_local)
-			atomic_dec(&ctl->req_works);
+			tb_ctl_req_work_put(ctl);
 		return res;
 	}
 
@@ -1032,7 +1036,7 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		tb_cfg_request_release_local_slot(req);
 		tb_cfg_request_put(req);
 		/* Last touch of @ctl: tb_ctl_free() may proceed after this. */
-		atomic_dec(&ctl->req_works);
+		tb_ctl_req_work_put(ctl);
 	}
 
 	res = req->result;
@@ -1096,6 +1100,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 
 	mutex_init(&ctl->request_queue_lock);
 	sema_init(&ctl->xdomain_tx_sem, 1);
+	init_waitqueue_head(&ctl->req_work_wait);
 	INIT_LIST_HEAD(&ctl->request_queue);
 	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", &nhi->pdev->dev,
 					 TB_FRAME_SIZE, 4, 0);
@@ -1135,43 +1140,18 @@ err:
  */
 void tb_ctl_free(struct tb_ctl *ctl)
 {
-	unsigned int waited = 0;
 	int i;
 
 	if (!ctl)
 		return;
 
 	/*
-	 * Bounded fence against completion work that still dereferences this
-	 * ctl. tb_cfg_request_work() calls tb_cfg_request_dequeue(), which
-	 * takes ctl->request_queue_lock, AFTER the callback -- and those work
-	 * items run on system_wq with no reference on the ctl or the domain,
-	 * so kfree(ctl) below could race them. The reachable case on the
-	 * teardown path is a peer that is still sending XDomain requests at
-	 * us: tb_xdp_handle_request() -> tb_xdomain_response() ->
-	 * tb_cfg_request() with a NULL response schedules the work
-	 * immediately.
-	 *
-	 * Not done in tb_ctl_stop(): that runs under tb->lock, and one of the
-	 * callbacks (icm_usb4_switch_nvm_auth_complete()) takes tb->lock, so
-	 * waiting there would be the very lock inversion this series exists to
-	 * remove. Here the lock is not held.
-	 *
-	 * Bounded with a defined failure action, per the no-unbounded-waits
-	 * rule: on expiry, warn and proceed. Leaking the ctl allocation is
-	 * strictly better than never returning from a module unload or a
-	 * shutdown.
+	 * Request work dereferences this object after its callback. Control stop
+	 * has already terminated both request state machines and released the
+	 * unsequenced local slot, so this is a local workqueue drain, not a wait
+	 * for firmware or a peer. It runs without the domain lock.
 	 */
-	while (atomic_read(&ctl->req_works)) {
-		if (waited >= TB_CTL_REQ_WORK_DRAIN_MS) {
-			tb_ctl_WARN(ctl,
-				    "%d request work items still outstanding after %u ms; leaking the control channel rather than blocking teardown\n",
-				    atomic_read(&ctl->req_works), waited);
-			return;
-		}
-		msleep(20);
-		waited += 20;
-	}
+	wait_event(ctl->req_work_wait, !atomic_read(&ctl->req_works));
 
 	if (ctl->rx)
 		tb_ring_free(ctl->rx);
@@ -1214,6 +1194,8 @@ void tb_ctl_start(struct tb_ctl *ctl)
  */
 void tb_ctl_stop(struct tb_ctl *ctl)
 {
+	struct tb_cfg_request *req;
+
 	mutex_lock(&ctl->request_queue_lock);
 	ctl->running = false;
 	mutex_unlock(&ctl->request_queue_lock);
@@ -1222,27 +1204,28 @@ void tb_ctl_stop(struct tb_ctl *ctl)
 	tb_ring_stop(ctl->tx);
 
 	/*
-	 * Retire the dangling requests properly instead of re-heading the
-	 * list. INIT_LIST_HEAD() left every dangling request LINKED to its
-	 * stale neighbours with TB_CFG_REQUEST_ACTIVE still set, so the next
-	 * tb_cfg_request_dequeue() for one of them did list_del() through
-	 * freed neighbour pointers -- list corruption on a teardown path,
-	 * which is the worst place to have it. The WARN below documents that
-	 * this state is expected to occur, so it has to be handled, not just
-	 * reported. Also wake anyone inside tb_cfg_request_cancel(), which
-	 * waits on TB_CFG_REQUEST_ACTIVE clearing and would otherwise wait
-	 * forever for a request the ctl has just abandoned.
+	 * Fail every outstanding request through its normal completion work.
+	 * Synchronous callers must wake immediately, including local XDomain
+	 * commands whose independent completion otherwise has a 25-second
+	 * deadline. Work owns the dequeue so no request is left linked through
+	 * stale neighbours, and tb_ctl_free() can fence it through req_works.
 	 */
 	mutex_lock(&ctl->request_queue_lock);
 	if (!list_empty(&ctl->request_queue)) {
-		struct tb_cfg_request *req, *n;
-
 		tb_ctl_WARN(ctl, "dangling request in request_queue\n");
-		list_for_each_entry_safe(req, n, &ctl->request_queue, list) {
-			list_del_init(&req->list);
-			clear_bit(TB_CFG_REQUEST_ACTIVE, &req->flags);
+		list_for_each_entry(req, &ctl->request_queue, list) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&req->state_lock, flags);
+			tb_cfg_request_stop_state(&req->state);
+			spin_unlock_irqrestore(&req->state_lock, flags);
+			req->result.err = -ESHUTDOWN;
+			set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
+			set_bit(TB_CFG_REQUEST_STOPPED, &req->flags);
+			tb_cfg_request_release_local_slot(req);
+			tb_ctl_schedule_req_work(req);
 		}
-		wake_up(&tb_cfg_request_cancel_queue);
+		wake_up_all(&tb_cfg_request_local_queue);
 	}
 	mutex_unlock(&ctl->request_queue_lock);
 	tb_ctl_dbg(ctl, "control channel stopped\n");

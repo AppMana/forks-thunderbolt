@@ -1868,22 +1868,6 @@ static int nhi_runtime_resume(struct device *dev)
 	return tb_domain_runtime_resume(tb);
 }
 
-/*
- * Bound on every wait for the domain's last reference to go away. A domain
- * reference is held by, among others, tb_xdp_handle_request() work items --
- * i.e. by a peer that is still sending XDomain requests at us, which is
- * precisely the state a chain node is in during a reload or a reboot. An
- * unbounded wait_for_completion() here strands nhi_probe(), nhi_remove() and
- * the reboot path indefinitely.
- */
-#define NHI_DOMAIN_RELEASE_MS	5000
-
-static bool nhi_wait_domain_released(struct tb_nhi *nhi)
-{
-	return wait_for_completion_timeout(&nhi->domain_released,
-					   msecs_to_jiffies(NHI_DOMAIN_RELEASE_MS)) != 0;
-}
-
 static void nhi_shutdown(struct tb_nhi *nhi)
 {
 	int i;
@@ -2250,8 +2234,6 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_warn(dev,
 			 "PCIe hotplug is firmware-controlled (_OSC did not grant it, often caused by pcie_aspm=off); PCIe tunnel devices will NOT enumerate\n");
 
-	init_completion(&nhi->domain_released);
-
 	res = tb_domain_add(tb, host_reset);
 	if (res) {
 		if (res == -ETIMEDOUT &&
@@ -2287,10 +2269,6 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 release_domain:
 		/* Release every ring and mapping before the deferred reprobe. */
 		tb_domain_put(tb);
-		if (!nhi_wait_domain_released(nhi))
-			dev_err(dev,
-				"domain did not release within %u ms; poisoning NHI MMIO and abandoning it rather than blocking probe\n",
-				NHI_DOMAIN_RELEASE_MS);
 		nhi_shutdown(nhi);
 
 		if (recovery->state == TB_NHI_RECOVERY_REPROBE_PENDING)
@@ -2356,19 +2334,6 @@ static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 				"quiesced ARC/CIO reset failed (%d); a power-removal reset is required\n",
 				reset_ret);
 	}
-	/*
-	 * Bounded, with a defined failure action. Refusing is not available on
-	 * this path -- the PCI core is removing us, and the identical code runs
-	 * from the reboot path -- so on expiry we proceed. nhi_shutdown()
-	 * poisons MMIO first thing, so a straggler that still holds a domain
-	 * reference can no longer reach the BAR that pcim devres is about to
-	 * unmap. Leaking the domain allocation is strictly better than never
-	 * returning from an rmmod or a shutdown.
-	 */
-	if (!nhi_wait_domain_released(nhi))
-		dev_err(&pdev->dev,
-			"domain did not release within %u ms; proceeding with NHI teardown and leaking it\n",
-			NHI_DOMAIN_RELEASE_MS);
 	nhi_shutdown(nhi);
 }
 

@@ -262,6 +262,22 @@ struct tb_cfg_request {
 #define TB_CFG_REQUEST_CANCELED		1
 #define TB_CFG_REQUEST_HOLD_LOCAL	2
 #define TB_CFG_REQUEST_LOCAL_SLOT	3
+#define TB_CFG_REQUEST_STOPPED		4
+
+static inline void
+tb_cfg_request_stop_state(struct tb_cfg_request_state *state)
+{
+	if (state->local == TB_CFG_LOCAL_WAITING)
+		state->local = TB_CFG_LOCAL_TIMED_OUT;
+	if (state->peer == TB_CFG_PEER_WAITING)
+		state->peer = TB_CFG_PEER_CANCELED;
+}
+
+static inline bool tb_cfg_request_work_runs_callback(unsigned long flags)
+{
+	return !test_bit(TB_CFG_REQUEST_CANCELED, &flags) ||
+	       test_bit(TB_CFG_REQUEST_STOPPED, &flags);
+}
 
 struct tb_cfg_request *tb_cfg_request_alloc(void);
 void tb_cfg_request_get(struct tb_cfg_request *req);

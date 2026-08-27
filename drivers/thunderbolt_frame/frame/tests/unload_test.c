@@ -245,6 +245,138 @@ static void tbframe_unload_shutdown_cannot_be_rearmed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);	/* never a second up */
 }
 
+static void tbframe_unload_shutdown_quiets_all_links_before_first_path_disable(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = ul_fx(test);
+	struct tbframe_mock peer = { };
+	struct tbframe_link *second;
+
+	INIT_LIST_HEAD(&peer.tx_queue);
+	INIT_LIST_HEAD(&peer.rx_posted);
+	peer.in_hopid = -1;
+	peer.last_alloc_in_hopid = -1;
+	peer.last_release_in_hopid = -1;
+	peer.last_disable_remote_hopid = -1;
+	peer.route = TBFRAME_MOCK_ROUTE + 1;
+	peer.paths_active_ret = 1;
+	peer.peer = fx->mock.peer;
+	peer.peer.transmit_hopid++;
+
+	second = tbframe_link_create(&fx->tf, &tbframe_mock_ops, &peer,
+				     peer.route,
+				     TBFRAME_MOCK_LOCAL_EUI64 + 1, false);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(second));
+
+	tbframe_mock_link_up(test, fx);
+	tbframe_link_session_step(second);
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
+
+	fx->mock.must_be_quiet_before_disable = second;
+	queue_delayed_work(fx->tf.wq, &second->session_work,
+			   msecs_to_jiffies(60000));
+	fx->tf.shutdown_mode = true;
+	tbframe_prepare_shutdown(&fx->tf);
+	tbframe_link_shutdown(fx->link);
+
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.disable_started_before_all_links_parked);
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.disable_started_before_all_activity_stopped);
+
+	tbframe_link_shutdown(second);
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_destroy(second, TBFRAME_DOWN_CLOSED));
+}
+
+/*
+ * Client detach is a global state transition. Every link must stop its
+ * session worker before the first link begins a wire-level teardown; otherwise
+ * a second link can issue a path/config request while the first waits for BYE,
+ * coupling two independent control transactions during module exit.
+ */
+static void tbframe_unload_parks_all_links_before_first_bye(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = ul_fx(test);
+	struct tbframe_mock peer = { };
+	struct tbframe_link *second;
+
+	INIT_LIST_HEAD(&peer.tx_queue);
+	INIT_LIST_HEAD(&peer.rx_posted);
+	peer.in_hopid = -1;
+	peer.last_alloc_in_hopid = -1;
+	peer.last_release_in_hopid = -1;
+	peer.last_disable_remote_hopid = -1;
+	peer.route = TBFRAME_MOCK_ROUTE + 1;
+	peer.paths_active_ret = 1;
+	peer.peer = fx->mock.peer;
+	peer.peer.transmit_hopid++;
+
+	second = tbframe_link_create(&fx->tf, &tbframe_mock_ops, &peer,
+				     peer.route,
+				     TBFRAME_MOCK_LOCAL_EUI64 + 1, false);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(second));
+
+	tbframe_mock_link_up(test, fx);
+	tbframe_link_session_step(second);
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
+
+	fx->mock.must_be_parked_before_bye = second;
+	queue_delayed_work(fx->tf.wq, &second->session_work,
+			   msecs_to_jiffies(60000));
+	tbframe_unregister_client_tf(&fx->tf);
+
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.bye_started_before_all_links_parked);
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.bye_started_before_all_session_work_stopped);
+
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_destroy(second, TBFRAME_DOWN_CLOSED));
+}
+
+static void tbframe_unload_service_stop_quiets_all_links_before_remove(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = ul_fx(test);
+	struct tbframe_mock peer = { };
+	struct tbframe_link *second;
+
+	INIT_LIST_HEAD(&peer.tx_queue);
+	INIT_LIST_HEAD(&peer.rx_posted);
+	peer.in_hopid = -1;
+	peer.last_alloc_in_hopid = -1;
+	peer.last_release_in_hopid = -1;
+	peer.last_disable_remote_hopid = -1;
+	peer.route = TBFRAME_MOCK_ROUTE + 1;
+	peer.paths_active_ret = 1;
+	peer.peer = fx->mock.peer;
+	peer.peer.transmit_hopid++;
+
+	second = tbframe_link_create(&fx->tf, &tbframe_mock_ops, &peer,
+				     peer.route,
+				     TBFRAME_MOCK_LOCAL_EUI64 + 1, false);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(second));
+
+	tbframe_mock_link_up(test, fx);
+	tbframe_link_session_step(second);
+	KUNIT_ASSERT_EQ(test, 2u, fx->client.up_count);
+
+	fx->mock.must_be_parked_before_bye = second;
+	queue_delayed_work(fx->tf.wq, &second->session_work,
+			   msecs_to_jiffies(60000));
+	tbframe_prepare_stop(&fx->tf);
+
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_destroy(fx->link, TBFRAME_DOWN_CLOSED));
+	fx->link_destroyed = true;
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.bye_started_before_all_links_parked);
+	KUNIT_EXPECT_FALSE(test,
+			   fx->mock.bye_started_before_all_session_work_stopped);
+
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_destroy(second, TBFRAME_DOWN_CLOSED));
+}
+
 static struct kunit_case tbframe_unload_cases[] = {
 	KUNIT_CASE(tbframe_unload_peer_hello_during_teardown),
 	KUNIT_CASE(tbframe_unload_hello_after_removing_is_refused),
@@ -252,6 +384,9 @@ static struct kunit_case tbframe_unload_cases[] = {
 	KUNIT_CASE(tbframe_unload_never_waits_forever),
 	KUNIT_CASE(tbframe_unload_shutdown_quiesce_is_silent_and_complete),
 	KUNIT_CASE(tbframe_unload_shutdown_cannot_be_rearmed),
+	KUNIT_CASE(tbframe_unload_shutdown_quiets_all_links_before_first_path_disable),
+	KUNIT_CASE(tbframe_unload_parks_all_links_before_first_bye),
+	KUNIT_CASE(tbframe_unload_service_stop_quiets_all_links_before_remove),
 	{}
 };
 

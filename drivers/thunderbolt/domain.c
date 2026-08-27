@@ -315,11 +315,8 @@ const struct bus_type tb_bus_type = {
 	.shutdown = tb_service_shutdown,
 };
 
-static void tb_domain_release(struct device *dev)
+static void tb_domain_release_resources(struct tb *tb)
 {
-	struct tb *tb = container_of(dev, struct tb, dev);
-	struct tb_nhi *nhi = tb->nhi;
-
 	/*
 	 * destroy_workqueue() BEFORE tb_ctl_free(): work items on tb->wq
 	 * (icm_handle_notification, the xdomain state/properties works) reach
@@ -328,13 +325,24 @@ static void tb_domain_release(struct device *dev)
 	 * because tb_domain_remove() flushes the queue first -- a one-shot
 	 * flush that does not disarm an armed delayed_work timer.
 	 */
-	destroy_workqueue(tb->wq);
-	tb_ctl_free(tb->ctl);
+	if (tb->wq) {
+		destroy_workqueue(tb->wq);
+		tb->wq = NULL;
+	}
+	if (tb->ctl) {
+		tb_ctl_free(tb->ctl);
+		tb->ctl = NULL;
+	}
+}
+
+static void tb_domain_release(struct device *dev)
+{
+	struct tb *tb = container_of(dev, struct tb, dev);
+
+	tb_domain_release_resources(tb);
 	ida_free(&tb_domain_ida, tb->index);
 	mutex_destroy(&tb->lock);
 	kfree(tb);
-
-	complete(&nhi->domain_released);
 }
 
 const struct device_type tb_domain_type = {
@@ -546,6 +554,7 @@ err_ctl_stop:
 	 * through it twice.
 	 */
 	flush_workqueue(tb->wq);
+	tb_domain_release_resources(tb);
 
 	return ret;
 }
@@ -588,6 +597,13 @@ int tb_domain_remove(struct tb *tb, bool runtime_reset)
 		else
 			ret = -EOPNOTSUPP;
 	}
+
+	/*
+	 * Release everything backed by the NHI before PCI remove can unmap its
+	 * BAR and free device-managed storage. The domain device itself may stay
+	 * referenced by userspace after device_unregister().
+	 */
+	tb_domain_release_resources(tb);
 
 	device_unregister(&tb->dev);
 	return ret;

@@ -412,6 +412,8 @@ int tbframe_handle_packet(struct tbframe *tf, const void *token,
 int tbframe_register_client_tf(struct tbframe *tf,
 			       const struct tbframe_client_ops *ops, void *ctx);
 void tbframe_unregister_client_tf(struct tbframe *tf);
+void tbframe_prepare_stop(struct tbframe *tf);
+void tbframe_prepare_shutdown(struct tbframe *tf);
 void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled);
 void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			      u16 len, u8 pdf, bool bad);

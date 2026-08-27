@@ -4024,6 +4024,107 @@ static void tb_test_icm_takeover_teardown_no_deadlock(struct kunit *test)
 }
 
 /*
+ * Runtime-resume cleanup has two state machines: topology mutation must run
+ * while the domain lock owns a live root, while device unregistration must
+ * run after the lock is dropped. Model a stop landing between those phases.
+ */
+struct tb_remove_work_model {
+	bool lock_held;
+	bool root_present;
+	bool xdomain_removed;
+	bool xdomain_removed_under_lock;
+	unsigned int root_deref_after_stop;
+};
+
+static void remove_work_stop_between_phases(struct tb_remove_work_model *m)
+{
+	m->lock_held = true;
+	if (m->root_present) {
+		m->xdomain_removed = true;
+		m->xdomain_removed_under_lock = m->lock_held;
+	}
+	m->lock_held = false;
+
+	/* Domain stop may remove and clear the root before unregistration. */
+	m->root_present = false;
+}
+
+static void tb_test_remove_work_stop_between_phases(struct kunit *test)
+{
+	struct tb_remove_work_model m = {
+		.root_present = true,
+	};
+
+	remove_work_stop_between_phases(&m);
+
+	KUNIT_EXPECT_TRUE(test, m.xdomain_removed);
+	KUNIT_EXPECT_TRUE(test, m.xdomain_removed_under_lock);
+	KUNIT_EXPECT_EQ(test, 0u, m.root_deref_after_stop);
+}
+
+/*
+ * A domain device reference may outlive PCI-driver remove. Hardware-backed
+ * resources therefore have to be released before device-managed NHI storage
+ * disappears; the eventual domain release callback cannot touch the NHI.
+ */
+struct tb_domain_release_model {
+	bool resources_released;
+	bool nhi_alive;
+	unsigned int late_nhi_touches;
+};
+
+static void domain_remove_then_late_release(struct tb_domain_release_model *m)
+{
+	/* Hardware-backed workqueues and rings are released by remove itself. */
+	m->resources_released = true;
+
+	/* PCI remove returns and device-managed NHI storage disappears. */
+	m->nhi_alive = false;
+
+	/* A delayed domain reference frees only hardware-independent storage. */
+}
+
+static void tb_test_domain_resources_precede_nhi_release(struct kunit *test)
+{
+	struct tb_domain_release_model m = {
+		.nhi_alive = true,
+	};
+
+	domain_remove_then_late_release(&m);
+
+	KUNIT_EXPECT_TRUE(test, m.resources_released);
+	KUNIT_EXPECT_EQ(test, 0u, m.late_nhi_touches);
+}
+
+struct tb_ctl_free_model {
+	bool request_work_active;
+	bool nhi_alive;
+	unsigned int late_work_uaf;
+};
+
+static void ctl_free_then_nhi_remove(struct tb_ctl_free_model *m)
+{
+	/* Control free joins local request work before NHI ownership ends. */
+	m->request_work_active = false;
+	m->nhi_alive = false;
+	if (m->request_work_active && !m->nhi_alive)
+		m->late_work_uaf++;
+}
+
+static void tb_test_ctl_free_drains_work_before_nhi_remove(struct kunit *test)
+{
+	struct tb_ctl_free_model m = {
+		.request_work_active = true,
+		.nhi_alive = true,
+	};
+
+	ctl_free_then_nhi_remove(&m);
+
+	KUNIT_EXPECT_FALSE(test, m.request_work_active);
+	KUNIT_EXPECT_EQ(test, 0u, m.late_work_uaf);
+}
+
+/*
  * The takeover fallback must NOT trigger for a healthy responding ICM
  * (that one really does answer ring 0 itself) nor rewrite the plain
  * no-firmware software path.
@@ -5887,6 +5988,22 @@ static void tb_test_ctl_peer_timeout_keeps_local_command_waiting(struct kunit *t
 	KUNIT_EXPECT_TRUE(test, tb_cfg_local_slot_is_owned(state.local));
 }
 
+static void tb_test_ctl_stop_releases_both_request_machines(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	unsigned long flags = BIT(TB_CFG_REQUEST_CANCELED) |
+			      BIT(TB_CFG_REQUEST_STOPPED);
+
+	tb_cfg_request_stop_state(&state);
+
+	KUNIT_EXPECT_FALSE(test, tb_cfg_local_slot_is_owned(state.local));
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_CANCELED);
+	KUNIT_EXPECT_TRUE(test, tb_cfg_request_work_runs_callback(flags));
+}
+
 static void tb_test_ctl_local_status_slot_blocks_reuse(struct kunit *test)
 {
 	/* The first command can claim an empty completion slot. */
@@ -6198,6 +6315,9 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_work_after_destroy),
 	KUNIT_CASE(tb_test_icm_takeover_teardown_no_deadlock),
+	KUNIT_CASE(tb_test_remove_work_stop_between_phases),
+	KUNIT_CASE(tb_test_domain_resources_precede_nhi_release),
+	KUNIT_CASE(tb_test_ctl_free_drains_work_before_nhi_remove),
 	KUNIT_CASE(tb_test_icm_healthy_keeps_firmware_cm),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
@@ -6248,6 +6368,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_split_state_records_local_acceptance),
 	KUNIT_CASE(tb_test_ctl_split_state_preserves_accept_on_peer_timeout),
 	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),
+	KUNIT_CASE(tb_test_ctl_stop_releases_both_request_machines),
 	KUNIT_CASE(tb_test_ctl_local_status_slot_blocks_reuse),
 	KUNIT_CASE(tb_test_ctl_local_status_error_does_not_abort_peer),
 	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
