@@ -38,10 +38,10 @@
 
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
- * become readable. Each pass retains the normal config-read retry sequence
- * and then sleeps 50 ms, so the default 50 is about 22.5 s in the worst case.
+ * become readable. Each pass issues one 100 ms request in a continuous
+ * sequence stream and then sleeps 50 ms, so the default 50 is about 7.5 s.
  * Completed descriptors are reaped and reusable; this budget is independent
- * of the ring size.
+ * of both the generic config retry policy and the ring size.
  *
  * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
  * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
@@ -53,7 +53,7 @@
 static unsigned int icm_cfg_space_retries = 50;
 module_param(icm_cfg_space_retries, uint, 0644);
 MODULE_PARM_DESC(icm_cfg_space_retries,
-		 "root config-space readiness passes, up to ~450ms each (default 50)");
+		 "single-request root config-space readiness passes, ~150ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -2605,6 +2605,33 @@ icm_log_startup_failure(struct tb *tb, const char *stage, int error,
 	return error;
 }
 
+static struct tb_cfg_result
+icm_wait_for_root_config(struct tb *tb, unsigned int *passes)
+{
+	struct tb_cfg_result res = { .err = -ETIMEDOUT };
+	unsigned int pass;
+
+	for (pass = 0;
+	     pass < tb_icm_root_config_request_count(icm_cfg_space_retries);
+	     pass++) {
+		u32 tmp;
+
+		res = tb_cfg_read_raw_once(tb->ctl, &tmp, 0, 0,
+					   TB_CFG_SWITCH, 0, 1,
+					   TB_ICM_ROOT_CONFIG_TIMEOUT_MS,
+					   pass);
+		if (!res.err) {
+			*passes = pass + 1;
+			return res;
+		}
+
+		msleep(TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+	}
+
+	*passes = pass;
+	return res;
+}
+
 static int
 __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 		   u8 *proto_version, size_t *nboot_acl, bool *rpm)
@@ -2639,38 +2666,25 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	}
 	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
 
-	/*
-	 * Hold on here until the switch config space is accessible so
-	 * that we can read root switch config successfully.
-	 */
-	for (pass = 0;
-	     pass < tb_icm_root_config_request_count(icm_cfg_space_retries);
-	     pass++) {
-		u32 tmp;
-
-		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-				      0, 1, TB_ICM_ROOT_CONFIG_TIMEOUT_MS);
-		if (!res.err) {
-			tb_icm_startup_proof_advance(&proof,
-						     TB_ICM_PROOF_ROOT_CONFIG);
-			tb_ctl_get_stats(tb->ctl, &after);
-			tb_info(tb,
-				"ICM startup proved in %u pass(es) / %u ms: firmware-ready=%u mailbox-ready=%u driver-ready=%u root-config=%u; ring0 delta tx-done=%u tx-canceled=%u rx-total=%u rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
-				pass + 1, jiffies_to_msecs(jiffies - started),
-				proof.firmware_ready, proof.mailbox_ready,
-				proof.driver_ready, proof.root_config_ready,
-				after.tx_done - before.tx_done,
-				after.tx_canceled - before.tx_canceled,
-				after.rx_total - before.rx_total,
-				after.rx_matched - before.rx_matched,
-				after.rx_unmatched - before.rx_unmatched,
-				after.rx_xdomain_tx_status -
-					before.rx_xdomain_tx_status,
-				after.rx_dropped - before.rx_dropped);
-			return 0;
-		}
-
-		msleep(TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+	/* Prove that DriverReady also made the root config space accessible. */
+	res = icm_wait_for_root_config(tb, &pass);
+	if (!res.err) {
+		tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+		tb_ctl_get_stats(tb->ctl, &after);
+		tb_info(tb,
+			"ICM startup proved in %u pass(es) / %u ms: firmware-ready=%u mailbox-ready=%u driver-ready=%u root-config=%u; ring0 delta tx-done=%u tx-canceled=%u rx-total=%u rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
+			pass, jiffies_to_msecs(jiffies - started),
+			proof.firmware_ready, proof.mailbox_ready,
+			proof.driver_ready, proof.root_config_ready,
+			after.tx_done - before.tx_done,
+			after.tx_canceled - before.tx_canceled,
+			after.rx_total - before.rx_total,
+			after.rx_matched - before.rx_matched,
+			after.rx_unmatched - before.rx_unmatched,
+			after.rx_xdomain_tx_status -
+				before.rx_xdomain_tx_status,
+			after.rx_dropped - before.rx_dropped);
+		return 0;
 	}
 
 	/*
@@ -2679,7 +2693,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	 * matched config response prove the end-to-end control path.
 	 */
 	tb_err(tb,
-	       "root config proof exhausted %u sequence-retry pass(es) / %u ms\n",
+	       "root config proof exhausted %u single-request pass(es) / %u ms\n",
 	       tb_icm_root_config_request_count(pass),
 	       jiffies_to_msecs(jiffies - started));
 	icm->root_config_timed_out = res.err == -ETIMEDOUT;
@@ -2710,7 +2724,7 @@ int icm_unlock_config_space(struct tb *tb)
 		.hdr.code = ICM_DRIVER_READY,
 	};
 	struct icm_tr_pkg_driver_ready_response reply;
-	unsigned int retries = 50;
+	unsigned int passes;
 	struct tb_cfg_request *req;
 	struct tb_cfg_result res;
 
@@ -2744,20 +2758,16 @@ int icm_unlock_config_space(struct tb *tb)
 		return err;
 	}
 
-	do {
-		u32 tmp;
+	res = icm_wait_for_root_config(tb, &passes);
+	if (!res.err) {
+		tb_dbg(tb, "resident ICM opened the config space in %u pass(es)\n",
+		       passes);
+		return 0;
+	}
 
-		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-				      0, 1, 100);
-		if (!res.err) {
-			tb_dbg(tb, "resident ICM opened the config space\n");
-			return 0;
-		}
-
-		msleep(50);
-	} while (--retries);
-
-	tb_err(tb, "resident ICM never opened the config space\n");
+	tb_err(tb,
+	       "resident ICM never opened the config space after %u single-request pass(es)\n",
+	       passes);
 	return -ETIMEDOUT;
 }
 

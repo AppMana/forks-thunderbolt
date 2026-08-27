@@ -330,6 +330,11 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 				     u64 route, u32 port,
 				     enum tb_cfg_space space, u32 offset,
 				     u32 length, int timeout_msec);
+struct tb_cfg_result tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer,
+					  u64 route, u32 port,
+					  enum tb_cfg_space space, u32 offset,
+					  u32 length, int timeout_msec,
+					  unsigned int attempt);
 struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 				      u64 route, u32 port,
 				      enum tb_cfg_space space, u32 offset,
@@ -344,6 +349,23 @@ int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 		 enum tb_cfg_space space, u32 offset, u32 length);
 int tb_cfg_get_upstream_port(struct tb_ctl *ctl, u64 route);
+
+#define TB_CFG_SEQUENCE_COUNT 4U
+
+static inline u8 tb_cfg_request_sequence(unsigned int attempt)
+{
+	return attempt % TB_CFG_SEQUENCE_COUNT;
+}
+
+static inline bool
+tb_cfg_address_matches(const struct tb_cfg_address *request,
+		       const struct tb_cfg_address *response)
+{
+	return request->offset == response->offset &&
+	       request->length == response->length &&
+	       request->space == response->space &&
+	       request->seq == response->seq;
+}
 
 /*
  * Consecutive unanswered control requests after which the channel is treated

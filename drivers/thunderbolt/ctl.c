@@ -1372,7 +1372,7 @@ static bool tb_cfg_match(const struct tb_cfg_request *req,
 		const struct cfg_read_pkg *req_hdr = req->request;
 		const struct cfg_read_pkg *res_hdr = pkg->buffer;
 
-		if (req_hdr->addr.seq != res_hdr->addr.seq)
+		if (!tb_cfg_address_matches(&req_hdr->addr, &res_hdr->addr))
 			return false;
 	}
 
@@ -1449,7 +1449,8 @@ struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route)
 static struct tb_cfg_result
 tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 			enum tb_cfg_space space, u32 offset, u32 length,
-			int timeout_msec, unsigned int max_retries)
+			int timeout_msec, unsigned int first_attempt,
+			unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_read_pkg request = {
@@ -1473,7 +1474,8 @@ tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 			return res;
 		}
 
-		request.addr.seq = retries++;
+		request.addr.seq = tb_cfg_request_sequence(first_attempt +
+							       retries++);
 
 		req->match = tb_cfg_match;
 		req->copy = tb_cfg_copy;
@@ -1510,7 +1512,32 @@ tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 		enum tb_cfg_space space, u32 offset, u32 length, int timeout_msec)
 {
 	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
-				       length, timeout_msec, TB_CTL_RETRIES);
+				       length, timeout_msec, 0, TB_CTL_RETRIES);
+}
+
+/**
+ * tb_cfg_read_raw_once() - issue one config-space read in a request stream
+ * @ctl: Pointer to the control channel
+ * @buffer: Buffer where the data is read
+ * @route: Route string of the router
+ * @port: Port number when reading from %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword offset of the register to start reading
+ * @length: Number of dwords to read
+ * @timeout_msec: Timeout in ms how long to wait for the response
+ * @attempt: Attempt identity in the caller-owned request stream
+ *
+ * Readiness polling owns its retry policy. Keep each observation to one
+ * physical request while advancing the two-bit protocol sequence across
+ * calls, instead of restarting at sequence zero or nesting retry loops.
+ */
+struct tb_cfg_result
+tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+		     enum tb_cfg_space space, u32 offset, u32 length,
+		     int timeout_msec, unsigned int attempt)
+{
+	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
+				       length, timeout_msec, attempt, 1);
 }
 
 /**

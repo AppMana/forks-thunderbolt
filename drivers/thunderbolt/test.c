@@ -3374,19 +3374,61 @@ static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
 }
 
 /*
- * The generic config helper's retry group advances the protocol sequence.
- * Replacing it with independent one-request passes collapses that progression.
+ * Readiness polling owns one physical request stream. Nesting the generic
+ * four-request retry helper multiplies both the configured observation count
+ * and its timeout budget, even when the controller produces no new evidence.
  */
-static void tb_test_icm_root_config_probe_preserves_sequence_retries(struct kunit *test)
+static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *test)
 {
 	/*
-	 * Each readiness pass must retain the normal four-request sequence group.
-	 * Recreating a one-request helper on every pass sends sequence zero over
-	 * and over, which a controller may correctly treat as a duplicate.
+	 * Sequence identity must advance in that single stream; it must not be
+	 * obtained by turning each observation into a second retry loop.
 	 */
 	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 50u);
-	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_budget(50, 4), 200u);
-	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50, 4), 22500u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_budget(50), 50u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 7500u);
+
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(0), 0);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(1), 1);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(2), 2);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(3), 3);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(4), 0);
+}
+
+/* A response for another config address must remain unmatched. */
+static void tb_test_cfg_response_matches_full_address(struct kunit *test)
+{
+	const struct tb_cfg_address request = {
+		.offset = 0x20,
+		.length = 2,
+		.port = 3,
+		.space = TB_CFG_PORT,
+		.seq = 2,
+	};
+	struct tb_cfg_address response = request;
+
+	KUNIT_EXPECT_TRUE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.offset++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.length++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.port++;
+	/* Responses carry the sender's upstream port, not the requested port. */
+	KUNIT_EXPECT_TRUE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.space = TB_CFG_SWITCH;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.seq++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
 }
 
 /*
@@ -6303,7 +6345,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
 	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
-	KUNIT_CASE(tb_test_icm_root_config_probe_preserves_sequence_retries),
+	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
+	KUNIT_CASE(tb_test_cfg_response_matches_full_address),
 	KUNIT_CASE(tb_test_icm_root_recovery_is_separate_and_bounded),
 	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
 	KUNIT_CASE(tb_test_nhi_recovery_command_failure_is_terminal),
