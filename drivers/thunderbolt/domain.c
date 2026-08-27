@@ -557,8 +557,10 @@ err_ctl_stop:
  * Stops the domain, removes it from the system and releases all
  * resources once the last reference has been released.
  */
-void tb_domain_remove(struct tb *tb)
+int tb_domain_remove(struct tb *tb, bool runtime_reset)
 {
+	int ret = 0;
+
 	mutex_lock(&tb->lock);
 	if (tb->cm_ops->stop)
 		tb->cm_ops->stop(tb);
@@ -580,8 +582,15 @@ void tb_domain_remove(struct tb *tb)
 
 	if (tb->cm_ops->deinit)
 		tb->cm_ops->deinit(tb);
+	if (runtime_reset) {
+		if (tb->cm_ops->runtime_reset)
+			ret = tb->cm_ops->runtime_reset(tb);
+		else
+			ret = -EOPNOTSUPP;
+	}
 
 	device_unregister(&tb->dev);
+	return ret;
 }
 
 /**

@@ -87,12 +87,13 @@ stage_source() {
 		--exclude='.tbfix-gen-include' \
 		-cf - frame rxe \
 		| tar -C "$stage/kernel" -xf -
-	# frame/tbframe_priv.h includes ../../thunderbolt/thunderbolt_negotiation.h.
-	# Bundle the ONE canonical header (drivers/thunderbolt/) at that relative
-	# location -- a build artifact copied from the canonical, not a second
-	# source. kernel/frame/../../thunderbolt/ == $stage/thunderbolt/.
+	# Bundle the canonical core headers used by the frame backend at their
+	# source-relative location. These are build artifacts copied from the core,
+	# not second sources.
 	install -m 0644 "$repo_root/drivers/thunderbolt/thunderbolt_negotiation.h" \
 		"$stage/thunderbolt/thunderbolt_negotiation.h"
+	install -m 0644 "$repo_root/drivers/thunderbolt/nhi.h" \
+		"$stage/thunderbolt/nhi.h"
 	contaminant="$(find "$stage" -type f \( \
 		-name '*.o' -o -name '*.ko' -o -name '*.mod' -o \
 		-name '*.mod.c' -o -name '*.cmd' -o \

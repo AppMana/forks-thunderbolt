@@ -19,6 +19,7 @@
 #include <linux/thunderbolt.h>
 #include <linux/workqueue.h>
 
+#include "../../thunderbolt/nhi.h"
 #include "../../thunderbolt/thunderbolt_negotiation.h"
 #include "tbframe.h"
 #include "tbframe_wire.h"
@@ -152,6 +153,12 @@ struct tbframe_hw_ops {
 	int	(*disable_paths)(void *hw, int local_hopid, int remote_hopid);
 	/* level-triggered: 1 programmed, 0 gone, <0 unknown (not dead) */
 	int	(*paths_active)(void *hw, int local_hopid, int remote_hopid);
+	int	(*tx_snapshot)(void *hw, struct tb_ring_snapshot *snapshot);
+	int	(*report_tx_stall)(void *hw,
+				   const struct tb_ring_snapshot *first,
+				   const struct tb_ring_snapshot *last,
+				   bool control_healthy);
+	void	(*report_data_proven)(void *hw);
 	int	(*control_request)(void *hw, const void *req, size_t req_len,
 				   void *resp, size_t resp_len,
 				   unsigned int timeout_ms);
@@ -293,16 +300,20 @@ struct tbframe_link {
 	u64			data_rx_stale;
 	u64			data_rx_bad_cookie;
 	u64			data_tx_done;
+	u64			data_tx_done_mark;
 	u64			data_tx_submitted;
 	u64			data_tx_refused;
 	u64			data_tx_ring_err;
 	u64			data_tx_canceled;
 	bool			data_proven;
+	bool			controller_proof_reported;
 	bool			data_proof_unavailable_warned;
 	u64			data_generation;
 	unsigned int		probe_attempts;
 	unsigned int		probe_failures;
 	unsigned int		silent_ticks;
+	struct tb_ring_snapshot	tx_stall_first;
+	bool			tx_stall_first_valid;
 
 	bool			needs_down;
 	enum tbframe_down_reason down_reason;

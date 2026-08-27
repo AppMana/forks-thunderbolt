@@ -563,6 +563,8 @@ struct tb_path {
  * @stop: Stops the domain
  * @deinit: Perform any cleanup after the domain is stopped but before
  *	     it is unregistered. Called without @tb->lock taken. Optional.
+ * @runtime_reset: Reset controller firmware after every domain, service and
+ *		   ring has been quiesced. Optional.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -601,6 +603,7 @@ struct tb_cm_ops {
 	int (*start)(struct tb *tb, bool reset);
 	void (*stop)(struct tb *tb);
 	void (*deinit)(struct tb *tb);
+	int (*runtime_reset)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);
@@ -871,7 +874,7 @@ void tb_xdomain_exit(void);
 
 struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize);
 int tb_domain_add(struct tb *tb, bool reset);
-void tb_domain_remove(struct tb *tb);
+int tb_domain_remove(struct tb *tb, bool runtime_reset);
 /* Must be called with tb->lock NOT held; asserts it under lockdep. */
 void tb_domain_ctl_stop(struct tb *tb);
 int tb_domain_suspend_noirq(struct tb *tb);

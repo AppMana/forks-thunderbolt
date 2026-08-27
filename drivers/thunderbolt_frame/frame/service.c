@@ -107,33 +107,6 @@ static void tbframe_service_remove(struct tb_service *svc)
 	enum tbframe_down_reason reason = xd->is_unplugged ?
 		TBFRAME_DOWN_UNPLUG : TBFRAME_DOWN_CLOSED;
 
-	/*
-	 * Who is unbinding us, and why does the XDomain already read
-	 * unplugged? Five candidate teardown paths were instrumented in the
-	 * core (scan replacement, hotplug unplug, missing-service-key,
-	 * tb_switch_remove, tb_sw_set_unplugged) and ALL of them stayed at
-	 * zero while links kept cycling with TBFRAME_DOWN_UNPLUG under load.
-	 * Guessing at a sixth is worse than capturing the caller once.
-	 * Rate-limited to a single stack so a cycling link cannot turn the
-	 * diagnostic into the outage.
-	 */
-	pr_warn_once("service remove: route %llx is_unplugged=%d reason=%d -- caller stack follows\n",
-		     xd->route, xd->is_unplugged, reason);
-	/*
-	 * dump_stack() rather than WARN_ONCE(): a WARN taints the kernel and
-	 * would panic outright on the chain nodes, which run with the panic
-	 * sysctls armed for the hardware watchdog. This is a diagnostic, not
-	 * a fault, and must never be the thing that takes a node down.
-	 */
-	if (xd->is_unplugged) {
-		static bool stack_dumped;
-
-		if (!stack_dumped) {
-			stack_dumped = true;
-			dump_stack();
-		}
-	}
-
 	if (binding) {
 		/*
 		 * A forced (leaked) link teardown still references the hw

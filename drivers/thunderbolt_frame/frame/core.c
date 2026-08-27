@@ -386,6 +386,32 @@ static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
 	return ret;
 }
 
+static bool tbframe_link_sample_tx_stall(struct tbframe_link *link,
+					 struct tb_ring_snapshot *first,
+					 struct tb_ring_snapshot *last)
+{
+	unsigned long flags;
+	bool comparable = false;
+
+	if (!link->ops->tx_snapshot ||
+	    link->ops->tx_snapshot(link->hw, last))
+		return false;
+
+	spin_lock_irqsave(&link->lock, flags);
+	if (link->tx_stall_first_valid &&
+	    link->tx_stall_first.size == last->size &&
+	    link->tx_stall_first.hw_consumer == last->hw_consumer) {
+		*first = link->tx_stall_first;
+		comparable = true;
+	} else {
+		link->tx_stall_first = *last;
+		link->tx_stall_first_valid = true;
+	}
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	return comparable;
+}
+
 /*
  * Prove the bulk data path before declaring the session UP.
  *
@@ -412,9 +438,10 @@ static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
 static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 {
 	struct tbframe *tf = link->tf;
+	struct tb_ring_snapshot first, last;
 	unsigned long flags;
-	unsigned int attempts;
-	bool proven, warned;
+	unsigned int attempts, failures;
+	bool comparable, proven, warned;
 	u32 remote_caps;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -444,6 +471,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 
 	/* Best effort: a full ring or a wedged TX just costs this attempt. */
 	tbframe_link_send_keepalive(link, true);
+	comparable = tbframe_link_sample_tx_stall(link, &first, &last);
 
 	spin_lock_irqsave(&link->lock, flags);
 	proven = link->data_proven;
@@ -468,7 +496,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	 */
 	spin_lock_irqsave(&link->lock, flags);
 	link->probe_attempts = 0;
-	link->probe_failures++;
+	failures = ++link->probe_failures;
 	link->data_proof_unavailable_warned = false;
 	if (!link->needs_down) {
 		link->needs_down = true;
@@ -476,6 +504,15 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 		tbframe_link_kick_locked(link, 0);
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
+	if (failures >= 2 && comparable &&
+	    link->ops->report_tx_stall) {
+		int ret;
+
+		ret = link->ops->report_tx_stall(link->hw, &first, &last, true);
+		if (!ret)
+			pr_warn("%s: hardware TX consumer did not move across a complete proof interval after a ring/path rebuild; requested bounded controller recovery\n",
+				link->name);
+	}
 	/*
 	 * Report the counters, not just the verdict. rx_bad moving means the
 	 * wire carried frames and the signal did not survive -- a cable or
@@ -654,9 +691,10 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
 
 /*
  * Tear the session down to the negotiation floor. session_lock held.
- * Recovery never escalates past this re-handshake: no core unload, no NHI
- * reset. The only unbounded thing below us is hardware that never cancels;
- * every wait of our own is bounded and poisons the link on expiry.
+ * The first proof failure stays at this re-handshake and rebuilds the rings
+ * and paths. A later failure may already have reported independent hardware
+ * consumer evidence to the bounded controller-recovery machine. Every wait
+ * below is bounded and poisons the link on expiry.
  */
 static void tbframe_link_down_session(struct tbframe_link *link,
 				      enum tbframe_down_reason reason)
@@ -716,6 +754,9 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->data_rx_tick_mark = 0;
 	link->silent_ticks = 0;
 	link->probe_attempts = 0;
+	link->data_tx_done_mark = link->data_tx_done;
+	link->controller_proof_reported = false;
+	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -1510,7 +1551,7 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 	struct tbframe_frame_priv *next = NULL;
 	LIST_HEAD(flush);
 	unsigned long flags;
-	bool release, was_posted;
+	bool controller_proven = false, release, was_posted;
 
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
@@ -1524,6 +1565,12 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 		f->hw_posted = false;
 		if (!WARN_ON(!link->ring_posted))
 			link->ring_posted--;
+	}
+	if (!canceled && link->data_proven &&
+	    link->data_tx_done > link->data_tx_done_mark &&
+	    !link->controller_proof_reported) {
+		link->controller_proof_reported = true;
+		controller_proven = true;
 	}
 	release = tbframe_tx_return_locked(link, f) && !canceled;
 	if (link->tf->tx_ring_budget) {
@@ -1556,6 +1603,8 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 		}
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
+	if (controller_proven && link->ops->report_data_proven)
+		link->ops->report_data_proven(link->hw);
 
 	if (next && link->ops->ring_tx(link->hw, next)) {
 		spin_lock_irqsave(&link->lock, flags);
@@ -1600,7 +1649,7 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
 	u64 cookie = 0;
-	bool current_generation, proof, up;
+	bool controller_proven = false, current_generation, proof, up;
 
 	if (canceled) {
 		tbframe_frame_putback_rx(f);
@@ -1643,8 +1692,16 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	} else {
 		link->data_rx_oversize++;
 	}
+	if (link->data_proven &&
+	    link->data_tx_done > link->data_tx_done_mark &&
+	    !link->controller_proof_reported) {
+		link->controller_proof_reported = true;
+		controller_proven = true;
+	}
 	up = current_generation && link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);
+	if (controller_proven && link->ops->report_data_proven)
+		link->ops->report_data_proven(link->hw);
 
 	/* Loss model: CRC drops and post-link_down frames never reach rx(). */
 	if (!up || bad || len > TBFRAME_MAX_FRAME) {

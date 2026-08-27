@@ -60,9 +60,24 @@ struct nhi_probe_reprobe {
 	struct device *dev;
 };
 
+struct nhi_runtime_recovery_record {
+	struct list_head list;
+	unsigned int domain;
+	u8 bus;
+	u8 devfn;
+	enum tb_nhi_runtime_recovery_state state;
+};
+
+struct nhi_runtime_recovery_work {
+	struct work_struct work;
+	struct device *dev;
+};
+
 static LIST_HEAD(nhi_probe_recoveries);
 static DEFINE_MUTEX(nhi_probe_recoveries_lock);
 static struct workqueue_struct *nhi_probe_recovery_wq;
+static LIST_HEAD(nhi_runtime_recoveries);
+static DEFINE_MUTEX(nhi_runtime_recoveries_lock);
 
 static unsigned int nhi_probe_recovery_wq_flags(void)
 {
@@ -156,6 +171,229 @@ static void nhi_probe_recovery_clear_all(void)
 	}
 	mutex_unlock(&nhi_probe_recoveries_lock);
 }
+
+static bool
+nhi_runtime_recovery_matches(const struct nhi_runtime_recovery_record *r,
+			     const struct pci_dev *pdev)
+{
+	return r->domain == pci_domain_nr(pdev->bus) &&
+	       r->bus == pdev->bus->number && r->devfn == pdev->devfn;
+}
+
+static enum tb_nhi_runtime_recovery_state
+nhi_runtime_recovery_get(struct pci_dev *pdev)
+{
+	struct nhi_runtime_recovery_record *r;
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_IDLE;
+
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry(r, &nhi_runtime_recoveries, list) {
+		if (nhi_runtime_recovery_matches(r, pdev)) {
+			state = r->state;
+			break;
+		}
+	}
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+
+	return state;
+}
+
+static int
+nhi_runtime_recovery_set(struct pci_dev *pdev,
+			 enum tb_nhi_runtime_recovery_state state)
+{
+	struct nhi_runtime_recovery_record *r, *new = NULL;
+	int ret = -ENOMEM;
+
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry(r, &nhi_runtime_recoveries, list) {
+		if (nhi_runtime_recovery_matches(r, pdev)) {
+			r->state = state;
+			ret = 0;
+			goto out;
+		}
+	}
+
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		goto out;
+	new->domain = pci_domain_nr(pdev->bus);
+	new->bus = pdev->bus->number;
+	new->devfn = pdev->devfn;
+	new->state = state;
+	list_add_tail(&new->list, &nhi_runtime_recoveries);
+	ret = 0;
+out:
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+	return ret;
+}
+
+static void nhi_runtime_recovery_clear(struct pci_dev *pdev)
+{
+	struct nhi_runtime_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_runtime_recoveries, list) {
+		if (nhi_runtime_recovery_matches(r, pdev)) {
+			list_del(&r->list);
+			kfree(r);
+			break;
+		}
+	}
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+}
+
+static void nhi_runtime_recovery_clear_all(void)
+{
+	struct nhi_runtime_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_runtime_recoveries, list) {
+		list_del(&r->list);
+		kfree(r);
+	}
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+}
+
+static void nhi_runtime_recovery_workfn(struct work_struct *work)
+{
+	struct nhi_runtime_recovery_work *recovery =
+		container_of(work, typeof(*recovery), work);
+	struct pci_dev *pdev = to_pci_dev(recovery->dev);
+	enum tb_nhi_runtime_recovery_state state;
+	enum tb_nhi_runtime_recovery_event event;
+	int ret;
+
+	state = nhi_runtime_recovery_get(pdev);
+	if (state != TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING)
+		goto out;
+
+	dev_warn(recovery->dev,
+		 "proven non-control TX stall; quiescing the domain for one ARC/CIO recovery\n");
+	device_release_driver(recovery->dev);
+
+	state = nhi_runtime_recovery_get(pdev);
+	if (state != TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING) {
+		if (state == TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING) {
+			event = TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED;
+			state = tb_nhi_runtime_recovery_next(state, event);
+			nhi_runtime_recovery_set(pdev, state);
+		}
+		dev_err(recovery->dev,
+			"runtime recovery could not quiesce and reset the controller; a power-removal reset is required\n");
+		goto out;
+	}
+
+	ret = device_attach(recovery->dev);
+	if (ret != 1) {
+		event = TB_NHI_RUNTIME_RECOVERY_REPROBE_FAILED;
+		state = tb_nhi_runtime_recovery_next(state, event);
+		nhi_runtime_recovery_set(pdev, state);
+		dev_err(recovery->dev,
+			"runtime recovery reprobe failed (%d); a power-removal reset is required\n",
+			ret);
+	}
+out:
+	put_device(recovery->dev);
+	kfree(recovery);
+}
+
+int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
+				    const struct tb_ring_snapshot *first,
+				    const struct tb_ring_snapshot *last,
+				    bool control_healthy)
+{
+	struct nhi_runtime_recovery_record *record, *new_record;
+	struct nhi_runtime_recovery_work *recovery;
+	enum tb_nhi_runtime_recovery_state state;
+	enum tb_nhi_runtime_recovery_event event;
+	struct pci_dev *pdev;
+	int ret = 0;
+
+	if (!nhi || !first || !last)
+		return -EINVAL;
+	pdev = nhi->pdev;
+	if (!tb_nhi_recovery_supported(pdev->vendor, pdev->device))
+		return -EOPNOTSUPP;
+	if (!tb_nhi_tx_stalled(first, last, control_healthy))
+		return -EAGAIN;
+
+	recovery = kzalloc(sizeof(*recovery), GFP_KERNEL);
+	if (!recovery)
+		return -ENOMEM;
+	new_record = kzalloc(sizeof(*new_record), GFP_KERNEL);
+	if (!new_record) {
+		kfree(recovery);
+		return -ENOMEM;
+	}
+
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry(record, &nhi_runtime_recoveries, list) {
+		if (!nhi_runtime_recovery_matches(record, pdev))
+			continue;
+		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING) {
+			event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+			record->state = tb_nhi_runtime_recovery_next(record->state, event);
+			ret = -EHWPOISON;
+		} else {
+			ret = -EALREADY;
+		}
+		goto unlock;
+	}
+
+	new_record->domain = pci_domain_nr(pdev->bus);
+	new_record->bus = pdev->bus->number;
+	new_record->devfn = pdev->devfn;
+	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
+	event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+	new_record->state = tb_nhi_runtime_recovery_next(state, event);
+	list_add_tail(&new_record->list, &nhi_runtime_recoveries);
+	new_record = NULL;
+unlock:
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+	kfree(new_record);
+	if (ret) {
+		kfree(recovery);
+		if (ret == -EHWPOISON)
+			dev_err(&pdev->dev,
+				"non-control TX remained stalled after ARC/CIO recovery; a power-removal reset is required\n");
+		return ret;
+	}
+
+	INIT_WORK(&recovery->work, nhi_runtime_recovery_workfn);
+	recovery->dev = get_device(&pdev->dev);
+	if (!queue_work(nhi_probe_recovery_wq, &recovery->work)) {
+		put_device(recovery->dev);
+		kfree(recovery);
+		nhi_runtime_recovery_clear(pdev);
+		return -EBUSY;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tb_nhi_request_runtime_recovery);
+
+void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi)
+{
+	struct pci_dev *pdev;
+	enum tb_nhi_runtime_recovery_state state;
+
+	if (!nhi)
+		return;
+	pdev = nhi->pdev;
+	state = nhi_runtime_recovery_get(pdev);
+	if (state != TB_NHI_RUNTIME_RECOVERY_VERIFYING)
+		return;
+
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
+	if (state == TB_NHI_RUNTIME_RECOVERY_COMPLETE) {
+		dev_info(&pdev->dev,
+			 "data traffic proved the recovered controller operational\n");
+		nhi_runtime_recovery_clear(pdev);
+	}
+}
+EXPORT_SYMBOL_GPL(tb_nhi_runtime_data_path_proven);
 
 static void nhi_probe_reprobe_work(struct work_struct *work)
 {
@@ -330,7 +568,7 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 	if (ring->irq > 0) {
 		u32 step, shift, ivr, misc;
 		void __iomem *ivr_base;
-		int auto_clear_bit;
+		bool auto_clear;
 		int index;
 
 		if (ring->is_tx)
@@ -350,13 +588,14 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 		 * reading the register clears both of them.
 		 */
 		misc = nhi_read(ring->nhi, ring->nhi->iobase + REG_DMA_MISC);
-		if (ring->nhi->quirks & QUIRK_AUTO_CLEAR_INT)
-			auto_clear_bit = REG_DMA_MISC_INT_AUTO_CLEAR;
-		else
-			auto_clear_bit = REG_DMA_MISC_DISABLE_AUTO_CLEAR;
-		if (!(misc & auto_clear_bit))
-			iowrite32(misc | auto_clear_bit,
-				  ring->nhi->iobase + REG_DMA_MISC);
+		auto_clear = ring->nhi->quirks & QUIRK_AUTO_CLEAR_INT;
+		new = tb_nhi_dma_misc_interrupt_policy(misc, auto_clear);
+		if (new != misc) {
+			iowrite32(new, ring->nhi->iobase + REG_DMA_MISC);
+			dev_dbg(&ring->nhi->pdev->dev,
+				"DMA_MISC interrupt policy %#010x -> %#010x\n",
+				misc, new);
+		}
 
 		ivr_base = ring->nhi->iobase + REG_INT_VEC_ALLOC_BASE;
 		step = index / REG_INT_VEC_ALLOC_REGS * REG_INT_VEC_ALLOC_BITS;
@@ -509,6 +748,7 @@ int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(tb_ring_snapshot);
 
 static bool ring_full(struct tb_ring *ring)
 {
@@ -1684,7 +1924,9 @@ static void nhi_check_quirks(struct tb_nhi *nhi)
 		 * status register right after interrupt is being
 		 * issued.
 		 */
-		nhi->quirks |= QUIRK_AUTO_CLEAR_INT;
+		if (tb_nhi_uses_auto_clear(nhi->pdev->vendor,
+					   nhi->pdev->device))
+			nhi->quirks |= QUIRK_AUTO_CLEAR_INT;
 
 		switch (nhi->pdev->device) {
 		case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_2C_NHI:
@@ -1878,6 +2120,8 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	enum tb_nhi_recovery_state recovery_next;
 	struct tb_nhi *nhi;
 	struct tb *tb;
+	enum tb_nhi_runtime_recovery_state runtime_state;
+	enum tb_nhi_runtime_recovery_event runtime_event;
 	int recovery_res;
 	int res;
 
@@ -1889,6 +2133,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -ENOMEM;
 	recovery->pdev = pdev;
 	recovery->state = nhi_probe_recovery_get(pdev);
+	runtime_state = nhi_runtime_recovery_get(pdev);
 	res = devm_add_action_or_reset(dev, nhi_probe_recovery_release,
 				       recovery);
 	if (res)
@@ -2012,6 +2257,13 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	nhi_probe_recovery_clear(pdev);
 	recovery->state = tb_nhi_recovery_next(recovery->state,
 					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);
+	if (runtime_state == TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING) {
+		runtime_event = TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED;
+		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
+		nhi_runtime_recovery_set(pdev, runtime_state);
+		dev_info(dev,
+			 "controller reprobed after ARC/CIO reset; awaiting data-path proof\n");
+	}
 	pci_set_drvdata(pdev, tb);
 
 	device_wakeup_enable(&pdev->dev);
@@ -2024,16 +2276,36 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 }
 
-static void nhi_remove(struct pci_dev *pdev)
+static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 {
 	struct tb *tb = pci_get_drvdata(pdev);
 	struct tb_nhi *nhi = tb->nhi;
+	enum tb_nhi_runtime_recovery_state runtime_state;
+	enum tb_nhi_runtime_recovery_event runtime_event;
+	bool runtime_reset;
+	int reset_ret;
 
 	pm_runtime_get_sync(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_forbid(&pdev->dev);
 
-	tb_domain_remove(tb);
+	runtime_state = nhi_runtime_recovery_get(pdev);
+	runtime_reset = allow_runtime_recovery &&
+		runtime_state == TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
+	reset_ret = tb_domain_remove(tb, runtime_reset);
+	if (runtime_reset) {
+		runtime_event = TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED;
+		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
+		runtime_event = reset_ret ?
+			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_FAILED :
+			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_SUCCEEDED;
+		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
+		nhi_runtime_recovery_set(pdev, runtime_state);
+		if (reset_ret)
+			dev_err(&pdev->dev,
+				"quiesced ARC/CIO reset failed (%d); a power-removal reset is required\n",
+				reset_ret);
+	}
 	/*
 	 * Bounded, with a defined failure action. Refusing is not available on
 	 * this path -- the PCI core is removing us, and the identical code runs
@@ -2048,6 +2320,16 @@ static void nhi_remove(struct pci_dev *pdev)
 			"domain did not release within %u ms; proceeding with NHI teardown and leaking it\n",
 			NHI_DOMAIN_RELEASE_MS);
 	nhi_shutdown(nhi);
+}
+
+static void nhi_remove(struct pci_dev *pdev)
+{
+	__nhi_remove(pdev, true);
+}
+
+static void nhi_pci_shutdown(struct pci_dev *pdev)
+{
+	__nhi_remove(pdev, false);
 }
 
 /*
@@ -2175,7 +2457,7 @@ static struct pci_driver nhi_driver = {
 	.id_table = nhi_ids,
 	.probe = nhi_probe,
 	.remove = nhi_remove,
-	.shutdown = nhi_remove,
+	.shutdown = nhi_pci_shutdown,
 	.driver.pm = &nhi_pm_ops,
 };
 
@@ -2206,6 +2488,7 @@ static void __exit nhi_unload(void)
 	pci_unregister_driver(&nhi_driver);
 	destroy_workqueue(nhi_probe_recovery_wq);
 	nhi_probe_recovery_clear_all();
+	nhi_runtime_recovery_clear_all();
 	tb_domain_exit();
 }
 

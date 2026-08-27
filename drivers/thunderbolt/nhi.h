@@ -45,6 +45,27 @@ struct tb_ring_snapshot {
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
 int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
+int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
+				    const struct tb_ring_snapshot *first,
+				    const struct tb_ring_snapshot *last,
+				    bool control_healthy);
+void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi);
+
+static inline bool
+tb_nhi_tx_stalled(const struct tb_ring_snapshot *first,
+		  const struct tb_ring_snapshot *last, bool control_healthy)
+{
+	if (!control_healthy || !first->running || !last->running ||
+	    !first->indices_valid || !last->indices_valid ||
+	    first->size != last->size || !last->in_flight)
+		return false;
+	if (!(first->options & BIT(31)) || !(last->options & BIT(31)))
+		return false;
+	if (last->hw_producer == last->hw_consumer)
+		return false;
+
+	return first->hw_consumer == last->hw_consumer;
+}
 
 /**
  * struct tb_nhi_ops - NHI specific optional operations
@@ -129,6 +150,15 @@ static inline bool tb_nhi_recovery_supported(u16 vendor, u16 device)
 
 	return device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI ||
 	       device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+}
+
+static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)
+{
+	if (vendor != PCI_VENDOR_ID_INTEL)
+		return false;
+
+	return device != PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI &&
+	       device != PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 }
 
 /* No controller has a documented, independently validated live ICM restart. */

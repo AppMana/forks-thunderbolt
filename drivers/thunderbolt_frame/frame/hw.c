@@ -351,6 +351,34 @@ static int tbframe_hw_paths_active(void *data, int local_hopid,
 #endif
 }
 
+static int tbframe_hw_tx_snapshot(void *data,
+				  struct tb_ring_snapshot *snapshot)
+{
+	struct tbframe_hw *hw = data;
+
+	if (!hw->tx_ring)
+		return -ESHUTDOWN;
+	return tb_ring_snapshot(hw->tx_ring, snapshot);
+}
+
+static int tbframe_hw_report_tx_stall(void *data,
+				      const struct tb_ring_snapshot *first,
+				      const struct tb_ring_snapshot *last,
+				      bool control_healthy)
+{
+	struct tbframe_hw *hw = data;
+
+	return tb_nhi_request_runtime_recovery(hw->xd->tb->nhi, first, last,
+					       control_healthy);
+}
+
+static void tbframe_hw_report_data_proven(void *data)
+{
+	struct tbframe_hw *hw = data;
+
+	tb_nhi_runtime_data_path_proven(hw->xd->tb->nhi);
+}
+
 static int tbframe_hw_loop_control_request(struct tbframe_hw *hw,
 					   const void *req, size_t req_len,
 					   void *resp, size_t resp_len)
@@ -498,6 +526,9 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.enable_paths		= tbframe_hw_enable_paths,
 	.disable_paths		= tbframe_hw_disable_paths,
 	.paths_active		= tbframe_hw_paths_active,
+	.tx_snapshot		= tbframe_hw_tx_snapshot,
+	.report_tx_stall	= tbframe_hw_report_tx_stall,
+	.report_data_proven	= tbframe_hw_report_data_proven,
 	.control_request	= tbframe_hw_control_request,
 	.control_response	= tbframe_hw_control_response,
 	.reannounce		= tbframe_hw_reannounce,

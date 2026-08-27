@@ -3469,6 +3469,143 @@ static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *tes
 }
 
 /*
+ * Runtime data-path recovery is independent from startup proof and probe
+ * recovery. A controller can complete both of those and later stop consuming
+ * non-control TX descriptors while ring 0 remains healthy. Reusing the
+ * completed startup state would make that failure unactionable.
+ */
+static void tb_test_nhi_runtime_recovery_is_a_separate_machine(struct kunit *test)
+{
+	enum tb_nhi_recovery_state startup = TB_NHI_RECOVERY_COMPLETE;
+	enum tb_nhi_runtime_recovery_state runtime =
+		TB_NHI_RUNTIME_RECOVERY_IDLE;
+
+	runtime = tb_nhi_runtime_recovery_next(runtime, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+
+	KUNIT_EXPECT_EQ(test, startup, TB_NHI_RECOVERY_COMPLETE);
+	KUNIT_EXPECT_EQ(test, runtime,
+			TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING);
+}
+
+static void tb_test_nhi_runtime_recovery_is_bounded(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_IDLE;
+
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+	KUNIT_ASSERT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED);
+	KUNIT_ASSERT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_PENDING);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_ICM_RESET_SUCCEEDED);
+	KUNIT_ASSERT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+}
+
+static void tb_test_nhi_runtime_recovery_requires_data_proof(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
+
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
+}
+
+static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state;
+
+	state = TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+
+	state = TB_NHI_RUNTIME_RECOVERY_ICM_RESET_PENDING;
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_ICM_RESET_FAILED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+
+	state = TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING;
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_FAILED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+}
+
+static void tb_test_nhi_dma_misc_policy_is_mutually_exclusive(struct kunit *test)
+{
+	u32 both = REG_DMA_MISC_INT_AUTO_CLEAR |
+		   REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+	u32 unrelated = BIT(3) | BIT(27);
+	u32 value;
+
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated, true);
+	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
+	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
+
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated, false);
+	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
+	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
+
+	value = tb_nhi_dma_misc_interrupt_policy(0, true);
+	KUNIT_EXPECT_EQ(test, value, (u32)REG_DMA_MISC_INT_AUTO_CLEAR);
+	value = tb_nhi_dma_misc_interrupt_policy(0, false);
+	KUNIT_EXPECT_EQ(test, value,
+			(u32)REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+}
+
+static void tb_test_maple_ridge_disables_interrupt_clear_on_read(struct kunit *test)
+{
+	u16 device;
+	bool auto_clear;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_FALSE(test, auto_clear);
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_FALSE(test, auto_clear);
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
+}
+
+static void tb_test_nhi_tx_stall_requires_hardware_consumer_proof(struct kunit *test)
+{
+	struct tb_ring_snapshot first = {
+		.size = 16,
+		.hw_producer = 4,
+		.hw_consumer = 0,
+		.in_flight = 4,
+		.options = RING_FLAG_ENABLE,
+		.running = true,
+		.indices_valid = true,
+	};
+	struct tb_ring_snapshot last = first;
+
+	last.hw_producer = 5;
+	last.in_flight = 5;
+	KUNIT_EXPECT_TRUE(test, tb_nhi_tx_stalled(&first, &last, true));
+
+	last.hw_consumer = 1;
+	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, true));
+	last.hw_consumer = 0;
+	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, false));
+	last.running = false;
+	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, true));
+}
+
+/*
  * ---------------------------------------------------------------------------
  * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
  *
@@ -5729,6 +5866,13 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
 	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
 	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_a_separate_machine),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
+	KUNIT_CASE(tb_test_nhi_dma_misc_policy_is_mutually_exclusive),
+	KUNIT_CASE(tb_test_maple_ridge_disables_interrupt_clear_on_read),
+	KUNIT_CASE(tb_test_nhi_tx_stall_requires_hardware_consumer_proof),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),

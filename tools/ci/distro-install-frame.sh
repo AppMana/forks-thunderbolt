@@ -83,7 +83,8 @@ printf '==> frame source: %s (%s)\n' "$frame_src" "$frame_ver"
 	exit 1
 }
 
-for required in dkms.conf Makefile kernel/frame kernel/rxe thunderbolt/thunderbolt_negotiation.h; do
+for required in dkms.conf Makefile kernel/frame kernel/rxe \
+	thunderbolt/thunderbolt_negotiation.h thunderbolt/nhi.h; do
 	[[ -e "$frame_src/$required" ]] ||
 		{ printf 'error: missing %s in %s\n' "$required" "$frame_src" >&2; exit 1; }
 done

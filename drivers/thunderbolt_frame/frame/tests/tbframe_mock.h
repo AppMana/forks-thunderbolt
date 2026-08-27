@@ -47,6 +47,9 @@ struct tbframe_mock {
 	 * peer's verify cadence does.
 	 */
 	bool		datapath_dead;
+	bool		tx_consumer_stalled;
+	unsigned int	tx_stall_reports;
+	unsigned int	data_proven_reports;
 	/*
 	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
 	 * the teardown window after the session state has been reset but
@@ -386,7 +389,7 @@ static int tbframe_mock_ring_tx(void *data, struct tbframe_frame_priv *f)
 		 * measure. hold_keepalives opts out for tests that want to
 		 * inspect the frame itself.
 		 */
-		if (!m->hold_keepalives) {
+		if (!m->hold_keepalives && !m->tx_consumer_stalled) {
 			tbframe_core_tx_complete(f, false);
 			return 0;
 		}
@@ -424,6 +427,43 @@ static int tbframe_mock_paths_active(void *data, int local_hopid,
 	struct tbframe_mock *m = data;
 
 	return m->paths_active_ret;
+}
+
+static int tbframe_mock_tx_snapshot(void *data,
+				    struct tb_ring_snapshot *snapshot)
+{
+	struct tbframe_mock *m = data;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	snapshot->size = m->peer.rx_ring_entries;
+	snapshot->hw_producer = m->keepalives_sent % snapshot->size;
+	snapshot->hw_consumer = m->tx_consumer_stalled ? 0 :
+		snapshot->hw_producer;
+	snapshot->in_flight = m->tx_consumer_stalled ? m->tx_queued : 0;
+	snapshot->options = BIT(31);
+	snapshot->running = m->rings_started;
+	snapshot->indices_valid = true;
+	return 0;
+}
+
+static int tbframe_mock_report_tx_stall(void *data,
+					const struct tb_ring_snapshot *first,
+					const struct tb_ring_snapshot *last,
+					bool control_healthy)
+{
+	struct tbframe_mock *m = data;
+
+	if (!tb_nhi_tx_stalled(first, last, control_healthy))
+		return -EAGAIN;
+	m->tx_stall_reports++;
+	return 0;
+}
+
+static void tbframe_mock_report_data_proven(void *data)
+{
+	struct tbframe_mock *m = data;
+
+	m->data_proven_reports++;
 }
 
 static int tbframe_mock_control_request(void *data, const void *req,
@@ -522,6 +562,9 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.enable_paths		= tbframe_mock_enable_paths,
 	.disable_paths		= tbframe_mock_disable_paths,
 	.paths_active		= tbframe_mock_paths_active,
+	.tx_snapshot		= tbframe_mock_tx_snapshot,
+	.report_tx_stall	= tbframe_mock_report_tx_stall,
+	.report_data_proven	= tbframe_mock_report_data_proven,
 	.control_request	= tbframe_mock_control_request,
 	.control_response	= tbframe_mock_control_response,
 	.reannounce		= tbframe_mock_reannounce,

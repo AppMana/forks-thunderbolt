@@ -2797,6 +2797,30 @@ static int icm_firmware_reset(struct tb *tb, struct tb_nhi *nhi)
 	return icm->cio_reset(tb);
 }
 
+static int icm_runtime_reset(struct tb *tb)
+{
+	struct tb_nhi *nhi = tb->nhi;
+	u32 before, after;
+	int ret;
+
+	before = ioread32(nhi->iobase + REG_FW_STS);
+	ret = icm_firmware_reset(tb, nhi);
+	if (ret)
+		return ret;
+
+	/* Let the ARC leave reset before the new domain sends DriverReady. */
+	msleep(100);
+	after = ioread32(nhi->iobase + REG_FW_STS);
+	if (after == (u32)~0U)
+		return -ENODEV;
+	if (!(after & REG_FW_STS_NVM_AUTH_DONE))
+		return -ETIMEDOUT;
+
+	tb_info(tb, "runtime ARC/CIO reset completed (FW_STS %#010x -> %#010x)\n",
+		before, after);
+	return 0;
+}
+
 static int icm_firmware_start(struct tb *tb, struct tb_nhi *nhi)
 {
 	unsigned int retries = 10;
@@ -3430,6 +3454,7 @@ static const struct tb_cm_ops icm_tr_ops = {
 	.start = icm_start,
 	.stop = icm_stop,
 	.deinit = icm_deinit,
+	.runtime_reset = icm_runtime_reset,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
