@@ -3709,6 +3709,7 @@ static void tb_stop(struct tb *tb)
 	 * teardown when nobody is listening. The software half (freeing tunnel
 	 * objects, unregistering the switch) always runs.
 	 */
+	tb_ctl_enter_teardown(tb->ctl);
 	ctl_live = tb_ctl_is_responsive(tb->ctl);
 	if (!ctl_live)
 		tb_warn(tb,

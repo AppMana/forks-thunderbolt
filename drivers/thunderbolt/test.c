@@ -6197,6 +6197,22 @@ static void tb_test_ctl_liveness_unmatched_reply_does_not_clear(struct kunit *te
 	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
 }
 
+static void tb_test_ctl_teardown_timeout_opens_request_circuit(struct kunit *test)
+{
+	/* Normal operation tolerates a transient timeout. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_request_may_start(true, false, 1));
+
+	/* Best-effort teardown may make one attempt while the channel is clean. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_request_may_start(true, true, 0));
+
+	/* Its first unanswered request must prevent a second hardware request. */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(true, true, 1));
+
+	/* A stopped control channel never accepts work in either phase. */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(false, false, 0));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(false, true, 0));
+}
+
 static void tb_test_ctl_liveness_appmana_019_sequence(struct kunit *test)
 {
 	int n = 0;
@@ -6377,6 +6393,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_split_state_matches_independent_model),
 	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
 	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
+	KUNIT_CASE(tb_test_ctl_teardown_timeout_opens_request_circuit),
 	KUNIT_CASE(tb_test_ctl_liveness_appmana_019_sequence),
 	KUNIT_CASE(tb_test_icm_phy_reset_covers_single_lane_links),
 	{ }

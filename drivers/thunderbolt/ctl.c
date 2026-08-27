@@ -52,6 +52,8 @@ struct tb_ctl {
 	struct semaphore xdomain_tx_sem;
 	bool xdomain_tx_occupied;
 	bool running;
+	/* Best-effort hardware cleanup uses a fail-fast admission policy. */
+	bool teardown;
 	/*
 	 * Requests whose ->work has been accepted by system_wq and synchronous
 	 * local-slot owners that have not finished. tb_cfg_request_work()
@@ -216,9 +218,12 @@ static int tb_cfg_request_enqueue(struct tb_ctl *ctl,
 	WARN_ON(req->ctl);
 
 	mutex_lock(&ctl->request_queue_lock);
-	if (!ctl->running) {
+	if (!tb_ctl_request_may_start(ctl->running, ctl->teardown,
+				      atomic_read(&ctl->consec_timeouts))) {
+		int ret = ctl->running ? -ESHUTDOWN : -ENOTCONN;
+
 		mutex_unlock(&ctl->request_queue_lock);
-		return -ENOTCONN;
+		return ret;
 	}
 	req->ctl = ctl;
 	list_add_tail(&req->list, &ctl->request_queue);
@@ -1064,10 +1069,35 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
  */
 bool tb_ctl_is_responsive(struct tb_ctl *ctl)
 {
+	bool responsive;
+
 	if (!ctl)
 		return false;
 
-	return !tb_ctl_timeouts_indicate_dead(atomic_read(&ctl->consec_timeouts));
+	mutex_lock(&ctl->request_queue_lock);
+	responsive = ctl->teardown ?
+		tb_ctl_request_may_start(ctl->running, true,
+					 atomic_read(&ctl->consec_timeouts)) :
+		!tb_ctl_timeouts_indicate_dead(atomic_read(&ctl->consec_timeouts));
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return responsive;
+}
+
+/**
+ * tb_ctl_enter_teardown() - Select fail-fast request admission
+ * @ctl: Control channel
+ *
+ * Hardware cleanup is optional and must not turn a single unanswered request
+ * into a long sequence of retries. Once this phase starts, the first timeout
+ * opens the request circuit. Normal runtime keeps its separate, more tolerant
+ * liveness policy.
+ */
+void tb_ctl_enter_teardown(struct tb_ctl *ctl)
+{
+	mutex_lock(&ctl->request_queue_lock);
+	ctl->teardown = true;
+	mutex_unlock(&ctl->request_queue_lock);
 }
 
 /* public interface, alloc/start/stop/free */
@@ -1180,7 +1210,10 @@ void tb_ctl_start(struct tb_ctl *ctl)
 	for (i = 0; i < TB_CTL_RX_PKG_COUNT; i++)
 		tb_ctl_rx_submit(ctl->rx_packets[i]);
 
+	mutex_lock(&ctl->request_queue_lock);
+	ctl->teardown = false;
 	ctl->running = true;
+	mutex_unlock(&ctl->request_queue_lock);
 }
 
 /**
@@ -1611,6 +1644,9 @@ int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 			    route, space, offset);
 		break;
 
+	case -ESHUTDOWN:
+		break;
+
 	default:
 		WARN(1, "tb_cfg_read: %d\n", res.err);
 		break;
@@ -1635,6 +1671,9 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 	case -ETIMEDOUT:
 		tb_ctl_warn(ctl, "%llx: timeout writing config space %u to %#x\n",
 			    route, space, offset);
+		break;
+
+	case -ESHUTDOWN:
 		break;
 
 	default:

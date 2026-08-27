@@ -416,6 +416,18 @@ static inline bool tb_ctl_timeouts_indicate_dead(int consec_timeouts)
 	return consec_timeouts >= TB_CTL_DEAD_TIMEOUTS;
 }
 
+/*
+ * Request admission policy. The teardown argument is intentionally part of
+ * the policy boundary so KUnit exercises the decision made by the request
+ * queue, rather than a model that can drift away from it.
+ */
+static inline bool tb_ctl_request_may_start(bool running, bool teardown,
+					    int consec_timeouts)
+{
+	return running && (!teardown || !consec_timeouts);
+}
+
+void tb_ctl_enter_teardown(struct tb_ctl *ctl);
 bool tb_ctl_is_responsive(struct tb_ctl *ctl);
 
 #endif
