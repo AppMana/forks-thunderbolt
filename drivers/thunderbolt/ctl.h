@@ -234,6 +234,24 @@ static inline struct tb_cfg_header tb_cfg_make_header(u64 route)
 	return header;
 }
 
+static inline u64 tb_cfg_request_route(enum tb_cfg_pkg_type type,
+				       const void *request, size_t size)
+{
+	if (type == TB_CFG_PKG_XDOMAIN_REQ ||
+	    type == TB_CFG_PKG_XDOMAIN_RESP) {
+		const struct tb_xdomain_header *header = request;
+
+		if (size < sizeof(*header))
+			return 0;
+		return (u64)header->route_hi << 32 | header->route_lo;
+	}
+
+	if (size < sizeof(struct tb_cfg_header))
+		return 0;
+
+	return tb_cfg_get_route(request);
+}
+
 int tb_cfg_ack_notification(struct tb_ctl *ctl, u64 route,
 			    const struct cfg_error_pkg *error);
 int tb_cfg_ack_plug(struct tb_ctl *ctl, u64 route, u32 port, bool unplug);

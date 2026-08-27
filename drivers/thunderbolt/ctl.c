@@ -908,8 +908,12 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 			const u32 *rdw = req->request;
 
 			tb_ctl_warn_ratelimited(ctl,
-						"request timed out: want eof=%#x req_dw0=%#010x size=%zu\n",
+						"request timed out: send eof=%#x want eof=%#x route=%#llx req_dw0=%#010x size=%zu\n",
+						req->request_type,
 						req->response_type,
+						tb_cfg_request_route(req->request_type,
+								     req->request,
+								     req->request_size),
 						req->request_size >= 4 ? rdw[0] : 0,
 						req->request_size);
 		}

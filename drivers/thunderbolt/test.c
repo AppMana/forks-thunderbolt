@@ -5417,6 +5417,32 @@ static void tb_test_ctl_xdomain_tx_status_route_correlation(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_NONE);
 }
 
+static void tb_test_ctl_timeout_route_decode(struct kunit *test)
+{
+	struct tb_xdomain_header xdomain = {
+		.route_hi = 0x12,
+		.route_lo = 0x3456789a,
+	};
+	struct tb_cfg_header config = tb_cfg_make_header(0x123456789aULL);
+
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_REQ, &xdomain,
+					     sizeof(xdomain)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_RESP, &xdomain,
+					     sizeof(xdomain)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_READ, &config,
+					     sizeof(config)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_REQ, &xdomain,
+					     sizeof(xdomain) - 1),
+			0ULL);
+}
+
 static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test)
 {
 	struct ctl_transaction_model model = {
@@ -5622,6 +5648,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_split_state_terminal_transitions),
 	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),
+	KUNIT_CASE(tb_test_ctl_timeout_route_decode),
 	KUNIT_CASE(tb_test_ctl_split_state_matches_independent_model),
 	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
 	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
