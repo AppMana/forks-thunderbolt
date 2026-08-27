@@ -3459,6 +3459,46 @@ static void tb_test_nhi_recovery_command_failure_is_terminal(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
 }
 
+/*
+ * A response timeout does not say whether the controller consumed the command.
+ * Recovery may schedule a proof reprobe only when either the response arrived
+ * or the command's own TX descriptor completed. Keeping those observations
+ * separate prevents a queued-but-stuck write from masquerading as recovery.
+ */
+static void tb_test_root_power_cycle_timeout_requires_consumption(struct kunit *test)
+{
+	enum tb_icm_root_recovery_event event;
+
+	event = tb_icm_root_recovery_command_event(-ETIMEDOUT, false);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
+
+	event = tb_icm_root_recovery_command_event(-ETIMEDOUT, true);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED);
+
+	/* A matched response independently proves command delivery. */
+	event = tb_icm_root_recovery_command_event(0, false);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED);
+}
+
+static void tb_test_cfg_tx_consumption_is_independent_and_monotonic(struct kunit *test)
+{
+	struct tb_cfg_request_state state = { 0 };
+
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_QUEUED);
+	KUNIT_ASSERT_EQ(test, state.tx, TB_CFG_TX_QUEUED);
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_CONSUMED);
+	KUNIT_ASSERT_EQ(test, state.tx, TB_CFG_TX_CONSUMED);
+
+	/* A later cancellation cannot erase observed hardware consumption. */
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_CANCELED);
+	KUNIT_EXPECT_EQ(test, state.tx, TB_CFG_TX_CONSUMED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_DISABLED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_DISABLED);
+}
+
 static void tb_test_nhi_startup_recovery_requires_power_cycle_dispatch(struct kunit *test)
 {
 	enum tb_nhi_recovery_action action;
@@ -5943,6 +5983,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_icm_root_recovery_is_separate_and_bounded),
 	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
 	KUNIT_CASE(tb_test_nhi_recovery_command_failure_is_terminal),
+	KUNIT_CASE(tb_test_root_power_cycle_timeout_requires_consumption),
+	KUNIT_CASE(tb_test_cfg_tx_consumption_is_independent_and_monotonic),
 	KUNIT_CASE(tb_test_nhi_startup_recovery_requires_power_cycle_dispatch),
 	KUNIT_CASE(tb_test_maple_root_power_cycle_encoding),
 	KUNIT_CASE(tb_test_pcie2cio_completion_states),

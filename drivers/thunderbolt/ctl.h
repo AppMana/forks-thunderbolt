@@ -41,6 +41,13 @@ void tb_ctl_get_stats(const struct tb_ctl *ctl, struct tb_ctl_stats *stats);
 
 /* configuration commands */
 
+enum tb_cfg_tx_state {
+	TB_CFG_TX_IDLE,
+	TB_CFG_TX_QUEUED,
+	TB_CFG_TX_CONSUMED,
+	TB_CFG_TX_CANCELED,
+};
+
 struct tb_cfg_result {
 	u64 response_route;
 	u32 response_port; /*
@@ -53,12 +60,23 @@ struct tb_cfg_result {
 			    */
 	int err; /* negative errors, 0 for success, 1 for tb errors */
 	enum tb_cfg_error tb_error; /* valid if err == 1 */
+	/* State of this request's own TX descriptor when the result was read. */
+	enum tb_cfg_tx_state tx_state;
 };
+
+struct tb_cfg_request;
 
 struct ctl_pkg {
 	struct tb_ctl *ctl;
+	struct tb_cfg_request *request;
 	void *buffer;
 	struct ring_frame frame;
+};
+
+enum tb_cfg_tx_event {
+	TB_CFG_TX_EVENT_QUEUED,
+	TB_CFG_TX_EVENT_CONSUMED,
+	TB_CFG_TX_EVENT_CANCELED,
 };
 
 enum tb_cfg_local_state {
@@ -94,9 +112,31 @@ enum tb_cfg_request_action {
 };
 
 struct tb_cfg_request_state {
+	enum tb_cfg_tx_state tx;
 	enum tb_cfg_local_state local;
 	enum tb_cfg_peer_state peer;
 };
+
+static inline void
+tb_cfg_request_tx_step(struct tb_cfg_request_state *state,
+		       enum tb_cfg_tx_event event)
+{
+	switch (state->tx) {
+	case TB_CFG_TX_IDLE:
+		if (event == TB_CFG_TX_EVENT_QUEUED)
+			state->tx = TB_CFG_TX_QUEUED;
+		break;
+	case TB_CFG_TX_QUEUED:
+		if (event == TB_CFG_TX_EVENT_CONSUMED)
+			state->tx = TB_CFG_TX_CONSUMED;
+		else if (event == TB_CFG_TX_EVENT_CANCELED)
+			state->tx = TB_CFG_TX_CANCELED;
+		break;
+	case TB_CFG_TX_CONSUMED:
+	case TB_CFG_TX_CANCELED:
+		break;
+	}
+}
 
 static inline enum tb_cfg_request_action
 tb_cfg_request_state_step(struct tb_cfg_request_state *state,
@@ -179,8 +219,8 @@ static inline bool tb_cfg_local_slot_is_owned(enum tb_cfg_local_state state)
  * @callback: Callback called when the request is finished successfully
  * @callback_data: Data to be passed to @callback
  * @flags: Flags for the request
- * @state_lock: Serializes the two request state machines
- * @state: Independent local-submission and peer-protocol states
+ * @state_lock: Serializes the independent request state machines
+ * @state: Independent TX-consumption, local-submission, and peer-protocol states
  * @work: Work item used to complete the request
  * @result: Result after the request has been completed
  * @list: Requests are queued using this field

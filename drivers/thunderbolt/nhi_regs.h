@@ -9,6 +9,7 @@
 #ifndef NHI_REGS_H_
 #define NHI_REGS_H_
 
+#include <linux/errno.h>
 #include <linux/types.h>
 
 enum ring_flags {
@@ -276,6 +277,15 @@ enum tb_icm_root_recovery_event {
 	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED,
 	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED,
 };
+
+static inline enum tb_icm_root_recovery_event
+tb_icm_root_recovery_command_event(int err, bool tx_consumed)
+{
+	if (!err || (err == -ETIMEDOUT && tx_consumed))
+		return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED;
+
+	return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED;
+}
 
 static inline enum tb_icm_root_recovery_state
 tb_icm_root_recovery_next(enum tb_icm_root_recovery_state state,

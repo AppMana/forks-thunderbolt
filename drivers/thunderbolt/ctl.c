@@ -321,6 +321,16 @@ tb_cfg_request_read_state(struct tb_cfg_request *req)
 	return state;
 }
 
+static void tb_cfg_request_update_tx(struct tb_cfg_request *req,
+				     enum tb_cfg_tx_event event)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	tb_cfg_request_tx_step(&req->state, event);
+	spin_unlock_irqrestore(&req->state_lock, flags);
+}
+
 static void tb_cfg_request_release_local_slot(struct tb_cfg_request *req)
 {
 	struct tb_ctl *ctl = req->ctl;
@@ -468,6 +478,8 @@ static __be32 tb_crc(const void *data, size_t len)
 static void tb_ctl_pkg_free(struct ctl_pkg *pkg)
 {
 	if (pkg) {
+		if (pkg->request)
+			tb_cfg_request_put(pkg->request);
 		dma_pool_free(pkg->ctl->frame_pool,
 			      pkg->buffer, pkg->frame.buffer_phy);
 		kfree(pkg);
@@ -503,6 +515,10 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
 		else
 			atomic_inc(&pkg->ctl->tx_done);
 	}
+	if (pkg->request)
+		tb_cfg_request_update_tx(pkg->request, canceled ?
+					 TB_CFG_TX_EVENT_CANCELED :
+					 TB_CFG_TX_EVENT_CONSUMED);
 	tb_ctl_pkg_free(pkg);
 }
 
@@ -514,7 +530,7 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
  * Return: Returns 0 on success or an error code on failure.
  */
 static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
-		     enum tb_cfg_pkg_type type)
+		     enum tb_cfg_pkg_type type, struct tb_cfg_request *request)
 {
 	int res;
 	struct ctl_pkg *pkg;
@@ -534,6 +550,11 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	pkg->frame.size = len + 4;
 	pkg->frame.sof = type;
 	pkg->frame.eof = type;
+	if (request) {
+		tb_cfg_request_update_tx(request, TB_CFG_TX_EVENT_QUEUED);
+		tb_cfg_request_get(request);
+		pkg->request = request;
+	}
 
 	trace_tb_tx(ctl->index, type, data, len);
 
@@ -541,8 +562,12 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	*(__be32 *) (pkg->buffer + len) = tb_crc(pkg->buffer, len);
 
 	res = tb_ring_tx(ctl->tx, &pkg->frame);
-	if (res) /* ring is stopped */
+	if (res) { /* ring is stopped */
+		if (request)
+			tb_cfg_request_update_tx(request,
+						 TB_CFG_TX_EVENT_CANCELED);
 		tb_ctl_pkg_free(pkg);
+	}
 	return res;
 }
 
@@ -815,7 +840,7 @@ int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 		goto err_put;
 
 	ret = tb_ctl_tx(ctl, req->request, req->request_size,
-			req->request_type);
+			req->request_type, req);
 	if (ret)
 		goto err_dequeue;
 
@@ -891,6 +916,7 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	ret = tb_cfg_request(ctl, req, tb_cfg_request_complete, &done);
 	if (ret) {
 		res.err = ret;
+		res.tx_state = tb_cfg_request_read_state(req).tx;
 		if (hold_local)
 			tb_cfg_request_release_local_slot(req);
 		if (hold_local)
@@ -929,9 +955,9 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 						req->request_size);
 		}
 		tb_ctl_warn_ratelimited(ctl,
-					"request timed out after %d ms; local_state=%u peer_state=%u ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_xdomain_tx_status=%d rx_dropped=%d\n",
+					"request timed out after %d ms; tx_state=%u local_state=%u peer_state=%u ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_xdomain_tx_status=%d rx_dropped=%d\n",
 					timeout_msec,
-					state.local, state.peer,
+					state.tx, state.local, state.peer,
 					atomic_read(&ctl->tx_done),
 					atomic_read(&ctl->tx_canceled),
 					atomic_read(&ctl->rx_total),
@@ -996,7 +1022,9 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		atomic_dec(&ctl->req_works);
 	}
 
-	return req->result;
+	res = req->result;
+	res.tx_state = tb_cfg_request_read_state(req).tx;
+	return res;
 }
 
 /**
@@ -1268,7 +1296,7 @@ int tb_cfg_ack_notification(struct tb_ctl *ctl, u64 route,
 	tb_ctl_dbg(ctl, "acking %s (%#x) notification on %llx\n", name,
 		   error->error, route);
 
-	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_NOTIFY_ACK);
+	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_NOTIFY_ACK, NULL);
 }
 
 /**
@@ -1292,7 +1320,7 @@ int tb_cfg_ack_plug(struct tb_ctl *ctl, u64 route, u32 port, bool unplug)
 	};
 	tb_ctl_dbg(ctl, "acking hot %splug event on %llx:%u\n",
 		   unplug ? "un" : "", route, port);
-	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_ERROR);
+	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_ERROR, NULL);
 }
 
 static bool tb_cfg_match(const struct tb_cfg_request *req,

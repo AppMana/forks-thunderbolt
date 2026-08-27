@@ -2966,6 +2966,7 @@ static int icm_root_power_cycle(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 	enum tb_icm_root_recovery_state state = TB_ICM_ROOT_RECOVERY_IDLE;
 	struct pci_dev *pdev = tb->nhi->pdev;
+	bool tx_consumed = false;
 	int port, ret;
 
 	state = tb_icm_root_recovery_next(
@@ -2988,13 +2989,12 @@ static int icm_root_power_cycle(struct tb *tb)
 	tb_warn(tb,
 		"root config did not answer after DriverReady; issuing one host-router power-cycle request on DMA port %d\n",
 		port);
-	ret = dma_port_power_cycle_raw(tb->ctl, port);
+	ret = dma_port_power_cycle_raw(tb->ctl, port, &tx_consumed);
 	state = tb_icm_root_recovery_next(
-		state, !ret || ret == -ETIMEDOUT ?
-		TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED :
-		TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
+		state, tb_icm_root_recovery_command_event(ret, tx_consumed));
 	if (state != TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED) {
-		tb_err(tb, "host-router power-cycle request failed before dispatch: %d\n",
+		tb_err(tb,
+		       "host-router power-cycle request was not consumed (error %d); refusing to claim dispatch\n",
 		       ret);
 		return ret;
 	}
@@ -3002,7 +3002,7 @@ static int icm_root_power_cycle(struct tb *tb)
 	icm->root_power_cycle_dispatched = true;
 	if (ret == -ETIMEDOUT)
 		tb_warn(tb,
-			"host-router power-cycle request got no reply; treating execution as unproven and requiring a fresh probe\n");
+			"host-router power-cycle request was consumed but got no reply; treating execution as unproven and requiring a fresh probe\n");
 	else
 		tb_info(tb,
 			"host-router power-cycle request was acknowledged; requiring a fresh probe\n");

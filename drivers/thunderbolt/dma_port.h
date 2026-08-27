@@ -46,6 +46,6 @@ int dma_port_flash_update_auth_status(struct tb_dma_port *dma, u32 *status);
 int dma_port_flash_write(struct tb_dma_port *dma, unsigned int address,
 			 const void *buf, size_t size);
 int dma_port_power_cycle(struct tb_dma_port *dma);
-int dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port);
+int dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port, bool *tx_consumed);
 
 #endif
