@@ -3345,6 +3345,44 @@ static void tb_test_icm_partial_wedge_refuses_software_takeover(struct kunit *te
 }
 
 /*
+ * Firmware status, mailbox mode, DriverReady completion, and router config
+ * access are independent startup proofs. In particular, a ready-looking
+ * status register must not skip the later control-path checks.
+ */
+static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
+{
+	struct tb_icm_startup_proof proof;
+
+	proof = tb_icm_startup_proof_begin(0x800001a1, NHI_FW_CM_MODE);
+	KUNIT_EXPECT_TRUE(test, proof.firmware_ready);
+	KUNIT_EXPECT_TRUE(test, proof.mailbox_ready);
+	KUNIT_EXPECT_FALSE(test, proof.driver_ready);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	/* A config response cannot complete a startup whose command did not. */
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
+	KUNIT_EXPECT_TRUE(test, proof.driver_ready);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+	KUNIT_EXPECT_TRUE(test, proof.root_config_ready);
+}
+
+/*
+ * A readiness pass is one physical request. The generic config helper retries
+ * four times internally, so composing it with the outer readiness loop turns
+ * 50 observations into 200 requests and a roughly 23 second request storm.
+ */
+static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 50u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 7500u);
+}
+
+/*
  * ---------------------------------------------------------------------------
  * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
  *
@@ -5590,6 +5628,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
+	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
+	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),

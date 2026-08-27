@@ -27,6 +27,18 @@ void tb_ctl_start(struct tb_ctl *ctl);
 void tb_ctl_stop(struct tb_ctl *ctl);
 void tb_ctl_free(struct tb_ctl *ctl);
 
+struct tb_ctl_stats {
+	u32 tx_done;
+	u32 tx_canceled;
+	u32 rx_total;
+	u32 rx_matched;
+	u32 rx_unmatched;
+	u32 rx_xdomain_tx_status;
+	u32 rx_dropped;
+};
+
+void tb_ctl_get_stats(const struct tb_ctl *ctl, struct tb_ctl_stats *stats);
+
 /* configuration commands */
 
 struct tb_cfg_result {
@@ -260,6 +272,10 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 				     u64 route, u32 port,
 				     enum tb_cfg_space space, u32 offset,
 				     u32 length, int timeout_msec);
+struct tb_cfg_result tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer,
+					  u64 route, u32 port,
+					  enum tb_cfg_space space, u32 offset,
+					  u32 length, int timeout_msec);
 struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 				      u64 route, u32 port,
 				      enum tb_cfg_space space, u32 offset,

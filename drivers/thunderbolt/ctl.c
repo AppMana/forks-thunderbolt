@@ -110,6 +110,17 @@ struct tb_ctl {
 	int index;
 };
 
+void tb_ctl_get_stats(const struct tb_ctl *ctl, struct tb_ctl_stats *stats)
+{
+	stats->tx_done = atomic_read(&ctl->tx_done);
+	stats->tx_canceled = atomic_read(&ctl->tx_canceled);
+	stats->rx_total = atomic_read(&ctl->rx_total);
+	stats->rx_matched = atomic_read(&ctl->rx_matched);
+	stats->rx_unmatched = atomic_read(&ctl->rx_unmatched);
+	stats->rx_xdomain_tx_status = atomic_read(&ctl->rx_xdomain_tx_status);
+	stats->rx_dropped = atomic_read(&ctl->rx_dropped);
+}
+
 
 #define tb_ctl_WARN(ctl, format, arg...) \
 	dev_WARN(&(ctl)->nhi->pdev->dev, format, ## arg)
@@ -1378,9 +1389,10 @@ struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route)
  *
  * Reads from router config space without translating the possible error.
  */
-struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
-		u64 route, u32 port, enum tb_cfg_space space,
-		u32 offset, u32 length, int timeout_msec)
+static struct tb_cfg_result
+tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+			enum tb_cfg_space space, u32 offset, u32 length,
+			int timeout_msec, unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_read_pkg request = {
@@ -1395,7 +1407,7 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 	struct cfg_write_pkg reply;
 	int retries = 0;
 
-	while (retries < TB_CTL_RETRIES) {
+	while (retries < max_retries) {
 		struct tb_cfg_request *req;
 
 		req = tb_cfg_request_alloc();
@@ -1434,6 +1446,37 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 	if (!res.err)
 		memcpy(buffer, &reply.data, 4 * length);
 	return res;
+}
+
+struct tb_cfg_result
+tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+		enum tb_cfg_space space, u32 offset, u32 length, int timeout_msec)
+{
+	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
+				       length, timeout_msec, TB_CTL_RETRIES);
+}
+
+/**
+ * tb_cfg_read_raw_once() - issue one config-space read without retrying
+ * @ctl: Pointer to the control channel
+ * @buffer: Buffer where the data is read
+ * @route: Route string of the router
+ * @port: Port number when reading from %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword offset of the register to start reading
+ * @length: Number of dwords to read
+ * @timeout_msec: Timeout in ms how long to wait for the response
+ *
+ * Readiness polling owns its retry policy and must use this helper so a
+ * caller's observation loop does not multiply the generic retry loop.
+ */
+struct tb_cfg_result
+tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+		     enum tb_cfg_space space, u32 offset, u32 length,
+		     int timeout_msec)
+{
+	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
+				       length, timeout_msec, 1);
 }
 
 /**

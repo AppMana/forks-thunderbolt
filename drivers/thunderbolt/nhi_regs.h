@@ -168,6 +168,63 @@ static inline bool tb_icm_wedged(int driver_ready_err, u32 fw_sts)
 	return driver_ready_err && tb_icm_fw_sts_running(fw_sts);
 }
 
+enum tb_icm_startup_proof_event {
+	TB_ICM_PROOF_DRIVER_READY,
+	TB_ICM_PROOF_ROOT_CONFIG,
+};
+
+struct tb_icm_startup_proof {
+	bool firmware_ready;
+	bool mailbox_ready;
+	bool driver_ready;
+	bool root_config_ready;
+};
+
+/*
+ * Keep the controller's status claims separate from end-to-end control-path
+ * proofs. A set firmware-ready bit or the expected mailbox mode says nothing
+ * about whether DriverReady completes or router config traffic is live.
+ */
+static inline struct tb_icm_startup_proof
+tb_icm_startup_proof_begin(u32 fw_sts, bool mailbox_ready)
+{
+	return (struct tb_icm_startup_proof) {
+		.firmware_ready = fw_sts != (u32)~0U &&
+				  (fw_sts & REG_FW_STS_NVM_AUTH_DONE),
+		.mailbox_ready = mailbox_ready,
+	};
+}
+
+static inline void
+tb_icm_startup_proof_advance(struct tb_icm_startup_proof *proof,
+			     enum tb_icm_startup_proof_event event)
+{
+	switch (event) {
+	case TB_ICM_PROOF_DRIVER_READY:
+		proof->driver_ready = true;
+		break;
+	case TB_ICM_PROOF_ROOT_CONFIG:
+		if (proof->driver_ready)
+			proof->root_config_ready = true;
+		break;
+	}
+}
+
+#define TB_ICM_ROOT_CONFIG_TIMEOUT_MS	100U
+#define TB_ICM_ROOT_CONFIG_INTERVAL_MS	50U
+
+static inline unsigned int
+tb_icm_root_config_request_count(unsigned int passes)
+{
+	return passes;
+}
+
+static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)
+{
+	return (u64)passes * (TB_ICM_ROOT_CONFIG_TIMEOUT_MS +
+			      TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+}
+
 
 /*
  * Must nhi_select_cm() hand the domain straight to the software connection

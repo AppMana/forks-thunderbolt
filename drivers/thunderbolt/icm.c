@@ -46,8 +46,8 @@
 
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
- * become readable. Each pass costs a 100 ms read timeout plus a 50 ms
- * sleep, so the default 50 is about 7.5 s.
+ * become readable. Each pass issues exactly one 100 ms read and then sleeps
+ * 50 ms, so the default 50 is about 7.5 s.
  *
  * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
  * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
@@ -59,7 +59,7 @@
 static unsigned int icm_cfg_space_retries = 50;
 module_param(icm_cfg_space_retries, uint, 0644);
 MODULE_PARM_DESC(icm_cfg_space_retries,
-		 "root switch config-space readiness passes, ~150ms each (default 50)");
+		 "single-request root config-space readiness passes, ~150ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -2588,49 +2588,112 @@ static void icm_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 }
 
 static int
+icm_log_startup_failure(struct tb *tb, const char *stage, int error,
+			const struct tb_icm_startup_proof *proof,
+			const struct tb_ctl_stats *before)
+{
+	struct tb_ctl_stats after;
+	u32 fw_sts, outmail;
+	unsigned int mode;
+
+	tb_ctl_get_stats(tb->ctl, &after);
+	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
+	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
+	mode = FIELD_GET(REG_OUTMAIL_CMD_OPMODE_MASK, outmail);
+
+	tb_err(tb, "ICM startup proof failed at %s (%d)\n", stage, error);
+	tb_err(tb,
+	       "ICM startup claims: firmware-ready=%u mailbox-ready=%u fw_sts=%#x outmail=%#x mode=%u\n",
+	       proof->firmware_ready, proof->mailbox_ready, fw_sts, outmail, mode);
+	tb_err(tb, "ICM startup proofs: driver-ready=%u root-config=%u\n",
+	       proof->driver_ready, proof->root_config_ready);
+	tb_err(tb,
+	       "ring0 startup delta: tx-done=%u tx-canceled=%u rx-total=%u\n",
+	       after.tx_done - before->tx_done,
+	       after.tx_canceled - before->tx_canceled,
+	       after.rx_total - before->rx_total);
+	tb_err(tb,
+	       "ring0 startup delta: rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
+	       after.rx_matched - before->rx_matched,
+	       after.rx_unmatched - before->rx_unmatched,
+	       after.rx_xdomain_tx_status - before->rx_xdomain_tx_status,
+	       after.rx_dropped - before->rx_dropped);
+
+	return error;
+}
+
+static int
 __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 		   u8 *proto_version, size_t *nboot_acl, bool *rpm)
 {
 	struct icm *icm = tb_priv(tb);
-	unsigned int retries = icm_cfg_space_retries;
+	struct tb_ctl_stats before, after;
+	struct tb_icm_startup_proof proof;
+	struct tb_cfg_result res = { .err = -ETIMEDOUT };
 	unsigned long started = jiffies;
+	unsigned int pass;
+	bool mailbox_ready;
+	u32 fw_sts, outmail;
 	int ret;
+
+	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
+	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
+	mailbox_ready = FIELD_GET(REG_OUTMAIL_CMD_OPMODE_MASK, outmail) ==
+			NHI_FW_CM_MODE;
+	proof = tb_icm_startup_proof_begin(fw_sts, mailbox_ready);
+	tb_ctl_get_stats(tb->ctl, &before);
 
 	ret = icm->driver_ready(tb, security_level, proto_version, nboot_acl,
 				rpm);
-	if (ret) {
-		tb_err(tb, "failed to send driver ready to ICM\n");
-		return ret;
-	}
+	if (ret)
+		return icm_log_startup_failure(tb, "DriverReady", ret, &proof,
+					       &before);
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
 
 	/*
 	 * Hold on here until the switch config space is accessible so
 	 * that we can read root switch config successfully.
 	 */
-	do {
-		struct tb_cfg_result res;
+	for (pass = 0; pass < icm_cfg_space_retries; pass++) {
 		u32 tmp;
 
-		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-				      0, 1, 100);
-		if (!res.err)
+		res = tb_cfg_read_raw_once(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
+					   0, 1,
+					   TB_ICM_ROOT_CONFIG_TIMEOUT_MS);
+		if (!res.err) {
+			tb_icm_startup_proof_advance(&proof,
+						     TB_ICM_PROOF_ROOT_CONFIG);
+			tb_ctl_get_stats(tb->ctl, &after);
+			tb_info(tb,
+				"ICM startup proved in %u pass(es) / %u ms: firmware-ready=%u mailbox-ready=%u driver-ready=%u root-config=%u; ring0 delta tx-done=%u tx-canceled=%u rx-total=%u rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
+				pass + 1, jiffies_to_msecs(jiffies - started),
+				proof.firmware_ready, proof.mailbox_ready,
+				proof.driver_ready, proof.root_config_ready,
+				after.tx_done - before.tx_done,
+				after.tx_canceled - before.tx_canceled,
+				after.rx_total - before.rx_total,
+				after.rx_matched - before.rx_matched,
+				after.rx_unmatched - before.rx_unmatched,
+				after.rx_xdomain_tx_status -
+					before.rx_xdomain_tx_status,
+				after.rx_dropped - before.rx_dropped);
 			return 0;
+		}
 
-		msleep(50);
-	} while (--retries);
+		msleep(TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+	}
 
 	/*
-	 * Say what was actually observed. This timeout is the sole input to
-	 * the "wedged firmware" verdict, so recording the budget spent and
-	 * the last config-space error is what distinguishes "firmware is
-	 * dead" from "this boot needed longer than we allowed".
+	 * Report each independent proof and the ring-zero deltas. The status and
+	 * mailbox registers are firmware claims; only the command completion and
+	 * matched config response prove the end-to-end control path.
 	 */
 	tb_err(tb,
-	       "failed to read root switch config space after %u passes / %u ms (fw_sts %#x); giving up\n",
-	       icm_cfg_space_retries,
-	       jiffies_to_msecs(jiffies - started),
-	       ioread32(tb->nhi->iobase + REG_FW_STS));
-	return -ETIMEDOUT;
+	       "root config proof exhausted %u single-request pass(es) / %u ms\n",
+	       tb_icm_root_config_request_count(pass),
+	       jiffies_to_msecs(jiffies - started));
+	return icm_log_startup_failure(tb, "root config", res.err, &proof,
+				       &before);
 }
 
 /**
