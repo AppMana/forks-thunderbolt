@@ -102,6 +102,19 @@ enum tbframe_link_state {
 	TBFRAME_STATE_DEAD,		/* DEAD_HW poisoned, terminal */
 };
 
+enum tbframe_ready_responder_state {
+	TBFRAME_READY_RESPONDER_WAITING,
+	TBFRAME_READY_RESPONDER_PENDING_PATHS,
+	TBFRAME_READY_RESPONDER_PENDING_SEND,
+	TBFRAME_READY_RESPONDER_ACKED,
+};
+
+struct tbframe_ready_responder {
+	enum tbframe_ready_responder_state state;
+	u8 seq;
+	u8 xdomain_sequence;
+};
+
 struct tbframe_frame_priv {
 	struct tbframe_frame	frame;	/* public part, must stay first */
 	struct tbframe_link	*link;
@@ -267,7 +280,9 @@ struct tbframe_link {
 	 * must undo what it did, not what the peer most recently said.
 	 */
 	u16			active_remote_hopid;
-	struct tb_xdomain_handshake hs;	/* READY handshake + zombie predicate */
+	/* Outbound READY requester and inbound READY responder are independent. */
+	struct tb_xdomain_handshake hs;	/* requester + zombie predicate */
+	struct tbframe_ready_responder ready_responder;
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
 

@@ -92,6 +92,32 @@ static void tbframe_session_ready_withheld_until_paths(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+/*
+ * An early inbound READY is a responder-side operation with its own lifetime.
+ * Enabling the paths must finish that pending response; requiring the peer to
+ * retransmit makes two otherwise healthy simultaneous handshakes incur a full
+ * request timeout before either can converge.
+ */
+static void tbframe_session_early_ready_is_acked_after_paths(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_FALSE(test, fx->mock.have_response);
+
+	/* Keep the requester half red; only the deferred responder may reply. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_TRUE(test, fx->mock.have_response);
+}
+
 static void tbframe_session_hello_retries_reannounce(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -206,6 +232,7 @@ static void tbframe_session_test_exit(struct kunit *test)
 static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_happy_path),
 	KUNIT_CASE(tbframe_session_ready_withheld_until_paths),
+	KUNIT_CASE(tbframe_session_early_ready_is_acked_after_paths),
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
 	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
 	KUNIT_CASE(tbframe_session_event_ordering),

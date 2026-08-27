@@ -575,6 +575,62 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	return 0;
 }
 
+static void tbframe_ready_responder_reset(struct tbframe_link *link)
+{
+	link->ready_responder.state = TBFRAME_READY_RESPONDER_WAITING;
+	link->ready_responder.seq = 0;
+	link->ready_responder.xdomain_sequence = 0;
+}
+
+/*
+ * Finish an inbound READY that arrived before the local paths were enabled.
+ * The responder is independent of the outbound READY requester: simultaneous
+ * handshakes must not need a peer retransmission merely because their first
+ * requests crossed while one side was still programming paths.
+ */
+static int tbframe_link_flush_ready_response(struct tbframe_link *link)
+{
+	struct tbframe_wire_hello local;
+	u8 reply[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	unsigned long flags;
+	u8 seq, xdomain_sequence;
+	int ret;
+
+	spin_lock_irqsave(&link->lock, flags);
+	if (link->ready_responder.state ==
+			TBFRAME_READY_RESPONDER_PENDING_PATHS &&
+	    link->paths_enabled && !link->needs_down)
+		link->ready_responder.state =
+			TBFRAME_READY_RESPONDER_PENDING_SEND;
+	if (link->ready_responder.state != TBFRAME_READY_RESPONDER_PENDING_SEND ||
+	    link->needs_down || link->removing || link->parked) {
+		spin_unlock_irqrestore(&link->lock, flags);
+		return 0;
+	}
+	seq = link->ready_responder.seq;
+	xdomain_sequence = link->ready_responder.xdomain_sequence;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	tbframe_link_fill_local_hello(link, &local);
+	ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
+				       TBFRAME_WIRE_OP_READY_ACK, seq,
+				       link->route, xdomain_sequence);
+	if (ret >= 0)
+		ret = link->ops->control_response(link->hw, reply,
+						  sizeof(reply));
+
+	spin_lock_irqsave(&link->lock, flags);
+	/* A newer retry may have replaced the request while the response sent. */
+	if (!ret && link->ready_responder.state ==
+				TBFRAME_READY_RESPONDER_PENDING_SEND &&
+	    link->ready_responder.seq == seq &&
+	    link->ready_responder.xdomain_sequence == xdomain_sequence)
+		link->ready_responder.state = TBFRAME_READY_RESPONDER_ACKED;
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	return ret < 0 ? ret : 0;
+}
+
 /*
  * Orderly-teardown quiesce (tbnet LOGOUT analog). The canary campaign
  * measured that a peer which keeps streaming into paths we are about to
@@ -758,6 +814,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->controller_proof_reported = false;
 	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
+	tbframe_ready_responder_reset(link);
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	timer_delete_sync(&link->verify_timer);
@@ -1043,6 +1100,15 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 				return;
 			}
 		}
+	}
+
+	ret = tbframe_link_flush_ready_response(link);
+	if (ret) {
+		pr_warn_ratelimited("%s: deferred READY_ACK failed: %d\n",
+				    link->name, ret);
+		tbframe_link_kick(link,
+				  msecs_to_jiffies(TBFRAME_RETRY_DELAY_MS));
+		return;
 	}
 
 	if (!ready_sent) {
@@ -1335,6 +1401,7 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		}
 		spin_lock_irqsave(&link->lock, flags);
 		tbframe_link_apply_remote_locked(link, &remote);
+		tbframe_ready_responder_reset(link);
 		/*
 		 * An inbound HELLO while established means the peer restarted
 		 * without a link edge; our session points at its freed rings.
@@ -1381,6 +1448,12 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		 * posted, nothing consumed, reboot-only recovery).
 		 */
 		enabled = link->paths_enabled && !link->needs_down;
+		link->ready_responder.seq = info.seq;
+		link->ready_responder.xdomain_sequence =
+			info.xdomain_sequence;
+		link->ready_responder.state = enabled ?
+			TBFRAME_READY_RESPONDER_PENDING_SEND :
+			TBFRAME_READY_RESPONDER_PENDING_PATHS;
 		tbframe_link_kick_locked(link, 0);
 		spin_unlock_irqrestore(&link->lock, flags);
 
@@ -1389,17 +1462,7 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		 * keeps retrying READY and the ack then certifies mutual
 		 * readiness (see tbframe_link_ready_once()).
 		 */
-		if (!enabled)
-			return 1;
-
-		tbframe_link_fill_local_hello(link, &local);
-		ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
-					       TBFRAME_WIRE_OP_READY_ACK,
-					       info.seq, link->route,
-					       info.xdomain_sequence);
-		if (ret >= 0)
-			ret = link->ops->control_response(link->hw, reply,
-							  sizeof(reply));
+		ret = tbframe_link_flush_ready_response(link);
 		if (ret < 0)
 			pr_warn("%s: READY_ACK failed: %d\n", link->name, ret);
 		return 1;
@@ -2073,6 +2136,7 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	link->state = TBFRAME_STATE_INIT;
 	link->tx_quiesced = true;
 	tb_xdomain_handshake_reset(&link->hs);
+	tbframe_ready_responder_reset(link);
 
 	ret = ops->alloc_out_hopid(hw);
 	if (ret < 0)
