@@ -34,6 +34,7 @@
 #define XDOMAIN_BONDING_REARM_TIMEOUT		10000	/* ms, doubles */
 #define XDOMAIN_DIRECT_BOND_RETRIES		10
 #define XDOMAIN_DEFAULT_MAX_HOPID		15
+#define XDOMAIN_UUID_BACKOFF_MAX_SHIFT		6
 
 enum {
 	XDOMAIN_STATE_INIT,
@@ -1680,6 +1681,7 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	}
 	xd->uuid_verified = true;
 	xd->needs_uuid = false;
+	xd->uuid_retry_failures = 0;
 
 	return 0;
 }
@@ -2001,12 +2003,40 @@ err_free_block:
 	return ret;
 }
 
+static unsigned int tb_xdomain_uuid_retry_delay_ms(unsigned int failures)
+{
+	return XDOMAIN_DEFAULT_TIMEOUT <<
+		min(failures, (unsigned int)XDOMAIN_UUID_BACKOFF_MAX_SHIFT);
+}
+
 static void tb_xdomain_queue_uuid(struct tb_xdomain *xd)
 {
 	xd->state = XDOMAIN_STATE_UUID;
 	xd->state_retries = XDOMAIN_RETRIES;
+	xd->uuid_retry_failures = 0;
 	queue_delayed_work(xd->tb->wq, &xd->state_work,
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+unsigned int tb_test_xdomain_uuid_retry_delay_ms(unsigned int failures)
+{
+	return tb_xdomain_uuid_retry_delay_ms(failures);
+}
+#endif
+
+static void tb_xdomain_queue_uuid_backoff(struct tb_xdomain *xd)
+{
+	unsigned int failures = xd->uuid_retry_failures;
+	unsigned int delay_ms;
+
+	xd->state = XDOMAIN_STATE_UUID;
+	xd->state_retries = 0;
+	if (failures < XDOMAIN_UUID_BACKOFF_MAX_SHIFT)
+		xd->uuid_retry_failures = failures + 1;
+	delay_ms = tb_xdomain_uuid_retry_delay_ms(failures);
+	queue_delayed_work(xd->tb->wq, &xd->state_work,
+			   msecs_to_jiffies(delay_ms));
 }
 
 static void tb_xdomain_queue_link_status(struct tb_xdomain *xd)
@@ -2259,7 +2289,13 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				xd->is_unplugged = true;
 				tb_xdomain_failed(xd);
 			} else {
-				tb_xdomain_queue_uuid(xd);
+				/*
+				 * Keep an unverified route discoverable, but after the
+				 * initial fast budget probe it at an exponential cadence.
+				 * A new handshake event uses queue_uuid() and restores the
+				 * fast budget immediately.
+				 */
+				tb_xdomain_queue_uuid_backoff(xd);
 			}
 		} else {
 			tb_xdomain_queue_properties_changed(xd);

@@ -4778,6 +4778,34 @@ static void tb_test_xdomain_announce_survives_absent_peer(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, a.delivered);
 }
 
+static void tb_test_xdomain_uuid_absence_backs_off(struct kunit *test)
+{
+	unsigned int actual_attempts = 0;
+	unsigned int model_attempts = 0;
+	unsigned int actual_ms = 0;
+	unsigned int model_ms = 0;
+	unsigned int failures;
+
+	/* Compare the implementation with an independent state-policy oracle. */
+	for (failures = 0; failures < 10; failures++)
+		KUNIT_EXPECT_EQ(test,
+				tb_test_xdomain_uuid_retry_delay_ms(failures),
+				identity_model_retry_delay_ms(failures));
+
+	/* An hour-long absence must remain discoverable without a probe storm. */
+	for (failures = 0; actual_ms < 3600u * 1000u; failures++) {
+		actual_ms += tb_test_xdomain_uuid_retry_delay_ms(failures);
+		actual_attempts++;
+	}
+	for (failures = 0; model_ms < 3600u * 1000u; failures++) {
+		model_ms += identity_model_retry_delay_ms(failures);
+		model_attempts++;
+	}
+
+	KUNIT_EXPECT_EQ(test, actual_attempts, model_attempts);
+	KUNIT_EXPECT_LT(test, actual_attempts, 100u);
+}
+
 /*
  * A neighbour that NEVER powers on. Nothing may accumulate: the spacing must
  * saturate at the ceiling rather than grow the attempt rate, the diagnostics
@@ -6115,6 +6143,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_properties_response_proves_both_identities),
 	KUNIT_CASE(tb_test_xdomain_unverified_uuid_cannot_alias_route),
 	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),
+	KUNIT_CASE(tb_test_xdomain_uuid_absence_backs_off),
 	KUNIT_CASE(tb_test_xdomain_peer_never_answers_leaves_no_latch),
 	KUNIT_CASE(tb_test_xdomain_peer_answers_after_many_attempts),
 	KUNIT_CASE(tb_test_xdomain_announce_rearms_mid_backoff),

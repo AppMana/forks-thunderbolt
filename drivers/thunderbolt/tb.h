@@ -71,6 +71,7 @@ int tb_test_xdomain_native_error_result(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);
+unsigned int tb_test_xdomain_uuid_retry_delay_ms(unsigned int failures);
 #endif
 #include "ctl.h"
 #include "dma_port.h"

@@ -1253,6 +1253,15 @@ struct announce_state {
 	bool stopped;		/* TB_XDOMAIN_ANNOUNCE_STOPPED published */
 };
 
+/* Independent policy oracle for a peer that remains absent after fast probe. */
+static inline unsigned int
+identity_model_retry_delay_ms(unsigned int failures)
+{
+	const unsigned int max_shift = 6;
+
+	return 1000u << min(failures, max_shift);
+}
+
 /* tb_xdomain_queue_properties_changed(): arm (or re-arm) the announcement. */
 static inline void announce_arm(struct announce_state *a)
 {

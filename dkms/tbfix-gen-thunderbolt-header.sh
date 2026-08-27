@@ -61,6 +61,9 @@ add_rearm=1;      grep -q 'bonding_rearm_attempts' "$src" && add_rearm=0
 # A firmware topology-event UUID is only a candidate until the peer answers a
 # route-local UUID request.
 add_uuid_verified=1; grep -q 'bool uuid_verified;' "$src" && add_uuid_verified=0
+# Separate failure history for unverified-peer discovery. This must not share
+# the properties-announcement counter because both delayed works run at once.
+add_uuid_retry=1; grep -q 'uuid_retry_failures' "$src" && add_uuid_retry=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
@@ -77,7 +80,8 @@ awk -v add_completion="$add_completion" \
     -v add_removing="$add_removing" \
     -v add_ring_flush="$add_ring_flush" \
     -v add_rearm="$add_rearm" \
-    -v add_uuid_verified="$add_uuid_verified" '
+    -v add_uuid_verified="$add_uuid_verified" \
+    -v add_uuid_retry="$add_uuid_retry" '
 
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
@@ -104,6 +108,8 @@ awk -v add_completion="$add_completion" \
 			print "\tunsigned int bonding_rearm_attempts;"
 		if (add_uuid_verified == 1)
 			print "\tbool uuid_verified;"
+		if (add_uuid_retry == 1)
+			print "\tunsigned int uuid_retry_failures;"
 		print "};"
 		in_xd = 0
 		next
@@ -178,7 +184,8 @@ for tok in \
 	'bool removing;' \
 	'TB_RING_HAS_FLUSH' \
 	'bonding_rearm_attempts' \
-	'bool uuid_verified;'
+	'bool uuid_verified;' \
+	'uuid_retry_failures'
 do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
