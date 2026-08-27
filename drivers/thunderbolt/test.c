@@ -3473,6 +3473,9 @@ static void tb_test_root_power_cycle_timeout_requires_consumption(struct kunit *
 {
 	enum tb_icm_root_recovery_event event;
 
+	/* Probe recovery must not pin module load behind a long mailbox wait. */
+	KUNIT_EXPECT_LE(test, DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS, 1000);
+
 	event = tb_icm_root_recovery_command_event(-ETIMEDOUT, false);
 	KUNIT_EXPECT_EQ(test, event,
 			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
@@ -5982,9 +5985,9 @@ static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test
 	KUNIT_EXPECT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_COMPLETE);
 
 	model_action = ctl_model_transaction_step(&failed_model,
-					CTL_TRANSACTION_MODEL_LOCAL_FAILED);
+						  CTL_TRANSACTION_MODEL_LOCAL_FAILED);
 	actual_action = tb_cfg_request_state_step(&failed_actual,
-					TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+						  TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
 	KUNIT_ASSERT_EQ(test, failed_model.submit, CTL_SUBMIT_MODEL_FAILED);
 	KUNIT_ASSERT_EQ(test, failed_model.peer, CTL_PEER_MODEL_WAITING);
 	KUNIT_ASSERT_EQ(test, model_action, CTL_TRANSACTION_MODEL_NONE);
@@ -5993,9 +5996,9 @@ static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test
 	KUNIT_ASSERT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_NONE);
 
 	model_action = ctl_model_transaction_step(&failed_model,
-					CTL_TRANSACTION_MODEL_PEER_MATCHED);
+						  CTL_TRANSACTION_MODEL_PEER_MATCHED);
 	actual_action = tb_cfg_request_state_step(&failed_actual,
-					TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+						  TB_CFG_REQUEST_EVENT_PEER_MATCHED);
 	KUNIT_EXPECT_EQ(test, failed_model.peer, CTL_PEER_MODEL_MATCHED);
 	KUNIT_EXPECT_EQ(test, model_action, CTL_TRANSACTION_MODEL_COMPLETE);
 	KUNIT_EXPECT_EQ(test, failed_actual.peer, TB_CFG_PEER_MATCHED);

@@ -22,6 +22,7 @@ struct tb_ctl;
 #define DMA_PORT_CAP			0x3e
 #define DMA_PORT_MAIL_IN		(DMA_PORT_CAP + 17)
 #define DMA_PORT_POWER_CYCLE_REQUEST	0x40000001
+#define DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS	500
 
 static inline int dma_port_for_nhi(u16 vendor, u16 device)
 {
