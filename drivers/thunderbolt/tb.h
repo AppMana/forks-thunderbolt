@@ -21,6 +21,7 @@
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void);
 u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags);
+unsigned int tb_test_nhi_probe_recovery_wq_flags(void);
 bool tb_test_xdomain_should_negotiate_bonding(bool has_dual_link,
 					       unsigned int generation,
 					       enum tb_link_width width);

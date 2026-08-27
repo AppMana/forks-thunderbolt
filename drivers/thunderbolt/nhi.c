@@ -64,6 +64,18 @@ static LIST_HEAD(nhi_probe_recoveries);
 static DEFINE_MUTEX(nhi_probe_recoveries_lock);
 static struct workqueue_struct *nhi_probe_recovery_wq;
 
+static unsigned int nhi_probe_recovery_wq_flags(void)
+{
+	return 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+unsigned int tb_test_nhi_probe_recovery_wq_flags(void)
+{
+	return nhi_probe_recovery_wq_flags();
+}
+#endif
+
 static bool nhi_probe_recovery_matches(const struct nhi_probe_recovery_record *r,
 				       const struct pci_dev *pdev)
 {
@@ -2176,7 +2188,7 @@ static int __init nhi_init(void)
 		return ret;
 
 	nhi_probe_recovery_wq = alloc_ordered_workqueue("thunderbolt_recovery",
-							WQ_MEM_RECLAIM);
+							nhi_probe_recovery_wq_flags());
 	if (!nhi_probe_recovery_wq) {
 		tb_domain_exit();
 		return -ENOMEM;

@@ -3461,6 +3461,13 @@ static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *tes
 	KUNIT_EXPECT_FALSE(test, supported);
 }
 
+static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *test)
+{
+	unsigned int flags = tb_test_nhi_probe_recovery_wq_flags();
+
+	KUNIT_EXPECT_EQ(test, flags & WQ_MEM_RECLAIM, 0u);
+}
+
 /*
  * ---------------------------------------------------------------------------
  * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
@@ -5713,6 +5720,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_recovery_reset_failure_is_terminal),
 	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
 	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
+	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
