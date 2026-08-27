@@ -1378,15 +1378,12 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 	switch (info.op) {
 	case TBFRAME_WIRE_OP_HELLO_ACK:
 		/*
-		 * Observed before tb_xdomain_request() response matching;
-		 * apply but do not consume, or the requester times out.
+		 * Reply packets belong exclusively to the requester state machine.
+		 * The shared dispatch path observes them before request matching, so
+		 * leave them unconsumed and unmodified for control_request() to
+		 * correlate and apply.  Mutating here lets a delayed reply from an
+		 * earlier peer instance seed a fresh session with stale fields.
 		 */
-		if (remote.proto_version == TBFRAME_WIRE_VERSION) {
-			spin_lock_irqsave(&link->lock, flags);
-			tbframe_link_apply_remote_locked(link, &remote);
-			link->hello_done = true;
-			spin_unlock_irqrestore(&link->lock, flags);
-		}
 		return 0;
 
 	case TBFRAME_WIRE_OP_READY_ACK:

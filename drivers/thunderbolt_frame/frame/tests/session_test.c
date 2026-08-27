@@ -153,6 +153,37 @@ static void tbframe_session_wrong_ack_cannot_advance_state(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+/*
+ * Reply packets belong to the requester state machine.  A delayed reply from
+ * an earlier peer instance may still traverse the shared dispatch path before
+ * request matching; it must not seed a new session with stale peer fields.
+ */
+static void tbframe_session_unsolicited_hello_ack_cannot_seed_session(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 current_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(7);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx,
+						    TBFRAME_WIRE_OP_HELLO_ACK,
+						    msg, sizeof(msg)),
+			0);
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	/* Only a correlated control_request() response may finish HELLO. */
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_EQ(test, 0ull, fx->link->remote_cookie);
+
+	fx->mock.peer.session_cookie = current_cookie;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, current_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
 static void tbframe_session_event_ordering(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -235,6 +266,7 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_early_ready_is_acked_after_paths),
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
 	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
+	KUNIT_CASE(tbframe_session_unsolicited_hello_ack_cannot_seed_session),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}
 };
