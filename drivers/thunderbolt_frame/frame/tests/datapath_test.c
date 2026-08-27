@@ -132,11 +132,10 @@ static void tbframe_datapath_live_ring_declares_up(struct kunit *test)
 
 /*
  * A peer that does not negotiate keepalive cannot supply the evidence. The
- * gate must WAIVE rather than refuse the link forever -- but it must be a
- * visible waiver, not a silent one, so the link is declared up exactly once
- * and the operator has a dmesg line saying it is unverified.
+ * gate must refuse to publish the link.  An unavailable proof is not evidence
+ * that data can cross the rings.
  */
-static void tbframe_datapath_unprovable_peer_is_waived(struct kunit *test)
+static void tbframe_datapath_unprovable_peer_stays_down(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 
@@ -145,9 +144,64 @@ static void tbframe_datapath_unprovable_peer_is_waived(struct kunit *test)
 
 	tbframe_link_session_step(fx->link);
 
-	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
 	/* Nothing was probed, because nothing could be. */
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.keepalives_sent);
+}
+
+static void tbframe_datapath_zero_length_cannot_prove(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	struct tbframe_frame_priv *f;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	f = tbframe_mock_pop_rx(fx);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+
+	tbframe_core_rx_complete(f, false, 0, TBFRAME_PDF_KEEPALIVE, false);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->data_proven);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+static void tbframe_datapath_data_frame_cannot_prove_pre_up(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	struct tbframe_frame_priv *f;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	f = tbframe_mock_pop_rx(fx);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+
+	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+				 TBFRAME_PDF_DATA, false);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->data_proven);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+static void tbframe_datapath_wrong_cookie_cannot_prove(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	struct tbframe_frame_priv *f;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	f = tbframe_mock_pop_rx(fx);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+
+	tbframe_wire_put_le64(f->frame.data,
+			      fx->mock.peer.session_cookie ^ BIT_ULL(0));
+	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+				 TBFRAME_PDF_KEEPALIVE, false);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->data_proven);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
 }
 
 /*
@@ -284,15 +338,47 @@ static void tbframe_datapath_late_frame_cannot_prove_next_session(struct kunit *
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.down_count);
 }
 
+static void tbframe_datapath_old_descriptor_cannot_prove_new_session(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	struct tbframe_frame_priv *old;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	tbframe_mock_link_up(test, fx);
+	old = tbframe_mock_pop_rx(fx);
+	KUNIT_ASSERT_NOT_NULL(test, old);
+
+	fx->mock.datapath_dead = true;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)),
+			0);
+	tbframe_link_handle_packet(fx->link, msg, sizeof(msg));
+	tbframe_link_session_step(fx->link);
+	tbframe_link_session_step(fx->link);
+
+	tbframe_wire_put_le64(old->frame.data, fx->mock.peer.session_cookie);
+	tbframe_core_rx_complete(old, false, TBFRAME_KEEPALIVE_LEN,
+				 TBFRAME_PDF_KEEPALIVE, false);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->data_proven);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
 static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_live_ring_declares_up),
-	KUNIT_CASE(tbframe_datapath_unprovable_peer_is_waived),
+	KUNIT_CASE(tbframe_datapath_unprovable_peer_stays_down),
+	KUNIT_CASE(tbframe_datapath_zero_length_cannot_prove),
+	KUNIT_CASE(tbframe_datapath_data_frame_cannot_prove_pre_up),
+	KUNIT_CASE(tbframe_datapath_wrong_cookie_cannot_prove),
 	KUNIT_CASE(tbframe_datapath_silence_after_up_tears_down),
 	KUNIT_CASE(tbframe_datapath_healthy_survives_verify),
 	KUNIT_CASE(tbframe_datapath_proof_does_not_survive_a_session),
 	KUNIT_CASE(tbframe_datapath_late_frame_cannot_prove_next_session),
+	KUNIT_CASE(tbframe_datapath_old_descriptor_cannot_prove_new_session),
 	{}
 };
 

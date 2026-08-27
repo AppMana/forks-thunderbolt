@@ -232,6 +232,8 @@ static void tbframe_frame_recycle_rx(struct tbframe_frame_priv *f)
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
 	repost = link->rings_up && !link->removing;
+	if (repost)
+		f->rx_generation = link->data_generation;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (repost && !link->ops->post_rx(link->hw, f)) {
 		atomic_dec(&link->hw_active);
@@ -272,7 +274,8 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	 * so it is the only place the invariant actually holds.
 	 */
 	link->data_proven = false;
-	link->data_proof_waived = false;
+	link->data_proof_unavailable_warned = false;
+	link->data_generation++;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
 	link->silent_ticks = 0;
@@ -314,6 +317,9 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 		spin_unlock_irqrestore(&link->lock, flags);
 		if (!f)
 			break;
+		spin_lock_irqsave(&link->lock, flags);
+		f->rx_generation = link->data_generation;
+		spin_unlock_irqrestore(&link->lock, flags);
 		ret = link->ops->post_rx(link->hw, f);
 		if (ret) {
 			tbframe_frame_putback_rx(f);
@@ -408,32 +414,32 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
 	unsigned int attempts;
-	bool proven, waived;
+	bool proven, warned;
 	u32 remote_caps;
 
 	spin_lock_irqsave(&link->lock, flags);
 	proven = link->data_proven;
-	waived = link->data_proof_waived;
+	warned = link->data_proof_unavailable_warned;
 	remote_caps = link->remote_caps;
 	spin_unlock_irqrestore(&link->lock, flags);
 
-	if (proven || waived || !tf->data_proof)
+	if (proven || !tf->data_proof)
 		return true;
 
 	/*
-	 * A peer that does not negotiate keepalive cannot be made to emit
-	 * anything on its own, so there is nothing to wait for. Waive the gate
-	 * for this session rather than refuse the link forever -- but say so,
-	 * because the link is then exactly as unverified as every link was
-	 * before this gate existed.
+	 * A peer that does not negotiate keepalive cannot provide the exact,
+	 * session-bound evidence required by the gate. Keep the link private and
+	 * retry slowly in case a new peer session negotiates the capability.
 	 */
 	if (!tf->keepalive || !(remote_caps & TBFRAME_WIRE_CAP_KEEPALIVE)) {
 		spin_lock_irqsave(&link->lock, flags);
-		link->data_proof_waived = true;
+		link->data_proof_unavailable_warned = true;
 		spin_unlock_irqrestore(&link->lock, flags);
-		pr_warn("%s: peer does not negotiate keepalive; the data path CANNOT be validated and this link is being declared up unverified\n",
-			link->name);
-		return true;
+		if (!warned)
+			pr_warn("%s: peer does not negotiate keepalive; refusing to publish an unverified data path\n",
+				link->name);
+		tbframe_link_kick(link, msecs_to_jiffies(tf->verify_ms));
+		return false;
 	}
 
 	/* Best effort: a full ring or a wedged TX just costs this attempt. */
@@ -463,7 +469,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	spin_lock_irqsave(&link->lock, flags);
 	link->probe_attempts = 0;
 	link->probe_failures++;
-	link->data_proof_waived = false;
+	link->data_proof_unavailable_warned = false;
 	if (!link->needs_down) {
 		link->needs_down = true;
 		link->down_reason = TBFRAME_DOWN_VERIFY;
@@ -476,12 +482,16 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	 * connector fault. Everything flat means nothing arrived at all. Both
 	 * present as "dead" and the remedies are completely different.
 	 */
-	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no frame crossed the data ring in %u probes over %u ms; tx_done=%llu tx_canceled=%llu rx_bad=%llu rx_oversize=%llu; refusing to declare the link up and rebuilding the session hardware\n",
+	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no authenticated keepalive crossed the data ring in %u probes over %u ms; generation=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; refusing to declare the link up and rebuilding the session hardware\n",
 	       link->name, link->local_hopid, link->active_remote_hopid,
 	       TBFRAME_PROBE_RETRIES,
 	       TBFRAME_PROBE_RETRIES * TBFRAME_PROBE_INTERVAL_MS,
+	       link->data_generation, link->ring_posted,
+	       link->data_tx_submitted,
 	       link->data_tx_done, link->data_tx_canceled,
-	       link->data_rx_bad, link->data_rx_oversize);
+	       link->data_tx_ring_err, link->data_rx_bad,
+	       link->data_rx_oversize, link->data_rx_stale,
+	       link->data_rx_bad_cookie);
 	return false;
 }
 
@@ -701,7 +711,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * old one says nothing about it.
 	 */
 	link->data_proven = false;
-	link->data_proof_waived = false;
+	link->data_proof_unavailable_warned = false;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
 	link->silent_ticks = 0;
@@ -1138,11 +1148,15 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 			 * again here just to print would be the only reason
 			 * to reacquire it.
 			 */
-			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; tx_done=%llu tx_canceled=%llu rx_bad=%llu rx_oversize=%llu; tearing the session down\n",
+			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; generation=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; tearing the session down\n",
 			       link->name, TBFRAME_DATA_SILENCE_TICKS,
 			       TBFRAME_DATA_SILENCE_TICKS * tf->verify_ms,
+			       link->data_generation, link->ring_posted,
+			       link->data_tx_submitted,
 			       link->data_tx_done, link->data_tx_canceled,
-			       link->data_rx_bad, link->data_rx_oversize);
+			       link->data_tx_ring_err, link->data_rx_bad,
+			       link->data_rx_oversize, link->data_rx_stale,
+			       link->data_rx_bad_cookie);
 			return;
 		}
 	}
@@ -1168,8 +1182,10 @@ static void tbframe_verify_workfn(struct work_struct *work)
 	 * observable at once, which is what separates "the peer never sends"
 	 * from "the peer sends and we never receive".
 	 */
-	pr_debug("%s: verify tick: data_rx=%llu tx_sub=%llu tx_refused=%llu tx_ringerr=%llu tx_done=%llu tx_canceled=%llu rx_bad=%llu silent=%u proven=%d\n",
-		 link->name, link->data_rx, link->data_tx_submitted,
+	pr_debug("%s: verify tick: generation=%llu data_rx=%llu rx_stale=%llu rx_bad_cookie=%llu tx_sub=%llu ring_posted=%u tx_refused=%llu tx_ringerr=%llu tx_done=%llu tx_canceled=%llu rx_bad=%llu silent=%u proven=%d\n",
+		 link->name, link->data_generation, link->data_rx,
+		 link->data_rx_stale, link->data_rx_bad_cookie,
+		 link->data_tx_submitted, link->ring_posted,
 		 link->data_tx_refused, link->data_tx_ring_err, link->data_tx_done,
 		 link->data_tx_canceled, link->data_rx_bad,
 		 link->silent_ticks, link->data_proven);
@@ -1494,16 +1510,17 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 	struct tbframe_frame_priv *next = NULL;
 	LIST_HEAD(flush);
 	unsigned long flags;
-	bool release;
+	bool release, was_posted;
 
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
-	/* Diagnostic only: did our frames actually leave the ring? */
-	if (canceled)
-		link->data_tx_canceled++;
-	else
-		link->data_tx_done++;
-	if (f->hw_posted) {
+	was_posted = f->hw_posted;
+	/* Software-backlog flushes are not hardware-ring completions. */
+	if (was_posted) {
+		if (canceled)
+			link->data_tx_canceled++;
+		else
+			link->data_tx_done++;
 		f->hw_posted = false;
 		if (!WARN_ON(!link->ring_posted))
 			link->ring_posted--;
@@ -1525,6 +1542,7 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 				list_del_init(&next->node);
 				next->hw_posted = true;
 				link->ring_posted++;
+				link->data_tx_submitted++;
 			}
 		} else if (canceled) {
 			/*
@@ -1581,35 +1599,42 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	struct tbframe_link *link = f->link;
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool up;
+	u64 cookie = 0;
+	bool current_generation, proof, up;
 
 	if (canceled) {
 		tbframe_frame_putback_rx(f);
 		return;
 	}
+	proof = !bad && pdf == TBFRAME_PDF_KEEPALIVE &&
+		len == TBFRAME_KEEPALIVE_LEN;
+	if (proof)
+		cookie = tbframe_wire_get_le64(f->frame.data);
 
 	spin_lock_irqsave(&link->lock, flags);
 	/*
-	 * Data-path proof. This is the ONE place in the driver that observes
-	 * a byte actually crossing the DMA data ring: every other health
-	 * signal (HELLO/READY over the control channel, paths_active() reading
-	 * hop-entry enable bits, link_attrs, GIDs) is satisfied by a link
-	 * whose bulk path moves nothing at all -- the measured 2026-08-23
-	 * post-reload state on 5 of 10 chain links, where ib_send_bw ran
-	 * 0.00 MB/s while every indicator read healthy.
-	 *
-	 * Counted BEFORE the UP gate on purpose: the frames that prove a fresh
-	 * session's path (the peer's keepalives, arriving while this side is
-	 * still pre-UP) are exactly the ones the UP gate would discard. CRC /
-	 * overrun frames are excluded -- they prove the wire moves, not that
-	 * the path is usable.
+	 * A completion only describes the session whose RX descriptor was
+	 * posted.  A late descriptor from a stopped ring must not authenticate
+	 * the replacement session, even if its payload happens to match.
 	 */
-	if (!bad && len <= TBFRAME_MAX_FRAME) {
+	current_generation = f->rx_generation == link->data_generation;
+	if (!current_generation) {
+		link->data_rx_stale++;
+	} else if (!bad && len <= TBFRAME_MAX_FRAME) {
 		link->data_rx++;
-		if (!link->data_proven) {
+		/*
+		 * Publishing requires an exact keepalive for this session.  A
+		 * generic, empty, truncated, or wrong-cookie completion only proves
+		 * that some descriptor completed; it does not prove peer identity.
+		 */
+		if (proof && cookie == link->remote_cookie &&
+		    link->rings_up && link->paths_enabled &&
+		    !link->data_proven) {
 			link->data_proven = true;
 			link->probe_attempts = 0;
 			link->probe_failures = 0;
+		} else if (proof && cookie != link->remote_cookie) {
+			link->data_rx_bad_cookie++;
 		}
 		link->silent_ticks = 0;
 	} else if (bad) {
@@ -1618,7 +1643,7 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	} else {
 		link->data_rx_oversize++;
 	}
-	up = link->state == TBFRAME_STATE_UP;
+	up = current_generation && link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	/* Loss model: CRC drops and post-link_down frames never reach rx(). */
@@ -1628,9 +1653,7 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	}
 
 	if (pdf == TBFRAME_PDF_KEEPALIVE) {
-		if (len >= TBFRAME_KEEPALIVE_LEN) {
-			u64 cookie = tbframe_wire_get_le64(f->frame.data);
-
+		if (proof) {
 			spin_lock_irqsave(&link->lock, flags);
 			/*
 			 * Cookie mismatch: the peer rebooted inside one

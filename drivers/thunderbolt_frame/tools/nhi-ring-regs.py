@@ -33,12 +33,20 @@ REG_TX_RING_BASE = 0x00000
 REG_RX_RING_BASE = 0x08000
 REG_TX_OPTIONS_BASE = 0x19800
 REG_RX_OPTIONS_BASE = 0x29800
+REG_CAPS = 0x39640
 
 RING_FLAG_ISOCH_ENABLE = 1 << 27
 RING_FLAG_E2E_FLOW_CONTROL = 1 << 28
 RING_FLAG_PCI_NO_SNOOP = 1 << 29
 RING_FLAG_RAW = 1 << 30
 RING_FLAG_ENABLE = 1 << 31
+
+
+def ring_distance(producer, consumer, count):
+    """Return a ring distance using the ring's configured wrap point."""
+    if count <= 0:
+        raise ValueError("ring count must be positive")
+    return (producer - consumer) % count
 
 
 def decode_flags(v):
@@ -75,27 +83,47 @@ def main():
         return struct.unpack_from("<Q", mm, off)[0]
 
     print(f"NHI {bdf} bar0 size=0x{size:x}")
+    caps = u32(REG_CAPS)
+    hop_count = caps & 0x3FF
+    if caps == 0xFFFFFFFF or not hop_count:
+        sys.exit(f"NHI {bdf}: invalid capabilities register 0x{caps:08x}")
+    print(f"capabilities=0x{caps:08x} hop_count={hop_count}")
     for hop in hops:
+        if hop < 0 or hop >= hop_count:
+            print(f"\n== hop {hop}: outside controller range 0..{hop_count - 1}")
+            continue
         tx = REG_TX_RING_BASE + hop * 16
         rx = REG_RX_RING_BASE + hop * 16
         txo = u32(REG_TX_OPTIONS_BASE + hop * 32)
         rxo = u32(REG_RX_OPTIONS_BASE + hop * 32)
 
         tx_pc = u32(tx + 8)
-        tx_head = (tx_pc >> 16) & 0xFFFF   # driver producer
-        tx_tail = tx_pc & 0xFFFF           # NHI consumer
+        tx_prod = (tx_pc >> 16) & 0xFFFF
+        tx_cons = tx_pc & 0xFFFF
+        tx_count_reg = u32(tx + 12)
+        tx_count = tx_count_reg & 0xFFFF
         rx_pc = u32(rx + 8)
-        rx_head = rx_pc & 0xFFFF           # driver producer
-        rx_tail = (rx_pc >> 16) & 0xFFFF   # NHI consumer
+        rx_cons = rx_pc & 0xFFFF
+        rx_prod = (rx_pc >> 16) & 0xFFFF
+        rx_count_reg = u32(rx + 12)
+        rx_count = rx_count_reg & 0xFFFF
 
         print(f"\n== hop {hop}")
-        print(f"  TX desc_phys=0x{u64(tx):016x} count_reg=0x{u32(tx + 12):08x}")
-        print(f"  TX prod/cons raw=0x{tx_pc:08x} driver_head={tx_head} nhi_tail={tx_tail} "
-              f"outstanding={(tx_head - tx_tail) & 0xFFFF}")
+        print(f"  TX desc_phys=0x{u64(tx):016x} count_reg=0x{tx_count_reg:08x}")
+        if tx_count:
+            print(f"  TX prod/cons raw=0x{tx_pc:08x} driver_prod={tx_prod} "
+                  f"nhi_cons={tx_cons} queued={ring_distance(tx_prod, tx_cons, tx_count)}")
+        else:
+            print(f"  TX prod/cons raw=0x{tx_pc:08x} driver_prod={tx_prod} "
+                  f"nhi_cons={tx_cons} queued=unconfigured")
         print(f"  TX options=0x{txo:08x} [{decode_flags(txo)}]")
-        print(f"  RX desc_phys=0x{u64(rx):016x} count_reg=0x{u32(rx + 12):08x}")
-        print(f"  RX prod/cons raw=0x{rx_pc:08x} driver_head={rx_head} nhi_tail={rx_tail} "
-              f"outstanding={(rx_head - rx_tail) & 0xFFFF}")
+        print(f"  RX desc_phys=0x{u64(rx):016x} count_reg=0x{rx_count_reg:08x}")
+        if rx_count:
+            print(f"  RX cons/prod raw=0x{rx_pc:08x} driver_cons={rx_cons} "
+                  f"nhi_prod={rx_prod} armed={ring_distance(rx_cons, rx_prod, rx_count)}")
+        else:
+            print(f"  RX cons/prod raw=0x{rx_pc:08x} driver_cons={rx_cons} "
+                  f"nhi_prod={rx_prod} armed=unconfigured")
         print(f"  RX options=0x{rxo:08x} [{decode_flags(rxo)}]")
     mm.close()
 

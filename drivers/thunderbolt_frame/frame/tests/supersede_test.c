@@ -193,14 +193,14 @@ static void tbframe_verify_sends_keepalive(struct kunit *test)
 	tbframe_mock_complete_tx(fx);
 }
 
-static void tbframe_no_keepalive_without_capability(struct kunit *test)
+static void tbframe_no_keepalive_capability_stays_private(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 
-	/* Peer did not advertise capability bit 1: never send keepalives. */
+	/* Without capability bit 1 there is no session-bound data proof. */
 	fx->mock.peer.capabilities = 0;
-	tbframe_mock_link_up(test, fx);
-	tbframe_link_verify_step(fx->link);
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_queued);
 }
 
@@ -229,7 +229,7 @@ static struct kunit_case tbframe_supersede_cases[] = {
 	KUNIT_CASE(tbframe_ready_ack_withheld_during_pending_supersede),
 	KUNIT_CASE(tbframe_cookie_mismatch_zombie),
 	KUNIT_CASE(tbframe_verify_sends_keepalive),
-	KUNIT_CASE(tbframe_no_keepalive_without_capability),
+	KUNIT_CASE(tbframe_no_keepalive_capability_stays_private),
 	{}
 };
 

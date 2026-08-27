@@ -236,6 +236,61 @@ static void tbframe_txq_flushes_on_down(struct kunit *test)
 			tbframe_alloc_frame(fx->link, 512, false, &f));
 }
 
+/* Diagnostics describe hardware residency, not software-queue admission. */
+static void tbframe_txq_counters_follow_hardware(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_frame *f;
+	u64 submitted, done;
+	u16 i;
+
+	fx->tf.tx_ring_budget = 2;
+	tbframe_mock_link_up(test, fx);
+	submitted = fx->link->data_tx_submitted;
+	done = fx->link->data_tx_done;
+
+	for (i = 0; i < 4; i++) {
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+		KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	}
+	KUNIT_EXPECT_EQ(test, submitted + 2, fx->link->data_tx_submitted);
+	KUNIT_EXPECT_EQ(test, done, fx->link->data_tx_done);
+
+	KUNIT_ASSERT_TRUE(test, tbframe_mock_complete_tx(fx));
+	KUNIT_EXPECT_EQ(test, submitted + 3, fx->link->data_tx_submitted);
+	KUNIT_EXPECT_EQ(test, done + 1, fx->link->data_tx_done);
+
+	while (tbframe_mock_complete_tx(fx))
+		;
+	KUNIT_EXPECT_EQ(test, submitted + 4, fx->link->data_tx_submitted);
+	KUNIT_EXPECT_EQ(test, done + 4, fx->link->data_tx_done);
+}
+
+/* Canceling a software backlog is not a hardware-ring cancellation. */
+static void tbframe_txq_canceled_counts_only_posted(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_frame *f;
+	u64 canceled;
+	u16 i;
+
+	fx->tf.tx_ring_budget = 2;
+	tbframe_mock_link_up(test, fx);
+	canceled = fx->link->data_tx_canceled;
+
+	for (i = 0; i < 4; i++) {
+		KUNIT_ASSERT_EQ(test, 0,
+				tbframe_alloc_frame(fx->link, 512, false, &f));
+		KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(fx->link, f));
+	}
+
+	fx->mock.paths_active_ret = 0;
+	tbframe_link_verify_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+	KUNIT_EXPECT_EQ(test, canceled + 2, fx->link->data_tx_canceled);
+}
+
 static int tbframe_window_test_init(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx;
@@ -264,6 +319,8 @@ static struct kunit_case tbframe_window_cases[] = {
 	KUNIT_CASE(tbframe_txq_budget_bounds_ring),
 	KUNIT_CASE(tbframe_txq_ctrl_jumps_queue),
 	KUNIT_CASE(tbframe_txq_flushes_on_down),
+	KUNIT_CASE(tbframe_txq_counters_follow_hardware),
+	KUNIT_CASE(tbframe_txq_canceled_counts_only_posted),
 	{}
 };
 

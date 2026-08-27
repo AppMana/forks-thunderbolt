@@ -110,6 +110,8 @@ struct tbframe_frame_priv {
 	bool			charged_data;
 	/* counted against tx_ring_budget (posted to the hardware ring) */
 	bool			hw_posted;
+	/* session that owned this RX descriptor when it was posted */
+	u64			rx_generation;
 	refcount_t		rx_refs;
 	/* hardware backend fields (unused by the mock) */
 	struct ring_frame	rf;
@@ -288,13 +290,16 @@ struct tbframe_link {
 	 */
 	u64			data_rx_bad;
 	u64			data_rx_oversize;
+	u64			data_rx_stale;
+	u64			data_rx_bad_cookie;
 	u64			data_tx_done;
 	u64			data_tx_submitted;
 	u64			data_tx_refused;
 	u64			data_tx_ring_err;
 	u64			data_tx_canceled;
 	bool			data_proven;
-	bool			data_proof_waived;
+	bool			data_proof_unavailable_warned;
+	u64			data_generation;
 	unsigned int		probe_attempts;
 	unsigned int		probe_failures;
 	unsigned int		silent_ticks;
