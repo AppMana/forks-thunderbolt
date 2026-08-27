@@ -175,6 +175,7 @@ struct icm {
 	unsigned int pcie_rescan_retries;
 	bool pcie_rescan_reclaim_empty;
 	bool veto;
+	bool root_config_timed_out;
 	bool (*is_supported)(struct tb *tb);
 	int (*cio_reset)(struct tb *tb);
 	int (*get_mode)(struct tb *tb);
@@ -2636,6 +2637,8 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	u32 fw_sts, outmail;
 	int ret;
 
+	icm->root_config_timed_out = false;
+
 	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
 	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
 	mailbox_ready = FIELD_GET(REG_OUTMAIL_CMD_OPMODE_MASK, outmail) ==
@@ -2692,6 +2695,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 	       "root config proof exhausted %u single-request pass(es) / %u ms\n",
 	       tb_icm_root_config_request_count(pass),
 	       jiffies_to_msecs(jiffies - started));
+	icm->root_config_timed_out = res.err == -ETIMEDOUT;
 	return icm_log_startup_failure(tb, "root config", res.err, &proof,
 				       &before);
 }
@@ -2982,6 +2986,14 @@ static int icm_driver_ready(struct tb *tb)
 		tb_dbg(tb, "USB4 proxy operations supported\n");
 
 	return 0;
+}
+
+bool icm_root_config_timed_out(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->root_config_timed_out;
 }
 
 static int icm_suspend(struct tb *tb)

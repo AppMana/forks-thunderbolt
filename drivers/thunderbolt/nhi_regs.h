@@ -225,6 +225,53 @@ static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)
 			      TB_ICM_ROOT_CONFIG_INTERVAL_MS);
 }
 
+enum tb_nhi_recovery_state {
+	TB_NHI_RECOVERY_IDLE,
+	TB_NHI_RECOVERY_RESET_PENDING,
+	TB_NHI_RECOVERY_RETRYING,
+	TB_NHI_RECOVERY_COMPLETE,
+	TB_NHI_RECOVERY_EXHAUSTED,
+};
+
+enum tb_nhi_recovery_event {
+	TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT,
+	TB_NHI_RECOVERY_OTHER_FAILURE,
+	TB_NHI_RECOVERY_RESET_SUCCEEDED,
+	TB_NHI_RECOVERY_RESET_FAILED,
+	TB_NHI_RECOVERY_PROBE_SUCCEEDED,
+};
+
+/* Keep recovery policy independent from the ICM startup proof machine above. */
+static inline enum tb_nhi_recovery_state
+tb_nhi_recovery_next(enum tb_nhi_recovery_state state,
+		     enum tb_nhi_recovery_event event)
+{
+	switch (state) {
+	case TB_NHI_RECOVERY_IDLE:
+		if (event == TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT)
+			return TB_NHI_RECOVERY_RESET_PENDING;
+		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
+			return TB_NHI_RECOVERY_COMPLETE;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_RESET_PENDING:
+		if (event == TB_NHI_RECOVERY_RESET_SUCCEEDED)
+			return TB_NHI_RECOVERY_RETRYING;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_RETRYING:
+		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
+			return TB_NHI_RECOVERY_COMPLETE;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_COMPLETE:
+	case TB_NHI_RECOVERY_EXHAUSTED:
+		return state;
+	}
+
+	return TB_NHI_RECOVERY_EXHAUSTED;
+}
+
 
 /*
  * Must nhi_select_cm() hand the domain straight to the software connection

@@ -13,6 +13,7 @@
 
 #include "tb.h"
 #include "tunnel.h"
+#include "nhi.h"
 #include "nhi_regs.h"
 #include "tests/negotiation_model.h"
 
@@ -3383,6 +3384,76 @@ static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *te
 }
 
 /*
+ * Recovery is a second state machine, not another startup-proof transition.
+ * Only the proven post-DriverReady root-config timeout may request one reset;
+ * every other failure and every failure after the retry is terminal.
+ */
+static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
+{
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_IDLE;
+	enum tb_nhi_recovery_state next;
+
+	next = tb_nhi_recovery_next(state, TB_NHI_RECOVERY_OTHER_FAILURE);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RESET_PENDING);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_RESET_SUCCEEDED);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RETRYING);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+}
+
+static void tb_test_nhi_recovery_reset_failure_is_terminal(struct kunit *test)
+{
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_RESET_PENDING;
+	enum tb_nhi_recovery_state next;
+
+	state = tb_nhi_recovery_next(state, TB_NHI_RECOVERY_RESET_FAILED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+}
+
+static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)
+{
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_RETRYING;
+	enum tb_nhi_recovery_state next;
+
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_PROBE_SUCCEEDED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_COMPLETE);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_COMPLETE);
+}
+
+static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *test)
+{
+	u16 vendor = PCI_VENDOR_ID_INTEL;
+	u16 device;
+	bool supported;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_TRUE(test, supported);
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_TRUE(test, supported);
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_FALSE(test, supported);
+	vendor = PCI_VENDOR_ID_AMD;
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_FALSE(test, supported);
+}
+
+/*
  * ---------------------------------------------------------------------------
  * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
  *
@@ -5630,6 +5701,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
 	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
 	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
+	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
+	KUNIT_CASE(tb_test_nhi_recovery_reset_failure_is_terminal),
+	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
+	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),

@@ -856,6 +856,7 @@ struct tb *tb_probe(struct tb_nhi *nhi);
 /* Set by the force_sw_cm module parameter (nhi.c) */
 extern bool tb_force_sw_cm;
 int icm_unlock_config_space(struct tb *tb);
+bool icm_root_config_timed_out(struct tb *tb);
 
 extern const struct device_type tb_domain_type;
 extern const struct device_type tb_retimer_type;

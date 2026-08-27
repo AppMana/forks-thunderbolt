@@ -42,6 +42,127 @@
 
 #define NHI_MAILBOX_TIMEOUT	500 /* ms */
 
+struct nhi_probe_recovery_record {
+	struct list_head list;
+	unsigned int domain;
+	u8 bus;
+	u8 devfn;
+	enum tb_nhi_recovery_state state;
+};
+
+struct nhi_probe_recovery_context {
+	struct pci_dev *pdev;
+	enum tb_nhi_recovery_state state;
+};
+
+static LIST_HEAD(nhi_probe_recoveries);
+static DEFINE_MUTEX(nhi_probe_recoveries_lock);
+
+static bool nhi_probe_recovery_matches(const struct nhi_probe_recovery_record *r,
+				       const struct pci_dev *pdev)
+{
+	return r->domain == pci_domain_nr(pdev->bus) &&
+	       r->bus == pdev->bus->number && r->devfn == pdev->devfn;
+}
+
+static enum tb_nhi_recovery_state
+nhi_probe_recovery_get(struct pci_dev *pdev)
+{
+	struct nhi_probe_recovery_record *r;
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_IDLE;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry(r, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			state = r->state;
+			break;
+		}
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+
+	return state;
+}
+
+static int nhi_probe_recovery_set(struct pci_dev *pdev,
+				  enum tb_nhi_recovery_state state)
+{
+	struct nhi_probe_recovery_record *r, *new = NULL;
+	int ret = -ENOMEM;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry(r, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			r->state = state;
+			ret = 0;
+			goto out;
+		}
+	}
+
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		goto out;
+	new->domain = pci_domain_nr(pdev->bus);
+	new->bus = pdev->bus->number;
+	new->devfn = pdev->devfn;
+	new->state = state;
+	list_add_tail(&new->list, &nhi_probe_recoveries);
+	ret = 0;
+out:
+	mutex_unlock(&nhi_probe_recoveries_lock);
+	return ret;
+}
+
+static void nhi_probe_recovery_clear(struct pci_dev *pdev)
+{
+	struct nhi_probe_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			list_del(&r->list);
+			kfree(r);
+			break;
+		}
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+}
+
+static void nhi_probe_recovery_clear_all(void)
+{
+	struct nhi_probe_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_probe_recoveries, list) {
+		list_del(&r->list);
+		kfree(r);
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+}
+
+static void nhi_probe_recovery_release(void *data)
+{
+	struct nhi_probe_recovery_context *ctx = data;
+	enum tb_nhi_recovery_event event;
+	int ret;
+
+	if (ctx->state != TB_NHI_RECOVERY_RESET_PENDING)
+		return;
+
+	/* All later devres and all domain/ring state have been released. */
+	ret = pci_reset_function_locked(ctx->pdev);
+	event = ret ? TB_NHI_RECOVERY_RESET_FAILED :
+		      TB_NHI_RECOVERY_RESET_SUCCEEDED;
+	ctx->state = tb_nhi_recovery_next(ctx->state, event);
+	nhi_probe_recovery_set(ctx->pdev, ctx->state);
+
+	if (ret)
+		dev_err(&ctx->pdev->dev,
+			"one-shot PCI recovery reset failed: %d\n", ret);
+	else
+		dev_warn(&ctx->pdev->dev,
+			 "PCI recovery reset completed; retrying probe once\n");
+}
+
 /* Host interface quirks */
 #define QUIRK_AUTO_CLEAR_INT	BIT(0)
 #define QUIRK_E2E		BIT(1)
@@ -1685,12 +1806,25 @@ static struct tb *nhi_select_cm(struct tb_nhi *nhi)
 static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
+	struct nhi_probe_recovery_context *recovery;
+	enum tb_nhi_recovery_event recovery_event;
+	enum tb_nhi_recovery_state recovery_next;
 	struct tb_nhi *nhi;
 	struct tb *tb;
 	int res;
 
 	if (!nhi_imr_valid(pdev))
 		return dev_err_probe(dev, -ENODEV, "firmware image not valid, aborting\n");
+
+	recovery = devm_kzalloc(dev, sizeof(*recovery), GFP_KERNEL);
+	if (!recovery)
+		return -ENOMEM;
+	recovery->pdev = pdev;
+	recovery->state = nhi_probe_recovery_get(pdev);
+	res = devm_add_action_or_reset(dev, nhi_probe_recovery_release,
+				       recovery);
+	if (res)
+		return res;
 
 	res = pcim_enable_device(pdev);
 	if (res)
@@ -1767,6 +1901,14 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	res = tb_domain_add(tb, host_reset);
 	if (res) {
+		if (res == -ETIMEDOUT && icm_root_config_timed_out(tb) &&
+		    tb_nhi_recovery_supported(pdev->vendor, pdev->device))
+			recovery_event = TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT;
+		else
+			recovery_event = TB_NHI_RECOVERY_OTHER_FAILURE;
+		recovery_next = tb_nhi_recovery_next(recovery->state,
+						     recovery_event);
+
 		/*
 		 * At this point the RX/TX rings might already have been
 		 * activated. Do a proper shutdown.
@@ -1777,8 +1919,31 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 				"domain did not release within %u ms; poisoning NHI MMIO and abandoning it rather than blocking probe\n",
 				NHI_DOMAIN_RELEASE_MS);
 		nhi_shutdown(nhi);
+
+		if (recovery_next == TB_NHI_RECOVERY_RESET_PENDING) {
+			res = nhi_probe_recovery_set(pdev, recovery_next);
+			if (res) {
+				dev_err(dev,
+					"cannot reserve one-shot PCI recovery state: %d\n",
+					res);
+				return -ETIMEDOUT;
+			}
+			recovery->state = recovery_next;
+			dev_warn(dev,
+				 "root-config control path remained unresponsive after DriverReady; scheduling one quiesced PCI recovery reset\n");
+			return -EPROBE_DEFER;
+		}
+
+		if (recovery->state != TB_NHI_RECOVERY_IDLE)
+			nhi_probe_recovery_clear(pdev);
+		recovery->state = recovery_next;
 		return res;
 	}
+	if (recovery->state == TB_NHI_RECOVERY_RETRYING)
+		dev_info(dev, "probe succeeded after one-shot PCI recovery reset\n");
+	nhi_probe_recovery_clear(pdev);
+	recovery->state = tb_nhi_recovery_next(recovery->state,
+					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);
 	pci_set_drvdata(pdev, tb);
 
 	device_wakeup_enable(&pdev->dev);
@@ -1962,6 +2127,7 @@ static int __init nhi_init(void)
 static void __exit nhi_unload(void)
 {
 	pci_unregister_driver(&nhi_driver);
+	nhi_probe_recovery_clear_all();
 	tb_domain_exit();
 }
 

@@ -122,6 +122,15 @@ extern const struct tb_nhi_ops icl_nhi_ops;
 
 #define PCI_CLASS_SERIAL_USB_USB4			0x0c0340
 
+static inline bool tb_nhi_recovery_supported(u16 vendor, u16 device)
+{
+	if (vendor != PCI_VENDOR_ID_INTEL)
+		return false;
+
+	return device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI ||
+	       device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+}
+
 /* No controller has a documented, independently validated live ICM restart. */
 static inline bool tb_icm_warm_restart_supported(u16 nhi_device_id)
 {
