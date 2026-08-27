@@ -47,17 +47,19 @@ enum tb_nhi_ring_stop_step {
 	TB_NHI_RING_STOP_DISABLE	= BIT(0),
 	TB_NHI_RING_STOP_CLEAR_STATE	= BIT(1),
 	TB_NHI_RING_STOP_FLUSH_WRITES	= BIT(2),
+	TB_NHI_RING_STOP_SETTLE_ENGINE	= BIT(3),
 };
 
 /*
  * Model the device-visible lifetime of a ring across posted MMIO writes.
- * Until a read flushes the disable and state-clear writes, software cannot
- * prove that the device has released the old coherent descriptor memory.
+ * A read flushes the disable and state-clear writes, but the ring engine must
+ * also be given time to quiesce before software can reuse coherent memory.
  */
 static inline unsigned int tb_nhi_ring_stop_steps(void)
 {
 	return TB_NHI_RING_STOP_DISABLE | TB_NHI_RING_STOP_CLEAR_STATE |
-	       TB_NHI_RING_STOP_FLUSH_WRITES;
+	       TB_NHI_RING_STOP_FLUSH_WRITES |
+	       TB_NHI_RING_STOP_SETTLE_ENGINE;
 }
 
 static inline bool tb_nhi_ring_stop_reuse_safe(void)
@@ -67,6 +69,7 @@ static inline bool tb_nhi_ring_stop_reuse_safe(void)
 	bool device_has_state = true;
 	bool disable_posted = false;
 	bool clear_posted = false;
+	bool engine_quiesced = false;
 
 	if (steps & TB_NHI_RING_STOP_DISABLE)
 		disable_posted = true;
@@ -78,8 +81,11 @@ static inline bool tb_nhi_ring_stop_reuse_safe(void)
 		if (clear_posted)
 			device_has_state = false;
 	}
+	if ((steps & TB_NHI_RING_STOP_SETTLE_ENGINE) && !device_enabled &&
+	    !device_has_state)
+		engine_quiesced = true;
 
-	return !device_enabled && !device_has_state;
+	return !device_enabled && !device_has_state && engine_quiesced;
 }
 
 static inline bool

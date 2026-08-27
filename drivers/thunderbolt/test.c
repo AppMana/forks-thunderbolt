@@ -5178,8 +5178,8 @@ static void tb_test_ring_descriptor_is_one_complete_word(struct kunit *test)
 /*
  * Stopping a ring transfers descriptor ownership back to software.  Posted
  * disable/clear writes alone do not complete that transfer: freeing or
- * reusing the coherent ring before a readback can replay the old descriptor
- * state through the replacement ring.
+ * reusing the coherent ring before a readback and engine-settle interval can
+ * replay the old descriptor state through the replacement ring.
  */
 static void tb_test_ring_stop_flushes_before_descriptor_reuse(struct kunit *test)
 {

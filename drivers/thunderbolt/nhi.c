@@ -1469,6 +1469,8 @@ EXPORT_SYMBOL_GPL(tb_ring_flush);
  */
 void tb_ring_stop(struct tb_ring *ring)
 {
+	bool settle = false;
+
 	spin_lock_irq(&ring->nhi->lock);
 	spin_lock(&ring->lock);
 	dev_dbg(&ring->nhi->pdev->dev, "stopping %s %d\n",
@@ -1517,6 +1519,8 @@ void tb_ring_stop(struct tb_ring *ring)
 					 "%s %d did not clear descriptor count: %#x\n",
 					 RING_TYPE(ring), ring->hop, count);
 		}
+		settle = tb_nhi_ring_stop_steps() &
+			 TB_NHI_RING_STOP_SETTLE_ENGINE;
 	}
 	ring->head = 0;
 	ring->tail = 0;
@@ -1525,6 +1529,14 @@ void tb_ring_stop(struct tb_ring *ring)
 err:
 	spin_unlock(&ring->lock);
 	spin_unlock_irq(&ring->nhi->lock);
+	/*
+	 * VALID is clear and the posted writes have reached the device, but the
+	 * ring engine can still hold its cached descriptor base briefly.  Keep
+	 * callbacks and tb_ring_free() from releasing either DMA allocation until
+	 * that internal ownership has settled.
+	 */
+	if (settle)
+		usleep_range(1000, 2000);
 
 	/*
 	 * schedule ring->work to invoke callbacks on all remaining frames.
