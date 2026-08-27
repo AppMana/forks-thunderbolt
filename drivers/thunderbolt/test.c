@@ -5191,6 +5191,28 @@ static void tb_test_xdomain_bonding_rearm_predicates(struct kunit *test)
 }
 
 /*
+ * A peer that explicitly rejects link-state negotiation has supplied a
+ * capability result, not a transient failure.  Once direct bonding is no
+ * longer eligible, the enumerated-state re-arm must remember that result and
+ * must not resurrect the unsupported request.
+ */
+static void tb_test_xdomain_unsupported_bonding_is_not_rearmed(struct kunit *test)
+{
+	bool possible;
+
+	possible = tb_test_xdomain_bonding_after(true, -EOPNOTSUPP, false);
+	KUNIT_EXPECT_FALSE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, -EOPNOTSUPP, true);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, -ETIMEDOUT, false);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, 0, false);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(false, 0, false);
+	KUNIT_EXPECT_FALSE(test, possible);
+}
+
+/*
  * ICM owns physical-lane cleanup.  On appmana-025, module removal received an
  * ICM XDomain-disconnected notification after the NHI had stopped answering.
  * Link exit tried tb_port_lane_bonding_disable(), blocked in a config read,
@@ -6001,6 +6023,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_recovers_boot_skew),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_bounded_and_safe),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_predicates),
+	KUNIT_CASE(tb_test_xdomain_unsupported_bonding_is_not_rearmed),
 	KUNIT_CASE(tb_test_xdomain_error_match_is_route_checked),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),

@@ -39,6 +39,7 @@ bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 bool tb_test_xdomain_direct_bonding_blocks_controller(void);
 bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
 					   unsigned int attempts);
+bool tb_test_xdomain_bonding_after(bool possible, int ret, bool fallback);
 bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool enumerated,
 					       bool bonding_possible,

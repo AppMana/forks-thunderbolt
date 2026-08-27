@@ -80,6 +80,23 @@ static bool tb_xdomain_bonding_rearm_allowed(bool bonding_possible,
 }
 
 /*
+ * Preserve an explicit protocol capability result across enumeration.
+ * Transient transport failures leave bonding eligible for a later re-arm,
+ * while ERROR_NOT_SUPPORTED is terminal unless the state machine is about
+ * to use the early direct-bonding fallback instead.
+ */
+static bool
+tb_xdomain_bonding_after(bool bonding_possible, int status_ret,
+			 bool direct_fallback)
+{
+	if (!bonding_possible)
+		return false;
+	if (status_ret == -EOPNOTSUPP && !direct_fallback)
+		return false;
+	return true;
+}
+
+/*
  * Passive high side: whether an inbound XDP link-state-change request is
  * acceptable. A peer parked in BONDING_UUID_HIGH accepts one (the
  * original handshake); additionally an ENUMERATED, capable, unbonded peer
@@ -2256,6 +2273,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				tb_xdomain_queue_direct_bonding(xd);
 				break;
 			}
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 
 			/*
 			 * If any of the lane bonding states fail we skip
@@ -2297,6 +2316,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 			tb_xdomain_queue_properties(xd);
 		} else {
 			tb_xdomain_queue_link_status2(xd);
@@ -2308,6 +2329,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 			tb_xdomain_queue_properties(xd);
 		} else {
 			tb_xdomain_queue_bonding_uuid_low(xd);
@@ -2806,6 +2829,11 @@ bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
 {
 	return tb_xdomain_bonding_rearm_allowed(bonding_possible, bonded,
 						attempts);
+}
+
+bool tb_test_xdomain_bonding_after(bool possible, int ret, bool fallback)
+{
+	return tb_xdomain_bonding_after(possible, ret, fallback);
 }
 
 bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
