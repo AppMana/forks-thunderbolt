@@ -1029,6 +1029,7 @@ struct ident_peer {
 struct ident_xd {
 	u32 cached_uuid;	/* xd->remote_uuid */
 	int state;		/* IDENT_STATE_* */
+	bool uuid_verified;	/* active route-local UUID response observed */
 	bool cached_properties; /* xd->remote_properties: enumerated before */
 	bool enumerated;	/* properties read; services probed */
 	bool unplugged;		/* xd->is_unplugged: waiting for CM replace */
@@ -1053,7 +1054,9 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 
 	switch (xd->state) {
 	case IDENT_STATE_PROPERTIES:
-		if (ident_properties_read(xd, peer))
+		if (!xd->uuid_verified)
+			xd->state = IDENT_STATE_UUID;
+		else if (ident_properties_read(xd, peer))
 			xd->enumerated = true;
 		else
 			xd->state = IDENT_STATE_UUID;	/* re-verify identity */
@@ -1073,8 +1076,10 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 			break;
 		}
 		if (xd->cached_uuid == peer->true_uuid) {
+			xd->uuid_verified = true;
 			xd->state = IDENT_STATE_PROPERTIES;
-		} else if (xd->cached_uuid == IDENT_UUID_PLACEHOLDER) {
+		} else if (!xd->uuid_verified ||
+			   xd->cached_uuid == IDENT_UUID_PLACEHOLDER) {
 			/*
 			 * Not "another domain connected" -- this domain finally
 			 * answering. The CM can hand us an XDomain for a link
@@ -1084,6 +1089,7 @@ static inline void ident_tick(struct ident_xd *xd, const struct ident_peer *peer
 			 * tb_xdomain_get_uuid).
 			 */
 			xd->cached_uuid = peer->true_uuid;
+			xd->uuid_verified = true;
 			xd->state = IDENT_STATE_PROPERTIES;
 		} else {
 			xd->unplugged = true;	/* tb_xdomain_get_uuid mismatch */
@@ -1103,6 +1109,7 @@ static inline void ident_cm_replace(struct ident_xd *xd,
 		return;
 	xd->cached_uuid = peer->true_uuid;
 	xd->state = IDENT_STATE_PROPERTIES;
+	xd->uuid_verified = false;
 	xd->cached_properties = false;
 	xd->unplugged = false;
 }

@@ -791,6 +791,22 @@ static void remove_switch(struct tb_switch *sw)
 	tb_switch_remove(sw);
 }
 
+static bool icm_xdomain_connected_event_valid(struct tb *tb,
+					      const struct icm_pkg_header *hdr,
+					      const uuid_t *local_uuid,
+					      const uuid_t *remote_uuid)
+{
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return false;
+	if (!tb->root_switch || !tb->root_switch->uuid ||
+	    !uuid_equal(local_uuid, tb->root_switch->uuid))
+		return false;
+	/* An all-ones event value is absence, not a globally usable identity. */
+	if (!memchr_inv(remote_uuid->b, 0xff, UUID_SIZE))
+		return false;
+	return true;
+}
+
 static void add_xdomain(struct tb_switch *sw, u64 route,
 			const uuid_t *local_uuid, const uuid_t *remote_uuid,
 			u8 link, u8 depth)
@@ -813,13 +829,6 @@ static void add_xdomain(struct tb_switch *sw, u64 route,
 out:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
-}
-
-static void update_xdomain(struct tb_xdomain *xd, u64 route, u8 link)
-{
-	xd->link = link;
-	xd->route = route;
-	xd->is_unplugged = false;
 }
 
 static void remove_xdomain(struct tb_xdomain *xd)
@@ -1036,6 +1045,12 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	u8 link, depth;
 	u64 route;
 
+	if (!icm_xdomain_connected_event_valid(tb, hdr, &pkg->local_uuid,
+					       &pkg->remote_uuid)) {
+		tb_warn(tb, "invalid XDomain connected event, ignoring\n");
+		return;
+	}
+
 	link = pkg->link_info & ICM_LINK_INFO_LINK_MASK;
 	depth = (pkg->link_info & ICM_LINK_INFO_DEPTH_MASK) >>
 		ICM_LINK_INFO_DEPTH_SHIFT;
@@ -1046,29 +1061,6 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	}
 
 	route = get_route(pkg->local_route_hi, pkg->local_route_lo);
-
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
-	if (xd) {
-		u8 xd_phy_port, phy_port;
-
-		xd_phy_port = phy_port_from_route(xd->route, xd->depth);
-		phy_port = phy_port_from_route(route, depth);
-
-		if (xd->depth == depth && xd_phy_port == phy_port) {
-			update_xdomain(xd, route, link);
-			tb_xdomain_put(xd);
-			return;
-		}
-
-		/*
-		 * If we find an existing XDomain connection remove it
-		 * now. We need to go through login handshake and
-		 * everything anyway to be able to re-establish the
-		 * connection.
-		 */
-		remove_xdomain(xd);
-		tb_xdomain_put(xd);
-	}
 
 	/*
 	 * Look if there already exists an XDomain in the same place
@@ -1107,7 +1099,7 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 		return;
 	}
 
-	add_xdomain(sw, route, &pkg->local_uuid, &pkg->remote_uuid, link,
+	add_xdomain(sw, route, tb->root_switch->uuid, &pkg->remote_uuid, link,
 		    depth);
 	tb_switch_put(sw);
 }
@@ -1118,13 +1110,28 @@ icm_fr_xdomain_disconnected(struct tb *tb, const struct icm_pkg_header *hdr)
 	const struct icm_fr_event_xdomain_disconnected *pkg =
 		(const struct icm_fr_event_xdomain_disconnected *)hdr;
 	struct tb_xdomain *xd;
+	u8 link, depth;
+
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return;
+	link = pkg->link_info & ICM_LINK_INFO_LINK_MASK;
+	depth = (pkg->link_info & ICM_LINK_INFO_DEPTH_MASK) >>
+		ICM_LINK_INFO_DEPTH_SHIFT;
+	if (link > ICM_MAX_LINK || depth > TB_SWITCH_MAX_DEPTH)
+		return;
 
 	/*
 	 * If the connection is through one or multiple devices, the
 	 * XDomain device is removed along with them so it is fine if we
 	 * cannot find it here.
 	 */
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
+	xd = tb_xdomain_find_by_link_depth(tb, link, depth);
+	if (!xd) {
+		u8 dual_link = dual_link_from_link(link);
+
+		if (dual_link)
+			xd = tb_xdomain_find_by_link_depth(tb, dual_link, depth);
+	}
 	if (xd) {
 		remove_xdomain(xd);
 		tb_xdomain_put(xd);
@@ -2121,22 +2128,13 @@ icm_tr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	struct tb_switch *sw;
 	u64 route;
 
-	if (!tb->root_switch)
+	if (!icm_xdomain_connected_event_valid(tb, hdr, &pkg->local_uuid,
+					       &pkg->remote_uuid)) {
+		tb_warn(tb, "invalid XDomain connected event, ignoring\n");
 		return;
+	}
 
 	route = get_route(pkg->local_route_hi, pkg->local_route_lo);
-
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
-	if (xd) {
-		if (xd->route == route) {
-			update_xdomain(xd, route, 0);
-			tb_xdomain_put(xd);
-			return;
-		}
-
-		remove_xdomain(xd);
-		tb_xdomain_put(xd);
-	}
 
 	/* An existing xdomain with the same address */
 	xd = tb_xdomain_find_by_route(tb, route);
@@ -2162,7 +2160,7 @@ icm_tr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 		return;
 	}
 
-	add_xdomain(sw, route, &pkg->local_uuid, &pkg->remote_uuid, 0, 0);
+	add_xdomain(sw, route, tb->root_switch->uuid, &pkg->remote_uuid, 0, 0);
 	tb_switch_put(sw);
 }
 
@@ -2173,6 +2171,9 @@ icm_tr_xdomain_disconnected(struct tb *tb, const struct icm_pkg_header *hdr)
 		(const struct icm_tr_event_xdomain_disconnected *)hdr;
 	struct tb_xdomain *xd;
 	u64 route;
+
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return;
 
 	route = get_route(pkg->route_hi, pkg->route_lo);
 

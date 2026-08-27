@@ -1596,12 +1596,15 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	 * resident ICM.
 	 */
 	if (xd->remote_uuid && !uuid_equal(&uuid, xd->remote_uuid)) {
-		if (tb_xdomain_uuid_is_placeholder(xd->remote_uuid->b)) {
+		if (!xd->uuid_verified ||
+		    tb_xdomain_uuid_is_placeholder(xd->remote_uuid->b)) {
 			dev_info(&xd->dev,
-				 "peer powered on; adopting identity %pUb\n",
+				 "verified route-local peer identity %pUb\n",
 				 &uuid);
 			mutex_lock(&xd->lock);
 			uuid_copy(xd->remote_uuid, &uuid);
+			xd->uuid_verified = true;
+			xd->needs_uuid = false;
 			/* Accept whatever generation the fresh peer reports. */
 			xd->remote_property_block_gen = 0;
 			mutex_unlock(&xd->lock);
@@ -1618,6 +1621,8 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 		if (!xd->remote_uuid)
 			return -ENOMEM;
 	}
+	xd->uuid_verified = true;
+	xd->needs_uuid = false;
 
 	return 0;
 }
@@ -2699,6 +2704,20 @@ static bool tb_xdomain_should_initialize_link(bool remote_uuid_known)
 	return true;
 }
 
+static bool tb_xdomain_initial_needs_uuid(bool remote_uuid_known)
+{
+	/* Supplied identities originate in topology events, not peer replies. */
+	(void)remote_uuid_known;
+	return true;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known)
+{
+	return tb_xdomain_initial_needs_uuid(remote_uuid_known);
+}
+#endif
+
 bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known)
 {
 	return tb_xdomain_should_initialize_link(remote_uuid_known);
@@ -3013,9 +3032,9 @@ struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,
 					  GFP_KERNEL);
 		if (!xd->remote_uuid)
 			goto err_free_local_uuid;
-	} else {
-		xd->needs_uuid = true;
 	}
+	/* A supplied UUID is a topology claim until the peer answers on route. */
+	xd->needs_uuid = tb_xdomain_initial_needs_uuid(remote_uuid);
 
 	if (tb_xdomain_should_initialize_link(remote_uuid))
 		tb_xdomain_link_init(xd, down);
@@ -3359,6 +3378,32 @@ struct tb_xdomain_lookup {
 	u64 route;
 };
 
+static bool tb_xdomain_uuid_globally_matchable(const struct tb_xdomain *xd,
+					       const uuid_t *uuid)
+{
+	return xd->uuid_verified && xd->remote_uuid &&
+		uuid_equal(xd->remote_uuid, uuid);
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_uuid_globally_matchable(bool verified, bool equal)
+{
+	uuid_t remote = UUID_INIT(0x12345678, 0x1234, 0x5678,
+				  0x12, 0x34, 0x56, 0x78, 0x12, 0x34,
+				  0x56, 0x78);
+	uuid_t other = UUID_INIT(0x87654321, 0x4321, 0x8765,
+				 0x87, 0x65, 0x43, 0x21, 0x87, 0x65,
+				 0x43, 0x21);
+	struct tb_xdomain xd = {
+		.remote_uuid = &remote,
+		.uuid_verified = verified,
+	};
+
+	return tb_xdomain_uuid_globally_matchable(&xd,
+					     equal ? &remote : &other);
+}
+#endif
+
 static struct tb_xdomain *switch_find_xdomain(struct tb_switch *sw,
 	const struct tb_xdomain_lookup *lookup)
 {
@@ -3381,8 +3426,8 @@ static struct tb_xdomain *switch_find_xdomain(struct tb_switch *sw,
 			xd = port->xdomain;
 
 			if (lookup->uuid) {
-				if (xd->remote_uuid &&
-				    uuid_equal(xd->remote_uuid, lookup->uuid))
+				if (tb_xdomain_uuid_globally_matchable(xd,
+								       lookup->uuid))
 					return xd;
 			} else {
 				if (lookup->link && lookup->link == xd->link &&

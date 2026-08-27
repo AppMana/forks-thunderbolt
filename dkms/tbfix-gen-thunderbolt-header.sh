@@ -58,6 +58,9 @@ add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
 # re-arm from ENUMERATED; appended at the END of the struct so every stock
 # member keeps its stock offset for stock-header consumers)
 add_rearm=1;      grep -q 'bonding_rearm_attempts' "$src" && add_rearm=0
+# A firmware topology-event UUID is only a candidate until the peer answers a
+# route-local UUID request.
+add_uuid_verified=1; grep -q 'bool uuid_verified;' "$src" && add_uuid_verified=0
 
 # Struct-scoped transformation. Anchors:
 #   1. after "#include <linux/workqueue.h>"           -> add completion.h
@@ -73,7 +76,9 @@ awk -v add_completion="$add_completion" \
     -v add_reannounce="$add_reannounce" \
     -v add_removing="$add_removing" \
     -v add_ring_flush="$add_ring_flush" \
-    -v add_rearm="$add_rearm" '
+    -v add_rearm="$add_rearm" \
+    -v add_uuid_verified="$add_uuid_verified" '
+
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
 		print
@@ -94,13 +99,15 @@ awk -v add_completion="$add_completion" \
 		print "\tbool removing;"
 		next
 	}
-	add_rearm == 1 && in_xd == 1 && $0 == "};" {
-		print "\tunsigned int bonding_rearm_attempts;"
+	in_xd == 1 && $0 == "};" {
+		if (add_rearm == 1)
+			print "\tunsigned int bonding_rearm_attempts;"
+		if (add_uuid_verified == 1)
+			print "\tbool uuid_verified;"
 		print "};"
 		in_xd = 0
 		next
 	}
-	in_xd == 1 && $0 == "};" { in_xd = 0 }
 	/^struct tb_ring \{/           { in_ring = 1 }
 	add_ring_flush == 1 && in_ring == 1 && $0 == "};" {
 		print "\twait_queue_head_t wait;"
@@ -120,9 +127,8 @@ awk -v add_completion="$add_completion" \
 	# tbfix Module.symvers loads cleanly (CRCs come from the symvers file)
 	# yet lays out uuid/callback/data/list at the stock offsets and its
 	# storage ends at ->list. A mid-struct insertion shifted ->data onto the
-	# offset the core reads as ->callback_xd, and the dispatch walk jumped
-	# through the registrant data pointer (appmana-025 NX-execute panic,
-	# kdump 202608031305). With the member appended, every stock field keeps
+	# offset the core reads as ->callback_xd, and the dispatch walk can jump
+	# through the registrant data pointer. With the member appended, every stock field keeps
 	# its stock offset and the core only reads ->callback_xd for registrants
 	# that left ->callback NULL (which therefore provide the extended
 	# struct). NOTE: this awk program lives in a single-quoted sh string;
@@ -163,7 +169,17 @@ awk -v add_completion="$add_completion" \
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE' 'bool removing;' 'TB_RING_HAS_FLUSH' 'bonding_rearm_attempts'; do
+for tok in \
+	'#include <linux/completion.h>' \
+	'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' \
+	'domain_released' \
+	'TB_XDOMAIN_HAS_PATHS_ACTIVE' \
+	'TB_XDOMAIN_HAS_REANNOUNCE' \
+	'bool removing;' \
+	'TB_RING_HAS_FLUSH' \
+	'bonding_rearm_attempts' \
+	'bool uuid_verified;'
+do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1

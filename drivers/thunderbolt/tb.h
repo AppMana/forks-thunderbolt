@@ -27,6 +27,8 @@ bool tb_test_xdomain_should_negotiate_bonding(bool has_dual_link,
 bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known);
 bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
 						      bool bonding_possible);
+bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known);
+bool tb_test_xdomain_uuid_globally_matchable(bool verified, bool equal);
 bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							bool services_published,
 							int link_status_ret,
