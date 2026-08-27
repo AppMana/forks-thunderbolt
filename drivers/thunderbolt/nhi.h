@@ -168,11 +168,9 @@ static inline bool tb_nhi_arc_cio_recovery_supported(u16 vendor, u16 device)
 
 static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)
 {
-	if (vendor != PCI_VENDOR_ID_INTEL)
-		return false;
+	(void)device;
 
-	return device != PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI &&
-	       device != PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	return vendor == PCI_VENDOR_ID_INTEL;
 }
 
 /* No controller has a documented, independently validated live ICM restart. */

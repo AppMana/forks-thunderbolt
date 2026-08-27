@@ -3703,17 +3703,17 @@ static void tb_test_nhi_dma_misc_policy_is_mutually_exclusive(struct kunit *test
 			(u32)REG_DMA_MISC_DISABLE_AUTO_CLEAR);
 }
 
-static void tb_test_maple_ridge_disables_interrupt_clear_on_read(struct kunit *test)
+static void tb_test_maple_ridge_uses_interrupt_clear_on_read(struct kunit *test)
 {
 	u16 device;
 	bool auto_clear;
 
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
 	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
-	KUNIT_EXPECT_FALSE(test, auto_clear);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
-	KUNIT_EXPECT_FALSE(test, auto_clear);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
 	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
 	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
 	KUNIT_EXPECT_TRUE(test, auto_clear);
@@ -6017,7 +6017,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_is_mutually_exclusive),
-	KUNIT_CASE(tb_test_maple_ridge_disables_interrupt_clear_on_read),
+	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_clear_on_read),
 	KUNIT_CASE(tb_test_nhi_tx_stall_requires_hardware_consumer_proof),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
