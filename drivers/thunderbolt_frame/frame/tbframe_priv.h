@@ -113,6 +113,7 @@ struct tbframe_ready_responder {
 	enum tbframe_ready_responder_state state;
 	u8 seq;
 	u8 xdomain_sequence;
+	struct tbframe_wire_hello peer;
 };
 
 struct tbframe_frame_priv {

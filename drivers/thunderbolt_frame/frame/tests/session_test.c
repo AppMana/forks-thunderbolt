@@ -184,6 +184,113 @@ static void tbframe_session_unsolicited_hello_ack_cannot_seed_session(struct kun
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+/*
+ * READY belongs to the peer instance negotiated by HELLO.  A delayed READY
+ * from an earlier instance must not satisfy the responder half of the current
+ * handshake or receive an acknowledgement for paths it does not own.
+ */
+static void tbframe_session_stale_ready_cannot_complete_responder(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	/* Negotiate HELLO and program paths without completing READY. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_TRUE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_FALSE(test, fx->link->hs.peer_seen);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(17);
+	KUNIT_ASSERT_NE(test, negotiated_cookie,
+			fx->mock.peer.session_cookie);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+}
+
+/*
+ * The requester half has the same binding requirement: a delayed READY_ACK
+ * from a prior peer instance cannot certify the paths negotiated by HELLO.
+ */
+static void tbframe_session_stale_ready_ack_cannot_complete_requester(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+
+	/* Leave the requester waiting after a valid HELLO and path setup. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_TRUE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_FALSE(test, fx->link->hs.request_sent);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(23);
+	KUNIT_ASSERT_NE(test, negotiated_cookie,
+			fx->mock.peer.session_cookie);
+	fx->mock.fail_ready = false;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.request_sent);
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+/*
+ * The inbound responder and outbound requester can observe control packets in
+ * either order.  They must converge on one peer instance before either is
+ * allowed to replace the session identity used by the data path.
+ */
+static void tbframe_session_crossed_hello_cookies_cannot_mix(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_EQ(test, negotiated_cookie, fx->link->remote_cookie);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	mutex_lock(&fx->link->session_lock);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	KUNIT_EXPECT_EQ(test, negotiated_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	mutex_unlock(&fx->link->session_lock);
+}
+
+/*
+ * A session cookie authenticates data frames for one negotiated lifetime.
+ * Reusing it after teardown lets delayed frames from the old rings prove the
+ * replacement session even though they predate its HELLO/READY exchange.
+ */
+static void tbframe_session_teardown_rotates_local_cookie(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 old_cookie;
+
+	tbframe_mock_link_up(test, fx);
+	old_cookie = fx->link->local_cookie;
+
+	fx->mock.paths_active_ret = 0;
+	tbframe_link_verify_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+
+	KUNIT_EXPECT_NE(test, old_cookie, fx->link->local_cookie);
+}
+
 static void tbframe_session_event_ordering(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -267,6 +374,10 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
 	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
 	KUNIT_CASE(tbframe_session_unsolicited_hello_ack_cannot_seed_session),
+	KUNIT_CASE(tbframe_session_stale_ready_cannot_complete_responder),
+	KUNIT_CASE(tbframe_session_stale_ready_ack_cannot_complete_requester),
+	KUNIT_CASE(tbframe_session_crossed_hello_cookies_cannot_mix),
+	KUNIT_CASE(tbframe_session_teardown_rotates_local_cookie),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}
 };

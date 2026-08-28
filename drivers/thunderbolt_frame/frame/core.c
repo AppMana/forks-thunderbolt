@@ -31,11 +31,23 @@
 static void tbframe_session_workfn(struct work_struct *work);
 static void tbframe_tx_released_workfn(struct work_struct *work);
 static void tbframe_verify_workfn(struct work_struct *work);
+static void tbframe_ready_responder_reset(struct tbframe_link *link);
 static int __tbframe_alloc_frame(struct tbframe_link *link, u16 len,
 				 bool is_ctrl, bool pre_up,
 				 struct tbframe_frame **frame);
 static int __tbframe_xmit(struct tbframe_link *link,
 			  struct tbframe_frame *frame, bool pre_up);
+
+static u64 tbframe_new_session_cookie(u64 previous)
+{
+	u64 cookie = get_random_u64();
+
+	if (!cookie || cookie == previous)
+		cookie = previous ^ 0x9e3779b97f4a7c15ULL;
+	if (!cookie)
+		cookie = 1;
+	return cookie;
+}
 
 void tbframe_state_init(struct tbframe *tf)
 {
@@ -129,6 +141,22 @@ static void tbframe_link_apply_remote_locked(struct tbframe_link *link,
 	link->remote_cookie = h->session_cookie;
 }
 
+static bool
+tbframe_link_remote_matches_locked(const struct tbframe_link *link,
+				   const struct tbframe_wire_hello *h)
+{
+	lockdep_assert_held(&link->lock);
+
+	return link->hello_done &&
+	       h->proto_version == TBFRAME_WIRE_VERSION &&
+	       h->transmit_hopid == link->remote_hopid &&
+	       clamp_t(u16, h->rx_ring_entries, 1, 4096) ==
+			link->remote_rx_entries &&
+	       h->capabilities == link->remote_caps &&
+	       h->gid_eui64 == link->remote_gid_eui64 &&
+	       h->session_cookie == link->remote_cookie;
+}
+
 static void tbframe_link_fill_local_hello(struct tbframe_link *link,
 					  struct tbframe_wire_hello *hello)
 {
@@ -203,6 +231,15 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 	spin_lock_irqsave(&link->lock, flags);
 	tbframe_link_apply_remote_locked(link, &remote);
 	link->hello_done = true;
+	if (link->ready_responder.state != TBFRAME_READY_RESPONDER_WAITING) {
+		if (tbframe_link_remote_matches_locked(
+				link, &link->ready_responder.peer))
+			link->hs.peer_seen = true;
+		else {
+			tbframe_ready_responder_reset(link);
+			link->hs.peer_seen = false;
+		}
+	}
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	pr_info("%s: HELLO negotiated remote_hopid=%u rx_entries=%u caps=0x%x\n",
@@ -566,12 +603,19 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	if (info.op != TBFRAME_WIRE_OP_READY_ACK)
 		return -EPROTO;
 
+	spin_lock_irqsave(&link->lock, flags);
+	if (!tbframe_link_remote_matches_locked(link, &remote)) {
+		spin_unlock_irqrestore(&link->lock, flags);
+		pr_warn_ratelimited("%s: READY_ACK belongs to a different peer session; ignoring stale response\n",
+				    link->name);
+		return -ESTALE;
+	}
+
 	/*
 	 * A peer only acks READY once its own paths are enabled (the inbound
 	 * handler withholds the ack until then), so the ack carries the same
 	 * evidence as an inbound READY: count it as peer_seen too.
 	 */
-	spin_lock_irqsave(&link->lock, flags);
 	link->hs.request_sent = true;
 	link->hs.peer_seen = true;
 	spin_unlock_irqrestore(&link->lock, flags);
@@ -584,6 +628,8 @@ static void tbframe_ready_responder_reset(struct tbframe_link *link)
 	link->ready_responder.state = TBFRAME_READY_RESPONDER_WAITING;
 	link->ready_responder.seq = 0;
 	link->ready_responder.xdomain_sequence = 0;
+	memset(&link->ready_responder.peer, 0,
+	       sizeof(link->ready_responder.peer));
 }
 
 /*
@@ -607,7 +653,9 @@ static int tbframe_link_flush_ready_response(struct tbframe_link *link)
 		link->ready_responder.state =
 			TBFRAME_READY_RESPONDER_PENDING_SEND;
 	if (link->ready_responder.state != TBFRAME_READY_RESPONDER_PENDING_SEND ||
-	    link->needs_down || link->removing || link->parked) {
+	    link->needs_down || link->removing || link->parked ||
+	    !tbframe_link_remote_matches_locked(link,
+					       &link->ready_responder.peer)) {
 		spin_unlock_irqrestore(&link->lock, flags);
 		return 0;
 	}
@@ -765,6 +813,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	bool had_rings, rings_running, had_paths, had_hopid;
 	unsigned int drain_ms;
 	u16 remote_hopid;
+	u64 next_cookie = tbframe_new_session_cookie(link->local_cookie);
 	int active;
 
 	lockdep_assert_held(&link->session_lock);
@@ -820,6 +869,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	tbframe_ready_responder_reset(link);
+	link->local_cookie = next_cookie;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	timer_delete_sync(&link->verify_timer);
@@ -1404,6 +1454,18 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 			return 1;
 		}
 		spin_lock_irqsave(&link->lock, flags);
+		if (link->hello_done &&
+		    !tbframe_link_remote_matches_locked(link, &remote) &&
+		    link->state != TBFRAME_STATE_UP) {
+			tb_xdomain_handshake_supersede(&link->hs);
+			link->needs_down = true;
+			link->down_reason = TBFRAME_DOWN_SUPERSEDE;
+			tbframe_link_kick_locked(link, 0);
+			spin_unlock_irqrestore(&link->lock, flags);
+			pr_warn_ratelimited("%s: crossed HELLO packets name different peer sessions; restarting negotiation\n",
+					    link->name);
+			return 1;
+		}
 		tbframe_link_apply_remote_locked(link, &remote);
 		tbframe_ready_responder_reset(link);
 		/*
@@ -1440,6 +1502,13 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		bool enabled;
 
 		spin_lock_irqsave(&link->lock, flags);
+		if (link->hello_done &&
+		    !tbframe_link_remote_matches_locked(link, &remote)) {
+			spin_unlock_irqrestore(&link->lock, flags);
+			pr_warn_ratelimited("%s: READY belongs to a different peer session; ignoring stale request\n",
+					    link->name);
+			return 1;
+		}
 		link->hs.peer_seen = true;
 		/*
 		 * A pending down (supersede queued by the HELLO that preceded
@@ -1455,6 +1524,7 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		link->ready_responder.seq = info.seq;
 		link->ready_responder.xdomain_sequence =
 			info.xdomain_sequence;
+		link->ready_responder.peer = remote;
 		link->ready_responder.state = enabled ?
 			TBFRAME_READY_RESPONDER_PENDING_SEND :
 			TBFRAME_READY_RESPONDER_PENDING_PATHS;
@@ -2120,7 +2190,7 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	link->hw = hw;
 	link->route = route;
 	link->local_gid_eui64 = gid_eui64;
-	link->local_cookie = get_random_u64();
+	link->local_cookie = tbframe_new_session_cookie(0);
 	snprintf(link->name, sizeof(link->name), "tbframe0x%llx", route);
 
 	mutex_init(&link->session_lock);
