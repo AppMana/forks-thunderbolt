@@ -108,6 +108,7 @@ const char *rxe_parent_name(struct rxe_dev *rxe, unsigned int port_num);
 int tbrxe_credit_init(struct rxe_qp *qp);
 void tbrxe_credit_cleanup(struct rxe_qp *qp);
 bool tbrxe_admit(struct rxe_qp *qp);
+bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn);
 void tbrxe_unadmit(struct rxe_qp *qp);
 void tbrxe_credit_commit(struct rxe_qp *qp);
 void tbrxe_unacked_sync(struct rxe_qp *qp);

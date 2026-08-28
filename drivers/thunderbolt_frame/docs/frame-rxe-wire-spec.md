@@ -183,10 +183,12 @@ Correctness never depends on hardware E2E.
 - Retransmissions (PSNs below the QP's committed send high water) may use a
   replay reserve held inside `data_window`: for valid negotiated rings,
   `min(32, data_window / 8)` records are unavailable to fresh requests but
-  available to replay. This recovers a
-  lost ACK after the fresh window filled without forgetting the original
-  flight. The separate 64-descriptor physical reserve remains wholly
-  available to ACK/read-response traffic.
+  available to replay. Every replay requests an immediate cumulative ACK;
+  otherwise the reserve can fill before the ordinary periodic ACK cadence
+  reaches an ACK-requesting packet. This recovers a lost ACK after the fresh
+  window filled without forgetting the original flight. The separate
+  64-descriptor physical reserve remains wholly available to ACK/read-response
+  traffic.
 - ACK/control frames are small and bounded by data received (one ACK per
   ack-req packet); they are admitted outside the data window but counted
   against a fixed reserve (ring is sized with a control reserve:

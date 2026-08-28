@@ -33,7 +33,7 @@
 #define ADM_WINDOW		4
 #define ADM_POSTS		8
 #define ADM_MSG_LEN		16
-#define ADM_POOL		64
+#define ADM_POOL		512
 #define ADM_FRAME_BYTES		512
 #define ADM_SQ_PSN		0x100
 #define ADM_POLL_MS		10
@@ -65,6 +65,7 @@ static bool adm_alloc_take_budget(void)
 
 /* Wire capture: PSN of every DATA (non-ack-class) packet xmitted. */
 static u32 adm_sent_psn[ADM_POOL];
+static bool adm_sent_ack[ADM_POOL];
 static atomic_t adm_sent;
 
 /*
@@ -151,6 +152,8 @@ static int adm_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 		n = atomic_fetch_inc(&adm_sent);
 		if (n < ADM_POOL)
 			adm_sent_psn[n] = psn & BTH_PSN_MASK;
+		if (n < ADM_POOL)
+			adm_sent_ack[n] = __bth_ack(bth);
 		if (adm_retain_remote)
 			adm_remote_arrive();
 	}
@@ -827,12 +830,93 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	tbrxe_set_transport_ops(NULL);
 }
 
+/*
+ * The aggregate replay reserve is deliberately much smaller than one RC
+ * unacknowledged flight.  Recovery therefore cannot wait for the ordinary
+ * every-N-packets ACK cadence: the requester would fill the reserve before
+ * reaching the first ACK-requesting replay and neither side could create the
+ * progress needed to reopen it.  Every replay must request cumulative ACK
+ * progress immediately.
+ */
+static void tbrxe_admission_replay_requests_immediate_ack(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 4 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 4,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	u8 *src;
+	int sent, i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, 192);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, 128 * 256, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	KUNIT_ASSERT_EQ(test, adm_connect_mtu(qp, 0x42, &peer, sgid_index,
+					      14, IB_MTU_256), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = 128 * 256;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+
+	KUNIT_ASSERT_GE(test, adm_wait_sent(128), 128);
+	KUNIT_ASSERT_GE(test, adm_wait_sent(129), 129);
+	KUNIT_EXPECT_EQ(test, adm_sent_psn[128], (u32)ADM_SQ_PSN);
+	sent = adm_settled_sent();
+	for (i = 128; i < sent; i++)
+		KUNIT_EXPECT_TRUE(test, adm_sent_ack[i]);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE(tbrxe_admission_window_bounds_unacked),
 	KUNIT_CASE(tbrxe_admission_charge_released_on_destroy),
 	KUNIT_CASE_SLOW(tbrxe_admission_retry_rewind_keeps_peer_credit),
 	KUNIT_CASE(tbrxe_admission_session_bounce_replaces_credit_generation),
 	KUNIT_CASE_SLOW(tbrxe_admission_rewind_ack_race_no_poison),
+	KUNIT_CASE_SLOW(tbrxe_admission_replay_requests_immediate_ack),
 	{}
 };
 

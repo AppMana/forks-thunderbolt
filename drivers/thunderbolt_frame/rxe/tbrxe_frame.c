@@ -322,6 +322,33 @@ bool tbrxe_admit(struct rxe_qp *qp)
 	return ok;
 }
 
+/* The requester asks for an immediate cumulative ACK on every replay.  With
+ * a bounded replay reserve, waiting for the ordinary periodic ACK cadence can
+ * consume the entire reserve before any packet capable of reopening it is
+ * emitted.
+ */
+bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn)
+{
+	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
+	unsigned long flags;
+	u32 credit;
+	bool replay = false;
+
+	if (!link || qp_type(qp) != IB_QPT_RC)
+		return false;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	tbrxe_credit_generation_locked(qp, link);
+	if (qp->tbl_credit_count) {
+		credit = qp->tbl_credits[qp->tbl_credit_count - 1];
+		replay = (credit & TBRXE_CREDIT_REPLAY) &&
+			 (credit & BTH_PSN_MASK) == (psn & BTH_PSN_MASK);
+	}
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+
+	return replay;
+}
+
 /* Roll back the most recent pre-charge when no frame reached the wire. */
 void tbrxe_unadmit(struct rxe_qp *qp)
 {
