@@ -656,6 +656,7 @@ int rxe_requester(struct rxe_qp *qp)
 	struct rxe_ah *ah;
 	struct rxe_av *av;
 	unsigned long flags;
+	bool admitted = false;
 
 	spin_lock_irqsave(&qp->state_lock, flags);
 	if (unlikely(!qp->valid)) {
@@ -792,6 +793,7 @@ int rxe_requester(struct rxe_qp *qp)
 			rxe_put(ah);
 		goto exit;
 	}
+	admitted = qp_type(qp) == IB_QPT_RC;
 
 	skb = init_req_packet(qp, av, wqe, opcode, payload, &pkt);
 	if (unlikely(!skb)) {
@@ -834,10 +836,13 @@ int rxe_requester(struct rxe_qp *qp)
 	update_wqe_state(qp, wqe, &pkt);
 	update_wqe_psn(qp, wqe, &pkt, payload);
 	update_state(qp, &pkt);
-	/* Reconcile the admission pre-charge with the PSN advance (a READ
-	 * advances by its full response-packet count).
+	/* Commit the next never-sent PSN.  The per-wire-frame record remains
+	 * charged until ACK/NAK progress proves peer consumption.
 	 */
-	tbrxe_unacked_sync(qp);
+	if (admitted) {
+		tbrxe_credit_commit(qp);
+		admitted = false;
+	}
 
 	/* A non-zero return value will cause rxe_do_task to
 	 * exit its loop and end the work item. A zero return
@@ -852,10 +857,11 @@ err:
 	wqe->state = wqe_state_error;
 	rxe_qp_error(qp);
 exit:
-	/* Return any admission pre-charge whose packet never reached the
-	 * wire (alloc/finish/xmit failure after tbrxe_admit()).
+	/* Return only this invocation's pre-charge when no frame reached the
+	 * wire.  Retry cursor rewind must never release older records.
 	 */
-	tbrxe_unacked_sync(qp);
+	if (admitted)
+		tbrxe_unadmit(qp);
 	ret = -EAGAIN;
 out:
 	return ret;

@@ -72,6 +72,15 @@
  */
 #define TBRXE_MIN_LINK_PAYLOAD	(RXE_MAX_HDR_LENGTH + 2048 + 3 + RXE_ICRC_SIZE)
 
+/* Keep a small part of the advertised data window unavailable to fresh
+ * requests.  Replay can use it after a lost ACK, while the separate physical
+ * control reserve remains wholly available to ACK/read-response traffic.
+ */
+#define TBRXE_REPLAY_RESERVE	(TBFRAME_CTRL_RESERVE / 2)
+#define TBRXE_QP_CREDIT_CAP	(RXE_MAX_UNACKED_PSNS + \
+				 TBRXE_REPLAY_RESERVE)
+#define TBRXE_CREDIT_REPLAY	BIT(31)
+
 /*
  * One record per tbframe link: the link's ib_device, its GID-anchor netdev
  * and the Mode A admission state. Created (and the device published) at
@@ -87,6 +96,8 @@ struct tbrxe_link {
 	bool			session_up;
 	/* Mode A engine-side admission, under tbrxe.lock. */
 	u32			unacked;
+	u32			fresh_unacked;
+	u64			credit_generation;
 	bool			admission_waiters;
 };
 
@@ -182,30 +193,33 @@ struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink)
  * The tbframe data window only bounds frames the local TX ring has not
  * completed; local TX completion proves the local NHI consumed the frame,
  * not the peer. The engine is the layer that sees ACKs, so it enforces the
- * normative invariant here: the aggregate unacked wire packets charged
- * against one link never exceed the peer's advertised window, and window
- * release is correlated with actual peer consumption (the peer reposts the
- * RX descriptor before its engine emits the ACK, so unacked <= window
- * implies its RX ring cannot overflow). No credit messages exist.
+ * normative invariant here: fresh unacknowledged request frames never exceed
+ * the peer's advertised data window, total request records including bounded
+ * replay never exceed the portion of the physical RX ring reserved for them,
+ * and release is correlated with actual peer consumption (the peer reposts
+ * the RX descriptor before its engine emits the ACK). No credit messages
+ * exist.
  *
- * Accounting: each RC wire packet pre-charges one slot in tbrxe_admit();
- * tbrxe_unacked_sync() then reconciles the QP's charge with its live PSN
- * distance (req.psn - comp.psn), which releases slots as the completer
- * advances comp.psn (ACK arrival), on retry rewind (req.psn pulled back to
- * comp.psn -- the rewound packets will be re-sent and re-charged, matching
- * the descriptors they will re-occupy), and tops up multi-response charges
- * (a READ advances req.psn by the number of response packets). QP
- * reset/error/destroy sync with a zero distance, returning everything.
+ * Accounting: each RC request frame pre-charges one record containing its
+ * wire PSN in tbrxe_admit().  Successful transmission commits the requester's
+ * high-water PSN.  ACK/NAK progress releases every record whose PSN precedes
+ * comp.psn; reset/error/destroy releases all records.  Critically, retry
+ * rewind changes req.psn but releases no record: a send cursor is not evidence
+ * that the peer consumed a descriptor.
+ *
+ * A small bounded part of data_window is held back from fresh requests for
+ * retransmission (a PSN below the committed high water).  That avoids deadlock
+ * when an ACK for a full fresh flight was lost without borrowing from the
+ * physical control reserve needed by ACK/read-response traffic.
  *
  * The record outlives every QP of its device (teardown unregisters the
  * ib_device, which drains all QPs, before freeing the record), so
  * rxe->tbl_link is always safe to dereference from engine context.
  *
- * Transient slack: between the pre-charge and update_wqe_psn the charge
- * exceeds the PSN distance by one, so a concurrent completer sync can
- * momentarily release that slot early. The overshoot is bounded by the
- * number of concurrently-sending QPs and absorbed by the control reserve
- * the ring is sized with.
+ * The per-QP record array is bounded by RXE_MAX_UNACKED_PSNS plus the replay
+ * reserve.  The engine already prevents a QP from advancing farther than the
+ * former, and aggregate admission prevents one QP from owning more replay
+ * records than the latter.
  */
 
 static u32 tbrxe_link_engine_window(const struct tbrxe_link *link)
@@ -213,17 +227,82 @@ static u32 tbrxe_link_engine_window(const struct tbrxe_link *link)
 	return link->info.data_window ? : 1;
 }
 
+static u32 tbrxe_link_replay_reserve(const struct tbrxe_link *link)
+{
+	u32 data = tbrxe_link_engine_window(link);
+
+	/* Real frame rings are at least 256 entries (data_window >= 192).
+	 * Tiny synthetic KUnit windows retain their exact advertised behavior.
+	 */
+	if (data < 128)
+		return 0;
+	return min_t(u32, TBRXE_REPLAY_RESERVE, data / 8);
+}
+
+static u32 tbrxe_link_fresh_window(const struct tbrxe_link *link)
+{
+	return tbrxe_link_engine_window(link) -
+		tbrxe_link_replay_reserve(link);
+}
+
+static u32 tbrxe_link_wire_window(const struct tbrxe_link *link)
+{
+	return tbrxe_link_engine_window(link);
+}
+
+int tbrxe_credit_init(struct rxe_qp *qp)
+{
+	if (qp_type(qp) != IB_QPT_RC)
+		return 0;
+
+	qp->tbl_credits = kcalloc(TBRXE_QP_CREDIT_CAP,
+				 sizeof(*qp->tbl_credits), GFP_KERNEL);
+	if (!qp->tbl_credits)
+		return -ENOMEM;
+	qp->tbl_credit_cap = TBRXE_QP_CREDIT_CAP;
+	return 0;
+}
+
+void tbrxe_credit_cleanup(struct rxe_qp *qp)
+{
+	kfree(qp->tbl_credits);
+	qp->tbl_credits = NULL;
+	qp->tbl_credit_count = 0;
+	qp->tbl_credit_cap = 0;
+}
+
+static void tbrxe_credit_generation_locked(struct rxe_qp *qp,
+					    const struct tbrxe_link *link)
+{
+	if (qp->tbl_generation == link->credit_generation)
+		return;
+
+	/* The old session's rings are gone, so none of its records occupies a
+	 * descriptor in this generation.  Preserve the PSN high water: a live
+	 * RC QP can retry old PSNs after a non-terminal port bounce.
+	 */
+	qp->tbl_credit_count = 0;
+	qp->tbl_generation = link->credit_generation;
+}
+
 bool tbrxe_admit(struct rxe_qp *qp)
 {
 	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
 	unsigned long flags;
+	bool replay;
 	bool ok = true;
 
 	if (!link)
 		return true;
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	if (link->unacked >= tbrxe_link_engine_window(link)) {
+	tbrxe_credit_generation_locked(qp, link);
+	replay = qp->tbl_high_valid &&
+		 psn_compare(qp->req.psn, qp->tbl_high_psn) < 0;
+	if (link->unacked >= tbrxe_link_wire_window(link) ||
+	    (!replay &&
+	     link->fresh_unacked >= tbrxe_link_fresh_window(link)) ||
+	    qp->tbl_credit_count >= qp->tbl_credit_cap) {
 		/* Park flag BEFORE the waiters flag, under the same lock the
 		 * release path takes: a concurrent release that observes
 		 * admission_waiters and sweeps is then guaranteed to see
@@ -234,10 +313,55 @@ bool tbrxe_admit(struct rxe_qp *qp)
 		ok = false;
 	} else {
 		link->unacked++;
-		qp->tbl_charged++;
+		if (!replay)
+			link->fresh_unacked++;
+		qp->tbl_credits[qp->tbl_credit_count++] = qp->req.psn |
+			(replay ? TBRXE_CREDIT_REPLAY : 0);
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 	return ok;
+}
+
+/* Roll back the most recent pre-charge when no frame reached the wire. */
+void tbrxe_unadmit(struct rxe_qp *qp)
+{
+	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
+	unsigned long flags;
+	u32 credit;
+
+	if (!link || qp_type(qp) != IB_QPT_RC)
+		return;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	tbrxe_credit_generation_locked(qp, link);
+	if (!qp->tbl_credit_count)
+		goto out;
+	credit = qp->tbl_credits[--qp->tbl_credit_count];
+	if (!(credit & TBRXE_CREDIT_REPLAY) && link->fresh_unacked)
+		link->fresh_unacked--;
+	if (link->unacked)
+		link->unacked--;
+out:
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+}
+
+/* Called after update_wqe_psn(): remember the next never-sent PSN. */
+void tbrxe_credit_commit(struct rxe_qp *qp)
+{
+	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
+	unsigned long flags;
+
+	if (!link || qp_type(qp) != IB_QPT_RC)
+		return;
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	tbrxe_credit_generation_locked(qp, link);
+	if (!qp->tbl_high_valid ||
+	    psn_compare(qp->req.psn, qp->tbl_high_psn) > 0) {
+		qp->tbl_high_psn = qp->req.psn;
+		qp->tbl_high_valid = true;
+	}
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
 }
 
 void tbrxe_unacked_sync(struct rxe_qp *qp)
@@ -245,8 +369,9 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 	struct tbrxe_link *link;
 	struct rxe_dev *rxe;
 	unsigned long flags;
+	bool released = false;
 	bool kick = false;
-	u32 target;
+	u16 src, dst;
 
 	if (qp_type(qp) != IB_QPT_RC)
 		return;
@@ -256,48 +381,33 @@ void tbrxe_unacked_sync(struct rxe_qp *qp)
 	if (!link)
 		return;
 
-	/* An errored/reset/destroyed QP will never see further ACKs; its
-	 * in-flight frames are consumed (and their descriptors reposted) by
-	 * the peer regardless of engine progress, so holding window for it
-	 * only starves the link's live QPs. Racy state read is fine: the
-	 * flush paths re-sync, destroy is the backstop.
-	 */
-	if (!qp->valid || qp->attr.qp_state == IB_QPS_ERR ||
-	    qp->attr.qp_state == IB_QPS_RESET)
-		target = 0;
-	else
-		target = (qp->req.psn - qp->comp.psn) & BTH_PSN_MASK;
-
-	/*
-	 * comp.psn AHEAD of req.psn is a state the engine tolerates
-	 * everywhere through the signed psn_compare() (e.g. a late ACK
-	 * landing after a timeout retry rewound req.psn): the masked
-	 * distance then reads as ~2^24, and charging that poisons the
-	 * link's window -- admission refuses every future packet on the
-	 * link. Negative distance means nothing of this QP is unacked.
-	 */
-	if (target > (BTH_PSN_MASK >> 1))
-		target = 0;
-
 	spin_lock_irqsave(&tbrxe.lock, flags);
-	if (qp->tbl_charged > target) {
-		u32 rel = qp->tbl_charged - target;
+	tbrxe_credit_generation_locked(qp, link);
+	for (src = 0, dst = 0; src < qp->tbl_credit_count; src++) {
+		u32 credit = qp->tbl_credits[src];
+		u32 psn = credit & BTH_PSN_MASK;
+		bool release = !qp->valid ||
+			qp->attr.qp_state == IB_QPS_ERR ||
+			qp->attr.qp_state == IB_QPS_RESET ||
+			psn_compare(psn, qp->comp.psn) < 0;
 
-		link->unacked -= min(rel, link->unacked);
-		qp->tbl_charged = target;
-		if (link->admission_waiters &&
-		    link->unacked < tbrxe_link_engine_window(link)) {
-			link->admission_waiters = false;
-			kick = true;
+		if (release) {
+			if (!(credit & TBRXE_CREDIT_REPLAY) &&
+			    link->fresh_unacked)
+				link->fresh_unacked--;
+			if (link->unacked)
+				link->unacked--;
+			released = true;
+		} else {
+			qp->tbl_credits[dst++] = credit;
 		}
-	} else if (qp->tbl_charged < target) {
-		/* Multi-response ops (READ) advance req.psn by more than the
-		 * one packet admitted; top the charge up so release stays
-		 * exact. May transiently overshoot the window; the gate in
-		 * tbrxe_admit() re-closes admission.
-		 */
-		link->unacked += target - qp->tbl_charged;
-		qp->tbl_charged = target;
+	}
+	qp->tbl_credit_count = dst;
+	if (!qp->valid || qp->attr.qp_state == IB_QPS_RESET)
+		qp->tbl_high_valid = false;
+	if (released && link->admission_waiters) {
+		link->admission_waiters = false;
+		kick = true;
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
@@ -1073,6 +1183,8 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 		link->info = *info;
 		link->session_up = true;
 		link->unacked = 0;
+		link->fresh_unacked = 0;
+		link->credit_generation++;
 		link->admission_waiters = false;
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
@@ -1092,6 +1204,7 @@ static void tbrxe_client_link_up(void *ctx, struct tbframe_link *tblink,
 		goto out_unlock;
 	link->tblink = tblink;
 	link->info = *info;
+	link->credit_generation = 1;
 
 	ndev = tbrxe_ndev_create(info);
 	if (IS_ERR(ndev))
@@ -1174,6 +1287,8 @@ static void tbrxe_client_link_down(void *ctx, struct tbframe_link *tblink,
 	if (link) {
 		link->session_up = false;
 		link->unacked = 0;
+		link->fresh_unacked = 0;
+		link->credit_generation++;
 		link->admission_waiters = false;
 		if (terminal)
 			list_del_init(&link->list);

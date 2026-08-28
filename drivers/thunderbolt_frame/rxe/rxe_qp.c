@@ -250,6 +250,13 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 	if (err)
 		return err;
 
+	err = tbrxe_credit_init(qp);
+	if (err) {
+		rxe_queue_cleanup(qp->sq.queue);
+		qp->sq.queue = NULL;
+		return err;
+	}
+
 	qp->req.wqe_index = queue_get_producer(qp->sq.queue,
 					       QUEUE_TYPE_FROM_CLIENT);
 
@@ -380,6 +387,7 @@ int rxe_qp_from_init(struct rxe_dev *rxe, struct rxe_qp *qp, struct rxe_pd *pd,
 	return 0;
 
 err2:
+	tbrxe_credit_cleanup(qp);
 	rxe_queue_cleanup(qp->sq.queue);
 	qp->sq.queue = NULL;
 err1:
@@ -830,6 +838,7 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 
 	if (qp->sq.queue)
 		rxe_queue_cleanup(qp->sq.queue);
+	tbrxe_credit_cleanup(qp);
 
 	if (qp->srq)
 		rxe_put(qp->srq);

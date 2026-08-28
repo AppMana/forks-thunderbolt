@@ -293,12 +293,18 @@ struct rxe_qp {
 	atomic_t		skb_out;
 	int			need_req_skb;
 
-	/* Mode A engine-side admission (wire-spec section 6): this RC QP's
-	 * live charge against its device's link window. The link record is
-	 * reached through the device (rxe->tbl_link), which outlives every
-	 * QP of the device.
+	/* Mode A engine-side admission (wire-spec section 6).  Each entry is
+	 * one actually transmitted request frame which has not yet been
+	 * proven consumed by ACK/NAK progress.  Keeping the wire PSNs, rather
+	 * than deriving a count from the mutable requester cursor, makes retry
+	 * rewind independent from peer-consumption credit.
 	 */
-	u32			tbl_charged;
+	u32			*tbl_credits;
+	u16			tbl_credit_count;
+	u16			tbl_credit_cap;
+	u32			tbl_high_psn;
+	bool			tbl_high_valid;
+	u64			tbl_generation;
 
 	/* Timer for retranmitting packet when ACKs have been lost. RC
 	 * only. The requester sets it when it is not already

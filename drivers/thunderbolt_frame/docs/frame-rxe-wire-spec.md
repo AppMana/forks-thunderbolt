@@ -169,21 +169,29 @@ Correctness never depends on hardware E2E.
 
 ### Mode A — static window (default, universal)
 
-- The sender bounds aggregate unacknowledged data frames per link to
-  `min(local cap, peer rx_ring_entries)` from HELLO.
+- The sender derives `data_window = min(local cap, peer rx_ring_entries) -
+  64` from HELLO. Aggregate request records never exceed `data_window`.
 - Enforcement: per-QP inflight caps (rxe's existing
   `RXE_INFLIGHT_SKBS_PER_QP_HIGH` analog, plus the 128-PSN unacked window)
   summed over the link; the tbframe admission check refuses `xmit` beyond
   the link cap and invokes the `tx_released` upcall as completions drain.
-- Invariant: every unacked data frame occupies at most one peer RX
-  descriptor, and the peer reposts descriptors before its engine emits the
-  ACK that releases the window. Therefore `window <= rx_ring_entries`
-  implies the RX ring cannot overflow. No credit messages exist; there is
-  nothing to lose or desynchronize.
+- Admission records every request frame actually put on the wire, keyed by
+  QP and PSN. ACK/NAK progress releases records below the peer's cumulative
+  PSN; QP reset/error and session-ring replacement release the corresponding
+  generation. Rewinding the local requester cursor for retry releases
+  nothing: cursor position is not evidence of peer consumption.
+- Retransmissions (PSNs below the QP's committed send high water) may use a
+  replay reserve held inside `data_window`: for valid negotiated rings,
+  `min(32, data_window / 8)` records are unavailable to fresh requests but
+  available to replay. This recovers a
+  lost ACK after the fresh window filled without forgetting the original
+  flight. The separate 64-descriptor physical reserve remains wholly
+  available to ACK/read-response traffic.
 - ACK/control frames are small and bounded by data received (one ACK per
   ack-req packet); they are admitted outside the data window but counted
   against a fixed reserve (ring is sized with a control reserve:
-  `usable data window = rx_ring_entries - 64`).
+  `data_window = rx_ring_entries - 64`; request replay also stays inside that
+  data window).
 
 ### Mode B — hardware E2E (negotiated enhancement)
 
@@ -197,10 +205,11 @@ Correctness never depends on hardware E2E.
 
 ### What the PSN layer still covers (either mode)
 
-CRC-dropped frames, frames lost across `link_down -> link_up` transitions,
-and duplicates from retransmission. Loss model contract: frames are never
-silently lost while `link_state == UP`; any loss window is bracketed by a
-link_down/link_up pair and session reset.
+CRC/path-dropped frames while a session remains up, frames lost across
+`link_down -> link_up` transitions, and duplicates from retransmission.
+The admission ledger remains conservative across retry; session-ring
+replacement advances its generation and discards credits belonging to the
+old rings.
 
 ## 7. tbframe kernel API (contract for tbrxe)
 

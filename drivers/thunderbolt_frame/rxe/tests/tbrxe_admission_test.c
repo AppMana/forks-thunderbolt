@@ -67,6 +67,30 @@ static bool adm_alloc_take_budget(void)
 static u32 adm_sent_psn[ADM_POOL];
 static atomic_t adm_sent;
 
+/*
+ * Optional peer-RX model.  A successful local xmit does not recycle a peer
+ * descriptor: tests explicitly consume remote frames.  This is deliberately
+ * separate from adm_pool_used, which models only local TX ownership.
+ */
+static bool adm_retain_remote;
+static atomic_t adm_remote_occupied;
+static atomic_t adm_remote_max;
+
+static void adm_remote_arrive(void)
+{
+	int occupied = atomic_inc_return(&adm_remote_occupied);
+	int old = atomic_read(&adm_remote_max);
+
+	while (occupied > old &&
+	       !atomic_try_cmpxchg(&adm_remote_max, &old, occupied))
+		;
+}
+
+static void adm_remote_consume_all(void)
+{
+	atomic_set(&adm_remote_occupied, 0);
+}
+
 static int adm_register_client(const struct tbframe_client_ops *ops, void *ctx)
 {
 	return 0;
@@ -127,6 +151,8 @@ static int adm_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 		n = atomic_fetch_inc(&adm_sent);
 		if (n < ADM_POOL)
 			adm_sent_psn[n] = psn & BTH_PSN_MASK;
+		if (adm_retain_remote)
+			adm_remote_arrive();
 	}
 	adm_frame_release(frame);
 	return 0;
@@ -466,6 +492,218 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 }
 
 /*
+ * A retry rewind is a requester cursor change, not evidence that the peer
+ * consumed any frame.  Keep a full advertised peer RX window occupied,
+ * prevent the retry itself from allocating a local frame, and let the retry
+ * timer rewind the first QP.  A second QP must remain parked: admitting it
+ * would put a fifth frame into a four-descriptor peer.
+ *
+ * The old req.psn-comp.psn accounting drops the first QP's entire charge at
+ * rewind.  The blocked retry consumes no transport slot, but the newly posted
+ * second QP observes an empty accounting window and transmits into the full
+ * modeled peer ring.
+ */
+static void tbrxe_admission_retry_rewind_keeps_peer_credit(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr	= ADM_POSTS + 2,
+			.max_recv_wr	= 2,
+			.max_send_sge	= 1,
+			.max_recv_sge	= 1,
+		},
+		.sq_sig_type	= IB_SIGNAL_ALL_WR,
+		.qp_type	= IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *first;
+	struct ib_qp *second;
+	u8 *src;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	atomic_set(&adm_remote_occupied, 0);
+	atomic_set(&adm_remote_max, 0);
+	adm_retain_remote = true;
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	first = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, first);
+	second = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, second);
+	KUNIT_ASSERT_EQ(test, adm_connect(first, 0x42, &peer,
+					  sgid_index, 14), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(second, 0x43, &peer,
+					  sgid_index, 31), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = ADM_MSG_LEN;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(first, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(ADM_WINDOW), ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, atomic_read(&adm_remote_occupied), ADM_WINDOW);
+
+	/* Let the timeout rewind, but keep its replay parked in alloc_frame. */
+	atomic_set(&adm_alloc_budget, 0);
+	msleep(250);
+
+	/* Only the second QP is freshly scheduled after one slot is granted. */
+	atomic_set(&adm_alloc_budget, 1);
+	swr.wr_id = ADM_WINDOW;
+	KUNIT_ASSERT_EQ(test, ib_post_send(second, &swr, &bad_swr), 0);
+	msleep(100);
+	KUNIT_EXPECT_LE(test, atomic_read(&adm_remote_max), ADM_WINDOW);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_remote_consume_all();
+	adm_retain_remote = false;
+	ib_destroy_qp(second);
+	ib_destroy_qp(first);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* A non-terminal frame-session bounce replaces the peer RX rings while the
+ * ib_device and RC QPs survive.  Old-generation credits must disappear, and
+ * a late ACK on an old QP must not subtract records admitted in the new
+ * generation on another QP.
+ */
+static void tbrxe_admission_session_bounce_replaces_credit_generation(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = ADM_POSTS + 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *old_qp;
+	struct ib_qp *new_qp;
+	u8 *src;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	old_qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, old_qp);
+	new_qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, new_qp);
+	KUNIT_ASSERT_EQ(test, adm_connect(old_qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(new_qp, 0x43, &peer,
+					  sgid_index, 31), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = ADM_MSG_LEN;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(old_qp, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(ADM_WINDOW), ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+
+	tbrxe_frame_client_ops()->link_down(NULL,
+					    (struct tbframe_link *)&fake_link,
+					    TBFRAME_DOWN_LOGOUT);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 0u);
+
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = ADM_WINDOW + i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(new_qp, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(2 * ADM_WINDOW),
+			2 * ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+
+	/* Old-generation progress is harmless to the new QP's four records. */
+	adm_inject_ack(&fake_link, old_qp->qp_num,
+		       ADM_SQ_PSN + ADM_WINDOW - 1);
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+	adm_inject_ack(&fake_link, new_qp->qp_num,
+		       ADM_SQ_PSN + ADM_WINDOW - 1);
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, tbrxe_link_unacked(rxe), 0u);
+
+	ib_destroy_qp(new_qp);
+	ib_destroy_qp(old_qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/*
  * comp.psn AHEAD of req.psn is a state the engine reaches on its own: a
  * PSN-sequence-error NAK "implicitly acks all packets with psns before"
  * (rxe_comp.c), so a straggler NAK carrying the peer's pre-rewind e_psn,
@@ -510,7 +748,7 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	struct ib_pd *pd;
 	struct ib_cq *cq;
 	struct ib_qp *qp;
-	int sent, i;
+	int sent;
 	u8 *src;
 
 	adm_pool_used = 0;
@@ -552,24 +790,18 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	swr.wr_id = 0;
 	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
 
-	/* The full flight reaches the wire (timeout retries may repeat it). */
+	/* The full flight reaches the wire. */
 	sent = adm_wait_sent(8);
 	KUNIT_ASSERT_GE(test, sent, 8);
 
 	/*
-	 * One frame of transport budget: the next timeout retry rewinds
-	 * req.psn to 0x100, re-sends exactly the first packet (wqe back to
-	 * pending, req.psn = 0x101, one slot charged) and parks. Grant the
-	 * budget again if a racing in-flight burst swallowed it.
+	 * Exhaust local transport capacity before the timeout.  The next retry
+	 * rewinds req.psn to 0x100 and parks without transmitting.  Peer credit
+	 * remains eight: cursor rewind is deliberately not consumption.
 	 */
-	for (i = 0; i < ADM_POLL_TRIES; i++) {
-		if (tbrxe_link_unacked(rxe) == 1)
-			break;
-		if ((i % 50) == 49)
-			atomic_set(&adm_alloc_budget, 1);
-		msleep(ADM_POLL_MS);
-	}
-	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 1u);
+	atomic_set(&adm_alloc_budget, 0);
+	msleep(250);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 8u);
 
 	/*
 	 * Straggler NAK from the pre-rewind flight: the peer's e_psn of
@@ -583,18 +815,10 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	/* The reconcile must not have charged the ~2^24 masked distance. */
 	KUNIT_EXPECT_LE(test, tbrxe_link_unacked(rxe), 8u);
 
-	/* The link must remain usable: with transport capacity restored, a
-	 * kick makes the pending flight (and this new WR) reach the wire.
-	 * A poisoned window refuses admission forever instead.
+	/* No masked req.psn-comp.psn conversion remains that can manufacture a
+	 * near-2^24 link charge.  Restore the mock before teardown.
 	 */
 	atomic_set(&adm_alloc_budget, -1);
-	sent = atomic_read(&adm_sent);
-	ssge.length = ADM_MSG_LEN;
-	swr.wr_id = 1;
-	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
-	for (i = 0; i < ADM_POLL_TRIES && atomic_read(&adm_sent) == sent; i++)
-		msleep(ADM_POLL_MS);
-	KUNIT_EXPECT_GT(test, atomic_read(&adm_sent), sent);
 
 	ib_destroy_qp(qp);
 	ib_destroy_cq(cq);
@@ -606,6 +830,8 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE(tbrxe_admission_window_bounds_unacked),
 	KUNIT_CASE(tbrxe_admission_charge_released_on_destroy),
+	KUNIT_CASE_SLOW(tbrxe_admission_retry_rewind_keeps_peer_credit),
+	KUNIT_CASE(tbrxe_admission_session_bounce_replaces_credit_generation),
 	KUNIT_CASE_SLOW(tbrxe_admission_rewind_ack_race_no_poison),
 	{}
 };
