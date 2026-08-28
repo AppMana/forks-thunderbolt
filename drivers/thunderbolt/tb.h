@@ -18,6 +18,41 @@
 
 #include "tb_regs.h"
 
+enum tb_icm_xdomain_path_state {
+	TB_ICM_XDOMAIN_PATH_INACTIVE,
+	TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING,
+	TB_ICM_XDOMAIN_PATH_ACTIVE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING,
+};
+
+enum tb_icm_xdomain_path_event {
+	TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_SETTLED,
+};
+
+enum tb_icm_xdomain_path_action {
+	TB_ICM_XDOMAIN_PATH_REJECT,
+	TB_ICM_XDOMAIN_PATH_SETTLE,
+	TB_ICM_XDOMAIN_PATH_ACTIVATE,
+	TB_ICM_XDOMAIN_PATH_SEND_STAGE2,
+	TB_ICM_XDOMAIN_PATH_DEACTIVATE,
+};
+
+struct tb_icm_xdomain_path_transition {
+	enum tb_icm_xdomain_path_state state;
+	enum tb_icm_xdomain_path_action action;
+	unsigned int settle_min_us;
+	unsigned int settle_max_us;
+};
+
+struct tb_icm_xdomain_path_transition
+tb_icm_xdomain_path_next(enum tb_icm_xdomain_path_state state,
+			 enum tb_icm_xdomain_path_event event);
+
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void);
 u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags);
