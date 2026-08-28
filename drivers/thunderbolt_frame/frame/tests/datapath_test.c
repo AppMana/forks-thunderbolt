@@ -109,7 +109,7 @@ static void tbframe_datapath_dead_ring_rebuilds_hardware(struct kunit *test)
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases, 1u);
 	/*
 	 * ...and the session was rebuilt from scratch afterwards: a second
-	 * in-HopID allocation means fresh rings and freshly programmed hop
+	 * in-HopID allocation means restarted rings and freshly programmed hop
 	 * entries, which is the only repair the driver can attempt for this
 	 * state. It still refuses to declare the link up (asserted above)
 	 * because the rebuild did not fix the path either.
@@ -334,7 +334,7 @@ static void tbframe_datapath_proof_does_not_survive_a_session(struct kunit *test
  * TX flush, quiesce_tx() and (off the shutdown path) a bounded BYE exchange.
  * Any good frame the peer delivers inside that window re-latches
  * data_proven, and nothing clears it again before the next bring_up. The
- * rebuilt session then has fresh rings, a fresh in-HopID and freshly
+ * rebuilt session then has restarted rings, a fresh in-HopID and freshly
  * programmed hop entries, and is declared UP on evidence that belongs to the
  * session that just died -- defeating the gate precisely at the session
  * boundary it exists to guard.

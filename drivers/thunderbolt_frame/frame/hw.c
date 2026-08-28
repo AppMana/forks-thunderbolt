@@ -158,6 +158,21 @@ static int tbframe_hw_alloc_rings(void *data, u16 tx_entries, u16 rx_entries,
 	unsigned int flags = RING_FLAG_FRAME | (e2e ? RING_FLAG_E2E : 0);
 	int e2e_tx_hop = 0;
 
+	/*
+	 * The protocol session may restart while the device-facing DMA storage
+	 * remains the same. Keeping the allocation makes every address cached by
+	 * the ring engine valid until the service itself is removed.
+	 */
+	if (hw->tx_ring || hw->rx_ring) {
+		if (!hw->tx_ring || !hw->rx_ring)
+			return -EUCLEAN;
+		if (hw->tx_ring->size != tx_entries ||
+		    hw->rx_ring->size != rx_entries ||
+		    hw->tx_ring->flags != flags || hw->rx_ring->flags != flags)
+			return -EINVAL;
+		return 0;
+	}
+
 	hw->tx_ring = tb_ring_alloc_tx(hw->xd->tb->nhi, -1, tx_entries, flags);
 	if (!hw->tx_ring)
 		return -ENOMEM;

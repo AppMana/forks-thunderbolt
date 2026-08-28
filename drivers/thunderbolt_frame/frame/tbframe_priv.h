@@ -248,6 +248,8 @@ struct tbframe_link {
 	 */
 	bool			parked;
 	bool			hello_done;
+	/* DMA storage outlives recoverable protocol sessions. */
+	bool			rings_allocated;
 	bool			rings_up;
 	bool			paths_enabled;
 	bool			in_hopid_held;

@@ -268,8 +268,8 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	 * quiesce_tx() and a bounded BYE exchange; a frame the peer had
 	 * already committed to the wire can land anywhere in that window and
 	 * re-latch it. Nothing cleared it again, so the rebuilt session --
-	 * fresh rings, fresh in-HopID, freshly programmed hop entries -- was
-	 * declared up on evidence belonging to the session that just died.
+	 * restarted rings, a fresh in-HopID and freshly programmed hop entries --
+	 * was declared up on evidence belonging to the session that just died.
 	 * This is the last point before the new session can receive anything,
 	 * so it is the only place the invariant actually holds.
 	 */
@@ -285,6 +285,9 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 				     tf->ring_entries, e2e);
 	if (ret)
 		return ret;
+	spin_lock_irqsave(&link->lock, flags);
+	link->rings_allocated = true;
+	spin_unlock_irqrestore(&link->lock, flags);
 
 	ret = link->ops->alloc_in_hopid(link->hw, remote_hopid);
 	if (ret < 0)
@@ -350,6 +353,7 @@ err_stop_rings:
 err_free_rings:
 	link->ops->free_rings(link->hw);
 	spin_lock_irqsave(&link->lock, flags);
+	link->rings_allocated = false;
 	if (link->in_hopid_held) {
 		link->in_hopid_held = false;
 		spin_unlock_irqrestore(&link->lock, flags);
@@ -491,7 +495,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	 * enabled, and not one frame has crossed the data ring. This is the
 	 * dead-path state. Refuse to go UP (so no link_up, no HCA, no false
 	 * health), say so unmistakably, and cycle the session hardware --
-	 * rings, hop entries and the in-HopID are all rebuilt by the retry,
+	 * rings are restarted while hop entries and the in-HopID are rebuilt,
 	 * which is the only in-driver repair available for it.
 	 */
 	spin_lock_irqsave(&link->lock, flags);
@@ -715,7 +719,7 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
 		link->hs.established = true;
 		/*
 		 * Data can flow from here on; until now the READY gate kept
-		 * the fresh rings silent, so a BYE_ACK (which certifies TX
+		 * the restarted rings silent, so a BYE_ACK (which certifies TX
 		 * silence) stays legitimate through bring_up and handshake.
 		 */
 		link->tx_quiesced = false;
@@ -757,8 +761,8 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool was_up, deliver_down, terminal, hold;
-	bool had_rings, had_paths, had_hopid;
+	bool was_up, deliver_down, terminal = false, hold;
+	bool had_rings, rings_running, had_paths, had_hopid;
 	unsigned int drain_ms;
 	u16 remote_hopid;
 	int active;
@@ -780,7 +784,8 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	was_up = link->state == TBFRAME_STATE_UP;
 	if (link->state != TBFRAME_STATE_DEAD)
 		link->state = TBFRAME_STATE_INIT;
-	had_rings = link->rings_up || link->hw_stale;
+	had_rings = link->rings_allocated;
+	rings_running = link->rings_up || link->hw_stale;
 	had_paths = link->paths_enabled || link->hw_stale;
 	had_hopid = link->in_hopid_held;
 	/*
@@ -800,9 +805,9 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_blocked = false;
 	link->hello_attempts = 0;
 	/*
-	 * The proof is per-session: the next session gets fresh rings, a fresh
-	 * in-HopID and freshly programmed hop entries, so evidence from the
-	 * old one says nothing about it.
+	 * The proof is per-session: the next session gets restarted rings, a
+	 * fresh in-HopID and freshly programmed hop entries, so evidence from
+	 * the old one says nothing about it.
 	 */
 	link->data_proven = false;
 	link->data_proof_unavailable_warned = false;
@@ -874,7 +879,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * killed its ingress while the sender's ring still held the storm
 	 * backlog; the flush then had nowhere to drain).
 	 */
-	if (had_rings && link->ops->quiesce_tx)
+	if (rings_running && link->ops->quiesce_tx)
 		link->ops->quiesce_tx(link->hw);
 	spin_lock_irqsave(&link->lock, flags);
 	link->tx_quiesced = true;
@@ -914,18 +919,23 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * ring -- the local half of the rapid-disable-of-an-active-path
 	 * pattern behind the router-level egress wedge.
 	 */
-	if (had_rings)
+	if (rings_running)
 		/* Cancels all in-flight frames through the completion path. */
 		link->ops->stop_rings(link->hw);
 	if (had_paths)
 		link->ops->disable_paths(link->hw, link->local_hopid,
 					 remote_hopid);
-	if (had_rings)
+	terminal = reason == TBFRAME_DOWN_CLOSED ||
+		   reason == TBFRAME_DOWN_UNPLUG ||
+		   reason == TBFRAME_DOWN_DEAD_HW;
+	if (had_rings && terminal)
 		link->ops->free_rings(link->hw);
 	if (had_hopid)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
 	spin_lock_irqsave(&link->lock, flags);
 	link->hw_stale = false;
+	if (terminal)
+		link->rings_allocated = false;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 deliver:
@@ -957,9 +967,6 @@ deliver:
 	 * shadowing the live device. Non-terminal downs do not clear the
 	 * flag: the client's record (and device) outlives session bounces.
 	 */
-	terminal = reason == TBFRAME_DOWN_CLOSED ||
-		   reason == TBFRAME_DOWN_UNPLUG ||
-		   reason == TBFRAME_DOWN_DEAD_HW;
 	spin_lock_irqsave(&link->lock, flags);
 	deliver_down = was_up || (link->up_delivered && terminal);
 	if (terminal)
@@ -992,8 +999,8 @@ deliver:
 
 		/*
 		 * A session torn down because the data path could not be
-		 * proven rebuilds rings, hop entries and the in-HopID on the
-		 * retry. If the fabric is genuinely wedged that must not
+		 * proven restarts rings and rebuilds hop entries and the in-HopID
+		 * on the retry. If the fabric is genuinely wedged that must not
 		 * become a hot loop of path enable/disable cycles (each one is
 		 * a shot at the router-level egress wedge), so consecutive
 		 * proof failures back off exponentially to a cap.

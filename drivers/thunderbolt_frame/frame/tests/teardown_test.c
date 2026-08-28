@@ -39,12 +39,44 @@ static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
 					   TBFRAME_HW_RELEASE_IN_HOPID, 0);
 	KUNIT_ASSERT_GE(test, stop, 0);
 	KUNIT_ASSERT_GE(test, disable, 0);
-	KUNIT_ASSERT_GE(test, freed, 0);
+	KUNIT_ASSERT_EQ(test, freed, -1);
 	KUNIT_ASSERT_GE(test, release, 0);
-	/* stop -> disable -> free -> release */
+	/* Recoverable reset: stop -> disable -> release, retain DMA storage. */
 	KUNIT_EXPECT_LT(test, stop, disable);
-	KUNIT_EXPECT_LT(test, disable, freed);
-	KUNIT_EXPECT_LT(test, freed, release);
+	KUNIT_EXPECT_LT(test, disable, release);
+}
+
+/*
+ * Protocol-session recovery and DMA-storage lifetime are separate state
+ * machines.  A recoverable session reset must stop the ring engine and paths,
+ * but retaining the ring allocation keeps any device-cached descriptor or
+ * buffer address valid until the link itself is removed.
+ */
+static void tbframe_teardown_session_reset_keeps_dma_storage(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned long flags;
+	int first_call;
+
+	tbframe_mock_link_up(test, fx);
+	first_call = fx->mock.hw_call_count;
+
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_GE(test,
+		tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_STOP_RINGS,
+					 first_call), 0);
+	KUNIT_EXPECT_GE(test,
+		tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_DISABLE_PATHS,
+					 first_call), 0);
+	KUNIT_EXPECT_EQ(test, -1,
+		tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_FREE_RINGS,
+					 first_call));
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
 }
 
 /*
@@ -229,6 +261,9 @@ static void tbframe_teardown_terminal_down_after_logout(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, 2u, fx->client.down_count);
 	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_UNPLUG,
 			fx->client.reasons[2]);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_GE(test,
+		tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_FREE_RINGS, 0), 0);
 }
 
 static void tbframe_teardown_publisher_drain_poisons(struct kunit *test)
@@ -342,6 +377,7 @@ static void tbframe_teardown_test_exit(struct kunit *test)
 
 static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
+	KUNIT_CASE(tbframe_teardown_session_reset_keeps_dma_storage),
 	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
 	KUNIT_CASE(tbframe_teardown_bye_holds_hardware),
