@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/prandom.h>
+#include <linux/refcount.h>
 #include <linux/string_helpers.h>
 #include <linux/utsname.h>
 #include <linux/uuid.h>
@@ -35,6 +36,8 @@
 #define XDOMAIN_DIRECT_BOND_RETRIES		10
 #define XDOMAIN_DEFAULT_MAX_HOPID		15
 #define XDOMAIN_UUID_BACKOFF_MAX_SHIFT		6
+#define XDOMAIN_QUARANTINE_RETRY_MS		1000
+#define XDOMAIN_QUARANTINE_PATH_RETRIES		3
 
 enum {
 	XDOMAIN_STATE_INIT,
@@ -164,6 +167,50 @@ static DEFINE_MUTEX(xdomain_lock);
  * xdomain_dispatch_lock -> xdomain_lock.
  */
 static DEFINE_MUTEX(xdomain_dispatch_lock);
+
+struct tb_xdomain_quarantine_ops {
+	int (*disconnect)(void *data, struct tb_xdomain *xd,
+			  int transmit_path, int transmit_ring,
+			  int receive_path, int receive_ring);
+	void (*free_ring)(void *data, struct tb_ring *ring);
+	int (*request_recovery)(void *data, struct tb_xdomain *xd);
+	void *data;
+};
+
+struct tb_xdomain_quarantine {
+	struct list_head list;
+	struct delayed_work retry_work;
+	refcount_t refs;
+	struct tb_xdomain *xd;
+	struct tb_ring *transmit_dma_ring;
+	struct tb_ring *receive_dma_ring;
+	int transmit_path;
+	int transmit_ring;
+	int receive_path;
+	int receive_ring;
+	unsigned int attempts;
+	bool recovery_pending;
+	bool stopping;
+	struct tb_xdomain_quarantine_ops ops;
+};
+
+static LIST_HEAD(xdomain_quarantines);
+static DEFINE_MUTEX(xdomain_quarantines_lock);
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+static struct tb_xdomain_quarantine_ops xdomain_quarantine_test_ops;
+static bool xdomain_quarantine_test_ops_set;
+static bool xdomain_quarantine_test_fail_alloc;
+#endif
+
+static void tb_xdomain_quarantine_put(struct tb_xdomain_quarantine *q)
+{
+	if (!refcount_dec_and_test(&q->refs))
+		return;
+
+	tb_xdomain_put(q->xd);
+	kfree(q);
+}
 
 /* Properties exposed to the remote domains */
 static struct tb_property_dir *xdomain_property_dir;
@@ -3097,17 +3144,23 @@ bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
  * 4 only clears cached bonded flags; older generations synchronously disable
  * or re-enable lane 1.
  */
-static bool tb_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
+static bool tb_xdomain_link_exit_touches_lane_hardware(bool unplugged,
+						       bool firmware_cm,
 						       unsigned int generation)
 {
-	return !firmware_cm && generation < 4;
+	return !unplugged && !firmware_cm && generation < 4;
 }
 
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation)
 {
-	return tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
+	return tb_xdomain_link_exit_touches_lane_hardware(false, firmware_cm,
 							 generation);
+}
+
+bool tb_test_xdomain_unplugged_link_exit_touches_lane_hardware(void)
+{
+	return tb_xdomain_link_exit_touches_lane_hardware(true, false, 3);
 }
 
 static void tb_xdomain_link_init(struct tb_xdomain *xd, struct tb_port *down)
@@ -3139,6 +3192,7 @@ static void tb_xdomain_link_exit(struct tb_xdomain *xd)
 {
 	struct tb_port *down = tb_xdomain_downstream_port(xd);
 	unsigned int generation;
+	bool touches_hardware;
 	bool firmware_cm;
 
 	if (!down->dual_link_port)
@@ -3154,8 +3208,10 @@ static void tb_xdomain_link_exit(struct tb_xdomain *xd)
 	 * the ICM workqueue during module removal without waiting on dead hardware.
 	 * Gen 4 software-CM links likewise need only their cached flags cleared.
 	 */
-	if (!tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
-							  generation)) {
+	touches_hardware = tb_xdomain_link_exit_touches_lane_hardware(xd->is_unplugged,
+								      firmware_cm,
+								      generation);
+	if (!touches_hardware) {
 		down->bonded = false;
 		down->dual_link_port->bonded = false;
 		return;
@@ -3498,7 +3554,10 @@ EXPORT_SYMBOL_GPL(tb_xdomain_release_out_hopid);
  * path. If a transmit or receive path is not needed, pass %-1 for those
  * parameters.
  *
- * Return: %0 in case of success and negative errno in case of error
+ * Return: %0 in case of success, %-EUCLEAN if activation failed and the
+ * exact rings and HopIDs remain owned by an unresolved hardware path, or
+ * another negative errno after a clean activation failure. On %-EUCLEAN the
+ * caller must retain those resources and retry tb_xdomain_disable_paths().
  */
 int tb_xdomain_enable_paths(struct tb_xdomain *xd, int transmit_path,
 			    int transmit_ring, int receive_path,
@@ -3564,6 +3623,421 @@ int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,
 					      receive_ring);
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_paths_active);
+
+static int
+tb_xdomain_quarantine_disconnect(void *data, struct tb_xdomain *xd,
+				 int transmit_path, int transmit_ring,
+				 int receive_path, int receive_ring)
+{
+	return tb_domain_retry_xdomain_paths(xd->tb, xd, transmit_path,
+					     transmit_ring, receive_path,
+					     receive_ring);
+}
+
+static void tb_xdomain_quarantine_free_ring(void *data, struct tb_ring *ring)
+{
+	tb_ring_free(ring);
+}
+
+static int
+tb_xdomain_quarantine_request_recovery(void *data, struct tb_xdomain *xd)
+{
+	return tb_nhi_request_quarantine_recovery(xd->tb->nhi, xd->route);
+}
+
+static const struct tb_xdomain_quarantine_ops xdomain_quarantine_real_ops = {
+	.disconnect = tb_xdomain_quarantine_disconnect,
+	.free_ring = tb_xdomain_quarantine_free_ring,
+	.request_recovery = tb_xdomain_quarantine_request_recovery,
+};
+
+static bool
+tb_xdomain_quarantine_matches(const struct tb_xdomain_quarantine *q,
+			      const struct tb_xdomain *xd,
+			      int transmit_path, int transmit_ring,
+			      const struct tb_ring *transmit_dma_ring,
+			      int receive_path, int receive_ring,
+			      const struct tb_ring *receive_dma_ring)
+{
+	return q->xd == xd && q->transmit_path == transmit_path &&
+		q->transmit_ring == transmit_ring &&
+		q->transmit_dma_ring == transmit_dma_ring &&
+		q->receive_path == receive_path &&
+		q->receive_ring == receive_ring &&
+		q->receive_dma_ring == receive_dma_ring;
+}
+
+static bool tb_xdomain_quarantine_is_last(struct tb_xdomain_quarantine *q)
+{
+	struct tb_xdomain_quarantine *other;
+
+	list_for_each_entry(other, &xdomain_quarantines, list) {
+		if (other != q && other->xd == q->xd)
+			return false;
+	}
+	return true;
+}
+
+static void
+tb_xdomain_quarantine_release(struct tb_xdomain_quarantine *q, bool proven)
+{
+	bool clear_error;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	if (list_empty(&q->list)) {
+		mutex_unlock(&xdomain_quarantines_lock);
+		return;
+	}
+	clear_error = tb_xdomain_quarantine_is_last(q);
+	list_del_init(&q->list);
+	if (clear_error)
+		WRITE_ONCE(q->xd->path_teardown_err, 0);
+	mutex_unlock(&xdomain_quarantines_lock);
+
+	/* A successful exact disconnect and a proven reset are both revocation. */
+	if (q->transmit_dma_ring)
+		q->ops.free_ring(q->ops.data, q->transmit_dma_ring);
+	if (q->receive_dma_ring)
+		q->ops.free_ring(q->ops.data, q->receive_dma_ring);
+	if (q->transmit_path >= 0)
+		tb_xdomain_release_out_hopid(q->xd, q->transmit_path);
+	if (q->receive_path >= 0)
+		tb_xdomain_release_in_hopid(q->xd, q->receive_path);
+
+	if (proven)
+		dev_info(&q->xd->dev,
+			 "controller reset revoked quarantined DMA tuple %d/%d -> %d/%d\n",
+			 q->transmit_path, q->transmit_ring,
+			 q->receive_path, q->receive_ring);
+	/* Drop the quarantine-list ownership reference. */
+	tb_xdomain_quarantine_put(q);
+}
+
+static int
+tb_xdomain_quarantine_retry_record(struct tb_xdomain_quarantine *q,
+				   bool reschedule)
+{
+	int recovery_ret, ret;
+
+	if (q->recovery_pending) {
+		recovery_ret = q->ops.request_recovery(q->ops.data, q->xd);
+		if (recovery_ret && recovery_ret != -EALREADY && reschedule &&
+		    !READ_ONCE(q->stopping))
+			mod_delayed_work(q->xd->tb->wq, &q->retry_work,
+					 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+		return recovery_ret == -EALREADY ? 0 : recovery_ret;
+	}
+
+	ret = q->ops.disconnect(q->ops.data, q->xd,
+				q->transmit_path, q->transmit_ring,
+				q->receive_path, q->receive_ring);
+	if (!ret) {
+		tb_xdomain_quarantine_release(q, false);
+		return 0;
+	}
+
+	q->attempts++;
+	if (q->attempts < XDOMAIN_QUARANTINE_PATH_RETRIES) {
+		if (reschedule && !READ_ONCE(q->stopping))
+			mod_delayed_work(q->xd->tb->wq, &q->retry_work,
+					 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+		return ret;
+	}
+
+	q->recovery_pending = true;
+	dev_err(&q->xd->dev,
+		"DMA tuple %d/%d -> %d/%d remained owned after %u retries; scheduling controller recovery\n",
+		q->transmit_path, q->transmit_ring,
+		q->receive_path, q->receive_ring, q->attempts);
+	recovery_ret = q->ops.request_recovery(q->ops.data, q->xd);
+	if (recovery_ret && recovery_ret != -EALREADY && reschedule &&
+	    !READ_ONCE(q->stopping))
+		mod_delayed_work(q->xd->tb->wq, &q->retry_work,
+				 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+	return ret;
+}
+
+static void tb_xdomain_quarantine_retry_work(struct work_struct *work)
+{
+	struct tb_xdomain_quarantine *q =
+		container_of(work, typeof(*q), retry_work.work);
+
+	refcount_inc(&q->refs);
+	if (!READ_ONCE(q->stopping))
+		tb_xdomain_quarantine_retry_record(q, true);
+	tb_xdomain_quarantine_put(q);
+}
+
+static bool tb_xdomain_quarantine_tuple_valid(struct tb_xdomain *xd,
+					      int path, int ring,
+					      struct tb_ring *dma_ring,
+					      bool transmit)
+{
+	if (path < 0)
+		return ring < 0 && !dma_ring;
+	if (!dma_ring || ring < 0 || dma_ring->hop != ring)
+		return false;
+	if (dma_ring->nhi != xd->tb->nhi || dma_ring->is_tx != transmit)
+		return false;
+	return true;
+}
+
+/**
+ * tb_xdomain_quarantine_paths() - transfer an unresolved DMA tuple to core
+ * @xd: XDomain that owns the path HopIDs
+ * @transmit_path: Locally allocated output HopID
+ * @transmit_ring: NHI TX ring HopID programmed into the path
+ * @transmit_dma_ring: Exact stopped TX ring object being transferred
+ * @receive_path: Locally allocated input HopID used by the peer
+ * @receive_ring: NHI RX ring HopID programmed into the path
+ * @receive_dma_ring: Exact stopped RX ring object being transferred
+ *
+ * Service remove callbacks cannot veto driver unbind. After an exact path
+ * disable returns an ownership error, this transfers the complete tuple to
+ * the core. The core fences callbacks, retains both XDomain IDA reservations,
+ * retries the real disable operation, and escalates through controller
+ * unbind/reset/reprobe when the bounded retry budget is exhausted.
+ *
+ * Return: %0 after ownership transfer or a negative errno before transfer.
+ */
+int tb_xdomain_quarantine_paths(struct tb_xdomain *xd,
+				int transmit_path, int transmit_ring,
+				struct tb_ring *transmit_dma_ring,
+				int receive_path, int receive_ring,
+				struct tb_ring *receive_dma_ring)
+{
+	const struct tb_xdomain_quarantine_ops *ops =
+		&xdomain_quarantine_real_ops;
+	struct tb_xdomain_quarantine *q, *existing;
+
+	if (!xd || (!transmit_dma_ring && !receive_dma_ring))
+		return -EINVAL;
+	if (!tb_xdomain_quarantine_tuple_valid(xd, transmit_path,
+					       transmit_ring, transmit_dma_ring, true) ||
+	    !tb_xdomain_quarantine_tuple_valid(xd, receive_path,
+					       receive_ring, receive_dma_ring, false) ||
+	    (transmit_dma_ring && transmit_dma_ring == receive_dma_ring))
+		return -EINVAL;
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (xdomain_quarantine_test_fail_alloc)
+		q = NULL;
+	else
+#endif
+		q = kzalloc(sizeof(*q), GFP_KERNEL);
+	if (!q) {
+		/*
+		 * Exact retry metadata could not be retained, but leaf removal
+		 * still cannot leave IRQ/work callbacks live. Ring quarantine is
+		 * enough to force the generic domain reset and abandonment gate.
+		 */
+		if (transmit_dma_ring)
+			tb_ring_quarantine(transmit_dma_ring);
+		if (receive_dma_ring)
+			tb_ring_quarantine(receive_dma_ring);
+		return -ENOMEM;
+	}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (xdomain_quarantine_test_ops_set)
+		ops = &xdomain_quarantine_test_ops;
+#endif
+	INIT_LIST_HEAD(&q->list);
+	INIT_DELAYED_WORK(&q->retry_work, tb_xdomain_quarantine_retry_work);
+	refcount_set(&q->refs, 1);
+	q->xd = tb_xdomain_get(xd);
+	q->transmit_path = transmit_path;
+	q->transmit_ring = transmit_ring;
+	q->transmit_dma_ring = transmit_dma_ring;
+	q->receive_path = receive_path;
+	q->receive_ring = receive_ring;
+	q->receive_dma_ring = receive_dma_ring;
+	q->ops = *ops;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	list_for_each_entry(existing, &xdomain_quarantines, list) {
+		if (tb_xdomain_quarantine_matches(existing, xd,
+						  transmit_path, transmit_ring,
+						  transmit_dma_ring, receive_path,
+						  receive_ring, receive_dma_ring)) {
+			mutex_unlock(&xdomain_quarantines_lock);
+			tb_xdomain_quarantine_put(q);
+			return 0;
+		}
+	}
+	list_add_tail(&q->list, &xdomain_quarantines);
+	WRITE_ONCE(xd->path_teardown_err, -EUCLEAN);
+	mutex_unlock(&xdomain_quarantines_lock);
+
+	/* No leaf callback or polling pointer survives this function. */
+	if (transmit_dma_ring)
+		tb_ring_quarantine(transmit_dma_ring);
+	if (receive_dma_ring)
+		tb_ring_quarantine(receive_dma_ring);
+	queue_delayed_work(xd->tb->wq, &q->retry_work,
+			   msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tb_xdomain_quarantine_paths);
+
+void tb_xdomain_quarantine_prepare_reset(struct tb *tb)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb && !iter->stopping) {
+				iter->stopping = true;
+				refcount_inc(&iter->refs);
+				q = iter;
+				break;
+			}
+		}
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+void tb_xdomain_quarantine_finalize_reset(struct tb *tb,
+					  enum tb_domain_reset_state reset_state)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	if (reset_state != TB_DOMAIN_RESET_PROVEN)
+		return;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb) {
+				q = iter;
+				break;
+			}
+		}
+		if (q)
+			refcount_inc(&q->refs);
+		if (q)
+			q->stopping = true;
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		tb_xdomain_quarantine_release(q, true);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+void tb_xdomain_quarantine_discard_domain(struct tb *tb)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb) {
+				q = iter;
+				break;
+			}
+		}
+		if (q) {
+			refcount_inc(&q->refs);
+			q->stopping = true;
+			list_del_init(&q->list);
+		}
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		dev_err(&q->xd->dev,
+			"controller reset did not prove revocation; abandoning quarantined DMA allocation without reuse\n");
+		/* Drop the former list reference, then our traversal reference. */
+		tb_xdomain_quarantine_put(q);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_xdomain_quarantine_set_ops(const struct tb_xdomain_quarantine_test_ops *ops)
+{
+	mutex_lock(&xdomain_quarantines_lock);
+	if (ops) {
+		xdomain_quarantine_test_ops.disconnect = ops->disconnect;
+		xdomain_quarantine_test_ops.free_ring = ops->free_ring;
+		xdomain_quarantine_test_ops.request_recovery =
+			ops->request_recovery;
+		xdomain_quarantine_test_ops.data = ops->data;
+		xdomain_quarantine_test_ops_set = true;
+	} else {
+		memset(&xdomain_quarantine_test_ops, 0,
+		       sizeof(xdomain_quarantine_test_ops));
+		xdomain_quarantine_test_ops_set = false;
+	}
+	mutex_unlock(&xdomain_quarantines_lock);
+}
+
+void tb_test_xdomain_quarantine_fail_alloc(bool fail)
+{
+	xdomain_quarantine_test_fail_alloc = fail;
+}
+
+static struct tb_xdomain_quarantine *
+tb_test_xdomain_quarantine_find(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+
+	list_for_each_entry(q, &xdomain_quarantines, list)
+		if (q->xd == xd)
+			return q;
+	return NULL;
+}
+
+int tb_test_xdomain_quarantine_retry(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+	int ret;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	q = tb_test_xdomain_quarantine_find(xd);
+	if (q) {
+		refcount_inc(&q->refs);
+		q->stopping = true;
+	}
+	mutex_unlock(&xdomain_quarantines_lock);
+	if (!q)
+		return -ENOENT;
+	cancel_delayed_work_sync(&q->retry_work);
+	q->stopping = false;
+	ret = tb_xdomain_quarantine_retry_record(q, false);
+	tb_xdomain_quarantine_put(q);
+	return ret;
+}
+
+void tb_test_xdomain_quarantine_finalize(struct tb *tb,
+					 enum tb_domain_reset_state reset_state)
+{
+	tb_xdomain_quarantine_finalize_reset(tb, reset_state);
+}
+
+unsigned int tb_test_xdomain_quarantine_count(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+	unsigned int count = 0;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	list_for_each_entry(q, &xdomain_quarantines, list)
+		if (q->xd == xd)
+			count++;
+	mutex_unlock(&xdomain_quarantines_lock);
+	return count;
+}
+#endif
 
 struct tb_xdomain_lookup {
 	const uuid_t *uuid;

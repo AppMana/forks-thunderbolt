@@ -117,15 +117,19 @@ static void tbframe_service_remove(struct tb_service *svc)
 		TBFRAME_DOWN_UNPLUG : TBFRAME_DOWN_CLOSED;
 
 	if (binding) {
+		int ret;
+
 		/*
 		 * A forced (leaked) link teardown still references the hw
 		 * context from its leaked frames; leak the hw context too
 		 * rather than hand those frames a dangling pointer.
 		 */
-		if (tbframe_link_destroy(binding->link, reason))
-			pr_err("leaking hw context after forced link teardown\n");
-		else
-			tbframe_hw_destroy(binding->hw);
+		ret = tbframe_link_destroy(binding->link, reason);
+		if (ret) {
+			pr_err("leaking forced link and hw context after client references failed to drain\n");
+			return;
+		}
+		tbframe_hw_destroy(binding->hw);
 	}
 	tb_service_set_drvdata(svc, NULL);
 	kfree(binding);

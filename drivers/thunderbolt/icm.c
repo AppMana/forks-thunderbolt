@@ -19,6 +19,10 @@
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+#include <kunit/test.h>
+#endif
+
 #include "ctl.h"
 #include "dma_port.h"
 #include "nhi_regs.h"
@@ -280,10 +284,20 @@ static inline u64 get_parent_route(u64 route)
 }
 
 static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw);
-static void icm_disconnect_pcie_tunnels(struct tb *tb);
+static int icm_disconnect_pcie_tunnels(struct tb *tb);
 static void icm_cancel_pcie_rescan(struct icm *icm);
 static void icm_schedule_native_pcie_hotplug_rescan(struct tb *tb,
 						    struct tb_switch *sw);
+
+struct icm_teardown_ops {
+	int (*disconnect_pcie_tunnels)(struct tb *tb, void *data);
+	int (*disconnect_pcie_paths)(struct tb *tb, void *data);
+	void (*put_after_revoke)(struct tb_tunnel *tunnel, void *data);
+	void (*put_on_cm_stop)(struct tb_tunnel *tunnel, void *data);
+	void (*remove_topology)(struct tb *tb, void *data);
+	void (*driver_unloads)(struct tb *tb, void *data);
+	void (*release_auth)(struct tb *tb, void *data);
+};
 
 static int pci2cio_wait_completion(struct icm *icm, unsigned long timeout_msec)
 {
@@ -1720,24 +1734,33 @@ static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw)
 
 	tb_switch_xhci_disconnect(sw);
 	icm_remove_pcie_devices(tb, tunnel->src_port);
-	tb_tunnel_deactivate(tunnel);
+	if (tb_tunnel_deactivate(tunnel))
+		return -EUCLEAN;
 	list_del(&tunnel->list);
 	tb_tunnel_put(tunnel);
 	return 0;
 }
 
-static void icm_disconnect_pcie_tunnels(struct tb *tb)
+static int icm_disconnect_pcie_tunnels(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
 
 	list_for_each_entry_safe_reverse(tunnel, n, &icm->tunnel_list, list) {
 		if (tunnel->type == TB_TUNNEL_PCI) {
-			tb_tunnel_deactivate(tunnel);
+			res = tb_tunnel_deactivate(tunnel);
+			if (res) {
+				if (!ret)
+					ret = res;
+				continue;
+			}
 			list_del(&tunnel->list);
 			tb_tunnel_put(tunnel);
 		}
 	}
+
+	return ret;
 }
 
 static int icm_tunnel_pcie_fallback(struct tb *tb, struct tb_switch *sw)
@@ -1777,7 +1800,10 @@ static int icm_tunnel_pcie_fallback(struct tb *tb, struct tb_switch *sw)
 	if (ret) {
 		tb_sw_warn(sw, "tbfix: software PCIe tunnel activation failed: %d\n",
 			   ret);
-		tb_tunnel_put(tunnel);
+		if (ret == -EUCLEAN)
+			list_add_tail(&tunnel->list, &icm->tunnel_list);
+		else
+			tb_tunnel_put(tunnel);
 		return ret;
 	}
 
@@ -3281,16 +3307,104 @@ static int icm_start(struct tb *tb, bool not_used)
 	return ret;
 }
 
-static void icm_stop(struct tb *tb)
+static int icm_teardown_disconnect_pcie_tunnels(struct tb *tb, void *data)
+{
+	return icm_disconnect_pcie_tunnels(tb);
+}
+
+static int icm_teardown_disconnect_pcie_paths(struct tb *tb, void *data)
+{
+	return nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DISCONNECT_PCIE_PATHS, 0);
+}
+
+static void icm_teardown_put_after_revoke(struct tb_tunnel *tunnel, void *data)
+{
+	tb_tunnel_put_after_revoke(tunnel);
+}
+
+static void icm_teardown_put_on_cm_stop(struct tb_tunnel *tunnel, void *data)
+{
+	tb_tunnel_put_on_cm_stop(tunnel);
+}
+
+static void icm_teardown_remove_topology(struct tb *tb, void *data)
+{
+	tb_switch_remove(tb->root_switch);
+	tb->root_switch = NULL;
+}
+
+static void icm_teardown_driver_unloads(struct tb *tb, void *data)
+{
+	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
+}
+
+static void icm_teardown_release_auth(struct tb *tb, void *data)
 {
 	struct icm *icm = tb_priv(tb);
 
-	cancel_delayed_work(&icm->rescan_work);
-	icm_cancel_pcie_rescan(icm);
-	icm_disconnect_pcie_tunnels(tb);
-	tb_switch_remove(tb->root_switch);
-	tb->root_switch = NULL;
-	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
+	kfree(icm->last_nvm_auth);
+	icm->last_nvm_auth = NULL;
+}
+
+static const struct icm_teardown_ops icm_teardown_ops = {
+	.disconnect_pcie_tunnels = icm_teardown_disconnect_pcie_tunnels,
+	.disconnect_pcie_paths = icm_teardown_disconnect_pcie_paths,
+	.put_after_revoke = icm_teardown_put_after_revoke,
+	.put_on_cm_stop = icm_teardown_put_on_cm_stop,
+	.remove_topology = icm_teardown_remove_topology,
+	.driver_unloads = icm_teardown_driver_unloads,
+	.release_auth = icm_teardown_release_auth,
+};
+
+static int __icm_stop(struct tb *tb, const struct icm_teardown_ops *ops,
+		      void *data)
+{
+	int ret, retry_ret;
+
+	ret = ops->disconnect_pcie_tunnels(tb, data);
+	if (!ret)
+		return 0;
+
+	/*
+	 * A mailbox acknowledgment only says that firmware accepted the
+	 * request. Prove that every tracked path is inactive by running the
+	 * normal deactivation/readback path again before releasing ownership.
+	 */
+	ret = ops->disconnect_pcie_paths(tb, data);
+	if (ret) {
+		tb_warn(tb, "failed to request PCIe path disconnect: %d\n", ret);
+		return ret;
+	}
+
+	retry_ret = ops->disconnect_pcie_tunnels(tb, data);
+	if (retry_ret)
+		tb_warn(tb,
+			"PCIe tunnel ownership remains unresolved after firmware disconnect: %d\n",
+			retry_ret);
+
+	return retry_ret;
+}
+
+static void __icm_finalize_stop(struct tb *tb,
+				enum tb_domain_reset_state reset_state,
+				const struct icm_teardown_ops *ops, void *data)
+{
+	struct icm *icm = tb_priv(tb);
+	struct tb_tunnel *tunnel, *n;
+
+	list_for_each_entry_safe_reverse(tunnel, n, &icm->tunnel_list, list) {
+		list_del_init(&tunnel->list);
+		if (reset_state == TB_DOMAIN_RESET_PROVEN) {
+			ops->put_after_revoke(tunnel, data);
+		} else {
+			if (WARN_ON(tb_tunnel_is_dma(tunnel)))
+				continue;
+			ops->put_on_cm_stop(tunnel, data);
+		}
+	}
+
+	ops->remove_topology(tb, data);
+	ops->driver_unloads(tb, data);
 
 	/*
 	 * Do not reset resident firmware merely to clean up for the next load.
@@ -3298,9 +3412,23 @@ static void icm_stop(struct tb *tb)
 	 * the available warm CPU restart. No other family has a documented and
 	 * independently validated live restart contract here.
 	 */
+	ops->release_auth(tb, data);
+}
 
-	kfree(icm->last_nvm_auth);
-	icm->last_nvm_auth = NULL;
+static int icm_stop(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+
+	cancel_delayed_work(&icm->rescan_work);
+	icm_cancel_pcie_rescan(icm);
+	return __icm_stop(tb, &icm_teardown_ops, NULL);
+}
+
+static void icm_finalize_stop(struct tb *tb,
+			      enum tb_domain_reset_state reset_state,
+			      bool ownership_unresolved)
+{
+	__icm_finalize_stop(tb, reset_state, &icm_teardown_ops, NULL);
 }
 
 /*
@@ -3488,6 +3616,7 @@ static const struct tb_cm_ops icm_fr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
@@ -3505,6 +3634,7 @@ static const struct tb_cm_ops icm_ar_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
@@ -3528,6 +3658,7 @@ static const struct tb_cm_ops icm_tr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
 	.quiesced_reset = icm_quiesced_reset,
 	.suspend = icm_suspend,
@@ -3555,6 +3686,7 @@ static const struct tb_cm_ops icm_mr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
@@ -3581,6 +3713,7 @@ static const struct tb_cm_ops icm_icl_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -3723,3 +3856,198 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	return tb;
 }
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct icm_teardown_test_ctx {
+	struct icm_teardown_ops ops;
+	int disconnect_ret[2];
+	unsigned int disconnect_calls;
+	int mailbox_ret;
+	unsigned int mailbox_calls;
+	unsigned int revoke_put_calls;
+	unsigned int cm_stop_put_calls;
+	unsigned int remove_calls;
+	bool list_empty_at_remove;
+	unsigned int unload_calls;
+	unsigned int auth_release_calls;
+};
+
+static int icm_teardown_test_disconnect(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+	unsigned int call = ctx->disconnect_calls++;
+
+	return ctx->disconnect_ret[min(call, 1U)];
+}
+
+static int icm_teardown_test_mailbox(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->mailbox_calls++;
+	return ctx->mailbox_ret;
+}
+
+static void icm_teardown_test_revoke_put(struct tb_tunnel *tunnel, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->revoke_put_calls++;
+}
+
+static void icm_teardown_test_cm_stop_put(struct tb_tunnel *tunnel, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->cm_stop_put_calls++;
+}
+
+static void icm_teardown_test_remove(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+	struct icm *icm = tb_priv(tb);
+
+	ctx->remove_calls++;
+	ctx->list_empty_at_remove = list_empty(&icm->tunnel_list);
+}
+
+static void icm_teardown_test_unload(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->unload_calls++;
+}
+
+static void icm_teardown_test_release_auth(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->auth_release_calls++;
+}
+
+static void icm_teardown_test_init(struct icm_teardown_test_ctx *ctx)
+{
+	ctx->ops.disconnect_pcie_tunnels = icm_teardown_test_disconnect;
+	ctx->ops.disconnect_pcie_paths = icm_teardown_test_mailbox;
+	ctx->ops.put_after_revoke = icm_teardown_test_revoke_put;
+	ctx->ops.put_on_cm_stop = icm_teardown_test_cm_stop_put;
+	ctx->ops.remove_topology = icm_teardown_test_remove;
+	ctx->ops.driver_unloads = icm_teardown_test_unload;
+	ctx->ops.release_auth = icm_teardown_test_release_auth;
+}
+
+static struct tb *icm_teardown_test_alloc_tb(struct kunit *test)
+{
+	struct pci_dev *pdev;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb) + sizeof(struct icm), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	pdev->dev.init_name = "thunderbolt-icm-test";
+	nhi->pdev = pdev;
+	tb->nhi = nhi;
+	INIT_LIST_HEAD(&((struct icm *)tb_priv(tb))->tunnel_list);
+	return tb;
+}
+
+static void icm_stop_mailbox_ack_needs_readback_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+	int ret;
+
+	icm_teardown_test_init(&ctx);
+	ctx.disconnect_ret[0] = -ETIMEDOUT;
+	ctx.disconnect_ret[1] = -ETIMEDOUT;
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	ret = __icm_stop(tb, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, ctx.disconnect_calls, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.mailbox_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, list_empty(&icm->tunnel_list));
+}
+
+static void icm_finalize_unproven_non_dma_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	icm_teardown_test_init(&ctx);
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	__icm_finalize_stop(tb, TB_DOMAIN_RESET_NONE, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_TRUE(test, list_empty(&icm->tunnel_list));
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.cm_stop_put_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.list_empty_at_remove);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 1U);
+}
+
+static void icm_finalize_proven_revoke_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	icm_teardown_test_init(&ctx);
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	__icm_finalize_stop(tb, TB_DOMAIN_RESET_PROVEN, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_TRUE(test, list_empty(&icm->tunnel_list));
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.cm_stop_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.list_empty_at_remove);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 1U);
+}
+
+static struct kunit_case icm_teardown_test_cases[] = {
+	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
+	KUNIT_CASE(icm_finalize_unproven_non_dma_test),
+	KUNIT_CASE(icm_finalize_proven_revoke_test),
+	{}
+};
+
+static struct kunit_suite icm_teardown_test_suite = {
+	.name = "thunderbolt_icm_teardown",
+	.test_cases = icm_teardown_test_cases,
+};
+
+kunit_test_suite(icm_teardown_test_suite);
+#endif

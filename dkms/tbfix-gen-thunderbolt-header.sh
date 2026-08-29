@@ -42,6 +42,7 @@ dst="$out/linux/thunderbolt.h"
 # Idempotency: only apply a change the stock header does not already carry.
 add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handler=0
 add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_active=0
+add_path_quarantine=1; grep -q 'TB_XDOMAIN_HAS_PATH_QUARANTINE' "$src" && add_path_quarantine=0
 add_reannounce=1; grep -q 'TB_XDOMAIN_HAS_REANNOUNCE' "$src" && add_reannounce=0
 # struct tb_xdomain::removing (xdomain.c: mainline 2c5d2d3c3f70 backport --
 # tb_xdomain_remove() sets it under xd->lock; every external
@@ -51,6 +52,10 @@ add_removing=1;   grep -q 'bool removing;' "$src" && add_removing=0
 # backport -- lets service drivers wait for in-flight frames to complete
 # before stopping a ring)
 add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
+# A terminal service-driver teardown may have to hand a stopped ring to the
+# core when the fabric path cannot be proven drained. The ring stays allocated
+# and non-reusable until the domain has obtained real controller-reset proof.
+add_ring_quarantine=1; grep -q 'tb_ring_quarantine' "$src" && add_ring_quarantine=0
 # struct tb_xdomain::bonding_rearm_attempts (xdomain.c: bounded lane-bonding
 # re-arm from ENUMERATED; appended at the END of the struct so every stock
 # member keeps its stock offset for stock-header consumers)
@@ -61,6 +66,9 @@ add_uuid_verified=1; grep -q 'bool uuid_verified;' "$src" && add_uuid_verified=0
 # Separate failure history for unverified-peer discovery. This must not share
 # the properties-announcement counter because both delayed works run at once.
 add_uuid_retry=1; grep -q 'uuid_retry_failures' "$src" && add_uuid_retry=0
+# Preserve a failed core path teardown across the later is_unplugged service
+# unbind phase; consumers must not turn an unresolved tuple into success.
+add_path_teardown_err=1; grep -q 'path_teardown_err' "$src" && add_path_teardown_err=0
 
 # Struct-scoped transformation. Anchors:
 #   1. inside struct tb_protocol_handler, after the
@@ -69,12 +77,16 @@ add_uuid_retry=1; grep -q 'uuid_retry_failures' "$src" && add_uuid_retry=0
 #      insertion after its closing ");")               -> add paths_active decl
 awk -v add_handler="$add_handler" \
     -v add_paths_active="$add_paths_active" \
+    -v add_path_quarantine="$add_path_quarantine" \
     -v add_reannounce="$add_reannounce" \
     -v add_removing="$add_removing" \
     -v add_ring_flush="$add_ring_flush" \
+    -v add_ring_quarantine="$add_ring_quarantine" \
     -v add_rearm="$add_rearm" \
     -v add_uuid_verified="$add_uuid_verified" \
-    -v add_uuid_retry="$add_uuid_retry" '
+    -v add_uuid_retry="$add_uuid_retry" \
+    -v add_path_teardown_err="$add_path_teardown_err" '
+
 
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
@@ -97,22 +109,37 @@ awk -v add_handler="$add_handler" \
 			print "\tbool uuid_verified;"
 		if (add_uuid_retry == 1)
 			print "\tunsigned int uuid_retry_failures;"
+		if (add_path_teardown_err == 1)
+			print "\tint path_teardown_err;"
 		print "};"
 		in_xd = 0
 		next
 	}
 	/^struct tb_ring \{/           { in_ring = 1 }
-	add_ring_flush == 1 && in_ring == 1 && $0 == "};" {
-		print "\twait_queue_head_t wait;"
-		print
+	in_ring == 1 && $0 == "};" {
+		if (add_ring_flush == 1)
+			print "\twait_queue_head_t wait;"
+		if (add_ring_quarantine == 1)
+			print "\tbool quarantined;"
+		print "};"
 		in_ring = 0
 		next
 	}
-	in_ring == 1 && $0 == "};" { in_ring = 0 }
 	add_ring_flush == 1 && $0 == "void tb_ring_start(struct tb_ring *ring);" {
 		print
 		print "#define TB_RING_HAS_FLUSH 1"
 		print "bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec);"
+		if (add_ring_quarantine == 1) {
+			print "#define TB_RING_HAS_QUARANTINE 1"
+			print "void tb_ring_quarantine(struct tb_ring *ring);"
+		}
+		next
+	}
+	add_ring_flush == 0 && add_ring_quarantine == 1 && \
+	    $0 == "void tb_ring_start(struct tb_ring *ring);" {
+		print
+		print "#define TB_RING_HAS_QUARANTINE 1"
+		print "void tb_ring_quarantine(struct tb_ring *ring);"
 		next
 	}
 	# ->callback_xd is APPENDED after ->list, never inserted mid-struct: a
@@ -135,16 +162,28 @@ awk -v add_handler="$add_handler" \
 		next
 	}
 	in_ph == 1 && $0 == "};" { in_ph = 0 }
-	add_paths_active == 1 && \
+	(add_paths_active == 1 || add_path_quarantine == 1) && \
 	    $0 ~ /^int tb_xdomain_disable_paths\(struct tb_xdomain \*xd, int transmit_path,/ {
 		in_disable = 1
 	}
-	add_paths_active == 1 && in_disable == 1 && $0 ~ /\);$/ {
+	in_disable == 1 && $0 ~ /\);$/ {
 		print
-		print "#define TB_XDOMAIN_HAS_PATHS_ACTIVE 1"
-		print "int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,"
-		print "\t\t\t    int transmit_ring, int receive_path,"
-		print "\t\t\t    int receive_ring);"
+		if (add_paths_active == 1) {
+			print "#define TB_XDOMAIN_HAS_PATHS_ACTIVE 1"
+			print "int tb_xdomain_paths_active(struct tb_xdomain *xd,"
+			print "\t\t\t    int transmit_path, int transmit_ring,"
+			print "\t\t\t    int receive_path,"
+			print "\t\t\t    int receive_ring);"
+		}
+		if (add_path_quarantine == 1) {
+			print "#define TB_XDOMAIN_HAS_PATH_QUARANTINE 1"
+			print "struct tb_ring;"
+			print "int tb_xdomain_quarantine_paths(struct tb_xdomain *xd,"
+			print "\t\t\t\tint transmit_path, int transmit_ring,"
+			print "\t\t\t\tstruct tb_ring *transmit_dma_ring,"
+			print "\t\t\t\tint receive_path, int receive_ring,"
+			print "\t\t\t\tstruct tb_ring *receive_dma_ring);"
+		}
 		in_disable = 0
 		next
 	}
@@ -159,12 +198,16 @@ fail=0
 for tok in \
 	'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' \
 	'TB_XDOMAIN_HAS_PATHS_ACTIVE' \
+	'TB_XDOMAIN_HAS_PATH_QUARANTINE' \
 	'TB_XDOMAIN_HAS_REANNOUNCE' \
 	'bool removing;' \
 	'TB_RING_HAS_FLUSH' \
+	'TB_RING_HAS_QUARANTINE' \
+	'bool quarantined;' \
 	'bonding_rearm_attempts' \
 	'bool uuid_verified;' \
-	'uuid_retry_failures'
+	'uuid_retry_failures' \
+	'path_teardown_err'
 do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2

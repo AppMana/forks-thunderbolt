@@ -186,6 +186,9 @@ struct tbframe_hw_ops {
 				   const struct tb_ring_snapshot *first,
 				   const struct tb_ring_snapshot *last,
 				   bool control_healthy);
+	/* Transfer the exact unresolved path/ring/HopID tuple to core ownership. */
+	int	(*quarantine_paths)(void *hw, int local_hopid,
+				    int remote_hopid);
 	void	(*report_data_proven)(void *hw);
 	int	(*control_request)(void *hw, const void *req, size_t req_len,
 				   void *resp, size_t resp_len,
@@ -267,6 +270,10 @@ struct tbframe_link {
 	bool			rings_allocated;
 	bool			rings_up;
 	bool			paths_enabled;
+	/* The core still owns the exact path tuple, active or quarantined. */
+	bool			paths_owned;
+	/* An unresolved path transferred rings/HopIDs to core quarantine. */
+	bool			terminal_handoff;
 	bool			in_hopid_held;
 	/*
 	 * True once this side's TX ring has been drained/cancelled for the
@@ -447,5 +454,4 @@ struct tbframe_hw;
 struct tbframe_hw *tbframe_hw_create(struct tbframe *tf, struct tb_xdomain *xd);
 void tbframe_hw_destroy(struct tbframe_hw *hw);
 extern const struct tbframe_hw_ops tbframe_hw_real_ops;
-
 #endif /* TBFRAME_PRIV_H */

@@ -312,6 +312,52 @@ static void tbframe_frame_recycle_rx(struct tbframe_frame_priv *f)
 	tbframe_frame_putback_rx(f);
 }
 
+/* Called only after the rings and every leaf callback have been stopped. */
+static bool tbframe_link_quarantine_paths(struct tbframe_link *link,
+					  u16 remote_hopid)
+{
+	unsigned long flags;
+
+	if (!link->ops->quarantine_paths ||
+	    link->ops->quarantine_paths(link->hw, link->local_hopid,
+					remote_hopid))
+		return false;
+
+	spin_lock_irqsave(&link->lock, flags);
+	link->state = TBFRAME_STATE_DEAD;
+	link->terminal_handoff = true;
+	link->rings_allocated = false;
+	link->rings_up = false;
+	link->paths_enabled = false;
+	link->paths_owned = false;
+	link->in_hopid_held = false;
+	spin_unlock_irqrestore(&link->lock, flags);
+	return true;
+}
+
+static void tbframe_link_notify_down(struct tbframe_link *link,
+				     enum tbframe_down_reason reason,
+				     bool was_up, bool terminal)
+{
+	struct tbframe *tf = link->tf;
+	unsigned long flags;
+	bool deliver;
+
+	spin_lock_irqsave(&link->lock, flags);
+	deliver = was_up || (link->up_delivered && terminal);
+	if (terminal)
+		link->up_delivered = false;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (!deliver)
+		return;
+
+	pr_info("%s: link down (%d)\n", link->name, reason);
+	down_read(&tf->client_rwsem);
+	if (tf->client_ops && tf->client_ops->link_down)
+		tf->client_ops->link_down(tf->client_ctx, link, reason);
+	up_read(&tf->client_rwsem);
+}
+
 /*
  * Bring up the data plane, tbnet_connected_work ordering: allocate rings,
  * register the in-HopID from the peer's advertised transmit HopID, start
@@ -402,12 +448,44 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 
 	ret = link->ops->enable_paths(link->hw, link->local_hopid,
 				      remote_hopid);
+	if (ret == -EUCLEAN) {
+		int disconnect_ret;
+
+		/*
+		 * Activation rollback left the core owning this exact tuple.
+		 * Retry its disconnect once while both descriptor sinks still
+		 * exist. If the retry also fails, fence callbacks and quarantine
+		 * every object the unresolved route may still name.
+		 */
+		spin_lock_irqsave(&link->lock, flags);
+		link->paths_owned = true;
+		spin_unlock_irqrestore(&link->lock, flags);
+		disconnect_ret = link->ops->disable_paths(link->hw,
+							link->local_hopid,
+							remote_hopid);
+		link->ops->stop_rings(link->hw);
+		if (disconnect_ret) {
+			if (!tbframe_link_quarantine_paths(link, remote_hopid)) {
+				spin_lock_irqsave(&link->lock, flags);
+				link->state = TBFRAME_STATE_DEAD;
+				spin_unlock_irqrestore(&link->lock, flags);
+			}
+			tbframe_link_notify_down(link, TBFRAME_DOWN_DEAD_HW,
+						 false, true);
+			return disconnect_ret;
+		}
+		spin_lock_irqsave(&link->lock, flags);
+		link->paths_owned = false;
+		spin_unlock_irqrestore(&link->lock, flags);
+		goto err_free_rings;
+	}
 	if (ret)
 		goto err_stop_rings;
 
 	spin_lock_irqsave(&link->lock, flags);
 	link->rings_up = true;
 	link->paths_enabled = true;
+	link->paths_owned = true;
 	link->e2e_active = e2e;
 	link->data_window = tbframe_link_window(link);
 	spin_unlock_irqrestore(&link->lock, flags);
@@ -857,7 +935,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool was_up, deliver_down, terminal = false;
+	bool was_up, terminal = false;
 	bool had_rings, rings_running, had_paths, had_hopid;
 	unsigned int drain_ms;
 	u16 remote_hopid;
@@ -881,7 +959,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 		link->state = TBFRAME_STATE_INIT;
 	had_rings = link->rings_allocated;
 	rings_running = link->rings_up;
-	had_paths = link->paths_enabled;
+	had_paths = link->paths_owned;
 	had_hopid = link->in_hopid_held;
 	/*
 	 * NOT link->remote_hopid: that field tracks the peer's latest HELLO
@@ -1018,6 +1096,9 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 		/* Fence callbacks even when the route could not be drained. */
 		link->ops->stop_rings(link->hw);
 
+	terminal = reason == TBFRAME_DOWN_CLOSED ||
+		   reason == TBFRAME_DOWN_UNPLUG ||
+		   reason == TBFRAME_DOWN_DEAD_HW;
 	if (disconnect_ret) {
 		spin_lock_irqsave(&link->lock, flags);
 		link->state = TBFRAME_STATE_DEAD;
@@ -1025,19 +1106,28 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 		pr_err("%s: path disconnect failed (%d) and route ownership remains unresolved; retaining rings and HopIDs\n",
 		       link->name, disconnect_ret);
 		reason = TBFRAME_DOWN_DEAD_HW;
+		terminal = true;
+		/*
+		 * A failed disconnect cannot be repaired by another session over the
+		 * same tuple. Once every leaf callback is fenced, transfer the stopped
+		 * rings to core ownership. The core retries the exact path and, if it
+		 * remains owned, drives the controller recovery state machine. This is
+		 * required for ordinary verification failures as well as final remove.
+		 */
+		if (tbframe_link_quarantine_paths(link, remote_hopid))
+			disconnect_ret = 0;
 	} else {
 		/* Firmware no longer names the rings or HopID; ownership may move. */
 		spin_lock_irqsave(&link->lock, flags);
 		link->paths_enabled = false;
+		link->paths_owned = false;
 		link->in_hopid_held = false;
 		spin_unlock_irqrestore(&link->lock, flags);
 	}
-	terminal = reason == TBFRAME_DOWN_CLOSED ||
-		   reason == TBFRAME_DOWN_UNPLUG ||
-		   reason == TBFRAME_DOWN_DEAD_HW;
-	if (!disconnect_ret && had_rings && terminal)
+	if (!disconnect_ret && had_rings && terminal &&
+	    !link->terminal_handoff)
 		link->ops->free_rings(link->hw);
-	if (!disconnect_ret && had_hopid)
+	if (!disconnect_ret && had_hopid && !link->terminal_handoff)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
 	spin_lock_irqsave(&link->lock, flags);
 	if (!disconnect_ret && terminal)
@@ -1071,18 +1161,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	 * shadowing the live device. Non-terminal downs do not clear the
 	 * flag: the client's record (and device) outlives session bounces.
 	 */
-	spin_lock_irqsave(&link->lock, flags);
-	deliver_down = was_up || (link->up_delivered && terminal);
-	if (terminal)
-		link->up_delivered = false;
-	spin_unlock_irqrestore(&link->lock, flags);
-	if (deliver_down) {
-		pr_info("%s: link down (%d)\n", link->name, reason);
-		down_read(&tf->client_rwsem);
-		if (tf->client_ops && tf->client_ops->link_down)
-			tf->client_ops->link_down(tf->client_ctx, link, reason);
-		up_read(&tf->client_rwsem);
-	}
+	tbframe_link_notify_down(link, reason, was_up, terminal);
 
 	/*
 	 * Automatic re-handshake for every reason but the terminal ones.  After a
@@ -2362,11 +2441,6 @@ int tbframe_link_destroy(struct tbframe_link *link,
 	link->removing = true;
 	spin_unlock_irqrestore(&link->lock, flags);
 
-	/* Unlink first: tf->lock is always taken outside session_lock. */
-	mutex_lock(&tf->lock);
-	list_del_init(&link->node);
-	mutex_unlock(&tf->lock);
-
 	timer_shutdown_sync(&link->verify_timer);
 	cancel_delayed_work_sync(&link->session_work);
 	cancel_work_sync(&link->verify_work);
@@ -2379,7 +2453,13 @@ int tbframe_link_destroy(struct tbframe_link *link,
 	if (ret)
 		return ret;
 
-	link->ops->release_out_hopid(link->hw, link->local_hopid);
+	/* Delist only after no controller path can still name this link. */
+	mutex_lock(&tf->lock);
+	list_del_init(&link->node);
+	mutex_unlock(&tf->lock);
+
+	if (!link->terminal_handoff)
+		link->ops->release_out_hopid(link->hw, link->local_hopid);
 
 	/*
 	 * Bounded refs wait, then a deliberate leak: a still-held ref means

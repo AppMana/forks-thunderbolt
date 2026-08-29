@@ -365,6 +365,9 @@ tbframe_teardown_disconnect_failure_quarantines_without_reapprove(struct kunit *
 	KUNIT_EXPECT_EQ(test, releases, fx->mock.in_hopid_releases);
 	KUNIT_EXPECT_EQ(test, allocs, fx->mock.in_hopid_allocs);
 	KUNIT_EXPECT_EQ(test, enables, fx->mock.enable_paths_calls);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.quarantine_requests);
+	KUNIT_EXPECT_TRUE(test, fx->link->terminal_handoff);
+	KUNIT_EXPECT_FALSE(test, fx->link->up_delivered);
 	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
 	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
 	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
@@ -379,9 +382,82 @@ tbframe_teardown_disconnect_failure_quarantines_without_reapprove(struct kunit *
 }
 
 /*
+ * An activation error does not prove that activation left no hardware behind.
+ * If the core retained a tunnel because its rollback could not drain a hop,
+ * the exact rings and HopID named by that tunnel must remain owned.  A retry
+ * must first finish disconnecting that tuple; it may not free it and allocate
+ * a replacement over the ambiguous route.
+ */
+static void
+tbframe_activation_failure_quarantines_ambiguous_ownership(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned int allocs, releases;
+
+	fx->mock.enable_paths_err = -EUCLEAN;
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+	allocs = fx->mock.in_hopid_allocs;
+	releases = fx->mock.in_hopid_releases;
+
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.enable_paths_calls);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.disable_paths_calls);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_STATE_DEAD,
+			(int)fx->link->state);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_EQ(test, allocs + 1, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, releases, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.quarantine_requests);
+	KUNIT_EXPECT_TRUE(test, fx->link->terminal_handoff);
+	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
+	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
+
+	/* A scheduled retry must not allocate or approve a replacement tuple. */
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.enable_paths_calls);
+	KUNIT_EXPECT_EQ(test, allocs + 1, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, releases, fx->mock.in_hopid_releases);
+}
+
+/*
+ * A nonterminal rebuild keeps the client device published between sessions.
+ * If the next activation cannot roll back, the core recovery handoff becomes
+ * terminal and must withdraw that previously published device exactly once.
+ */
+static void
+tbframe_activation_quarantine_withdraws_prior_publication(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned long flags;
+
+	tbframe_mock_link_up(test, fx);
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_ASSERT_TRUE(test, fx->link->up_delivered);
+
+	fx->mock.enable_paths_err = -EUCLEAN;
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_STATE_DEAD,
+			(int)fx->link->state);
+	KUNIT_EXPECT_TRUE(test, fx->link->terminal_handoff);
+	KUNIT_EXPECT_FALSE(test, fx->link->up_delivered);
+	KUNIT_EXPECT_EQ(test, 2u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_DEAD_HW,
+			fx->client.reasons[2]);
+}
+
+/*
  * Terminal removal has the same ownership rule. If the route cannot be
  * disconnected, retain every object that its DMA programming may still name
- * and return an error so the caller keeps the hardware context alive.
+ * and complete only after the core has accepted the exact ownership handoff.
  */
 static void
 tbframe_teardown_disconnect_failure_leaks_owned_dma_state(struct kunit *test)
@@ -395,7 +471,9 @@ tbframe_teardown_disconnect_failure_leaks_owned_dma_state(struct kunit *test)
 	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
 	fx->link_destroyed = true;
 
-	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
+	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.quarantine_requests);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_quarantined);
 	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
 	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
@@ -426,7 +504,8 @@ tbframe_teardown_inactive_readback_does_not_prove_drained(struct kunit *test)
 	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
 	fx->link_destroyed = true;
 
-	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
+	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.quarantine_requests);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.paths_active_calls);
 	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
@@ -521,6 +600,8 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_terminal_down_after_logout),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_disconnect_failure_quarantines_without_reapprove),
+	KUNIT_CASE(tbframe_activation_failure_quarantines_ambiguous_ownership),
+	KUNIT_CASE(tbframe_activation_quarantine_withdraws_prior_publication),
 	KUNIT_CASE(tbframe_teardown_disconnect_failure_leaks_owned_dma_state),
 	KUNIT_CASE(tbframe_teardown_inactive_readback_does_not_prove_drained),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),

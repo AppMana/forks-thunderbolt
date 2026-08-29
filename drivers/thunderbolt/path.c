@@ -13,6 +13,39 @@
 
 #include "tb.h"
 
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+static const struct tb_path_test_io *tb_path_test_io;
+static void *tb_path_test_io_data;
+
+void tb_test_path_set_io(const struct tb_path_test_io *io, void *data)
+{
+	tb_path_test_io_data = data;
+	tb_path_test_io = io;
+}
+#endif
+
+static int tb_path_port_read(struct tb_port *port, void *buffer,
+			     enum tb_cfg_space space, u32 offset, u32 length)
+{
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (tb_path_test_io && tb_path_test_io->read)
+		return tb_path_test_io->read(tb_path_test_io_data, port, buffer,
+					     space, offset, length);
+#endif
+	return tb_port_read(port, buffer, space, offset, length);
+}
+
+static int tb_path_port_write(struct tb_port *port, const void *buffer,
+			      enum tb_cfg_space space, u32 offset, u32 length)
+{
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (tb_path_test_io && tb_path_test_io->write)
+		return tb_path_test_io->write(tb_path_test_io_data, port, buffer,
+					      space, offset, length);
+#endif
+	return tb_port_write(port, buffer, space, offset, length);
+}
+
 static void tb_dump_hop(const struct tb_path_hop *hop, const struct tb_regs_hop *regs)
 {
 	const struct tb_port *port = hop->in_port;
@@ -111,6 +144,9 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 	size_t num_hops;
 	int ret, i, h;
 
+	if (last)
+		*last = NULL;
+
 	if (src_hopid < 0 && dst) {
 		/*
 		 * For incomplete paths the intermediate HopID can be
@@ -131,7 +167,7 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 	for (i = 0; p && i < TB_PATH_MAX_HOPS; i++) {
 		sw = p->sw;
 
-		ret = tb_port_read(p, &hop, TB_CFG_HOPS, 2 * h, 2);
+		ret = tb_path_port_read(p, &hop, TB_CFG_HOPS, 2 * h, 2);
 		if (ret) {
 			tb_port_warn(p, "failed to read path at %d\n", h);
 			return NULL;
@@ -149,6 +185,8 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 		p = out_port->remote;
 		num_hops++;
 	}
+	if (!num_hops)
+		return NULL;
 
 	path = kzalloc(sizeof(*path), GFP_KERNEL);
 	if (!path)
@@ -157,7 +195,7 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 	path->name = name;
 	path->tb = src->sw->tb;
 	path->path_length = num_hops;
-	path->activated = true;
+	path->state = TB_PATH_ACTIVE;
 	path->alloc_hopid = alloc_hopid;
 
 	path->hops = kcalloc(num_hops, sizeof(*path->hops), GFP_KERNEL);
@@ -177,7 +215,7 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 
 		sw = p->sw;
 
-		ret = tb_port_read(p, &hop, TB_CFG_HOPS, 2 * h, 2);
+		ret = tb_path_port_read(p, &hop, TB_CFG_HOPS, 2 * h, 2);
 		if (ret) {
 			tb_port_warn(p, "failed to read path at %d\n", h);
 			goto err;
@@ -397,24 +435,27 @@ static int __tb_path_deactivate_hop(struct tb_port *port, int hop_index,
 	int ret;
 
 	/* Disable the path */
-	ret = tb_port_read(port, &hop, TB_CFG_HOPS, 2 * hop_index, 2);
+	ret = tb_path_port_read(port, &hop, TB_CFG_HOPS, 2 * hop_index, 2);
 	if (ret)
 		return ret;
 
-	/* Already disabled */
-	if (!hop.enable)
+	/* Already disabled and fully drained. */
+	if (!hop.enable && !hop.pending)
 		return 0;
 
-	hop.enable = 0;
+	if (hop.enable) {
+		hop.enable = 0;
 
-	ret = tb_port_write(port, &hop, TB_CFG_HOPS, 2 * hop_index, 2);
-	if (ret)
-		return ret;
+		ret = tb_path_port_write(port, &hop, TB_CFG_HOPS,
+					 2 * hop_index, 2);
+		if (ret)
+			return ret;
+	}
 
 	/* Wait until it is drained */
 	timeout = ktime_add_ms(ktime_get(), 500);
 	do {
-		ret = tb_port_read(port, &hop, TB_CFG_HOPS, 2 * hop_index, 2);
+		ret = tb_path_port_read(port, &hop, TB_CFG_HOPS, 2 * hop_index, 2);
 		if (ret)
 			return ret;
 
@@ -433,8 +474,8 @@ static int __tb_path_deactivate_hop(struct tb_port *port, int hop_index,
 				hop.egress_fc = 0;
 				hop.egress_shared_buffer = 0;
 
-				return tb_port_write(port, &hop, TB_CFG_HOPS,
-						     2 * hop_index, 2);
+				return tb_path_port_write(port, &hop, TB_CFG_HOPS,
+							  2 * hop_index, 2);
 			}
 
 			return 0;
@@ -459,26 +500,54 @@ int tb_path_deactivate_hop(struct tb_port *port, int hop_index)
 	return __tb_path_deactivate_hop(port, hop_index, true);
 }
 
-static void __tb_path_deactivate_hops(struct tb_path *path, int first_hop)
+static int __tb_path_deactivate_hops(struct tb_path *path, int first_hop)
 {
-	int i, res;
+	int i, res, ret = 0;
 
 	for (i = first_hop; i < path->path_length; i++) {
 		res = __tb_path_deactivate_hop(path->hops[i].in_port,
 					       path->hops[i].in_hop_index,
 					       path->clear_fc);
-		if (res && res != -ENODEV)
+		if (res && res != -ENODEV) {
 			tb_port_warn(path->hops[i].in_port,
 				     "hop deactivation failed for hop %d, index %d\n",
 				     i, path->hops[i].in_hop_index);
+			if (!ret)
+				ret = res;
+		}
 	}
+
+	return ret;
 }
 
-void tb_path_deactivate(struct tb_path *path)
+static void __tb_path_activation_rollback(struct tb_path *path, int first_hop)
 {
-	if (!path->activated) {
-		tb_WARN(path->tb, "trying to deactivate an inactive path\n");
+	if (__tb_path_deactivate_hops(path, first_hop)) {
+		path->state = TB_PATH_TEARDOWN_FAILED;
 		return;
+	}
+
+	__tb_path_deallocate_nfc(path, 0);
+}
+
+/**
+ * tb_path_deactivate() - Disable and drain every hop in a path
+ * @path: Path to deactivate
+ *
+ * The path retains its routing and credit ownership if any hop cannot be
+ * proven drained, allowing a later call to retry the same teardown.
+ *
+ * Return: %0 on success or the first deactivation error.
+ */
+int tb_path_deactivate(struct tb_path *path)
+{
+	int ret;
+
+	if (!path->hops || path->path_length <= 0)
+		return -EINVAL;
+	if (path->state == TB_PATH_INACTIVE) {
+		tb_WARN(path->tb, "trying to deactivate an inactive path\n");
+		return -EINVAL;
 	}
 	tb_dbg(path->tb,
 	       "deactivating %s path from %llx:%u to %llx:%u\n",
@@ -486,9 +555,16 @@ void tb_path_deactivate(struct tb_path *path)
 	       path->hops[0].in_port->port,
 	       tb_route(path->hops[path->path_length - 1].out_port->sw),
 	       path->hops[path->path_length - 1].out_port->port);
-	__tb_path_deactivate_hops(path, 0);
+	ret = __tb_path_deactivate_hops(path, 0);
+	if (ret) {
+		path->state = TB_PATH_TEARDOWN_FAILED;
+		return ret;
+	}
+
 	__tb_path_deallocate_nfc(path, 0);
-	path->activated = false;
+	path->state = TB_PATH_INACTIVE;
+
+	return 0;
 }
 
 /**
@@ -504,7 +580,10 @@ int tb_path_activate(struct tb_path *path)
 {
 	int i, res;
 	enum tb_path_port out_mask, in_mask;
-	if (path->activated) {
+
+	if (!path->hops || path->path_length <= 0)
+		return -EINVAL;
+	if (path->state != TB_PATH_INACTIVE) {
 		tb_WARN(path->tb, "trying to activate already activated path\n");
 		return -EINVAL;
 	}
@@ -542,8 +621,13 @@ int tb_path_activate(struct tb_path *path)
 		struct tb_regs_hop check = { 0 };
 
 		/* If it is left active deactivate it first */
-		__tb_path_deactivate_hop(path->hops[i].in_port,
-				path->hops[i].in_hop_index, path->clear_fc);
+		res = __tb_path_deactivate_hop(path->hops[i].in_port,
+					       path->hops[i].in_hop_index,
+					       path->clear_fc);
+		if (res) {
+			__tb_path_activation_rollback(path, i);
+			goto err;
+		}
 
 		/* dword 0 */
 		hop.next_hop = path->hops[i].next_hop_index;
@@ -573,11 +657,11 @@ int tb_path_activate(struct tb_path *path)
 
 		tb_port_dbg(path->hops[i].in_port, "Writing hop %d\n", i);
 		tb_dump_hop(&path->hops[i], &hop);
-		res = tb_port_write(path->hops[i].in_port, &hop, TB_CFG_HOPS,
-				    2 * path->hops[i].in_hop_index, 2);
+		res = tb_path_port_write(path->hops[i].in_port, &hop,
+					 TB_CFG_HOPS,
+					 2 * path->hops[i].in_hop_index, 2);
 		if (res) {
-			__tb_path_deactivate_hops(path, i);
-			__tb_path_deallocate_nfc(path, 0);
+			__tb_path_activation_rollback(path, i);
 			goto err;
 		}
 
@@ -588,19 +672,16 @@ int tb_path_activate(struct tb_path *path)
 		 * enable=1 weight=%TB_DMA_WEIGHT, and __tb_path_deactivate_hop()
 		 * clears enable while leaving weight, so an entry reading
 		 * enable=0 weight=0 cannot have come from either and is not a
-		 * state this driver can reach. Measured on appmana-018/019
-		 * 2026-08-26: dw0 0x001c3801 dw1 0x01800500 on the live link,
-		 * against 0x801c3801/0x01800501 on every healthy node, with the
-		 * session negotiating cleanly 108 times and the data-path proof
-		 * failing 107 of them. Fail the activation instead of returning
-		 * success, so the consumer retries rather than declaring a dead
-		 * link up.
+		 * state this driver can reach. Repeated measurements found the
+		 * session negotiation succeeding while the data-path proof failed
+		 * whenever this readback mismatch occurred. Fail the activation so
+		 * the consumer retries instead of declaring a dead link up.
 		 */
-		res = tb_port_read(path->hops[i].in_port, &check, TB_CFG_HOPS,
-				   2 * path->hops[i].in_hop_index, 2);
+		res = tb_path_port_read(path->hops[i].in_port, &check,
+					TB_CFG_HOPS,
+					2 * path->hops[i].in_hop_index, 2);
 		if (res) {
-			__tb_path_deactivate_hops(path, i);
-			__tb_path_deallocate_nfc(path, 0);
+			__tb_path_activation_rollback(path, i);
 			goto err;
 		}
 		if (!check.enable || check.weight != path->weight) {
@@ -611,12 +692,11 @@ int tb_path_activate(struct tb_path *path)
 				     ((const u32 *)&check)[0],
 				     ((const u32 *)&check)[1]);
 			res = -EIO;
-			__tb_path_deactivate_hops(path, i);
-			__tb_path_deallocate_nfc(path, 0);
+			__tb_path_activation_rollback(path, i);
 			goto err;
 		}
 	}
-	path->activated = true;
+	path->state = TB_PATH_ACTIVE;
 	tb_dbg(path->tb, "%s path activation complete\n", path->name);
 	return 0;
 err:

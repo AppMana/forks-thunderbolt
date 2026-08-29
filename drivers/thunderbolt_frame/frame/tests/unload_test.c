@@ -186,6 +186,55 @@ static void tbframe_unload_never_waits_forever(struct kunit *test)
 }
 
 /*
+ * A void service remove cannot be retried or veto module unload. If terminal
+ * path teardown fails, the leaf must synchronously drain its callbacks and
+ * hand the stopped rings to core quarantine. The core retains every HopID and
+ * path until a later real controller reset; the leaf may then disappear.
+ */
+static void
+tbframe_unload_disconnect_failure_hands_off_inert_rings(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = ul_fx(test);
+	unsigned int hw_calls;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	int local_hopid, remote_hopid;
+	int ret;
+
+	tbframe_mock_link_up(test, fx);
+	local_hopid = fx->link->local_hopid;
+	remote_hopid = fx->link->active_remote_hopid;
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+
+	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_CLOSED);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	fx->link_destroyed = true;
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx->tf.links));
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.quarantine_requests);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_quarantined);
+	KUNIT_EXPECT_EQ(test, local_hopid,
+			fx->mock.quarantine_local_hopid);
+	KUNIT_EXPECT_EQ(test, remote_hopid,
+			fx->mock.quarantine_remote_hopid);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_started);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx->mock.tx_queue));
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx->mock.rx_posted));
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.out_hopid_releases);
+
+	/* No leaf entry point remains reachable after destroy returned. */
+	hw_calls = fx->mock.hw_call_count;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_handle_packet(&fx->tf, NULL, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+	KUNIT_EXPECT_EQ(test, hw_calls, fx->mock.hw_call_count);
+}
+
+/*
  * (b-companion) Shutdown teardown, appmana-008's configuration: leaf reload
  * has left the session in the failed/retry state, the peer is HELLOing at us
  * endlessly, and the machine is rebooting.
@@ -382,6 +431,7 @@ static struct kunit_case tbframe_unload_cases[] = {
 	KUNIT_CASE(tbframe_unload_hello_after_removing_is_refused),
 	KUNIT_CASE(tbframe_unload_silent_peer_is_bounded),
 	KUNIT_CASE(tbframe_unload_never_waits_forever),
+	KUNIT_CASE(tbframe_unload_disconnect_failure_hands_off_inert_rings),
 	KUNIT_CASE(tbframe_unload_shutdown_quiesce_is_silent_and_complete),
 	KUNIT_CASE(tbframe_unload_shutdown_cannot_be_rearmed),
 	KUNIT_CASE(tbframe_unload_shutdown_quiets_all_links_before_first_path_disable),

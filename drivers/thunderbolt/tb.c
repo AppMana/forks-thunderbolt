@@ -188,10 +188,13 @@ struct tb_hotplug_event {
 
 static void tb_scan_port(struct tb_port *port);
 static void tb_handle_hotplug(struct work_struct *work);
-static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
-				       const char *reason);
+static int tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
+				      const char *reason);
 static void tb_queue_dp_bandwidth_request(struct tb *tb, u64 route, u8 port,
 					  int retry, unsigned long delay);
+static int __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+					 int transmit_path, int transmit_ring,
+					 int receive_path, int receive_ring);
 
 static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
 {
@@ -278,7 +281,7 @@ static void tb_discover_dp_resources(struct tb *tb)
 	struct tb_tunnel *tunnel;
 
 	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_dp(tunnel))
+		if (!tunnel->cleanup_only && tb_tunnel_is_dp(tunnel))
 			tb_discover_dp_resource(tb, tunnel->dst_port);
 	}
 }
@@ -610,6 +613,20 @@ static struct tb_tunnel *tb_find_tunnel(struct tb *tb, enum tb_tunnel_type type,
 	}
 
 	return NULL;
+}
+
+static bool tb_tunnels_quarantined(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	const struct tb_tunnel *tunnel;
+
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tunnel->cleanup_only ||
+		    tunnel->state == TB_TUNNEL_TEARDOWN_FAILED)
+			return true;
+	}
+
+	return false;
 }
 
 static struct tb_tunnel *tb_find_first_usb3_tunnel(struct tb *tb,
@@ -1009,6 +1026,9 @@ static int tb_tunnel_usb3(struct tb *tb, struct tb_switch *sw)
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 
+	if (tb_tunnels_quarantined(tb))
+		return -EUCLEAN;
+
 	if (!tb_acpi_may_tunnel_usb3()) {
 		tb_dbg(tb, "USB3 tunneling disabled, not creating tunnel\n");
 		return 0;
@@ -1071,10 +1091,16 @@ static int tb_tunnel_usb3(struct tb *tb, struct tb_switch *sw)
 		goto err_reclaim;
 	}
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(up,
 			     "USB3 tunnel activation failed, aborting\n");
-		ret = -EIO;
+		if (ret == -EUCLEAN) {
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return ret;
+		}
 		goto err_free;
 	}
 
@@ -1449,6 +1475,9 @@ static void tb_scan_port(struct tb_port *port)
 	 * alone no longer does.
 	 */
 	if (port->xdomain) {
+		port->xdomain->path_teardown_err =
+			__tb_disconnect_xdomain_paths(port->sw->tb,
+						      port->xdomain, -1, -1, -1, -1);
 		/*
 		 * Loud, because this is a REPLACEMENT, not a hotplug: a scan
 		 * found a router where an XDomain already existed. Every pass
@@ -1810,6 +1839,8 @@ static void tb_discover_tunnels(struct tb *tb)
 	tb_switch_discover_tunnels(tb->root_switch, &tcm->tunnel_list, true);
 
 	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tunnel->cleanup_only)
+			continue;
 		if (tb_tunnel_is_pci(tunnel)) {
 			struct tb_switch *parent = tunnel->dst_port->sw;
 
@@ -1830,16 +1861,25 @@ static void tb_discover_tunnels(struct tb *tb)
 	}
 }
 
-static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
+static int tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 {
 	struct tb_port *src_port, *dst_port;
 	struct tb *tb;
+	int ret;
 
 	if (!tunnel)
-		return;
+		return 0;
 
-	tb_tunnel_deactivate(tunnel);
-	list_del(&tunnel->list);
+	ret = tb_tunnel_deactivate(tunnel);
+	if (ret)
+		return ret;
+
+	list_del_init(&tunnel->list);
+
+	if (tunnel->cleanup_only) {
+		WARN_ON(tb_tunnel_put(tunnel));
+		return 0;
+	}
 
 	tb = tunnel->tb;
 	src_port = tunnel->src_port;
@@ -1877,22 +1917,63 @@ static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 		break;
 	}
 
-	tb_tunnel_put(tunnel);
+	WARN_ON(tb_tunnel_put(tunnel));
+
+	return 0;
 }
 
 /*
  * tb_free_invalid_tunnels() - destroy tunnels of devices that have gone away
  */
-static void tb_free_invalid_tunnels(struct tb *tb)
+static int tb_free_invalid_tunnels(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
+	int res, ret = 0;
 
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_invalid(tunnel))
-			tb_deactivate_and_free_tunnel(tunnel);
+		if (!tb_tunnel_is_invalid(tunnel))
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
 	}
+
+	return ret;
+}
+
+static int tb_retry_quarantined_tunnels(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
+
+	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
+		if (!tunnel->cleanup_only &&
+		    tunnel->state != TB_TUNNEL_TEARDOWN_FAILED)
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
+	}
+
+	return ret;
+}
+
+static bool tb_has_invalid_tunnels(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel;
+
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tb_tunnel_is_invalid(tunnel))
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -1907,6 +1988,12 @@ static void tb_free_unplugged_children(struct tb_switch *sw)
 			continue;
 
 		if (port->remote->sw->is_unplugged) {
+			/* Paths hold raw port pointers, so topology must outlive them. */
+			if (tb_has_invalid_tunnels(sw->tb)) {
+				tb_port_warn(port,
+					     "retaining unplugged topology referenced by unresolved tunnel\n");
+				continue;
+			}
 			tb_retimer_remove_all(port);
 			tb_remove_dp_resources(port->remote->sw);
 			tb_switch_unconfigure_link(port->remote->sw);
@@ -2032,7 +2119,11 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		if (ret) {
 			tb_tunnel_warn(tunnel,
 				       "failed to read consumed bandwidth, tearing down\n");
-			tb_deactivate_and_free_tunnel(tunnel);
+			ret = tb_deactivate_and_free_tunnel(tunnel);
+			if (ret)
+				tb_warn(tb,
+					"DP tunnel teardown failed (%d), quarantining tunnel\n",
+					ret);
 		} else {
 			tb_reclaim_usb3_bandwidth(tb, in, out);
 			/*
@@ -2072,7 +2163,10 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		 * the DP IN again.
 		 */
 		tb_tunnel_warn(tunnel, "not active, tearing down\n");
-		tb_dp_resource_unavailable(tb, in, "DPRX negotiation failed");
+		if (tb_dp_resource_unavailable(tb, in,
+					       "DPRX negotiation failed"))
+			tb_warn(tb,
+				"failed to tear down unusable DP resource; tunnel quarantined\n");
 	}
 	mutex_unlock(&tb->lock);
 
@@ -2149,6 +2243,15 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 	ret = tb_tunnel_activate(tunnel);
 	if (ret && ret != -EINPROGRESS) {
 		tb_port_info(out, "DP tunnel activation failed, aborting\n");
+		if (ret == -EUCLEAN) {
+			/* No deferred callback will release this reference. */
+			tunnel->callback = NULL;
+			tunnel->callback_data = NULL;
+			tb_domain_put(tb);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return;
+		}
 		list_del(&tunnel->list);
 		goto err_free;
 	}
@@ -2175,6 +2278,11 @@ static void tb_tunnel_dp(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_port *port, *in, *out;
+
+	if (tb_tunnels_quarantined(tb)) {
+		tb_warn(tb, "tunnel ownership unresolved, not creating DP tunnel\n");
+		return;
+	}
 
 	if (!tb_acpi_may_tunnel_dp()) {
 		tb_dbg(tb, "DP tunneling disabled, not creating tunnel\n");
@@ -2286,11 +2394,12 @@ static void tb_switch_exit_redrive(struct tb_switch *sw)
 	}
 }
 
-static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
-				       const char *reason)
+static int tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
+				      const char *reason)
 {
 	struct tb_port *in, *out;
 	struct tb_tunnel *tunnel;
+	int ret;
 
 	if (tb_port_is_dpin(port)) {
 		tb_port_dbg(port, "DP IN resource unavailable: %s\n", reason);
@@ -2303,10 +2412,13 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 	}
 
 	tunnel = tb_find_tunnel(tb, TB_TUNNEL_DP, in, out);
-	if (tunnel)
-		tb_deactivate_and_free_tunnel(tunnel);
-	else
+	if (tunnel) {
+		ret = tb_deactivate_and_free_tunnel(tunnel);
+		if (ret)
+			return ret;
+	} else {
 		tb_enter_redrive(port);
+	}
 	list_del_init(&port->list);
 
 	/*
@@ -2315,6 +2427,7 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 	 */
 	tb_recalc_estimated_bandwidth(tb);
 	tb_tunnel_dp(tb);
+	return 0;
 }
 
 static void tb_dp_resource_available(struct tb *tb, struct tb_port *port)
@@ -2339,19 +2452,26 @@ static void tb_dp_resource_available(struct tb *tb, struct tb_port *port)
 	tb_tunnel_dp(tb);
 }
 
-static void tb_disconnect_and_release_dp(struct tb *tb)
+static int tb_disconnect_and_release_dp(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
 
 	/*
 	 * Tear down all DP tunnels and release their resources. They
 	 * will be re-established after resume based on plug events.
 	 */
 	list_for_each_entry_safe_reverse(tunnel, n, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_dp(tunnel))
-			tb_deactivate_and_free_tunnel(tunnel);
+		if (!tb_tunnel_is_dp(tunnel))
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
 	}
+	if (ret)
+		return ret;
 
 	while (!list_empty(&tcm->dp_resources)) {
 		struct tb_port *port;
@@ -2360,6 +2480,8 @@ static void tb_disconnect_and_release_dp(struct tb *tb)
 					struct tb_port, list);
 		list_del_init(&port->list);
 	}
+
+	return 0;
 }
 
 static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
@@ -2377,10 +2499,7 @@ static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
 
 	tb_switch_xhci_disconnect(sw);
 
-	tb_tunnel_deactivate(tunnel);
-	list_del(&tunnel->list);
-	tb_tunnel_put(tunnel);
-	return 0;
+	return tb_deactivate_and_free_tunnel(tunnel);
 }
 
 static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
@@ -2388,6 +2507,10 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 	struct tb_port *up, *down, *port;
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
+	int ret;
+
+	if (tb_tunnels_quarantined(tb))
+		return -EUCLEAN;
 
 	up = tb_switch_find_port(sw, TB_TYPE_PCIE_UP);
 	if (!up)
@@ -2406,11 +2529,18 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 	if (!tunnel)
 		return -ENOMEM;
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(up,
 			     "PCIe tunnel activation failed, aborting\n");
+		if (ret == -EUCLEAN) {
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return ret;
+		}
 		tb_tunnel_put(tunnel);
-		return -EIO;
+		return ret;
 	}
 
 	/*
@@ -2442,6 +2572,10 @@ static int tb_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	nhi_port = tb_switch_find_port(tb->root_switch, TB_TYPE_NHI);
 
 	mutex_lock(&tb->lock);
+	if (tb_tunnels_quarantined(tb)) {
+		ret = -EUCLEAN;
+		goto err_unlock;
+	}
 
 	/*
 	 * When tunneling DMA paths the link should not enter CL states
@@ -2456,10 +2590,18 @@ static int tb_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 		goto err_clx;
 	}
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(nhi_port,
 			     "DMA tunnel activation failed, aborting\n");
-		ret = -EIO;
+		if (tunnel->state == TB_TUNNEL_TEARDOWN_FAILED) {
+			/* Keep ambiguous path and HopID ownership discoverable. */
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			ret = -EUCLEAN;
+			goto err_unlock;
+		}
 		goto err_free;
 	}
 
@@ -2471,19 +2613,21 @@ err_free:
 	tb_tunnel_put(tunnel);
 err_clx:
 	tb_enable_clx(sw);
+err_unlock:
 	mutex_unlock(&tb->lock);
 
 	return ret;
 }
 
-static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
-					  int transmit_path, int transmit_ring,
-					  int receive_path, int receive_ring)
+static int __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+					 int transmit_path, int transmit_ring,
+					 int receive_path, int receive_ring)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_port *nhi_port, *dst_port;
 	struct tb_tunnel *tunnel, *n;
 	struct tb_switch *sw;
+	int res, ret = 0;
 
 	sw = tb_to_switch(xd->dev.parent);
 	dst_port = tb_port_at(xd->route, sw);
@@ -2496,8 +2640,11 @@ static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 			continue;
 
 		if (tb_tunnel_match_dma(tunnel, transmit_path, transmit_ring,
-					receive_path, receive_ring))
-			tb_deactivate_and_free_tunnel(tunnel);
+					receive_path, receive_ring)) {
+			res = tb_deactivate_and_free_tunnel(tunnel);
+			if (res && !ret)
+				ret = res;
+		}
 	}
 
 	/*
@@ -2505,22 +2652,62 @@ static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	 * because we may still have another DMA tunnel active through
 	 * the same host router USB4 downstream port.
 	 */
-	tb_enable_clx(sw);
+	if (!ret)
+		tb_enable_clx(sw);
+
+	return ret;
 }
 
 static int tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring)
 {
+	int ret = 0;
+
 	if (!xd->is_unplugged) {
 		mutex_lock(&tb->lock);
-		__tb_disconnect_xdomain_paths(tb, xd, transmit_path,
-					      transmit_ring, receive_path,
-					      receive_ring);
+		ret = __tb_disconnect_xdomain_paths(tb, xd, transmit_path,
+						    transmit_ring, receive_path,
+						    receive_ring);
+		if (ret)
+			WRITE_ONCE(xd->path_teardown_err, ret);
 		mutex_unlock(&tb->lock);
+		if (ret)
+			ret = -EUCLEAN;
+	} else {
+		/*
+		 * The service-facing contract reports ownership, not the last
+		 * transport/config-space errno. Once removal has severed the
+		 * topology, any recorded teardown failure means the exact tuple is
+		 * still owned and cannot be retried through this dead XDomain.
+		 */
+		ret = xd->path_teardown_err ? -EUCLEAN : 0;
 	}
-	return 0;
+	return ret;
 }
+
+static int tb_retry_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+				  int transmit_path, int transmit_ring,
+				  int receive_path, int receive_ring)
+{
+	int ret;
+
+	mutex_lock(&tb->lock);
+	ret = __tb_disconnect_xdomain_paths(tb, xd, transmit_path,
+					    transmit_ring, receive_path,
+					    receive_ring);
+	if (!ret)
+		WRITE_ONCE(xd->path_teardown_err, 0);
+	mutex_unlock(&tb->lock);
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd)
+{
+	return tb_disconnect_xdomain_paths(tb, xd, -1, -1, -1, -1);
+}
+#endif
 
 static int tb_check_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
 					 int transmit_path, int transmit_ring,
@@ -2612,9 +2799,19 @@ static void tb_handle_hotplug(struct work_struct *work)
 		port->retrain_teardown = jiffies;
 
 		if (tb_port_has_remote(port)) {
+			int ret;
+
 			tb_port_dbg(port, "switch unplugged\n");
 			tb_sw_set_unplugged(port->remote->sw);
-			tb_free_invalid_tunnels(tb);
+			ret = tb_free_invalid_tunnels(tb);
+			if (ret) {
+				tb_port_warn(port,
+					     "tunnel teardown failed (%d), retaining unplugged topology\n",
+					     ret);
+				mod_delayed_work(tb->wq, &tcm->remove_work,
+						 msecs_to_jiffies(1000));
+				goto rpm_put;
+			}
 			tb_remove_dp_resources(port->remote->sw);
 			tb_switch_tmu_disable(port->remote->sw);
 			tb_switch_unconfigure_link(port->remote->sw);
@@ -2638,21 +2835,20 @@ static void tb_handle_hotplug(struct work_struct *work)
 			 * path above is not.
 			 */
 			tb_port_warn(port, "xdomain unplugged (hotplug event)\n");
-			/*
-			 * Service drivers are unbound during
-			 * tb_xdomain_remove() so setting XDomain as
-			 * unplugged here prevents deadlock if they call
-			 * tb_xdomain_disable_paths(). We will tear down
-			 * all the tunnels below.
-			 */
+			/* Preserve teardown ownership before severing topology. */
+			xd->path_teardown_err =
+				__tb_disconnect_xdomain_paths(tb, xd,
+							      -1, -1, -1, -1);
 			xd->is_unplugged = true;
 			tb_xdomain_remove(xd);
 			port->xdomain = NULL;
-			__tb_disconnect_xdomain_paths(tb, xd, -1, -1, -1, -1);
 			tb_xdomain_put(xd);
 			tb_port_unconfigure_xdomain(port);
 		} else if (tb_port_is_dpout(port) || tb_port_is_dpin(port)) {
-			tb_dp_resource_unavailable(tb, port, "adapter unplug");
+			if (tb_dp_resource_unavailable(tb, port,
+						       "adapter unplug"))
+				tb_port_warn(port,
+					     "DP teardown failed; retaining resource in quarantine\n");
 		} else if (!port->port) {
 			tb_sw_dbg(sw, "xHCI disconnect request\n");
 			tb_switch_xhci_disconnect(sw);
@@ -2676,6 +2872,7 @@ static void tb_handle_hotplug(struct work_struct *work)
 		}
 	}
 
+rpm_put:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
 
@@ -3688,13 +3885,52 @@ static void tb_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 	tb_queue_hotplug(tb, route, pkg->port, pkg->unplug);
 }
 
-static void tb_stop(struct tb *tb)
+static void tb_finalize_stopped_tunnels(struct tb *tb,
+					struct list_head *tunnels,
+					enum tb_domain_reset_state reset_state)
+{
+	struct tb_tunnel *tunnel;
+	struct tb_tunnel *n;
+	int ret;
+
+	list_for_each_entry_safe(tunnel, n, tunnels, list) {
+		if (!tb_tunnel_is_dma(tunnel)) {
+			list_del_init(&tunnel->list);
+			tb_tunnel_put_on_cm_stop(tunnel);
+		} else if (reset_state == TB_DOMAIN_RESET_PROVEN) {
+			list_del_init(&tunnel->list);
+			tb_tunnel_put_after_revoke(tunnel);
+		} else if (!tb_tunnel_release_safe(tunnel)) {
+			tb_warn(tb,
+				"retaining unresolved tunnel after unproven controller revocation\n");
+		} else {
+			list_del_init(&tunnel->list);
+			ret = tb_tunnel_put(tunnel);
+			WARN_ON(ret);
+		}
+	}
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_cm_finalize_stopped_tunnels(struct tb *tb,
+					 struct list_head *tunnels,
+					 bool controller_revoked)
+{
+	tb_finalize_stopped_tunnels(tb, tunnels,
+				    controller_revoked ? TB_DOMAIN_RESET_PROVEN :
+				    TB_DOMAIN_RESET_NONE);
+}
+#endif
+
+static int tb_stop(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
 	struct tb_port *port;
+	bool revoke_required = false;
 	bool ctl_live;
+	int ret;
 
 	/*
 	 * Everything below that touches config space is best-effort cleanup of
@@ -3752,17 +3988,65 @@ static void tb_stop(struct tb *tb)
 			port->replug_phase = TB_REPLUG_IDLE;
 		}
 	}
-	/* tunnels are only present after everything has been initialized */
+	/*
+	 * Quiesce every tunnel while its descriptor endpoints and the control
+	 * channel still exist. A failed path remains owned; do not let the final
+	 * reference silently return its HopIDs to an allocator.
+	 */
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		/*
-		 * DMA tunnels require the driver to be functional so we
-		 * tear them down. Other protocol tunnels can be left
-		 * intact.
-		 */
-		if (ctl_live && tb_tunnel_is_dma(tunnel))
-			tb_tunnel_deactivate(tunnel);
-		tb_tunnel_put(tunnel);
+		if (!tb_tunnel_is_dma(tunnel))
+			continue;
+		if (!ctl_live) {
+			revoke_required = true;
+			continue;
+		}
+
+		ret = tb_tunnel_deactivate(tunnel);
+		if (ret)
+			revoke_required = true;
 	}
+	if (tb_nhi_has_quarantined_rings(tb->nhi))
+		revoke_required = true;
+
+	return revoke_required ? -EUCLEAN : 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+static void tb_mark_topology_unplugged(struct tb_switch *sw, bool revoked,
+				       bool ownership_unresolved)
+{
+	struct tb_port *port;
+
+	sw->is_unplugged = true;
+	tb_switch_for_each_port(sw, port) {
+		if (tb_port_has_remote(port)) {
+			tb_mark_topology_unplugged(port->remote->sw, revoked,
+						   ownership_unresolved);
+		} else if (port->xdomain) {
+			if (revoked)
+				port->xdomain->path_teardown_err = 0;
+			else if (ownership_unresolved &&
+				 !port->xdomain->path_teardown_err)
+				port->xdomain->path_teardown_err = -EUCLEAN;
+			port->xdomain->is_unplugged = true;
+		}
+	}
+}
+
+void tb_test_cm_mark_topology_unplugged(struct tb_switch *sw, bool revoked,
+					bool ownership_unresolved)
+{
+	tb_mark_topology_unplugged(sw, revoked, ownership_unresolved);
+}
+#endif
+
+static void tb_finalize_stop(struct tb *tb,
+			     enum tb_domain_reset_state reset_state,
+			     bool ownership_unresolved)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	tb_finalize_stopped_tunnels(tb, &tcm->tunnel_list, reset_state);
 	tb_switch_remove(tb->root_switch);
 	/*
 	 * tb_switch_remove() ends in device_unregister() -> kfree(sw), and
@@ -3779,6 +4063,7 @@ static void tb_stop(struct tb *tb)
 static void tb_deinit(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel;
 	int i;
 
 	/*
@@ -3791,6 +4076,8 @@ static void tb_deinit(struct tb *tb)
 	 */
 	cancel_delayed_work_sync(&tcm->reconcile_work);
 	cancel_delayed_work_sync(&tcm->remove_work);
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list)
+		tb_tunnel_drain_deferred(tunnel);
 
 	/* Cancel all the release bandwidth workers */
 	for (i = 0; i < ARRAY_SIZE(tcm->groups); i++)
@@ -3879,6 +4166,9 @@ static int tb_start(struct tb *tb, bool reset)
 		tb_scan_switch(tb->root_switch);
 		/* Find out tunnels created by the boot firmware */
 		tb_discover_tunnels(tb);
+		if (tb_tunnels_quarantined(tb))
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
 		/* Add DP resources from the DP tunnels created by the boot firmware */
 		tb_discover_dp_resources(tb);
 	}
@@ -3933,9 +4223,12 @@ static int tb_start(struct tb *tb, bool reset)
 static int tb_suspend_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	int ret;
 
 	tb_dbg(tb, "suspending...\n");
-	tb_disconnect_and_release_dp(tb);
+	ret = tb_disconnect_and_release_dp(tb);
+	if (ret)
+		return ret;
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, false);
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
@@ -3995,12 +4288,90 @@ static void tb_free_unplugged_xdomains(struct tb_switch *sw)
 	}
 }
 
+struct tb_resume_activation_ops {
+	void (*schedule_cleanup)(struct tb *tb, void *data);
+};
+
+static void tb_resume_schedule_cleanup(struct tb *tb, void *data)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	mod_delayed_work(tb->wq, &tcm->remove_work, msecs_to_jiffies(1000));
+}
+
+static const struct tb_resume_activation_ops tb_resume_activation_ops = {
+	.schedule_cleanup = tb_resume_schedule_cleanup,
+};
+
+static int __tb_resume_activate_tunnels(struct tb *tb,
+					struct list_head *tunnels,
+					unsigned int usb3_delay,
+					const struct tb_resume_activation_ops *ops,
+					void *data)
+{
+	struct tb_tunnel *tunnel, *n;
+	bool cleanup_required = false;
+	int res, ret;
+
+	list_for_each_entry_safe(tunnel, n, tunnels, list) {
+		if (usb3_delay && tb_tunnel_is_usb3(tunnel)) {
+			msleep(usb3_delay);
+			usb3_delay = 0;
+		}
+		ret = tb_tunnel_activate(tunnel);
+		if (ret && ret != -EINPROGRESS)
+			goto rollback;
+	}
+
+	return 0;
+
+rollback:
+	/*
+	 * Tunnel activation is one resume transaction. A later failure must not
+	 * leave an earlier prefix passing traffic against a partially restored
+	 * topology. The failing tunnel has already attempted its own rollback;
+	 * preserve that quarantine and unwind every earlier activation even if
+	 * one of those deactivations also fails.
+	 */
+	if (tunnel->cleanup_only ||
+	    tunnel->state == TB_TUNNEL_TEARDOWN_FAILED)
+		cleanup_required = true;
+	list_for_each_entry_continue_reverse(tunnel, tunnels, list) {
+		res = tb_tunnel_deactivate(tunnel);
+		if (res)
+			cleanup_required = true;
+	}
+
+	if (cleanup_required) {
+		ops->schedule_cleanup(tb, data);
+		return -EUCLEAN;
+	}
+
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_resume_activate_tunnels(struct tb *tb, struct list_head *tunnels,
+				    unsigned int usb3_delay,
+				    void (*schedule_cleanup)(struct tb *tb,
+							     void *data),
+				    void *data)
+{
+	const struct tb_resume_activation_ops ops = {
+		.schedule_cleanup = schedule_cleanup,
+	};
+
+	return __tb_resume_activate_tunnels(tb, tunnels, usb3_delay, &ops, data);
+}
+#endif
+
 static int tb_resume_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
 	unsigned int usb3_delay = 0;
 	LIST_HEAD(tunnels);
+	int res, ret = 0;
 
 	tb_dbg(tb, "resuming...\n");
 
@@ -4012,7 +4383,11 @@ static int tb_resume_noirq(struct tb *tb)
 		tb_switch_reset(tb->root_switch);
 
 	tb_switch_resume(tb->root_switch, false);
-	tb_free_invalid_tunnels(tb);
+	ret = tb_free_invalid_tunnels(tb);
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return ret;
+	}
 	tb_free_unplugged_children(tb->root_switch);
 	tb_free_unplugged_xdomains(tb->root_switch);
 	tb_restore_children(tb->root_switch);
@@ -4027,20 +4402,31 @@ static int tb_resume_noirq(struct tb *tb)
 	list_for_each_entry_safe_reverse(tunnel, n, &tunnels, list) {
 		if (tb_tunnel_is_usb3(tunnel))
 			usb3_delay = 500;
-		tb_tunnel_deactivate(tunnel);
-		tb_tunnel_put(tunnel);
+		tunnel->cleanup_only = true;
+		res = tb_tunnel_deactivate(tunnel);
+		if (res) {
+			list_move_tail(&tunnel->list, &tcm->tunnel_list);
+			if (!ret)
+				ret = res;
+			continue;
+		}
+		list_del_init(&tunnel->list);
+		WARN_ON(tb_tunnel_put(tunnel));
+	}
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return ret;
+	}
+	if (tb_tunnels_quarantined(tb)) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return -EUCLEAN;
 	}
 
 	/* Re-create our tunnels now */
-	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		/* USB3 requires delay before it can be re-activated */
-		if (tb_tunnel_is_usb3(tunnel)) {
-			msleep(usb3_delay);
-			/* Only need to do it once */
-			usb3_delay = 0;
-		}
-		tb_tunnel_activate(tunnel);
-	}
+	ret = __tb_resume_activate_tunnels(tb, &tcm->tunnel_list, usb3_delay,
+					   &tb_resume_activation_ops, NULL);
+	if (ret)
+		return ret;
 	if (!list_empty(&tcm->tunnel_list)) {
 		/*
 		 * the pcie links need some time to get going.
@@ -4092,13 +4478,18 @@ static void tb_complete(struct tb *tb)
 static int tb_runtime_suspend(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	int ret;
 
 	mutex_lock(&tb->lock);
 	/*
 	 * The below call only releases DP resources to allow exiting and
 	 * re-entering redrive mode.
 	 */
-	tb_disconnect_and_release_dp(tb);
+	ret = tb_disconnect_and_release_dp(tb);
+	if (ret) {
+		mutex_unlock(&tb->lock);
+		return ret;
+	}
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, true);
 	tcm->hotplug_active = false;
@@ -4112,13 +4503,22 @@ static void tb_remove_work(struct work_struct *work)
 {
 	struct tb_cm *tcm = container_of(work, struct tb_cm, remove_work.work);
 	struct tb *tb = tcm_to_tb(tcm);
+	int ret = 0;
 
 	mutex_lock(&tb->lock);
 	if (tb->root_switch) {
-		tb_free_unplugged_children(tb->root_switch);
-		tb_free_unplugged_xdomains(tb->root_switch);
+		ret = tb_retry_quarantined_tunnels(tb);
+		if (!ret)
+			ret = tb_free_invalid_tunnels(tb);
+		if (!ret) {
+			tb_free_unplugged_children(tb->root_switch);
+			tb_free_unplugged_xdomains(tb->root_switch);
+		}
 	}
 	mutex_unlock(&tb->lock);
+	if (ret)
+		mod_delayed_work(tb->wq, &tcm->remove_work,
+				 msecs_to_jiffies(1000));
 
 	/* Service-driver unbind callbacks must run without the domain lock. */
 	tb_domain_unregister_unplugged_xdomains(tb);
@@ -4127,14 +4527,25 @@ static void tb_remove_work(struct work_struct *work)
 static int tb_runtime_resume(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
-	struct tb_tunnel *tunnel, *n;
+	int ret;
 
 	mutex_lock(&tb->lock);
 	tb_switch_resume(tb->root_switch, true);
-	tb_free_invalid_tunnels(tb);
+	ret = tb_free_invalid_tunnels(tb);
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		goto err_unlock;
+	}
+	if (tb_tunnels_quarantined(tb)) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		ret = -EUCLEAN;
+		goto err_unlock;
+	}
 	tb_restore_children(tb->root_switch);
-	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list)
-		tb_tunnel_activate(tunnel);
+	ret = __tb_resume_activate_tunnels(tb, &tcm->tunnel_list, 0,
+					   &tb_resume_activation_ops, NULL);
+	if (ret)
+		goto err_unlock;
 	tb_switch_enter_redrive(tb->root_switch);
 	tcm->hotplug_active = true;
 	if (port_reconcile_ms)
@@ -4149,6 +4560,10 @@ static int tb_runtime_resume(struct tb *tb)
 	 */
 	queue_delayed_work(tb->wq, &tcm->remove_work, msecs_to_jiffies(50));
 	return 0;
+
+err_unlock:
+	mutex_unlock(&tb->lock);
+	return ret;
 }
 
 /*
@@ -4168,6 +4583,7 @@ static const struct tb_cm_ops tb_cm_ops = {
 	.driver_ready = tb_driver_ready,
 	.start = tb_start,
 	.stop = tb_stop,
+	.finalize_stop = tb_finalize_stop,
 	.deinit = tb_deinit,
 	.suspend_noirq = tb_suspend_noirq,
 	.resume_noirq = tb_resume_noirq,
@@ -4181,6 +4597,7 @@ static const struct tb_cm_ops tb_cm_ops = {
 	.approve_switch = tb_tunnel_pci,
 	.approve_xdomain_paths = tb_approve_xdomain_paths,
 	.disconnect_xdomain_paths = tb_disconnect_xdomain_paths,
+	.retry_xdomain_paths = tb_retry_xdomain_paths,
 	.xdomain_paths_active = tb_check_xdomain_paths_active,
 };
 

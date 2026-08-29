@@ -93,6 +93,28 @@ static void tbnet_test_partial_session_resources_are_torn_down(struct kunit *tes
 }
 
 /*
+ * Activation recovery owns the responsibility for a fresh handshake. A
+ * successful teardown cannot merely leave carrier down and hope that the peer
+ * happens to send another LOGIN, while an unresolved teardown must not start
+ * a replacement session over the retained tuple.
+ */
+static void tbnet_test_recovery_disconnect_retries_then_relogs(struct kunit *test)
+{
+	struct tbnet_test_disconnect_result result = { };
+
+	tbnet_test_recovery_disconnect(-EUCLEAN, &result);
+	KUNIT_EXPECT_EQ(test, 1u, result.teardown_calls);
+	KUNIT_EXPECT_EQ(test, 1u, result.retry_calls);
+	KUNIT_EXPECT_EQ(test, 0u, result.login_calls);
+
+	memset(&result, 0, sizeof(result));
+	tbnet_test_recovery_disconnect(0, &result);
+	KUNIT_EXPECT_EQ(test, 1u, result.teardown_calls);
+	KUNIT_EXPECT_EQ(test, 0u, result.retry_calls);
+	KUNIT_EXPECT_EQ(test, 1u, result.login_calls);
+}
+
+/*
  * Session-verify (zombie) model. Lockstep lever with main.c: 1 = the driver
  * runs tbnet_verify_work() while carrier is on (the shipped fix), 0 = model
  * the pre-fix driver whose only post-carrier code paths are the two
@@ -232,6 +254,7 @@ static struct kunit_case tbnet_login_test_cases[] = {
 	KUNIT_CASE(tbnet_test_login_reconnect),
 	KUNIT_CASE(tbnet_test_supersede_still_tears_down_owned_session),
 	KUNIT_CASE(tbnet_test_partial_session_resources_are_torn_down),
+	KUNIT_CASE(tbnet_test_recovery_disconnect_retries_then_relogs),
 	KUNIT_CASE(tbnet_test_session_zombie_recovers),
 	KUNIT_CASE(tbnet_test_session_verify_healthy_noop),
 	{}

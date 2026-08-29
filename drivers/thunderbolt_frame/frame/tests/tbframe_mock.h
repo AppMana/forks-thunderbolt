@@ -51,6 +51,10 @@ struct tbframe_mock {
 	unsigned int	stale_peer_keepalives;
 	bool		tx_consumer_stalled;
 	unsigned int	tx_stall_reports;
+	unsigned int	quarantine_requests;
+	bool		rings_quarantined;
+	int		quarantine_local_hopid;
+	int		quarantine_remote_hopid;
 	unsigned int	data_proven_reports;
 	/*
 	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
@@ -74,6 +78,7 @@ struct tbframe_mock {
 	bool		rings_e2e;
 	bool		paths_on;
 	bool		enable_seen;
+	int		enable_paths_err;
 	int		disable_paths_err;
 	unsigned int	enable_paths_calls;
 	unsigned int	disable_paths_calls;
@@ -431,7 +436,7 @@ static int tbframe_mock_enable_paths(void *data, int local_hopid,
 	m->enable_paths_calls++;
 	m->enable_seen = true;
 	m->paths_on = true;
-	return 0;
+	return m->enable_paths_err;
 }
 
 static int tbframe_mock_disable_paths(void *data, int local_hopid,
@@ -504,6 +509,18 @@ tbframe_mock_report_tx_stall(void *data,
 	if (!tb_nhi_tx_stalled(first, last, control_healthy))
 		return -EAGAIN;
 	m->tx_stall_reports++;
+	return 0;
+}
+
+static int tbframe_mock_quarantine_paths(void *data, int local_hopid,
+					 int remote_hopid)
+{
+	struct tbframe_mock *m = data;
+
+	m->quarantine_requests++;
+	m->rings_quarantined = true;
+	m->quarantine_local_hopid = local_hopid;
+	m->quarantine_remote_hopid = remote_hopid;
 	return 0;
 }
 
@@ -628,6 +645,7 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.paths_active		= tbframe_mock_paths_active,
 	.tx_snapshot		= tbframe_mock_tx_snapshot,
 	.report_tx_stall	= tbframe_mock_report_tx_stall,
+	.quarantine_paths	= tbframe_mock_quarantine_paths,
 	.report_data_proven	= tbframe_mock_report_data_proven,
 	.control_request	= tbframe_mock_control_request,
 	.control_response	= tbframe_mock_control_response,

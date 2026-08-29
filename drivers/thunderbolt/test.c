@@ -1337,6 +1337,1822 @@ static void tb_test_path_mixed_chain_reverse(struct kunit *test)
 	tb_path_free(path);
 }
 
+struct path_deactivate_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hop;
+	bool any_dma_hopid;
+	unsigned int reads;
+	unsigned int writes;
+	unsigned int enable_writes;
+};
+
+static int path_deactivate_test_read(void *data, struct tb_port *port,
+				     void *buffer, enum tb_cfg_space space,
+				     u32 offset, u32 length)
+{
+	struct path_deactivate_test_io *io = data;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	if (io->any_dma_hopid)
+		KUNIT_EXPECT_EQ(io->test, offset & 1, 0u);
+	else
+		KUNIT_EXPECT_EQ(io->test, offset, 2 * TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	io->reads++;
+	memcpy(buffer, &io->hop, sizeof(io->hop));
+	return 0;
+}
+
+static int path_deactivate_test_write(void *data, struct tb_port *port,
+				      const void *buffer,
+				      enum tb_cfg_space space, u32 offset,
+				      u32 length)
+{
+	struct path_deactivate_test_io *io = data;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	if (io->any_dma_hopid)
+		KUNIT_EXPECT_EQ(io->test, offset & 1, 0u);
+	else
+		KUNIT_EXPECT_EQ(io->test, offset, 2 * TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	io->writes++;
+	memcpy(&io->hop, buffer, sizeof(io->hop));
+	if (io->hop.enable)
+		io->enable_writes++;
+	return 0;
+}
+
+static const struct tb_path_test_io path_deactivate_test_ops = {
+	.read = path_deactivate_test_read,
+	.write = path_deactivate_test_write,
+};
+
+static void path_deactivate_test_reset_io(void *data)
+{
+	tb_test_path_set_io(NULL, NULL);
+}
+
+/*
+ * A timed-out disable leaves enable clear while pending remains set. A retry
+ * must continue polling that pending bit instead of reporting that the hop is
+ * already drained. Once hardware clears pending, the same retry may succeed.
+ */
+static void tb_test_path_deactivate_disabled_pending_retries(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_switch *host = alloc_host(test);
+	unsigned int reads;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_deactivate_hop(&host->ports[1], TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_GT(test, io.reads, 1u);
+	KUNIT_EXPECT_EQ(test, io.writes, 0u);
+
+	reads = io.reads;
+	io.hop.pending = false;
+	ret = tb_path_deactivate_hop(&host->ports[1], TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_GT(test, io.reads, reads);
+}
+
+/*
+ * A disabled first hop is no path at all. Returning an ACTIVE zero-hop object
+ * makes discovery callers treat an uninitialized destination as topology and
+ * later makes activation/deactivation index hops[0] and hops[-1].
+ */
+static void tb_test_path_discover_rejects_zero_hop(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = false,
+		},
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_port *last = (struct tb_port *)1;
+	struct tb_path *path;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	path = tb_path_discover(&host->ports[1], TB_PATH_MIN_HOPID, NULL,
+				-1, &last, "KUnit zero-hop", false);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, path);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, last);
+	if (path)
+		tb_path_free(path);
+}
+
+static void tb_test_zero_hop_path_operations_are_rejected(struct kunit *test)
+{
+	struct tb_path path = {
+		.name = "KUnit zero-hop",
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	path.tb = tb;
+
+	KUNIT_EXPECT_EQ(test, -EINVAL, tb_path_deactivate(&path));
+	path.state = TB_PATH_INACTIVE;
+	KUNIT_EXPECT_EQ(test, -EINVAL, tb_path_activate(&path));
+}
+
+/*
+ * The path object owns its routing and credit resources until every hop is
+ * confirmed disabled and drained. A failed first pass must therefore remain
+ * retryable; the later drained readback is the point ownership may be dropped.
+ */
+static void tb_test_path_deactivate_pending_retains_ownership(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit path",
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	tb_path_deactivate(&path);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_GT(test, io.reads, 1u);
+
+	/* On GREEN, retry the same still-owned path after hardware drains. */
+	if (path.state == TB_PATH_TEARDOWN_FAILED) {
+		io.hop.pending = false;
+		tb_path_deactivate(&path);
+		KUNIT_EXPECT_EQ(test, path.state, TB_PATH_INACTIVE);
+	}
+}
+
+/*
+ * A disabled hop can still own buffered fabric traffic while pending is set.
+ * Activation must prove that state drained before replacing the hop tuple;
+ * otherwise the enable write silently assigns a new lifetime to old traffic.
+ */
+static void tb_test_path_activate_refuses_disabled_pending_hop(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+		.in_counter_index = -1,
+		.next_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit activation path",
+		.weight = 1,
+		.hops = &hop,
+		.path_length = 1,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_activate(&path);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, io.enable_writes, 0u);
+}
+
+#define PATH_ROLLBACK_TEST_HOPS 3
+
+struct path_rollback_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hops[PATH_ROLLBACK_TEST_HOPS];
+	unsigned int enable_writes[PATH_ROLLBACK_TEST_HOPS];
+	unsigned int disable_writes[PATH_ROLLBACK_TEST_HOPS];
+	int fail_readback_hop;
+	bool readback_failed;
+};
+
+static int path_rollback_test_index(struct path_rollback_test_io *io,
+				    enum tb_cfg_space space, u32 offset,
+				    u32 length)
+{
+	int index = offset / 2 - TB_PATH_MIN_HOPID;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	KUNIT_EXPECT_GE(io->test, index, 0);
+	KUNIT_EXPECT_LT(io->test, index, PATH_ROLLBACK_TEST_HOPS);
+	return index;
+}
+
+static int path_rollback_test_read(void *data, struct tb_port *port,
+				   void *buffer, enum tb_cfg_space space,
+				   u32 offset, u32 length)
+{
+	struct path_rollback_test_io *io = data;
+	int index = path_rollback_test_index(io, space, offset, length);
+
+	if (index == io->fail_readback_hop && io->hops[index].enable &&
+	    !io->readback_failed) {
+		io->readback_failed = true;
+		return -EIO;
+	}
+	memcpy(buffer, &io->hops[index], sizeof(io->hops[index]));
+	return 0;
+}
+
+static int path_rollback_test_write(void *data, struct tb_port *port,
+				    const void *buffer,
+				    enum tb_cfg_space space, u32 offset,
+				    u32 length)
+{
+	struct path_rollback_test_io *io = data;
+	const struct tb_regs_hop *hop = buffer;
+	int index = path_rollback_test_index(io, space, offset, length);
+
+	if (hop->enable)
+		io->enable_writes[index]++;
+	else
+		io->disable_writes[index]++;
+	memcpy(&io->hops[index], hop, sizeof(io->hops[index]));
+	return 0;
+}
+
+static const struct tb_path_test_io path_rollback_test_ops = {
+	.read = path_rollback_test_read,
+	.write = path_rollback_test_write,
+};
+
+/*
+ * Hops are enabled from destination to source. If a later readback fails,
+ * rollback must disable both the just-written hop and every destination-side
+ * hop enabled earlier in the loop. This guards the array/activation-order
+ * distinction without assuming the opposite traversal direction.
+ */
+static void tb_test_path_activation_rollback_covers_enabled_hops(struct kunit *test)
+{
+	struct path_rollback_test_io io = {
+		.test = test,
+		.fail_readback_hop = 1,
+	};
+	struct tb_path_hop hops[PATH_ROLLBACK_TEST_HOPS] = {};
+	struct tb_path path = {
+		.name = "KUnit rollback path",
+		.weight = 1,
+		.hops = hops,
+		.path_length = ARRAY_SIZE(hops),
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int i, ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	path.tb = tb;
+
+	for (i = 0; i < ARRAY_SIZE(hops); i++) {
+		hops[i].in_port = &host->ports[1];
+		hops[i].out_port = &host->ports[1];
+		hops[i].in_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].next_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].in_counter_index = -1;
+	}
+
+	tb_test_path_set_io(&path_rollback_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_activate(&path);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	KUNIT_EXPECT_TRUE(test, io.readback_failed);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[0], 0u);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[1], 1u);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[2], 1u);
+	KUNIT_EXPECT_FALSE(test, io.hops[1].enable);
+	KUNIT_EXPECT_FALSE(test, io.hops[2].enable);
+	KUNIT_EXPECT_GT(test, io.disable_writes[1], 0u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[2], 0u);
+}
+
+#define RESUME_ACTIVATION_TEST_TUNNELS 3
+
+struct resume_activation_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hops[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int enable_writes[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int disable_writes[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int cleanup_schedules;
+	int activation_fail_index;
+	int rollback_fail_index;
+	bool activation_failed;
+	bool rollback_failed;
+};
+
+static int resume_activation_test_index(struct resume_activation_test_io *io,
+					enum tb_cfg_space space, u32 offset,
+					u32 length)
+{
+	int index = offset / 2 - TB_PATH_MIN_HOPID;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	KUNIT_EXPECT_GE(io->test, index, 0);
+	KUNIT_EXPECT_LT(io->test, index, RESUME_ACTIVATION_TEST_TUNNELS);
+	return index;
+}
+
+static int resume_activation_test_read(void *data, struct tb_port *port,
+				       void *buffer, enum tb_cfg_space space,
+				       u32 offset, u32 length)
+{
+	struct resume_activation_test_io *io = data;
+	int index = resume_activation_test_index(io, space, offset, length);
+
+	if (index == io->activation_fail_index && io->hops[index].enable &&
+	    !io->activation_failed) {
+		io->activation_failed = true;
+		return -EIO;
+	}
+	if (index == io->rollback_fail_index && io->hops[index].enable &&
+	    io->activation_failed && !io->rollback_failed) {
+		io->rollback_failed = true;
+		return -ETIMEDOUT;
+	}
+	memcpy(buffer, &io->hops[index], sizeof(io->hops[index]));
+	return 0;
+}
+
+static int resume_activation_test_write(void *data, struct tb_port *port,
+					const void *buffer,
+					enum tb_cfg_space space, u32 offset,
+					u32 length)
+{
+	struct resume_activation_test_io *io = data;
+	const struct tb_regs_hop *hop = buffer;
+	int index = resume_activation_test_index(io, space, offset, length);
+
+	if (hop->enable)
+		io->enable_writes[index]++;
+	else
+		io->disable_writes[index]++;
+	memcpy(&io->hops[index], hop, sizeof(io->hops[index]));
+	return 0;
+}
+
+static const struct tb_path_test_io resume_activation_test_ops = {
+	.read = resume_activation_test_read,
+	.write = resume_activation_test_write,
+};
+
+static void resume_activation_test_schedule_cleanup(struct tb *tb, void *data)
+{
+	struct resume_activation_test_io *io = data;
+
+	io->cleanup_schedules++;
+}
+
+static void
+tb_test_resume_activation_is_transactional_and_schedules_cleanup(struct kunit *test)
+{
+	struct resume_activation_test_io io = {
+		.test = test,
+		.activation_fail_index = 2,
+		.rollback_fail_index = 1,
+	};
+	struct tb_path_hop hops[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_path paths[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_path *tunnel_paths[RESUME_ACTIVATION_TEST_TUNNELS][1];
+	struct tb_tunnel tunnels[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	LIST_HEAD(tunnel_list);
+	int i, ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+
+	for (i = 0; i < RESUME_ACTIVATION_TEST_TUNNELS; i++) {
+		hops[i].in_port = &host->ports[1];
+		hops[i].out_port = &host->ports[1];
+		hops[i].in_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].next_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].in_counter_index = -1;
+
+		paths[i].tb = tb;
+		paths[i].name = "KUnit resume path";
+		paths[i].weight = 1;
+		paths[i].hops = &hops[i];
+		paths[i].path_length = 1;
+		paths[i].state = TB_PATH_INACTIVE;
+
+		tunnel_paths[i][0] = &paths[i];
+		tunnels[i].tb = tb;
+		tunnels[i].src_port = hops[i].in_port;
+		tunnels[i].dst_port = hops[i].out_port;
+		tunnels[i].paths = tunnel_paths[i];
+		tunnels[i].npaths = 1;
+		tunnels[i].type = TB_TUNNEL_PCI;
+		tunnels[i].state = TB_TUNNEL_INACTIVE;
+		INIT_LIST_HEAD(&tunnels[i].list);
+		list_add_tail(&tunnels[i].list, &tunnel_list);
+	}
+
+	tb_test_path_set_io(&resume_activation_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_test_resume_activate_tunnels(tb, &tunnel_list, 0,
+					      resume_activation_test_schedule_cleanup,
+					      &io);
+
+	KUNIT_EXPECT_EQ(test, ret, -EUCLEAN);
+	KUNIT_EXPECT_TRUE(test, io.activation_failed);
+	KUNIT_EXPECT_TRUE(test, io.rollback_failed);
+	KUNIT_EXPECT_EQ(test, tunnels[0].state, TB_TUNNEL_INACTIVE);
+	KUNIT_EXPECT_EQ(test, paths[0].state, TB_PATH_INACTIVE);
+	KUNIT_EXPECT_EQ(test, tunnels[1].state, TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, paths[1].state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, tunnels[2].state, TB_TUNNEL_INACTIVE);
+	KUNIT_EXPECT_EQ(test, paths[2].state, TB_PATH_INACTIVE);
+	for (i = 0; i < RESUME_ACTIVATION_TEST_TUNNELS; i++)
+		KUNIT_EXPECT_EQ(test, io.enable_writes[i], 1u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[0], 0u);
+	KUNIT_EXPECT_EQ(test, io.disable_writes[1], 0u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[2], 0u);
+	KUNIT_EXPECT_EQ(test, io.cleanup_schedules, 1u);
+}
+
+/*
+ * Path ownership and tunnel availability are separate state machines. A
+ * tunnel whose path did not drain is unavailable, but it is not inactive:
+ * its routing resources must remain owned and retryable.
+ */
+static void tb_test_tunnel_deactivate_preserves_failed_teardown(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit path",
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_path *paths[] = { &path };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_ACTIVE,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+	tunnel.tb = tb;
+	tunnel.src_port = hop.in_port;
+	tunnel.dst_port = hop.out_port;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	tb_tunnel_deactivate(&tunnel);
+	KUNIT_EXPECT_EQ(test, tunnel.state, TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+}
+
+/*
+ * A tunnel discovered solely for cleanup has no activation ownership. This is
+ * especially important for resume discovery, which deliberately does not
+ * reserve the HopIDs it reads. Even after a later read proves the old hop has
+ * drained, activation must not turn that foreign tuple into a managed tunnel.
+ */
+static void tb_test_tunnel_cleanup_only_cannot_activate(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = false,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+		.in_counter_index = -1,
+		.next_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit cleanup-only path",
+		.weight = 1,
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_INACTIVE,
+	};
+	struct tb_path *paths[] = { &path };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_TEARDOWN_FAILED,
+		.cleanup_only = true,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+	tunnel.tb = tb;
+	tunnel.src_port = hop.in_port;
+	tunnel.dst_port = hop.out_port;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_tunnel_activate(&tunnel);
+	KUNIT_EXPECT_EQ(test, ret, -EUCLEAN);
+	KUNIT_EXPECT_EQ(test, io.enable_writes, 0u);
+	KUNIT_EXPECT_EQ(test, tunnel.state, TB_TUNNEL_TEARDOWN_FAILED);
+}
+
+/* Incomplete discovered tunnels legitimately contain NULL path slots. */
+static void tb_test_tunnel_incomplete_cleanup_invalid_safe(struct kunit *test)
+{
+	struct tb_path *paths[] = { NULL };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_TEARDOWN_FAILED,
+		.cleanup_only = true,
+	};
+
+	KUNIT_EXPECT_FALSE(test, tb_tunnel_is_invalid(&tunnel));
+}
+
+struct tunnel_final_release_fixture {
+	struct tb_switch *host;
+	struct tb_nhi *nhi;
+	struct tb_tunnel *tunnel;
+	struct tb_port *owned_port;
+	unsigned int owned_credits;
+};
+
+static void
+tb_test_tunnel_final_release_fixture_init(struct kunit *test,
+					  struct tunnel_final_release_fixture *fx)
+{
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	memset(fx, 0, sizeof(*fx));
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = fx->nhi;
+	fx->nhi->pdev = pdev;
+	fx->host->tb = tb;
+
+	fx->owned_port = &fx->host->ports[1];
+	fx->tunnel = tb_tunnel_alloc_dma(tb, &fx->host->ports[7],
+					 fx->owned_port, TB_PATH_MIN_HOPID, 1,
+					 TB_PATH_MIN_HOPID, 1);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tunnel);
+	fx->owned_credits = fx->owned_port->dma_credits;
+	KUNIT_ASSERT_GT(test, fx->owned_credits, 0u);
+}
+
+static void
+tb_test_tunnel_final_put_retains_failed_ownership(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+
+	/* Drive the real path and tunnel teardown machines to their failure state. */
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, fx.tunnel->state,
+			TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_ASSERT_EQ(test, fx.tunnel->paths[0]->state,
+			TB_PATH_TEARDOWN_FAILED);
+
+	/*
+	 * Ordinary final release must not convert unresolved fabric ownership
+	 * into free allocator entries.  Both observations are external ledgers
+	 * owned by production code, so the test does not depend on freed memory.
+	 */
+	tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits,
+			fx.owned_credits);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_LT(test, ret, 0);
+}
+
+static void
+tb_test_tunnel_terminal_release_requires_revocation_proof(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	enum tb_nhi_runtime_recovery_state recovery =
+		TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
+	enum tb_nhi_runtime_recovery_event event =
+		TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED;
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+
+	/*
+	 * These are only local observations: callback/MMIO fencing and a later
+	 * disabled readback do not revoke the controller's ownership of traffic
+	 * that already made the disable time out.  The independent recovery
+	 * machine likewise says that quiescing merely makes a power cycle
+	 * pending; it is not POWER_CYCLE_SUCCEEDED proof.
+	 */
+	WRITE_ONCE(fx.nhi->going_away, true);
+	io.hop.pending = false;
+	recovery = tb_nhi_runtime_recovery_next(recovery, event);
+	KUNIT_ASSERT_EQ(test, recovery,
+			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING);
+
+	tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits,
+			fx.owned_credits);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_LT(test, ret, 0);
+}
+
+static void
+tb_test_tunnel_terminal_release_after_revocation(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+
+	/* Models the successful whole-controller reset proof in tb_stop(). */
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+}
+
+/*
+ * A canceled asynchronous worker may still own a reference when controller
+ * revocation retires the CM's reference. The worker's later ordinary put must
+ * observe the revoked ownership state and complete the final release.
+ */
+static void
+tb_test_tunnel_revocation_survives_deferred_reference(struct kunit *test)
+{
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_TEARDOWN_FAILED;
+	fx.tunnel->state = TB_TUNNEL_TEARDOWN_FAILED;
+	tb_test_tunnel_get(fx.tunnel);
+
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, fx.owned_credits);
+
+	ret = tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+}
+
+#define CM_TERMINAL_TUNNELS 2
+
+struct cm_terminal_release_fixture {
+	struct tb_switch *host;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+	struct tb_tunnel *tunnels[CM_TERMINAL_TUNNELS];
+	struct tb_port *owned_port;
+	unsigned int owned_credits;
+	struct list_head tunnel_list;
+};
+
+static void
+tb_test_cm_terminal_release_fixture_init(struct kunit *test,
+					 struct cm_terminal_release_fixture *fx)
+{
+	struct pci_dev *pdev;
+	int i;
+
+	memset(fx, 0, sizeof(*fx));
+	INIT_LIST_HEAD(&fx->tunnel_list);
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+	fx->tb = kunit_kzalloc(test, sizeof(*fx->tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	fx->tb->nhi = fx->nhi;
+	fx->nhi->pdev = pdev;
+	fx->host->tb = fx->tb;
+	fx->owned_port = &fx->host->ports[1];
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+		int ring = i + 1;
+
+		fx->tunnels[i] =
+			tb_tunnel_alloc_dma(fx->tb, &fx->host->ports[7],
+					    fx->owned_port, hopid, ring,
+					    hopid, ring);
+		KUNIT_ASSERT_NOT_NULL(test, fx->tunnels[i]);
+		fx->tunnels[i]->state = TB_TUNNEL_TEARDOWN_FAILED;
+		fx->tunnels[i]->paths[0]->state = TB_PATH_TEARDOWN_FAILED;
+		list_add_tail(&fx->tunnels[i]->list, &fx->tunnel_list);
+	}
+
+	fx->owned_credits = fx->owned_port->dma_credits;
+	KUNIT_ASSERT_GT(test, fx->owned_credits, 0u);
+}
+
+static unsigned int
+tb_test_tunnel_list_count(const struct list_head *tunnels)
+{
+	const struct tb_tunnel *tunnel;
+	unsigned int count = 0;
+
+	list_for_each_entry(tunnel, tunnels, list)
+		count++;
+	return count;
+}
+
+static void
+tb_test_cm_reset_failure_retains_all_unresolved_dma(struct kunit *test)
+{
+	struct cm_terminal_release_fixture fx;
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &fx);
+	KUNIT_ASSERT_EQ(test, tb_test_tunnel_list_count(&fx.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, false);
+
+	KUNIT_EXPECT_EQ(test, tb_test_tunnel_list_count(&fx.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, fx.owned_credits);
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(fx.owned_port, hopid, hopid);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		list_del_init(&fx.tunnels[i]->list);
+		tb_tunnel_put_after_revoke(fx.tunnels[i]);
+	}
+}
+
+static void
+tb_test_cm_reset_success_revokes_all_unresolved_dma_once(struct kunit *test)
+{
+	struct cm_terminal_release_fixture fx;
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &fx);
+
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, true);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx.tunnel_list));
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+
+	/* Re-running the terminal policy must not release stale list entries. */
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, true);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx.tunnel_list));
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(fx.owned_port, hopid, hopid);
+		KUNIT_EXPECT_EQ(test, ret, hopid);
+	}
+}
+
+enum domain_remove_test_event {
+	DOMAIN_REMOVE_STOP,
+	DOMAIN_REMOVE_PREPARE_XDOMAINS,
+	DOMAIN_REMOVE_TERMINAL_RESET,
+	DOMAIN_REMOVE_RUNTIME_POWER_CYCLE,
+	DOMAIN_REMOVE_FINALIZE,
+	DOMAIN_REMOVE_FINALIZE_RINGS,
+	DOMAIN_REMOVE_ABANDON_RINGS,
+	DOMAIN_REMOVE_CTL_STOP,
+	DOMAIN_REMOVE_FLUSH,
+	DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+	DOMAIN_REMOVE_DEINIT,
+	DOMAIN_REMOVE_RELEASE,
+	DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+};
+
+struct domain_remove_test_context {
+	struct cm_terminal_release_fixture *release;
+	struct tb_xdomain *xd;
+	enum domain_remove_test_event events[13];
+	enum tb_domain_reset_state finalize_state;
+	enum tb_domain_reset_state terminal_reset_state;
+	enum tb_domain_reset_state runtime_reset_state;
+	int terminal_reset_error;
+	int runtime_reset_error;
+	int stop_ret;
+	bool has_quarantined_rings;
+	bool rings_finalized_proven;
+	bool rings_abandoned;
+	int service_disconnect_ret;
+	unsigned int nevents;
+};
+
+static void domain_remove_test_record(struct domain_remove_test_context *ctx,
+				      enum domain_remove_test_event event)
+{
+	ctx->events[ctx->nevents++] = event;
+}
+
+static int domain_remove_test_stop(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_STOP);
+	return ctx->stop_ret;
+}
+
+static struct tb_domain_reset_result
+domain_remove_test_terminal_reset(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_TERMINAL_RESET);
+	return (struct tb_domain_reset_result) {
+		.state = ctx->terminal_reset_state,
+		.error = ctx->terminal_reset_error,
+	};
+}
+
+static struct tb_domain_reset_result
+domain_remove_test_runtime_power_cycle(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_RUNTIME_POWER_CYCLE);
+	return (struct tb_domain_reset_result) {
+		.state = ctx->runtime_reset_state,
+		.error = ctx->runtime_reset_error,
+	};
+}
+
+static bool domain_remove_test_has_quarantined_rings(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	return ctx->has_quarantined_rings;
+}
+
+static void domain_remove_test_finalize_rings(struct tb *tb, void *data,
+					      bool controller_reset_proven)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_FINALIZE_RINGS);
+	ctx->rings_finalized_proven = controller_reset_proven;
+}
+
+static void domain_remove_test_abandon_rings(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_ABANDON_RINGS);
+	ctx->rings_abandoned = true;
+}
+
+static void domain_remove_test_finalize(struct tb *tb, void *data,
+					enum tb_domain_reset_state reset_state,
+					bool ownership_unresolved)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_FINALIZE);
+	ctx->finalize_state = reset_state;
+	tb_test_cm_finalize_stopped_tunnels(tb, &ctx->release->tunnel_list,
+					    reset_state == TB_DOMAIN_RESET_PROVEN);
+}
+
+static void domain_remove_test_prepare_xdomains(struct tb *tb, void *data,
+						bool ownership_unresolved)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_PREPARE_XDOMAINS);
+	if (ctx->xd)
+		tb_test_cm_mark_topology_unplugged(ctx->release->host, false,
+						   ownership_unresolved);
+}
+
+#define DOMAIN_REMOVE_TEST_OP(_name, _event) \
+static void domain_remove_test_##_name(struct tb *tb, void *data) \
+{ \
+	struct domain_remove_test_context *ctx = data; \
+	domain_remove_test_record(ctx, _event); \
+}
+
+DOMAIN_REMOVE_TEST_OP(ctl_stop, DOMAIN_REMOVE_CTL_STOP)
+DOMAIN_REMOVE_TEST_OP(flush, DOMAIN_REMOVE_FLUSH)
+DOMAIN_REMOVE_TEST_OP(deinit, DOMAIN_REMOVE_DEINIT)
+DOMAIN_REMOVE_TEST_OP(release, DOMAIN_REMOVE_RELEASE)
+DOMAIN_REMOVE_TEST_OP(unregister_domain, DOMAIN_REMOVE_UNREGISTER_DOMAIN)
+
+static void domain_remove_test_unregister_xdomains(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_UNREGISTER_XDOMAINS);
+	if (ctx->xd)
+		ctx->service_disconnect_ret =
+			tb_test_disconnect_xdomain_paths(tb, ctx->xd);
+}
+
+static const struct tb_domain_remove_ops domain_remove_test_ops = {
+	.stop = domain_remove_test_stop,
+	.prepare_xdomains = domain_remove_test_prepare_xdomains,
+	.has_quarantined_rings = domain_remove_test_has_quarantined_rings,
+	.terminal_reset = domain_remove_test_terminal_reset,
+	.runtime_power_cycle = domain_remove_test_runtime_power_cycle,
+	.finalize = domain_remove_test_finalize,
+	.ctl_stop = domain_remove_test_ctl_stop,
+	.flush = domain_remove_test_flush,
+	.unregister_xdomains = domain_remove_test_unregister_xdomains,
+	.deinit = domain_remove_test_deinit,
+	.finalize_quarantined_rings = domain_remove_test_finalize_rings,
+	.abandon_quarantined_rings = domain_remove_test_abandon_rings,
+	.release = domain_remove_test_release,
+	.unregister_domain = domain_remove_test_unregister_domain,
+};
+
+static void
+tb_test_domain_remove_dispatch_is_not_revocation_proof(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.stop_ret = -EUCLEAN,
+		.terminal_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb, false,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_DISPATCHED);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_abandoned);
+	KUNIT_EXPECT_EQ(test, tb_test_tunnel_list_count(&release.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+	KUNIT_EXPECT_EQ(test, release.owned_port->dma_credits,
+			release.owned_credits);
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(release.owned_port, hopid, hopid);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
+
+	if (!list_empty(&release.tunnel_list)) {
+		for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+			list_del_init(&release.tunnels[i]->list);
+			tb_tunnel_put_after_revoke(release.tunnels[i]);
+		}
+	}
+}
+
+static void
+tb_test_domain_remove_quarantine_requires_proven_terminal_reset(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.has_quarantined_rings = true,
+		.terminal_reset_state = TB_DOMAIN_RESET_PROVEN,
+		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb, true,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_PROVEN);
+	KUNIT_EXPECT_TRUE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_abandoned);
+}
+
+static void
+tb_test_domain_remove_failed_reset_detaches_quarantined_rings(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_ABANDON_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.has_quarantined_rings = true,
+		.terminal_reset_error = -ETIMEDOUT,
+		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb, true,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_FAILED);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_TRUE(test, ctx.rings_abandoned);
+}
+
+/*
+ * A native-CM stop failure means at least one DMA tunnel still owns its
+ * hardware tuple. If the terminal reset then fails, marking the XDomain
+ * unplugged must preserve that ownership failure for the later service-remove
+ * callback. Otherwise the service-facing disconnect reports success and the
+ * leaf is allowed to free rings and HopIDs still named by the retained tunnel.
+ */
+static void
+tb_test_domain_failed_reset_reaches_service_disconnect(struct kunit *test)
+{
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.stop_ret = -EUCLEAN,
+		.terminal_reset_error = -ETIMEDOUT,
+	};
+	struct tb_xdomain *xd;
+	int ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	xd = kunit_kzalloc(test, sizeof(*xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, xd);
+	xd->tb = release.tb;
+	release.host->ports[1].xdomain = xd;
+	ctx.xd = xd;
+
+	ret = tb_test_domain_remove_sequence(release.tb, false,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_TRUE(test, xd->is_unplugged);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_FAILED);
+	KUNIT_EXPECT_EQ(test, ctx.service_disconnect_ret, -EUCLEAN);
+
+	release.host->ports[1].xdomain = NULL;
+	if (!list_empty(&release.tunnel_list)) {
+		int i;
+
+		for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+			list_del_init(&release.tunnels[i]->list);
+			tb_tunnel_put_after_revoke(release.tunnels[i]);
+		}
+	}
+}
+
+static void
+tb_test_domain_power_cycle_completion_mapping(struct kunit *test)
+{
+	struct tb_domain_reset_result result;
+
+	result = tb_test_domain_power_cycle_dispatch_result(0, false);
+	KUNIT_EXPECT_EQ(test, result.error, 0);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
+
+	result = tb_test_domain_power_cycle_dispatch_result(-ETIMEDOUT, true);
+	KUNIT_EXPECT_EQ(test, result.error, 0);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
+
+	result = tb_test_domain_power_cycle_dispatch_result(-ETIMEDOUT, false);
+	KUNIT_EXPECT_EQ(test, result.error, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
+}
+
+static void
+tb_test_unplugged_xdomain_preserves_teardown_error(struct kunit *test)
+{
+	struct tb_xdomain *xd;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	xd = kunit_kzalloc(test, sizeof(*xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, xd);
+	xd->is_unplugged = true;
+	xd->path_teardown_err = -ETIMEDOUT;
+
+	KUNIT_EXPECT_EQ(test, tb_test_disconnect_xdomain_paths(tb, xd),
+			-EUCLEAN);
+}
+
+struct xdomain_quarantine_test_context {
+	struct kunit *test;
+	struct path_deactivate_test_io io;
+	struct tb_tunnel *tunnel;
+	struct tb_nhi *nhi;
+	unsigned int freed_rings;
+	unsigned int recovery_requests;
+};
+
+struct xdomain_quarantine_test_fixture {
+	struct tb_switch *host;
+	struct tb *tb;
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb_xdomain *xd;
+	struct tb_tunnel *tunnel;
+	struct tb_ring *tx_ring;
+	struct tb_ring *rx_ring;
+	struct xdomain_quarantine_test_context ctx;
+};
+
+static void xdomain_quarantine_test_device_release(struct device *dev)
+{
+}
+
+static const struct device_type xdomain_quarantine_test_device_type = {
+	.name = "thunderbolt_xdomain_quarantine_test",
+	.release = xdomain_quarantine_test_device_release,
+};
+
+static void xdomain_quarantine_test_ring_work(struct work_struct *work)
+{
+}
+
+static int
+xdomain_quarantine_test_disconnect(void *data, struct tb_xdomain *xd,
+				   int transmit_path, int transmit_ring,
+				   int receive_path, int receive_ring)
+{
+	struct xdomain_quarantine_test_context *ctx = data;
+
+	KUNIT_EXPECT_EQ(ctx->test, transmit_path, TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(ctx->test, transmit_ring, 1);
+	KUNIT_EXPECT_EQ(ctx->test, receive_path, TB_PATH_MIN_HOPID + 1);
+	KUNIT_EXPECT_EQ(ctx->test, receive_ring, 2);
+	return tb_tunnel_deactivate(ctx->tunnel);
+}
+
+static void xdomain_quarantine_test_free_ring(void *data,
+					      struct tb_ring *ring)
+{
+	struct xdomain_quarantine_test_context *ctx = data;
+
+	spin_lock_irq(&ring->nhi->lock);
+	if (ring->is_tx)
+		ring->nhi->tx_rings[ring->hop] = NULL;
+	else
+		ring->nhi->rx_rings[ring->hop] = NULL;
+	spin_unlock_irq(&ring->nhi->lock);
+	ctx->freed_rings++;
+}
+
+static int
+xdomain_quarantine_test_request_recovery(void *data, struct tb_xdomain *xd)
+{
+	struct xdomain_quarantine_test_context *ctx = data;
+
+	ctx->recovery_requests++;
+	return 0;
+}
+
+static void xdomain_quarantine_test_reset_ops(void *data)
+{
+	tb_test_xdomain_quarantine_fail_alloc(false);
+	tb_test_xdomain_quarantine_set_ops(NULL);
+}
+
+static void
+xdomain_quarantine_test_fixture_init(struct kunit *test,
+				     struct xdomain_quarantine_test_fixture *fx)
+{
+	struct tb_xdomain_quarantine_test_ops ops;
+	int ret;
+
+	memset(fx, 0, sizeof(*fx));
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+	fx->tb = kunit_kzalloc(test, sizeof(*fx->tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	fx->pdev = kunit_kzalloc(test, sizeof(*fx->pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->pdev);
+	fx->xd = kunit_kzalloc(test, sizeof(*fx->xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->xd);
+
+	fx->tb->nhi = fx->nhi;
+	device_initialize(&fx->tb->dev);
+	fx->tb->dev.type = &xdomain_quarantine_test_device_type;
+	fx->tb->wq = alloc_ordered_workqueue("tb-q-kunit", 0);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb->wq);
+	fx->host->tb = fx->tb;
+	spin_lock_init(&fx->nhi->lock);
+	fx->nhi->pdev = fx->pdev;
+	device_initialize(&fx->pdev->dev);
+	fx->pdev->dev.type = &xdomain_quarantine_test_device_type;
+	fx->nhi->hop_count = 4;
+	fx->nhi->tx_rings = kunit_kcalloc(test, fx->nhi->hop_count,
+					  sizeof(*fx->nhi->tx_rings), GFP_KERNEL);
+	fx->nhi->rx_rings = kunit_kcalloc(test, fx->nhi->hop_count,
+					  sizeof(*fx->nhi->rx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi->tx_rings);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi->rx_rings);
+
+	device_initialize(&fx->xd->dev);
+	fx->xd->dev.type = &xdomain_quarantine_test_device_type;
+	fx->xd->tb = fx->tb;
+	fx->xd->route = 1;
+	fx->xd->local_max_hopid = 19;
+	fx->xd->remote_max_hopid = 19;
+	kunit_ida_init(test, &fx->xd->in_hopids);
+	kunit_ida_init(test, &fx->xd->out_hopids);
+	ret = tb_xdomain_alloc_out_hopid(fx->xd, TB_PATH_MIN_HOPID);
+	KUNIT_ASSERT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = tb_xdomain_alloc_in_hopid(fx->xd, TB_PATH_MIN_HOPID + 1);
+	KUNIT_ASSERT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+
+	fx->tx_ring = kunit_kzalloc(test, sizeof(*fx->tx_ring), GFP_KERNEL);
+	fx->rx_ring = kunit_kzalloc(test, sizeof(*fx->rx_ring), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tx_ring);
+	KUNIT_ASSERT_NOT_NULL(test, fx->rx_ring);
+	spin_lock_init(&fx->tx_ring->lock);
+	spin_lock_init(&fx->rx_ring->lock);
+	INIT_LIST_HEAD(&fx->tx_ring->queue);
+	INIT_LIST_HEAD(&fx->tx_ring->in_flight);
+	INIT_LIST_HEAD(&fx->rx_ring->queue);
+	INIT_LIST_HEAD(&fx->rx_ring->in_flight);
+	INIT_WORK(&fx->tx_ring->work, xdomain_quarantine_test_ring_work);
+	INIT_WORK(&fx->rx_ring->work, xdomain_quarantine_test_ring_work);
+	init_waitqueue_head(&fx->tx_ring->wait);
+	init_waitqueue_head(&fx->rx_ring->wait);
+	fx->tx_ring->nhi = fx->nhi;
+	fx->tx_ring->hop = 1;
+	fx->tx_ring->is_tx = true;
+	fx->rx_ring->nhi = fx->nhi;
+	fx->rx_ring->hop = 2;
+	fx->nhi->tx_rings[1] = fx->tx_ring;
+	fx->nhi->rx_rings[2] = fx->rx_ring;
+
+	fx->tunnel = tb_tunnel_alloc_dma(fx->tb, &fx->host->ports[7],
+					 fx->host ? &fx->host->ports[1] : NULL,
+					 TB_PATH_MIN_HOPID, 1,
+					 TB_PATH_MIN_HOPID + 1, 2);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tunnel);
+	fx->tunnel->state = TB_TUNNEL_ACTIVE;
+	fx->tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	fx->tunnel->paths[1]->state = TB_PATH_ACTIVE;
+
+	fx->ctx.test = test;
+	fx->ctx.tunnel = fx->tunnel;
+	fx->ctx.nhi = fx->nhi;
+	fx->ctx.io.test = test;
+	fx->ctx.io.any_dma_hopid = true;
+	fx->ctx.io.hop.enable = false;
+	fx->ctx.io.hop.pending = true;
+	ops.disconnect = xdomain_quarantine_test_disconnect;
+	ops.free_ring = xdomain_quarantine_test_free_ring;
+	ops.request_recovery = xdomain_quarantine_test_request_recovery;
+	ops.data = &fx->ctx;
+	tb_test_xdomain_quarantine_set_ops(&ops);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  xdomain_quarantine_test_reset_ops,
+						  NULL), 0);
+	tb_test_path_set_io(&path_deactivate_test_ops, &fx->ctx.io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+}
+
+static int
+xdomain_quarantine_test_handoff(struct xdomain_quarantine_test_fixture *fx)
+{
+	return tb_xdomain_quarantine_paths(fx->xd,
+			TB_PATH_MIN_HOPID, fx->tx_ring->hop, fx->tx_ring,
+			TB_PATH_MIN_HOPID + 1, fx->rx_ring->hop, fx->rx_ring);
+}
+
+struct domain_late_handoff_test_context {
+	struct xdomain_quarantine_test_fixture *fx;
+	unsigned int terminal_reset_calls;
+	unsigned int quarantine_count_at_release;
+	int handoff_ret;
+	bool unregister_called;
+	bool reset_saw_handoff;
+	bool rings_quarantined_at_release;
+};
+
+static int domain_late_handoff_test_stop(struct tb *tb, void *data)
+{
+	return 0;
+}
+
+static bool domain_late_handoff_test_has_rings(struct tb *tb, void *data)
+{
+	return tb_nhi_has_quarantined_rings(tb->nhi);
+}
+
+static struct tb_domain_reset_result
+domain_late_handoff_test_terminal_reset(struct tb *tb, void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->terminal_reset_calls++;
+	ctx->reset_saw_handoff = ctx->unregister_called;
+	return (struct tb_domain_reset_result) {
+		.state = TB_DOMAIN_RESET_PROVEN,
+	};
+}
+
+static struct tb_domain_reset_result
+domain_late_handoff_test_runtime_reset(struct tb *tb, void *data)
+{
+	return (struct tb_domain_reset_result) {};
+}
+
+static void domain_late_handoff_test_finalize(struct tb *tb, void *data,
+					      enum tb_domain_reset_state reset_state,
+					      bool ownership_unresolved)
+{
+}
+
+static void domain_late_handoff_test_finalize_rings(struct tb *tb, void *data,
+						    bool reset_proven)
+{
+	tb_nhi_finalize_quarantined_rings(tb->nhi, reset_proven);
+}
+
+static void domain_late_handoff_test_abandon_rings(struct tb *tb, void *data)
+{
+	tb_nhi_abandon_quarantined_rings(tb->nhi);
+}
+
+static void domain_late_handoff_test_unregister_xdomains(struct tb *tb,
+							 void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->unregister_called = true;
+	ctx->handoff_ret = xdomain_quarantine_test_handoff(ctx->fx);
+}
+
+static void domain_late_handoff_test_release(struct tb *tb, void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->quarantine_count_at_release =
+		tb_test_xdomain_quarantine_count(ctx->fx->xd);
+	ctx->rings_quarantined_at_release =
+		tb_nhi_has_quarantined_rings(ctx->fx->nhi);
+}
+
+static void domain_late_handoff_test_noop(struct tb *tb, void *data)
+{
+}
+
+static void domain_late_handoff_test_prepare(struct tb *tb, void *data,
+					     bool ownership_unresolved)
+{
+}
+
+static const struct tb_domain_remove_ops domain_late_handoff_test_ops = {
+	.stop = domain_late_handoff_test_stop,
+	.prepare_xdomains = domain_late_handoff_test_prepare,
+	.has_quarantined_rings = domain_late_handoff_test_has_rings,
+	.terminal_reset = domain_late_handoff_test_terminal_reset,
+	.runtime_power_cycle = domain_late_handoff_test_runtime_reset,
+	.finalize = domain_late_handoff_test_finalize,
+	.ctl_stop = domain_late_handoff_test_noop,
+	.flush = domain_late_handoff_test_noop,
+	.unregister_xdomains = domain_late_handoff_test_unregister_xdomains,
+	.deinit = domain_late_handoff_test_noop,
+	.finalize_quarantined_rings = domain_late_handoff_test_finalize_rings,
+	.abandon_quarantined_rings = domain_late_handoff_test_abandon_rings,
+	.release = domain_late_handoff_test_release,
+	.unregister_domain = domain_late_handoff_test_noop,
+};
+
+/*
+ * Service unbind is the last producer of core-owned quarantine records. It
+ * must run before the domain samples ownership and crosses its one reset and
+ * discard boundary; otherwise remove can destroy the workqueue underneath a
+ * retry that the same remove call created.
+ */
+static void
+tb_test_domain_remove_collects_late_service_handoff(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	struct domain_late_handoff_test_context ctx = {};
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ctx.fx = &fx;
+
+	ret = tb_test_domain_remove_sequence(fx.tb, false,
+					     &domain_late_handoff_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.handoff_ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.terminal_reset_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.reset_saw_handoff);
+	KUNIT_EXPECT_EQ(test, ctx.quarantine_count_at_release, 0U);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_quarantined_at_release);
+	KUNIT_EXPECT_EQ(test, fx.ctx.freed_rings, 2U);
+	KUNIT_EXPECT_EQ(test, fx.ctx.recovery_requests, 0U);
+
+	/* RED cleanup: the old order leaves the newly queued retry behind. */
+	tb_xdomain_quarantine_discard_domain(fx.tb);
+	if (tb_nhi_has_quarantined_rings(fx.nhi))
+		tb_nhi_abandon_quarantined_rings(fx.nhi);
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+static void
+tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, xdomain_quarantine_test_handoff(&fx), 0);
+	KUNIT_EXPECT_TRUE(test, fx.tx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, fx.rx_ring->quarantined);
+	KUNIT_EXPECT_EQ(test, 1u, tb_test_xdomain_quarantine_count(fx.xd));
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->out_hopids,
+					      TB_PATH_MIN_HOPID,
+					      TB_PATH_MIN_HOPID, GFP_KERNEL), 0);
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->in_hopids,
+					      TB_PATH_MIN_HOPID + 1,
+					      TB_PATH_MIN_HOPID + 1,
+					      GFP_KERNEL), 0);
+
+	/* A real path readback now proves both directions drained. */
+	fx.ctx.io.hop.pending = false;
+	KUNIT_ASSERT_EQ(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_EQ(test, 0u, tb_test_xdomain_quarantine_count(fx.xd));
+	KUNIT_EXPECT_EQ(test, 2u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, fx.nhi->tx_rings[1]);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, fx.nhi->rx_rings[2]);
+	ret = ida_alloc_range(&fx.xd->out_hopids, TB_PATH_MIN_HOPID,
+			      TB_PATH_MIN_HOPID, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = ida_alloc_range(&fx.xd->in_hopids, TB_PATH_MIN_HOPID + 1,
+			      TB_PATH_MIN_HOPID + 1, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.recovery_requests);
+
+	WARN_ON(tb_tunnel_put(fx.tunnel));
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+static void
+tb_test_xdomain_quarantine_retries_then_requires_proven_reset(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, xdomain_quarantine_test_handoff(&fx), 0);
+
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_EQ(test, 1u, fx.ctx.recovery_requests);
+	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, -EUCLEAN, fx.xd->path_teardown_err);
+
+	/* Dispatch or timeout is not proof and must not release anything. */
+	tb_test_xdomain_quarantine_finalize(fx.tb,
+					    TB_DOMAIN_RESET_DISPATCHED);
+	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, -EUCLEAN, fx.xd->path_teardown_err);
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->out_hopids,
+					      TB_PATH_MIN_HOPID,
+					      TB_PATH_MIN_HOPID, GFP_KERNEL), 0);
+
+	/* Only synchronous reset completion revokes the tuple. */
+	tb_test_xdomain_quarantine_finalize(fx.tb, TB_DOMAIN_RESET_PROVEN);
+	KUNIT_EXPECT_EQ(test, 2u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, 0, fx.xd->path_teardown_err);
+	ret = ida_alloc_range(&fx.xd->out_hopids, TB_PATH_MIN_HOPID,
+			      TB_PATH_MIN_HOPID, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = ida_alloc_range(&fx.xd->in_hopids, TB_PATH_MIN_HOPID + 1,
+			      TB_PATH_MIN_HOPID + 1, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+/*
+ * A failed exact-record allocation cannot authorize leaf-owned ring objects
+ * to survive module removal with live IRQ/work callbacks. Even though the
+ * tuple is unavailable for path retry, both real rings must enter the generic
+ * reset quarantine so domain removal can detach them safely.
+ */
+static void
+tb_test_xdomain_quarantine_alloc_failure_still_fences_rings(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	tb_test_xdomain_quarantine_fail_alloc(true);
+
+	ret = xdomain_quarantine_test_handoff(&fx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ENOMEM);
+	KUNIT_EXPECT_TRUE(test, fx.tx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, fx.rx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, tb_nhi_has_quarantined_rings(fx.nhi));
+	KUNIT_EXPECT_EQ(test, 0u, tb_test_xdomain_quarantine_count(fx.xd));
+
+	tb_nhi_abandon_quarantined_rings(fx.nhi);
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
 static void tb_test_tunnel_pcie(struct kunit *test)
 {
 	struct tb_switch *host, *dev1, *dev2;
@@ -5480,6 +7296,12 @@ static void tb_test_xdomain_icm_teardown_never_touches_lane_hardware(struct kuni
 		"firmware-CM teardown must not issue synchronous lane register I/O after an XDomain disconnect");
 }
 
+static void tb_test_xdomain_unplugged_teardown_never_touches_lane_hardware(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+			   tb_test_xdomain_unplugged_link_exit_touches_lane_hardware());
+}
+
 /*
  * XDomain protocol handler ABI and reload-race regressions (appmana-025
  * kdump 202608031305). A tbframe.ko rebuilt against the stock
@@ -6384,6 +8206,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_unsupported_bonding_is_not_rearmed),
 	KUNIT_CASE(tb_test_xdomain_error_match_is_route_checked),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
+	KUNIT_CASE(tb_test_xdomain_unplugged_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),
 	KUNIT_CASE(tb_test_xdomain_handler_dispatch_source_blind_registrant),
 	KUNIT_CASE(tb_test_xdomain_handler_unregister_waits_for_dispatch),
@@ -6477,6 +8300,32 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_path_not_bonded_lane1_chain_reverse),
 	KUNIT_CASE(tb_test_path_mixed_chain),
 	KUNIT_CASE(tb_test_path_mixed_chain_reverse),
+	KUNIT_CASE(tb_test_path_deactivate_disabled_pending_retries),
+	KUNIT_CASE(tb_test_path_discover_rejects_zero_hop),
+	KUNIT_CASE(tb_test_zero_hop_path_operations_are_rejected),
+	KUNIT_CASE(tb_test_path_deactivate_pending_retains_ownership),
+	KUNIT_CASE(tb_test_path_activate_refuses_disabled_pending_hop),
+	KUNIT_CASE(tb_test_path_activation_rollback_covers_enabled_hops),
+	KUNIT_CASE(tb_test_resume_activation_is_transactional_and_schedules_cleanup),
+	KUNIT_CASE(tb_test_tunnel_deactivate_preserves_failed_teardown),
+	KUNIT_CASE(tb_test_tunnel_cleanup_only_cannot_activate),
+	KUNIT_CASE(tb_test_tunnel_incomplete_cleanup_invalid_safe),
+	KUNIT_CASE(tb_test_tunnel_final_put_retains_failed_ownership),
+	KUNIT_CASE(tb_test_tunnel_terminal_release_requires_revocation_proof),
+	KUNIT_CASE(tb_test_tunnel_terminal_release_after_revocation),
+	KUNIT_CASE(tb_test_tunnel_revocation_survives_deferred_reference),
+	KUNIT_CASE(tb_test_cm_reset_failure_retains_all_unresolved_dma),
+	KUNIT_CASE(tb_test_cm_reset_success_revokes_all_unresolved_dma_once),
+	KUNIT_CASE(tb_test_domain_remove_dispatch_is_not_revocation_proof),
+	KUNIT_CASE(tb_test_domain_remove_quarantine_requires_proven_terminal_reset),
+	KUNIT_CASE(tb_test_domain_remove_failed_reset_detaches_quarantined_rings),
+	KUNIT_CASE(tb_test_domain_failed_reset_reaches_service_disconnect),
+	KUNIT_CASE(tb_test_domain_power_cycle_completion_mapping),
+	KUNIT_CASE(tb_test_unplugged_xdomain_preserves_teardown_error),
+	KUNIT_CASE(tb_test_domain_remove_collects_late_service_handoff),
+	KUNIT_CASE(tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain),
+	KUNIT_CASE(tb_test_xdomain_quarantine_retries_then_requires_proven_reset),
+	KUNIT_CASE(tb_test_xdomain_quarantine_alloc_failure_still_fences_rings),
 	KUNIT_CASE(tb_test_tunnel_pcie),
 	KUNIT_CASE(tb_test_tunnel_dp),
 	KUNIT_CASE(tb_test_tunnel_dp_chain),

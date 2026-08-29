@@ -55,6 +55,8 @@
 #include <kunit/test.h>
 #include <linux/kernel.h>
 
+#include "tbnet_test.h"
+
 #ifndef TBNET_UNBIND_FENCE_FIRST
 #define TBNET_UNBIND_FENCE_FIRST 1
 #endif
@@ -422,6 +424,53 @@ static void tbnet_unbind_down_interface_still_fenced(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 0u, m.inversions);
 }
 
+/*
+ * ndo_stop's return value is not a remove result. If its failed disconnect
+ * left the DMA tuple owned, the actual remove branch must hand its stopped
+ * rings to the core and free all leaf-owned state without releasing any
+ * hardware identifier that the unresolved path can still target.
+ */
+static void tbnet_remove_hands_unresolved_dma_to_core(struct kunit *test)
+{
+	struct tbnet_test_handoff_result result = { };
+
+	/* Calls the same terminal handoff helper as the real remove callback. */
+	tbnet_test_terminal_handoff(0, &result);
+
+	KUNIT_EXPECT_EQ(test, 0, result.handoff_ret);
+	KUNIT_EXPECT_EQ(test, 1u, result.quarantine_requests);
+	KUNIT_EXPECT_EQ(test, 2u, result.quarantined);
+	KUNIT_EXPECT_EQ(test, 8, result.transmit_path);
+	KUNIT_EXPECT_EQ(test, 3, result.transmit_ring);
+	KUNIT_EXPECT_EQ(test, 9, result.receive_path);
+	KUNIT_EXPECT_EQ(test, 4, result.receive_ring);
+	KUNIT_EXPECT_EQ(test, 2u, result.buffers_freed);
+	KUNIT_EXPECT_EQ(test, 0u, result.rings_freed);
+	KUNIT_EXPECT_EQ(test, 0u, result.hopids_released);
+	KUNIT_EXPECT_TRUE(test, result.ring_pointers_cleared);
+	KUNIT_EXPECT_TRUE(test, result.leaf_ownership_cleared);
+}
+
+/*
+ * Ring-only fallback keeps module lifetime safe, but it cannot claim that the
+ * exact path/HopID tuple was recorded. Preserve the original error after the
+ * callbacks and leaf buffers have been fenced so remove can report that the
+ * core recovery record is incomplete.
+ */
+static void tbnet_remove_reports_failed_exact_handoff(struct kunit *test)
+{
+	struct tbnet_test_handoff_result result = { };
+
+	tbnet_test_terminal_handoff(-ENOMEM, &result);
+
+	KUNIT_EXPECT_EQ(test, result.handoff_ret, -ENOMEM);
+	KUNIT_EXPECT_EQ(test, 1u, result.quarantine_requests);
+	KUNIT_EXPECT_EQ(test, 2u, result.quarantined);
+	KUNIT_EXPECT_EQ(test, 2u, result.buffers_freed);
+	KUNIT_EXPECT_TRUE(test, result.ring_pointers_cleared);
+	KUNIT_EXPECT_TRUE(test, result.leaf_ownership_cleared);
+}
+
 static struct kunit_case tbnet_unbind_cases[] = {
 	KUNIT_CASE(tbnet_unbind_no_work_after_free),
 	KUNIT_CASE(tbnet_unbind_fence_excludes_peer),
@@ -430,6 +479,8 @@ static struct kunit_case tbnet_unbind_cases[] = {
 	KUNIT_CASE(tbnet_unbind_live_peer_is_cheap),
 	KUNIT_CASE(tbnet_shutdown_is_monotonic_under_peer_hello),
 	KUNIT_CASE(tbnet_unbind_down_interface_still_fenced),
+	KUNIT_CASE(tbnet_remove_hands_unresolved_dma_to_core),
+	KUNIT_CASE(tbnet_remove_reports_failed_exact_handoff),
 	{}
 };
 

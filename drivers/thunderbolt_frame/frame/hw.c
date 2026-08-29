@@ -245,6 +245,29 @@ static void tbframe_hw_free_rings(void *data)
 	}
 }
 
+static int tbframe_hw_quarantine_paths(void *data, int local_hopid,
+				       int remote_hopid)
+{
+	struct tbframe_hw *hw = data;
+	int ret;
+
+	if (!hw->tx_ring || !hw->rx_ring)
+		return -EINVAL;
+#ifdef TB_XDOMAIN_HAS_PATH_QUARANTINE
+	ret = tb_xdomain_quarantine_paths(hw->xd,
+					  local_hopid, hw->tx_ring->hop,
+					  hw->tx_ring, remote_hopid,
+					  hw->rx_ring->hop, hw->rx_ring);
+#else
+	ret = -EOPNOTSUPP;
+#endif
+	if (ret)
+		return ret;
+	hw->rx_ring = NULL;
+	hw->tx_ring = NULL;
+	return 0;
+}
+
 static int tbframe_hw_map_frame(void *data, struct tbframe_frame_priv *f,
 				bool tx)
 {
@@ -535,6 +558,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.quiesce_tx		= tbframe_hw_quiesce_tx,
 	.stop_rings		= tbframe_hw_stop_rings,
 	.free_rings		= tbframe_hw_free_rings,
+	.quarantine_paths	= tbframe_hw_quarantine_paths,
 	.map_frame		= tbframe_hw_map_frame,
 	.unmap_frame		= tbframe_hw_unmap_frame,
 	.post_rx		= tbframe_hw_post_rx,

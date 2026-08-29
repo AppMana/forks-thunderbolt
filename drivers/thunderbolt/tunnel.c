@@ -204,6 +204,13 @@ static void tb_tunnel_get(struct tb_tunnel *tunnel)
 	mutex_unlock(&tb_tunnel_lock);
 }
 
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_tunnel_get(struct tb_tunnel *tunnel)
+{
+	tb_tunnel_get(tunnel);
+}
+#endif
+
 static void tb_tunnel_destroy(struct kref *kref)
 {
 	struct tb_tunnel *tunnel = container_of(kref, typeof(*tunnel), kref);
@@ -221,11 +228,105 @@ static void tb_tunnel_destroy(struct kref *kref)
 	kfree(tunnel);
 }
 
-void tb_tunnel_put(struct tb_tunnel *tunnel)
+bool tb_tunnel_release_safe(const struct tb_tunnel *tunnel)
 {
+	int i;
+
+	if (tunnel->state == TB_TUNNEL_TEARDOWN_FAILED)
+		return false;
+
+	for (i = 0; i < tunnel->npaths; i++) {
+		if (tunnel->paths[i] &&
+		    tunnel->paths[i]->state != TB_PATH_INACTIVE)
+			return false;
+	}
+
+	return true;
+}
+
+/**
+ * tb_tunnel_put() - Drop a tunnel reference without abandoning hardware
+ * @tunnel: Tunnel whose reference is dropped
+ *
+ * The last software owner may not disappear while a path remains active or
+ * could not be proven drained. Keeping the final reference also keeps every
+ * HopID and credit reservation out of the allocators until teardown is
+ * retried or an explicit controller-revocation path is used.
+ *
+ * Return: %0 when the reference was dropped or %-EBUSY when the final
+ * reference was retained because hardware ownership remains unresolved.
+ */
+int tb_tunnel_put(struct tb_tunnel *tunnel)
+{
+	int ret = 0;
+
+	mutex_lock(&tb_tunnel_lock);
+	if (kref_read(&tunnel->kref) == 1 && !tb_tunnel_release_safe(tunnel)) {
+		ret = -EBUSY;
+		tb_tunnel_warn(tunnel,
+			       "retaining final reference to unresolved hardware ownership\n");
+	} else {
+		kref_put(&tunnel->kref, tb_tunnel_destroy);
+	}
+	mutex_unlock(&tb_tunnel_lock);
+
+	return ret;
+}
+
+/**
+ * tb_tunnel_put_after_revoke() - Drop a reference after controller revocation
+ * @tunnel: Tunnel whose hardware ownership was revoked
+ *
+ * This is the terminal counterpart to tb_tunnel_put(). It may only be used
+ * after a successful whole-controller reset has independently proved that no
+ * path can still name the tunnel's HopIDs, credits, or DMA endpoints.
+ */
+void tb_tunnel_put_after_revoke(struct tb_tunnel *tunnel)
+{
+	int i;
+
+	mutex_lock(&tb_tunnel_lock);
+	/*
+	 * Revocation is a permanent ownership transition, not merely permission
+	 * for this caller to drop one reference. A canceled asynchronous worker
+	 * may hold the last reference and must later observe a release-safe state.
+	 */
+	for (i = 0; i < tunnel->npaths; i++)
+		if (tunnel->paths[i])
+			tunnel->paths[i]->state = TB_PATH_INACTIVE;
+	tunnel->state = TB_TUNNEL_INACTIVE;
+	kref_put(&tunnel->kref, tb_tunnel_destroy);
+	mutex_unlock(&tb_tunnel_lock);
+}
+
+/*
+ * Drop the connection manager's final reference while destroying its entire
+ * topology model. Non-DMA protocol tunnels may intentionally remain in
+ * hardware for the next probe to discover, but they cannot name driver-owned
+ * ring memory. DMA callers must use normal teardown or proven revocation.
+ */
+void tb_tunnel_put_on_cm_stop(struct tb_tunnel *tunnel)
+{
+	WARN_ON(tb_tunnel_is_dma(tunnel));
+
 	mutex_lock(&tb_tunnel_lock);
 	kref_put(&tunnel->kref, tb_tunnel_destroy);
 	mutex_unlock(&tb_tunnel_lock);
+}
+
+/*
+ * A malformed tunnel found in hardware is owned only for deactivation. Keep
+ * it discoverable if that deactivation cannot be proved, but never allow a
+ * later resume pass to turn it into a connection-manager-owned tunnel.
+ */
+static struct tb_tunnel *tb_tunnel_abort_discovery(struct tb_tunnel *tunnel)
+{
+	tunnel->cleanup_only = true;
+	if (tb_tunnel_deactivate(tunnel))
+		return tunnel;
+
+	WARN_ON(tb_tunnel_put(tunnel));
+	return NULL;
 }
 
 /**
@@ -448,7 +549,9 @@ struct tb_tunnel *tb_tunnel_discover_pci(struct tb *tb, struct tb_port *down,
 	}
 	tunnel->paths[TB_PCI_PATH_UP] = path;
 	if (tb_pci_init_path(tunnel->paths[TB_PCI_PATH_UP]))
-		goto err_free;
+		goto err_deactivate;
+	if (!tunnel->dst_port)
+		goto err_deactivate;
 
 	path = tb_path_discover(tunnel->dst_port, -1, down, TB_PCI_HOPID, NULL,
 				"PCIe Down", alloc_hopid);
@@ -480,7 +583,7 @@ struct tb_tunnel *tb_tunnel_discover_pci(struct tb *tb, struct tb_port *down,
 	return tunnel;
 
 err_deactivate:
-	tb_tunnel_deactivate(tunnel);
+	return tb_tunnel_abort_discovery(tunnel);
 err_free:
 	tb_tunnel_put(tunnel);
 
@@ -1054,9 +1157,10 @@ static void tb_dp_dprx_work(struct work_struct *work)
 {
 	struct tb_tunnel *tunnel = container_of(work, typeof(*tunnel), dprx_work.work);
 	struct tb *tb = tunnel->tb;
+	bool notify = false;
 
+	mutex_lock(&tb->lock);
 	if (!tunnel->dprx_canceled) {
-		mutex_lock(&tb->lock);
 		if (tb_dp_is_usb4(tunnel->src_port->sw) &&
 		    tb_dp_wait_dprx(tunnel, TB_DPRX_WAIT_TIMEOUT)) {
 			if (ktime_before(ktime_get(), tunnel->dprx_timeout)) {
@@ -1068,10 +1172,11 @@ static void tb_dp_dprx_work(struct work_struct *work)
 		} else {
 			tb_tunnel_set_active(tunnel, true);
 		}
-		mutex_unlock(&tb->lock);
+		notify = true;
 	}
+	mutex_unlock(&tb->lock);
 
-	if (tunnel->callback)
+	if (notify && tunnel->callback)
 		tunnel->callback(tunnel, tunnel->callback_data);
 	tb_tunnel_put(tunnel);
 }
@@ -1103,6 +1208,21 @@ static void tb_dp_dprx_stop(struct tb_tunnel *tunnel)
 		tunnel->dprx_canceled = true;
 		if (cancel_delayed_work(&tunnel->dprx_work))
 			tb_tunnel_put(tunnel);
+	}
+}
+
+void tb_tunnel_drain_deferred(struct tb_tunnel *tunnel)
+{
+	if (tunnel->type != TB_TUNNEL_DP)
+		return;
+
+	if (tunnel->dprx_started) {
+		tunnel->dprx_started = false;
+		tunnel->dprx_canceled = true;
+		if (cancel_delayed_work_sync(&tunnel->dprx_work))
+			tb_tunnel_put(tunnel);
+	} else {
+		cancel_delayed_work_sync(&tunnel->dprx_work);
 	}
 }
 
@@ -1582,7 +1702,9 @@ struct tb_tunnel *tb_tunnel_discover_dp(struct tb *tb, struct tb_port *in,
 	}
 	tunnel->paths[TB_DP_VIDEO_PATH_OUT] = path;
 	if (tb_dp_init_video_path(tunnel->paths[TB_DP_VIDEO_PATH_OUT], false))
-		goto err_free;
+		goto err_deactivate;
+	if (!tunnel->dst_port)
+		goto err_deactivate;
 
 	path = tb_path_discover(in, TB_DP_AUX_TX_HOPID, NULL, -1, NULL, "AUX TX",
 				alloc_hopid);
@@ -1621,7 +1743,7 @@ struct tb_tunnel *tb_tunnel_discover_dp(struct tb *tb, struct tb_port *in,
 	return tunnel;
 
 err_deactivate:
-	tb_tunnel_deactivate(tunnel);
+	return tb_tunnel_abort_discovery(tunnel);
 err_free:
 	tb_tunnel_put(tunnel);
 
@@ -2015,7 +2137,7 @@ int tb_tunnel_dma_hw_active(const struct tb_tunnel *tunnel)
 
 		if (!path)
 			continue;
-		if (!path->activated)
+		if (path->state == TB_PATH_INACTIVE)
 			return 0;
 
 		for (j = 0; j < path->path_length; j++) {
@@ -2242,6 +2364,8 @@ struct tb_tunnel *tb_tunnel_discover_usb3(struct tb *tb, struct tb_port *down,
 	}
 	tunnel->paths[TB_USB3_PATH_DOWN] = path;
 	tb_usb3_init_path(tunnel->paths[TB_USB3_PATH_DOWN]);
+	if (!tunnel->dst_port)
+		goto err_deactivate;
 
 	path = tb_path_discover(tunnel->dst_port, -1, down, TB_USB3_HOPID, NULL,
 				"USB3 Up", alloc_hopid);
@@ -2295,7 +2419,7 @@ struct tb_tunnel *tb_tunnel_discover_usb3(struct tb *tb, struct tb_port *down,
 	return tunnel;
 
 err_deactivate:
-	tb_tunnel_deactivate(tunnel);
+	return tb_tunnel_abort_discovery(tunnel);
 err_free:
 	tb_tunnel_put(tunnel);
 
@@ -2391,8 +2515,13 @@ bool tb_tunnel_is_invalid(struct tb_tunnel *tunnel)
 {
 	int i;
 
+	if ((tunnel->src_port && tunnel->src_port->sw->is_unplugged) ||
+	    (tunnel->dst_port && tunnel->dst_port->sw->is_unplugged))
+		return true;
+
 	for (i = 0; i < tunnel->npaths; i++) {
-		WARN_ON(!tunnel->paths[i]->activated);
+		if (!tunnel->paths[i])
+			continue;
 		if (tb_path_is_invalid(tunnel->paths[i]))
 			return true;
 	}
@@ -2411,18 +2540,25 @@ bool tb_tunnel_is_invalid(struct tb_tunnel *tunnel)
  */
 int tb_tunnel_activate(struct tb_tunnel *tunnel)
 {
-	int res, i;
+	int cleanup, res, i;
 
 	tb_tunnel_dbg(tunnel, "activating\n");
+	if (tunnel->cleanup_only)
+		return -EUCLEAN;
 
 	/*
 	 * Make sure all paths are properly disabled before enabling
 	 * them again.
 	 */
 	for (i = 0; i < tunnel->npaths; i++) {
-		if (tunnel->paths[i]->activated) {
-			tb_path_deactivate(tunnel->paths[i]);
-			tunnel->paths[i]->activated = false;
+		if (!tunnel->paths[i])
+			return -EUCLEAN;
+		if (tunnel->paths[i]->state != TB_PATH_INACTIVE) {
+			res = tb_path_deactivate(tunnel->paths[i]);
+			if (res) {
+				tunnel->state = TB_TUNNEL_TEARDOWN_FAILED;
+				return res;
+			}
 		}
 	}
 
@@ -2454,32 +2590,52 @@ int tb_tunnel_activate(struct tb_tunnel *tunnel)
 
 err:
 	tb_tunnel_warn(tunnel, "activation failed\n");
-	tb_tunnel_deactivate(tunnel);
+	cleanup = tb_tunnel_deactivate(tunnel);
+	if (cleanup)
+		return -EUCLEAN;
 	return res;
 }
 
 /**
  * tb_tunnel_deactivate() - deactivate a tunnel
  * @tunnel: Tunnel to deactivate
+ *
+ * Availability and ownership are separate: a failure moves the tunnel to
+ * %TB_TUNNEL_TEARDOWN_FAILED and retains every unresolved path for retry.
+ *
+ * Return: %0 on success or the first deactivation error.
  */
-void tb_tunnel_deactivate(struct tb_tunnel *tunnel)
+int tb_tunnel_deactivate(struct tb_tunnel *tunnel)
 {
-	int i;
+	int i, res, ret = 0;
 
 	tb_tunnel_dbg(tunnel, "deactivating\n");
 
-	if (tunnel->activate)
-		tunnel->activate(tunnel, false);
+	if (tunnel->activate) {
+		res = tunnel->activate(tunnel, false);
+		if (res)
+			ret = res;
+	}
 
 	for (i = 0; i < tunnel->npaths; i++) {
-		if (tunnel->paths[i] && tunnel->paths[i]->activated)
-			tb_path_deactivate(tunnel->paths[i]);
+		if (tunnel->paths[i] &&
+		    tunnel->paths[i]->state != TB_PATH_INACTIVE) {
+			res = tb_path_deactivate(tunnel->paths[i]);
+			if (res && !ret)
+				ret = res;
+		}
+	}
+
+	if (ret) {
+		tunnel->state = TB_TUNNEL_TEARDOWN_FAILED;
+		return ret;
 	}
 
 	if (tunnel->post_deactivate)
 		tunnel->post_deactivate(tunnel);
-
 	tb_tunnel_set_active(tunnel, false);
+
+	return 0;
 }
 
 /**

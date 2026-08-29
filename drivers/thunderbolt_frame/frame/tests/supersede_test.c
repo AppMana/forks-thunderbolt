@@ -45,10 +45,10 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
 /*
  * A HELLO for a new peer lifetime is not merely a control-plane update.  The
  * old data rings, hop entries and HopID still name the previous lifetime until
- * session work has stopped the rings and removed those paths.  An early ACK
+ * session work has drained the paths and stopped those rings. An early ACK
  * lets the peer install its replacement path against that stale hardware.
  * The peer already retries HELLO, so withhold the reply until the old hardware
- * lifetime has crossed the stop -> disable -> release fence.
+ * lifetime has crossed the disable/drain -> stop -> release fence.
  */
 static void
 tbframe_supersede_hello_ack_waits_for_old_hw_fence(struct kunit *test)
@@ -86,8 +86,8 @@ tbframe_supersede_hello_ack_waits_for_old_hw_fence(struct kunit *test)
 	KUNIT_ASSERT_GE(test, stop, 0);
 	KUNIT_ASSERT_GE(test, disable, 0);
 	KUNIT_ASSERT_GE(test, release, 0);
-	KUNIT_EXPECT_LT(test, stop, disable);
-	KUNIT_EXPECT_LT(test, disable, release);
+	KUNIT_EXPECT_LT(test, disable, stop);
+	KUNIT_EXPECT_LT(test, stop, release);
 }
 
 /*
@@ -99,11 +99,10 @@ tbframe_supersede_hello_ack_waits_for_old_hw_fence(struct kunit *test)
  * ->paths_enabled -- still true for the OLD session's paths, which the queued
  * down_session() is about to rip out -- and certified mutual readiness with
  * READY_ACK. The peer then went UP and streamed a full TX ring into a hop
- * entry we were disabling; on the 023/025 canaries that wedged the peer's
- * egress HopID at the router level (TX ring enabled, 2047 posted, zero
- * consumed) until a reboot. The ack must be withheld while a down is
- * pending, exactly as it is withheld before the paths first come up; the
- * peer's READY retry budget absorbs the delay.
+ * entry being disabled, wedging the peer's router egress until a reset. The
+ * ack must be withheld while a down is pending, exactly as it is withheld
+ * before the paths first come up; the peer's READY retry budget absorbs the
+ * delay.
  */
 static void tbframe_ready_ack_withheld_during_pending_supersede(struct kunit *test)
 {

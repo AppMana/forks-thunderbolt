@@ -309,10 +309,7 @@ out:
 	kfree(recovery);
 }
 
-int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
-				    const struct tb_ring_snapshot *first,
-				    const struct tb_ring_snapshot *last,
-				    bool control_healthy)
+static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route)
 {
 	struct nhi_runtime_recovery_record *record, *new_record;
 	struct nhi_runtime_recovery_work *recovery;
@@ -321,14 +318,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	struct pci_dev *pdev;
 	int ret = 0;
 
-	if (!nhi || !first || !last)
-		return -EINVAL;
 	pdev = nhi->pdev;
-	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
-		return -EOPNOTSUPP;
-	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy))
-		return -EAGAIN;
-
 	recovery = kzalloc(sizeof(*recovery), GFP_KERNEL);
 	if (!recovery)
 		return -ENOMEM;
@@ -384,7 +374,44 @@ unlock:
 
 	return 0;
 }
+
+int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
+				    const struct tb_ring_snapshot *first,
+				    const struct tb_ring_snapshot *last,
+				    bool control_healthy)
+{
+	struct pci_dev *pdev;
+
+	if (!nhi || !first || !last)
+		return -EINVAL;
+	pdev = nhi->pdev;
+	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
+		return -EOPNOTSUPP;
+	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy))
+		return -EAGAIN;
+
+	return tb_nhi_queue_runtime_recovery(nhi, route);
+}
 EXPORT_SYMBOL_GPL(tb_nhi_request_runtime_recovery);
+
+/*
+ * A bounded sequence of failed, exact path-disable retries is independent
+ * controller-ownership evidence. It deliberately bypasses the TX-stall
+ * snapshot predicate while reusing the same serialized unbind, reset and
+ * reprobe state machine as data-path recovery.
+ */
+int tb_nhi_request_quarantine_recovery(struct tb_nhi *nhi, u64 route)
+{
+	struct pci_dev *pdev;
+
+	if (!nhi)
+		return -EINVAL;
+	pdev = nhi->pdev;
+	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
+		return -EOPNOTSUPP;
+
+	return tb_nhi_queue_runtime_recovery(nhi, route);
+}
 
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
 {
@@ -956,7 +983,7 @@ int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame)
 	int ret = 0;
 
 	spin_lock_irqsave(&ring->lock, flags);
-	if (ring->running) {
+	if (ring->running && !ring->quarantined) {
 		list_add_tail(&frame->list, &ring->queue);
 		ring_write_descriptors(ring);
 	} else {
@@ -1382,6 +1409,9 @@ void tb_ring_start(struct tb_ring *ring)
 
 	spin_lock_irq(&ring->nhi->lock);
 	spin_lock(&ring->lock);
+	/* Terminal ownership handoff is permanent until controller reset. */
+	if (ring->quarantined)
+		goto err;
 	if (ring->nhi->going_away)
 		goto err;
 	if (ring->running) {
@@ -1562,6 +1592,157 @@ err:
 	flush_work(&ring->work);
 }
 EXPORT_SYMBOL_GPL(tb_ring_stop);
+
+/**
+ * tb_ring_quarantine() - hand an unresolved stopped ring to the core
+ * @ring: Ring whose leaf owner is going away
+ *
+ * This is a software-lifetime fence, not evidence that the fabric path was
+ * drained. It prevents reuse, synchronously cancels every queued frame, and
+ * erases the only ring-level callback/data pair that may point into a leaf
+ * module. The NHI slot, coherent descriptor allocation, IRQ and HopID remain
+ * owned by the core until exact path readback proves a drain or a synchronous
+ * controller reset proves revocation.
+ *
+ * The caller must have fenced producers and joined any external poll consumer
+ * (for example NAPI) before calling. It must not call this from a frame
+ * callback and must never access the ring after ownership is handed off.
+ */
+void tb_ring_quarantine(struct tb_ring *ring)
+{
+	bool running;
+
+	if (!ring)
+		return;
+
+	spin_lock_irq(&ring->nhi->lock);
+	spin_lock(&ring->lock);
+	if (ring->quarantined) {
+		spin_unlock(&ring->lock);
+		spin_unlock_irq(&ring->nhi->lock);
+		flush_work(&ring->work);
+		return;
+	}
+
+	/* Close both admission paths before the callback drain starts. */
+	ring->quarantined = true;
+	ring->start_poll = NULL;
+	ring->poll_data = NULL;
+	running = ring->running;
+	spin_unlock(&ring->lock);
+	spin_unlock_irq(&ring->nhi->lock);
+
+	if (running) {
+		tb_ring_stop(ring);
+	} else {
+		/* ring_work's stopped branch cancels both software lists. */
+		schedule_work(&ring->work);
+		flush_work(&ring->work);
+	}
+}
+EXPORT_SYMBOL_GPL(tb_ring_quarantine);
+
+/* True when a leaf handoff requires a reset before core ring reclamation. */
+bool tb_nhi_has_quarantined_rings(struct tb_nhi *nhi)
+{
+	unsigned int i;
+	bool found = false;
+
+	spin_lock_irq(&nhi->lock);
+	for (i = 0; i < nhi->hop_count; i++) {
+		if ((nhi->tx_rings[i] && nhi->tx_rings[i]->quarantined) ||
+		    (nhi->rx_rings[i] && nhi->rx_rings[i]->quarantined)) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irq(&nhi->lock);
+
+	return found;
+}
+
+/*
+ * Reclaim the core-owned ring allocations after synchronous host-router reset
+ * success.  A reset request that was merely dispatched, timed out, or failed
+ * is not proof and must pass false.  Domain stop serializes this walk against
+ * allocation and leaf handoff; XDomain path/HopID allocators are torn down by
+ * their own topology destruction after this reset boundary.
+ */
+void tb_nhi_finalize_quarantined_rings(struct tb_nhi *nhi,
+				       bool controller_reset_proven)
+{
+	unsigned int i;
+
+	if (!controller_reset_proven)
+		return;
+
+	for (i = 0; i < nhi->hop_count; i++) {
+		struct tb_ring *ring;
+
+		spin_lock_irq(&nhi->lock);
+		ring = nhi->rx_rings[i];
+		if (!ring || !ring->quarantined)
+			ring = NULL;
+		spin_unlock_irq(&nhi->lock);
+		if (ring)
+			tb_ring_free(ring);
+
+		spin_lock_irq(&nhi->lock);
+		ring = nhi->tx_rings[i];
+		if (!ring || !ring->quarantined)
+			ring = NULL;
+		spin_unlock_irq(&nhi->lock);
+		if (ring)
+			tb_ring_free(ring);
+	}
+}
+
+static struct tb_ring *
+tb_nhi_detach_quarantined_ring(struct tb_nhi *nhi,
+			       struct tb_ring **rings, unsigned int hop)
+{
+	struct tb_ring *ring;
+
+	spin_lock_irq(&nhi->lock);
+	ring = rings[hop];
+	if (ring && ring->quarantined)
+		rings[hop] = NULL;
+	else
+		ring = NULL;
+	spin_unlock_irq(&nhi->lock);
+	return ring;
+}
+
+static void tb_nhi_abandon_quarantined_ring(struct tb_ring *ring)
+{
+	if (!ring)
+		return;
+
+	/*
+	 * An unproven reset cannot authorize reuse of the coherent descriptor
+	 * allocation. It still must not leave an IRQ action or queued work naming
+	 * module text and a devres-owned NHI after PCI remove returns. Detach the
+	 * HopID, join the IRQ, and drain work, then deliberately retain the inert
+	 * ring and descriptor allocation until physical reset removes ownership.
+	 */
+	ring_release_msix(ring);
+	flush_work(&ring->work);
+	ring->nhi = NULL;
+}
+
+void tb_nhi_abandon_quarantined_rings(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < nhi->hop_count; i++) {
+		struct tb_ring *ring;
+
+		ring = tb_nhi_detach_quarantined_ring(nhi, nhi->rx_rings, i);
+		tb_nhi_abandon_quarantined_ring(ring);
+		ring = tb_nhi_detach_quarantined_ring(nhi, nhi->tx_rings, i);
+		tb_nhi_abandon_quarantined_ring(ring);
+	}
+}
 
 /*
  * tb_ring_free() - free ring
@@ -2020,21 +2201,21 @@ static void nhi_check_iommu(struct tb_nhi *nhi)
 		str_enabled_disabled(port_ok));
 }
 
-static void nhi_reset(struct tb_nhi *nhi)
+static int __nhi_reset(struct tb_nhi *nhi, bool force)
 {
 	ktime_t timeout;
 	u32 val;
 
 	val = nhi_read(nhi, nhi->iobase + REG_CAPS);
 	if (READ_ONCE(nhi->going_away))
-		return;
+		return -ENODEV;
 	/* Reset only v2 and later routers */
 	if (FIELD_GET(REG_CAPS_VERSION_MASK, val) < REG_CAPS_VERSION_2)
-		return;
+		return -EOPNOTSUPP;
 
-	if (!host_reset) {
+	if (!force && !host_reset) {
 		dev_dbg(&nhi->pdev->dev, "skipping host router reset\n");
-		return;
+		return 0;
 	}
 
 	iowrite32(REG_RESET_HRR, nhi->iobase + REG_RESET);
@@ -2044,15 +2225,21 @@ static void nhi_reset(struct tb_nhi *nhi)
 	do {
 		val = nhi_read(nhi, nhi->iobase + REG_RESET);
 		if (READ_ONCE(nhi->going_away))
-			break;
+			return -ENODEV;
 		if (!(val & REG_RESET_HRR)) {
 			dev_warn(&nhi->pdev->dev, "host router reset successful\n");
-			return;
+			return 0;
 		}
 		usleep_range(10, 20);
 	} while (ktime_before(ktime_get(), timeout));
 
 	dev_warn(&nhi->pdev->dev, "timeout resetting host router\n");
+	return -ETIMEDOUT;
+}
+
+int tb_nhi_reset_host(struct tb_nhi *nhi)
+{
+	return __nhi_reset(nhi, true);
 }
 
 static int nhi_init_msi(struct tb_nhi *nhi)
@@ -2236,7 +2423,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	nhi_check_quirks(nhi);
 	nhi_check_iommu(nhi);
-	nhi_reset(nhi);
+	__nhi_reset(nhi, false);
 
 	res = nhi_init_msi(nhi);
 	if (res)
@@ -2554,3 +2741,116 @@ static void __exit nhi_unload(void)
 
 rootfs_initcall(nhi_init);
 module_exit(nhi_unload);
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+#include <kunit/test.h>
+
+struct ring_quarantine_test_frame {
+	struct ring_frame frame;
+	unsigned int *canceled;
+};
+
+static void ring_quarantine_test_callback(struct tb_ring *ring,
+					  struct ring_frame *frame,
+					  bool canceled)
+{
+	struct ring_quarantine_test_frame *tf =
+		container_of(frame, typeof(*tf), frame);
+
+	if (canceled)
+		(*tf->canceled)++;
+}
+
+static void ring_quarantine_test_poll(void *data)
+{
+	unsigned int *calls = data;
+
+	(*calls)++;
+}
+
+/*
+ * Exercise the real ring ownership handoff. A quarantined ring must drain all
+ * leaf callbacks before returning, erase the polling callback/data pair, stay
+ * reserved in the NHI HopID table, and refuse both enqueue and restart.
+ */
+static void tb_test_ring_quarantine_detaches_leaf_lifetime(struct kunit *test)
+{
+	struct ring_quarantine_test_frame queued = { }, in_flight = { };
+	struct tb_nhi *nhi;
+	struct tb_ring *ring;
+	unsigned int canceled = 0, poll_calls = 0;
+
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	spin_lock_init(&nhi->lock);
+	nhi->hop_count = 2;
+	nhi->tx_rings = kunit_kcalloc(test, nhi->hop_count,
+				      sizeof(*nhi->tx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi->tx_rings);
+	nhi->rx_rings = kunit_kcalloc(test, nhi->hop_count,
+				      sizeof(*nhi->rx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi->rx_rings);
+
+	ring = kunit_kzalloc(test, sizeof(*ring), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ring);
+	spin_lock_init(&ring->lock);
+	INIT_LIST_HEAD(&ring->queue);
+	INIT_LIST_HEAD(&ring->in_flight);
+	INIT_WORK(&ring->work, ring_work);
+	init_waitqueue_head(&ring->wait);
+	ring->nhi = nhi;
+	ring->hop = 1;
+	ring->is_tx = true;
+	ring->start_poll = ring_quarantine_test_poll;
+	ring->poll_data = &poll_calls;
+	nhi->tx_rings[ring->hop] = ring;
+
+	queued.canceled = &canceled;
+	queued.frame.callback = ring_quarantine_test_callback;
+	INIT_LIST_HEAD(&queued.frame.list);
+	list_add_tail(&queued.frame.list, &ring->queue);
+	in_flight.canceled = &canceled;
+	in_flight.frame.callback = ring_quarantine_test_callback;
+	INIT_LIST_HEAD(&in_flight.frame.list);
+	list_add_tail(&in_flight.frame.list, &ring->in_flight);
+
+	tb_ring_quarantine(ring);
+
+	KUNIT_EXPECT_EQ(test, 2u, canceled);
+	KUNIT_EXPECT_TRUE(test, list_empty(&ring->queue));
+	KUNIT_EXPECT_TRUE(test, list_empty(&ring->in_flight));
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->start_poll);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->poll_data);
+	KUNIT_EXPECT_TRUE(test, ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, tb_nhi_has_quarantined_rings(nhi));
+	KUNIT_EXPECT_PTR_EQ(test, ring, nhi->tx_rings[ring->hop]);
+	/* Unproven reset state must not turn quarantine into a free. */
+	tb_nhi_finalize_quarantined_rings(nhi, false);
+	KUNIT_EXPECT_PTR_EQ(test, ring, nhi->tx_rings[ring->hop]);
+	/* Sequential handoff is idempotent and cannot repeat callbacks. */
+	tb_ring_quarantine(ring);
+	KUNIT_EXPECT_EQ(test, 2u, canceled);
+	KUNIT_EXPECT_EQ(test, -ESHUTDOWN,
+			__tb_ring_enqueue(ring, &queued.frame));
+	tb_ring_start(ring);
+	KUNIT_EXPECT_FALSE(test, ring->running);
+	KUNIT_EXPECT_EQ(test, 0u, poll_calls);
+	/* Failed reset still detaches every IRQ/work lifetime before devres. */
+	tb_nhi_abandon_quarantined_rings(nhi);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, nhi->tx_rings[ring->hop]);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->nhi);
+	KUNIT_EXPECT_FALSE(test, tb_nhi_has_quarantined_rings(nhi));
+}
+
+static struct kunit_case tb_ring_quarantine_cases[] = {
+	KUNIT_CASE(tb_test_ring_quarantine_detaches_leaf_lifetime),
+	{}
+};
+
+static struct kunit_suite tb_ring_quarantine_suite = {
+	.name = "thunderbolt_ring_quarantine",
+	.test_cases = tb_ring_quarantine_cases,
+};
+
+kunit_test_suite(tb_ring_quarantine_suite);
+#endif
