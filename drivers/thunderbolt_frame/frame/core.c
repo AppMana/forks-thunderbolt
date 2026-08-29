@@ -851,9 +851,9 @@ enum tbframe_session_owner {
 	TBFRAME_SESSION_PEER,
 };
 
-static void tbframe_link_down_session(struct tbframe_link *link,
-				      enum tbframe_down_reason reason,
-				      enum tbframe_session_owner owner)
+static int tbframe_link_down_session(struct tbframe_link *link,
+				     enum tbframe_down_reason reason,
+				     enum tbframe_session_owner owner)
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
@@ -862,7 +862,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	unsigned int drain_ms;
 	u16 remote_hopid;
 	u64 next_cookie = tbframe_new_session_cookie(link->local_cookie);
-	int active;
+	int active, disconnect_ret = 0;
 
 	lockdep_assert_held(&link->session_lock);
 
@@ -890,8 +890,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 */
 	remote_hopid = link->active_remote_hopid;
 	link->rings_up = false;
-	link->paths_enabled = false;
-	link->in_hopid_held = false;
 	link->hello_done = false;
 	link->needs_down = false;
 	link->tx_blocked = false;
@@ -1015,18 +1013,53 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	if (rings_running)
 		/* Cancels all in-flight frames through the completion path. */
 		link->ops->stop_rings(link->hw);
-	if (had_paths)
-		link->ops->disable_paths(link->hw, link->local_hopid,
-					 remote_hopid);
+	if (had_paths) {
+		disconnect_ret = link->ops->disable_paths(link->hw,
+							 link->local_hopid,
+							 remote_hopid);
+		if (disconnect_ret && link->ops->paths_active) {
+			int paths_active;
+
+			/*
+			 * A command failure is not proof that firmware retained the
+			 * route: the response itself may have been lost. Read back the
+			 * actual hop state and release ownership only when it is proven
+			 * inactive. Active or unreadable state remains ambiguous.
+			 */
+			paths_active = link->ops->paths_active(link->hw,
+							       link->local_hopid,
+							       remote_hopid);
+			if (!paths_active) {
+				pr_warn("%s: path disconnect returned %d but hop readback proves the route inactive\n",
+					link->name, disconnect_ret);
+				disconnect_ret = 0;
+			}
+		}
+	}
+
+	if (disconnect_ret) {
+		spin_lock_irqsave(&link->lock, flags);
+		link->state = TBFRAME_STATE_DEAD;
+		spin_unlock_irqrestore(&link->lock, flags);
+		pr_err("%s: path disconnect failed (%d) and route ownership remains unresolved; retaining rings and HopIDs\n",
+		       link->name, disconnect_ret);
+		reason = TBFRAME_DOWN_DEAD_HW;
+	} else {
+		/* Firmware no longer names the rings or HopID; ownership may move. */
+		spin_lock_irqsave(&link->lock, flags);
+		link->paths_enabled = false;
+		link->in_hopid_held = false;
+		spin_unlock_irqrestore(&link->lock, flags);
+	}
 	terminal = reason == TBFRAME_DOWN_CLOSED ||
 		   reason == TBFRAME_DOWN_UNPLUG ||
 		   reason == TBFRAME_DOWN_DEAD_HW;
-	if (had_rings && terminal)
+	if (!disconnect_ret && had_rings && terminal)
 		link->ops->free_rings(link->hw);
-	if (had_hopid)
+	if (!disconnect_ret && had_hopid)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
 	spin_lock_irqsave(&link->lock, flags);
-	if (terminal)
+	if (!disconnect_ret && terminal)
 		link->rings_allocated = false;
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -1103,6 +1136,8 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 				      min(fails, 8u));
 		tbframe_link_kick(link, msecs_to_jiffies(delay));
 	}
+
+	return disconnect_ret;
 }
 
 static void __tbframe_link_session_step(struct tbframe_link *link)
@@ -2340,6 +2375,7 @@ int tbframe_link_destroy(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
+	int ret;
 
 	spin_lock_irqsave(&link->lock, flags);
 	link->removing = true;
@@ -2355,10 +2391,12 @@ int tbframe_link_destroy(struct tbframe_link *link,
 	cancel_work_sync(&link->verify_work);
 
 	mutex_lock(&link->session_lock);
-	tbframe_link_down_session(link, reason, TBFRAME_SESSION_LOCAL);
+	ret = tbframe_link_down_session(link, reason, TBFRAME_SESSION_LOCAL);
 	mutex_unlock(&link->session_lock);
 
 	cancel_work_sync(&link->tx_released_work);
+	if (ret)
+		return ret;
 
 	link->ops->release_out_hopid(link->hw, link->local_hopid);
 

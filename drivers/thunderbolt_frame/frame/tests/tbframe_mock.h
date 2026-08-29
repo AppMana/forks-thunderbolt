@@ -74,6 +74,12 @@ struct tbframe_mock {
 	bool		rings_e2e;
 	bool		paths_on;
 	bool		enable_seen;
+	int		disable_paths_err;
+	unsigned int	enable_paths_calls;
+	unsigned int	disable_paths_calls;
+	unsigned int	paths_active_calls;
+	bool		freed_rings_while_paths_on;
+	bool		released_hopid_while_paths_on;
 	/* out-HopID allocator: ida-like, lowest free, never a held id */
 	int		next_out_hopid;
 	unsigned int	out_hopid_allocs;
@@ -255,6 +261,8 @@ static void tbframe_mock_release_in_hopid(void *data, int hopid)
 	struct tbframe_mock *m = data;
 
 	tbframe_mock_hw_call(m, TBFRAME_HW_RELEASE_IN_HOPID);
+	if (m->paths_on)
+		m->released_hopid_while_paths_on = true;
 	m->in_hopid = -1;
 	m->last_release_in_hopid = hopid;
 	m->in_hopid_releases++;
@@ -327,6 +335,8 @@ static void tbframe_mock_free_rings(void *data)
 	struct tbframe_mock *m = data;
 
 	tbframe_mock_hw_call(m, TBFRAME_HW_FREE_RINGS);
+	if (m->paths_on)
+		m->freed_rings_while_paths_on = true;
 	m->rings_alloced = false;
 }
 
@@ -418,6 +428,7 @@ static int tbframe_mock_enable_paths(void *data, int local_hopid,
 {
 	struct tbframe_mock *m = data;
 
+	m->enable_paths_calls++;
 	m->enable_seen = true;
 	m->paths_on = true;
 	return 0;
@@ -445,9 +456,12 @@ static int tbframe_mock_disable_paths(void *data, int local_hopid,
 			m->disable_started_before_all_activity_stopped = true;
 	}
 
+	m->disable_paths_calls++;
 	tbframe_mock_hw_call(m, TBFRAME_HW_DISABLE_PATHS);
-	m->paths_on = false;
 	m->last_disable_remote_hopid = remote_hopid;
+	if (m->disable_paths_err)
+		return m->disable_paths_err;
+	m->paths_on = false;
 	return 0;
 }
 
@@ -456,6 +470,9 @@ static int tbframe_mock_paths_active(void *data, int local_hopid,
 {
 	struct tbframe_mock *m = data;
 
+	m->paths_active_calls++;
+	if (!m->paths_active_ret)
+		m->paths_on = false;
 	return m->paths_active_ret;
 }
 

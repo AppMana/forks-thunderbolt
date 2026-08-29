@@ -334,6 +334,110 @@ static void tbframe_teardown_publisher_drain_poisons(struct kunit *test)
 	atomic_dec(&fx->link->hw_active);
 }
 
+/*
+ * A failed route disconnect leaves ownership of the old hardware route
+ * ambiguous. The stopped rings and their HopIDs must remain pinned, and the
+ * link must not approve a replacement route over that unproven lifetime.
+ */
+static void
+tbframe_teardown_disconnect_failure_quarantines_without_reapprove(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned int enables, allocs, releases;
+	unsigned long flags;
+
+	tbframe_mock_link_up(test, fx);
+	enables = fx->mock.enable_paths_calls;
+	allocs = fx->mock.in_hopid_allocs;
+	releases = fx->mock.in_hopid_releases;
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_STATE_DEAD,
+			(int)fx->link->state);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_started);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_EQ(test, releases, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, allocs, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, enables, fx->mock.enable_paths_calls);
+	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
+	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_DEAD_HW,
+			fx->client.reasons[1]);
+
+	/* A later session step may not allocate or approve over the old route. */
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, enables, fx->mock.enable_paths_calls);
+	KUNIT_EXPECT_EQ(test, allocs, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, releases, fx->mock.in_hopid_releases);
+}
+
+/*
+ * Terminal removal has the same ownership rule. If the route cannot be
+ * disconnected, retain every object that its DMA programming may still name
+ * and return an error so the caller keeps the hardware context alive.
+ */
+static void
+tbframe_teardown_disconnect_failure_leaks_owned_dma_state(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	int ret;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+
+	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
+	fx->link_destroyed = true;
+
+	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
+	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_DEAD_HW,
+			fx->client.reasons[1]);
+}
+
+/*
+ * A disconnect command error is not itself proof that the route still owns
+ * anything. Read the actual hop state back: a route proven inactive is safe
+ * to release, while active or unreadable state remains quarantined.
+ */
+static void
+tbframe_teardown_disconnect_error_but_inactive_route_releases(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	int ret;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.disable_paths_err = -ETIMEDOUT;
+	fx->mock.paths_active_ret = 0;
+
+	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
+	fx->link_destroyed = true;
+
+	KUNIT_EXPECT_EQ(test, 0, ret);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.paths_active_calls);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
+	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_UNPLUG,
+			fx->client.reasons[1]);
+}
+
 static void tbframe_teardown_bounded_leak_no_hang(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -416,6 +520,9 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_bye_fences_hardware),
 	KUNIT_CASE(tbframe_teardown_terminal_down_after_logout),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
+	KUNIT_CASE(tbframe_teardown_disconnect_failure_quarantines_without_reapprove),
+	KUNIT_CASE(tbframe_teardown_disconnect_failure_leaks_owned_dma_state),
+	KUNIT_CASE(tbframe_teardown_disconnect_error_but_inactive_route_releases),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),
 	KUNIT_CASE(tbframe_teardown_clean_when_hw_cancels),
 	{}
