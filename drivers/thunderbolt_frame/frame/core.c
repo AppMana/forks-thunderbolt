@@ -814,6 +814,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	unsigned int drain_ms;
 	u16 remote_hopid;
 	u64 next_cookie = tbframe_new_session_cookie(link->local_cookie);
+	bool rotate_local_cookie;
 	int active;
 
 	lockdep_assert_held(&link->session_lock);
@@ -828,6 +829,17 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * next session step, right before the aligned rebuild.
 	 */
 	hold = reason == TBFRAME_DOWN_LOGOUT && !link->removing;
+	/*
+	 * Requester and responder sessions have independent lifetimes.  A
+	 * peer-driven SUPERSEDE/LOGOUT advances the remote identity, but the
+	 * peer has already negotiated our current local identity.  Rotating it
+	 * here invalidates that peer session in response, so crossed recovery
+	 * HELLOs make both sides advance forever and every data keepalive is one
+	 * cookie behind.  Locally initiated teardown still advances our cookie
+	 * and retains the stale-frame protection at that ownership boundary.
+	 */
+	rotate_local_cookie = reason != TBFRAME_DOWN_SUPERSEDE &&
+			      reason != TBFRAME_DOWN_LOGOUT;
 
 	spin_lock_irqsave(&link->lock, flags);
 	was_up = link->state == TBFRAME_STATE_UP;
@@ -869,7 +881,8 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	tbframe_ready_responder_reset(link);
-	link->local_cookie = next_cookie;
+	if (rotate_local_cookie)
+		link->local_cookie = next_cookie;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	timer_delete_sync(&link->verify_timer);

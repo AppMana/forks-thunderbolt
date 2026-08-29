@@ -272,6 +272,50 @@ static void tbframe_session_crossed_hello_cookies_cannot_mix(struct kunit *test)
 }
 
 /*
+ * A peer-driven replacement advances the peer's session identity, not ours.
+ *
+ * If both halves share one teardown epoch, receiving a fresh crossed HELLO
+ * schedules SUPERSEDE and down_session() rotates our local cookie too.  The
+ * peer has already negotiated the old local cookie in the response to its
+ * HELLO, so our rotation immediately makes that peer session stale.  When it
+ * re-HELLOs, the same transition repeats on the other side: neither pair of
+ * cookies can converge and every data proof sees the preceding cookie.
+ *
+ * Keep requester and responder lifetimes separate: only a locally initiated
+ * replacement advances the local identity.  The peer-driven teardown still
+ * rebuilds rings and paths, but it must retain the local cookie that the peer
+ * has just negotiated.
+ */
+static void tbframe_session_peer_supersede_keeps_local_identity(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 local_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	/* Negotiate one requester session but hold it below READY/UP. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	local_cookie = fx->link->local_cookie;
+
+	/* The peer independently advances its responder session. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->link->needs_down);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_DOWN_SUPERSEDE,
+			fx->link->down_reason);
+
+	/* Service the peer-driven teardown, but not the delayed retry. */
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/*
  * A session cookie authenticates data frames for one negotiated lifetime.
  * Reusing it after teardown lets delayed frames from the old rings prove the
  * replacement session even though they predate its HELLO/READY exchange.
@@ -377,6 +421,7 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_stale_ready_cannot_complete_responder),
 	KUNIT_CASE(tbframe_session_stale_ready_ack_cannot_complete_requester),
 	KUNIT_CASE(tbframe_session_crossed_hello_cookies_cannot_mix),
+	KUNIT_CASE(tbframe_session_peer_supersede_keeps_local_identity),
 	KUNIT_CASE(tbframe_session_teardown_rotates_local_cookie),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}
