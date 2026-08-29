@@ -1003,39 +1003,20 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 		tbframe_link_bye(link);
 
 	/*
-	 * Quiesce the NHI before touching the fabric, the tbnet_tear_down()
-	 * order: stop the rings (cancelling whatever the flush above could
-	 * not drain), and only then disable the hop entries. The old order
-	 * deactivated the egress hop entry under a still actively-DMAing TX
-	 * ring -- the local half of the rapid-disable-of-an-active-path
-	 * pattern behind the router-level egress wedge.
+	 * Teardown is the reverse of bring-up. Admission and TX are quiesced,
+	 * but both rings remain running while the hop entries deactivate so
+	 * frames already pending in the fabric still have valid descriptors to
+	 * drain into. Stopping a ring first clears its descriptor base; a pending
+	 * hop can then wait forever for a destination that no longer exists.
 	 */
-	if (rings_running)
-		/* Cancels all in-flight frames through the completion path. */
-		link->ops->stop_rings(link->hw);
 	if (had_paths) {
 		disconnect_ret = link->ops->disable_paths(link->hw,
 							 link->local_hopid,
 							 remote_hopid);
-		if (disconnect_ret && link->ops->paths_active) {
-			int paths_active;
-
-			/*
-			 * A command failure is not proof that firmware retained the
-			 * route: the response itself may have been lost. Read back the
-			 * actual hop state and release ownership only when it is proven
-			 * inactive. Active or unreadable state remains ambiguous.
-			 */
-			paths_active = link->ops->paths_active(link->hw,
-							       link->local_hopid,
-							       remote_hopid);
-			if (!paths_active) {
-				pr_warn("%s: path disconnect returned %d but hop readback proves the route inactive\n",
-					link->name, disconnect_ret);
-				disconnect_ret = 0;
-			}
-		}
 	}
+	if (rings_running)
+		/* Fence callbacks even when the route could not be drained. */
+		link->ops->stop_rings(link->hw);
 
 	if (disconnect_ret) {
 		spin_lock_irqsave(&link->lock, flags);

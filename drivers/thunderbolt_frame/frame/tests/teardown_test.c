@@ -11,13 +11,12 @@
 #include "tbframe_mock.h"
 
 /*
- * Session teardown quiesces the NHI before touching the fabric: rings stop
- * (all DMA cancelled) BEFORE the hop entries are disabled, the
- * tbnet_tear_down() order. Disabling the egress hop entry under a still
- * actively-DMAing TX ring is the local half of the "rapid disable of an
- * active path" pattern implicated in the router-level egress wedge.
+ * Admission and TX are quiesced first, but the rings must remain available
+ * while the fabric drains. Stopping them first removes the descriptor base
+ * that a pending hop needs to finish, turning an orderly teardown into a
+ * permanent pending route. Paths therefore drain before rings stop.
  */
-static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
+static void tbframe_teardown_drains_paths_before_stopping_rings(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	unsigned long flags;
@@ -41,9 +40,9 @@ static void tbframe_teardown_stops_rings_before_paths(struct kunit *test)
 	KUNIT_ASSERT_GE(test, disable, 0);
 	KUNIT_ASSERT_EQ(test, freed, -1);
 	KUNIT_ASSERT_GE(test, release, 0);
-	/* Recoverable reset: stop -> disable -> release, retain DMA storage. */
-	KUNIT_EXPECT_LT(test, stop, disable);
-	KUNIT_EXPECT_LT(test, disable, release);
+	/* Recoverable reset: disable/drain -> stop -> release. */
+	KUNIT_EXPECT_LT(test, disable, stop);
+	KUNIT_EXPECT_LT(test, stop, release);
 }
 
 /*
@@ -409,12 +408,13 @@ tbframe_teardown_disconnect_failure_leaks_owned_dma_state(struct kunit *test)
 }
 
 /*
- * A disconnect command error is not itself proof that the route still owns
- * anything. Read the actual hop state back: a route proven inactive is safe
- * to release, while active or unreadable state remains quarantined.
+ * Operationally inactive is not the same as fully drained. A partial
+ * teardown can leave one hop disabled but pending, or disable one direction
+ * while the other is still enabled. A generic "not active" result may not
+ * turn a disconnect error into permission to release DMA ownership.
  */
 static void
-tbframe_teardown_disconnect_error_but_inactive_route_releases(struct kunit *test)
+tbframe_teardown_inactive_readback_does_not_prove_drained(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	int ret;
@@ -426,15 +426,15 @@ tbframe_teardown_disconnect_error_but_inactive_route_releases(struct kunit *test
 	ret = tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
 	fx->link_destroyed = true;
 
-	KUNIT_EXPECT_EQ(test, 0, ret);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.paths_active_calls);
-	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_releases);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.out_hopid_releases);
+	KUNIT_EXPECT_EQ(test, -ETIMEDOUT, ret);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.paths_active_calls);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.out_hopid_releases);
 	KUNIT_EXPECT_FALSE(test, fx->mock.freed_rings_while_paths_on);
 	KUNIT_EXPECT_FALSE(test, fx->mock.released_hopid_while_paths_on);
 	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
-	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_UNPLUG,
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_DEAD_HW,
 			fx->client.reasons[1]);
 }
 
@@ -512,7 +512,7 @@ static void tbframe_teardown_test_exit(struct kunit *test)
 }
 
 static struct kunit_case tbframe_teardown_cases[] = {
-	KUNIT_CASE(tbframe_teardown_stops_rings_before_paths),
+	KUNIT_CASE(tbframe_teardown_drains_paths_before_stopping_rings),
 	KUNIT_CASE(tbframe_teardown_session_reset_keeps_dma_storage),
 	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
@@ -522,7 +522,7 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_disconnect_failure_quarantines_without_reapprove),
 	KUNIT_CASE(tbframe_teardown_disconnect_failure_leaks_owned_dma_state),
-	KUNIT_CASE(tbframe_teardown_disconnect_error_but_inactive_route_releases),
+	KUNIT_CASE(tbframe_teardown_inactive_readback_does_not_prove_drained),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),
 	KUNIT_CASE(tbframe_teardown_clean_when_hw_cancels),
 	{}
