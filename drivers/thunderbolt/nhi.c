@@ -745,6 +745,121 @@ static void ring_iowrite32options(struct tb_ring *ring, u32 value, u32 offset)
 	iowrite32(value, ring_options_base(ring) + offset);
 }
 
+static bool ring_prepare_start(struct tb_ring *ring, u32 index)
+{
+	u16 anchor = ring->is_tx ? index & 0xffff : index >> 16;
+
+	if (anchor >= ring->size)
+		return false;
+	ring->head = anchor;
+	ring->tail = anchor;
+	return true;
+}
+
+static bool ring_start_indices_match(const struct tb_ring *ring, u32 index)
+{
+	u16 producer = index >> 16;
+	u16 consumer = index & 0xffff;
+
+	return producer == ring->head && consumer == ring->tail;
+}
+
+struct ring_start_io_ops {
+	void (*write_desc32)(void *ctx, struct tb_ring *ring, u32 value,
+			     u32 offset);
+	void (*write_desc64)(void *ctx, struct tb_ring *ring, u64 value,
+			     u32 offset);
+	void (*write_options32)(void *ctx, struct tb_ring *ring, u32 value,
+				u32 offset);
+	u32 (*read_desc32)(void *ctx, struct tb_ring *ring, u32 offset);
+};
+
+enum ring_start_result {
+	RING_START_OK,
+	RING_START_INVALID_INDEX,
+	RING_START_UNSYNCHRONIZED,
+};
+
+static void ring_start_write_desc32(void *ctx, struct tb_ring *ring,
+				    u32 value, u32 offset)
+{
+	ring_iowrite32desc(ring, value, offset);
+}
+
+static void ring_start_write_desc64(void *ctx, struct tb_ring *ring,
+				    u64 value, u32 offset)
+{
+	ring_iowrite64desc(ring, value, offset);
+}
+
+static void ring_start_write_options32(void *ctx, struct tb_ring *ring,
+				       u32 value, u32 offset)
+{
+	ring_iowrite32options(ring, value, offset);
+}
+
+static u32 ring_start_read_desc32(void *ctx, struct tb_ring *ring, u32 offset)
+{
+	return nhi_read(ring->nhi, ring_desc_base(ring) + offset);
+}
+
+static const struct ring_start_io_ops ring_start_real_io = {
+	.write_desc32 = ring_start_write_desc32,
+	.write_desc64 = ring_start_write_desc64,
+	.write_options32 = ring_start_write_options32,
+	.read_desc32 = ring_start_read_desc32,
+};
+
+static enum ring_start_result
+ring_program_start(struct tb_ring *ring, const struct ring_start_io_ops *io,
+		   void *ctx, u32 *initial_index, u32 *final_index)
+{
+	u16 frame_size;
+	u32 flags;
+
+	if (ring->flags & RING_FLAG_FRAME) {
+		frame_size = 0;
+		flags = RING_FLAG_ENABLE;
+	} else {
+		frame_size = TB_FRAME_SIZE;
+		flags = RING_FLAG_ENABLE | RING_FLAG_RAW;
+	}
+
+	io->write_desc64(ctx, ring, ring->descriptors_dma, 0);
+	if (ring->is_tx) {
+		io->write_desc32(ctx, ring, ring->size, 12);
+		io->write_options32(ctx, ring, 0, 4);
+	} else {
+		u32 sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
+
+		io->write_desc32(ctx, ring,
+				 (frame_size << 16) | ring->size, 12);
+		io->write_options32(ctx, ring, sof_eof_mask, 4);
+	}
+
+	*initial_index = io->read_desc32(ctx, ring, 8);
+	if (!ring_prepare_start(ring, *initial_index))
+		return RING_START_INVALID_INDEX;
+	io->write_desc32(ctx, ring,
+			 ring->is_tx ? (u32)ring->head << 16 : ring->tail, 8);
+	*final_index = io->read_desc32(ctx, ring, 8);
+	if (!ring_start_indices_match(ring, *final_index))
+		return RING_START_UNSYNCHRONIZED;
+
+	if (ring->flags & RING_FLAG_E2E) {
+		if (!ring->is_tx) {
+			u32 hop;
+
+			hop = ring->e2e_tx_hop << REG_RX_OPTIONS_E2E_HOP_SHIFT;
+			hop &= REG_RX_OPTIONS_E2E_HOP_MASK;
+			flags |= hop;
+		}
+		flags |= RING_FLAG_E2E_FLOW_CONTROL;
+	}
+	io->write_options32(ctx, ring, flags, 0);
+	return RING_START_OK;
+}
+
 int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot)
 {
 	struct ring_frame *frame;
@@ -1404,8 +1519,8 @@ EXPORT_SYMBOL_GPL(tb_ring_alloc_rx);
  */
 void tb_ring_start(struct tb_ring *ring)
 {
-	u16 frame_size;
-	u32 flags;
+	u32 index, readback;
+	enum ring_start_result result;
 
 	spin_lock_irq(&ring->nhi->lock);
 	spin_lock(&ring->lock);
@@ -1421,54 +1536,41 @@ void tb_ring_start(struct tb_ring *ring)
 	dev_dbg(&ring->nhi->pdev->dev, "starting %s %d\n",
 		RING_TYPE(ring), ring->hop);
 
-	if (ring->flags & RING_FLAG_FRAME) {
-		/* Means 4096 */
-		frame_size = 0;
-		flags = RING_FLAG_ENABLE;
-	} else {
-		frame_size = TB_FRAME_SIZE;
-		flags = RING_FLAG_ENABLE | RING_FLAG_RAW;
-	}
-
-	ring_iowrite64desc(ring, ring->descriptors_dma, 0);
-	if (ring->is_tx) {
-		ring_iowrite32desc(ring, ring->size, 12);
-		ring_iowrite32options(ring, 0, 4); /* time releated ? */
-		ring_iowrite32options(ring, flags, 0);
-	} else {
-		u32 sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
-
-		ring_iowrite32desc(ring, (frame_size << 16) | ring->size, 12);
-		ring_iowrite32options(ring, sof_eof_mask, 4);
-		ring_iowrite32options(ring, flags, 0);
-	}
-
 	/*
-	 * Now that the ring valid bit is set we can configure E2E if
-	 * enabled for the ring.
+	 * The NHI owns the TX consumer and RX producer halves of the index
+	 * register, so clearing the whole word at stop cannot reset both halves.
+	 * Rebase the replacement software ring to the retained device index while
+	 * the ring is still disabled. Enabling first lets the controller consume
+	 * stale descriptors before software and hardware agree on slot ownership.
 	 */
-	if (ring->flags & RING_FLAG_E2E) {
-		if (!ring->is_tx) {
-			u32 hop;
-
-			hop = ring->e2e_tx_hop << REG_RX_OPTIONS_E2E_HOP_SHIFT;
-			hop &= REG_RX_OPTIONS_E2E_HOP_MASK;
-			flags |= hop;
-
-			dev_dbg(&ring->nhi->pdev->dev,
-				"enabling E2E for %s %d with TX HopID %d\n",
-				RING_TYPE(ring), ring->hop, ring->e2e_tx_hop);
-		} else {
-			dev_dbg(&ring->nhi->pdev->dev, "enabling E2E for %s %d\n",
-				RING_TYPE(ring), ring->hop);
-		}
-
-		flags |= RING_FLAG_E2E_FLOW_CONTROL;
-		ring_iowrite32options(ring, flags, 0);
+	result = ring_program_start(ring, &ring_start_real_io, NULL,
+				    &index, &readback);
+	if (result == RING_START_INVALID_INDEX) {
+		dev_warn(&ring->nhi->pdev->dev,
+			 "%s %d retained invalid index %#x for size %u\n",
+			 RING_TYPE(ring), ring->hop, index, ring->size);
+		goto err_clear;
 	}
+	if (result == RING_START_UNSYNCHRONIZED) {
+		dev_warn(&ring->nhi->pdev->dev,
+			 "%s %d could not synchronize retained index %#x -> %#x\n",
+			 RING_TYPE(ring), ring->hop, index, readback);
+		goto err_clear;
+	}
+	dev_dbg(&ring->nhi->pdev->dev,
+		"starting %s %d at retained index %u\n",
+		RING_TYPE(ring), ring->hop, ring->head);
 
 	ring_interrupt_active(ring, true);
 	ring->running = true;
+	goto err;
+
+err_clear:
+	ring_iowrite32options(ring, 0, 0);
+	ring_iowrite64desc(ring, 0, 0);
+	ring_iowrite32desc(ring, 0, 8);
+	ring_iowrite32desc(ring, 0, 12);
+	nhi_read(ring->nhi, ring_desc_base(ring) + 12);
 err:
 	spin_unlock(&ring->lock);
 	spin_unlock_irq(&ring->nhi->lock);
@@ -2750,6 +2852,85 @@ struct ring_quarantine_test_frame {
 	unsigned int *canceled;
 };
 
+enum ring_start_test_event {
+	RING_START_TEST_BASE,
+	RING_START_TEST_COUNT,
+	RING_START_TEST_AUX,
+	RING_START_TEST_READ_RETAINED,
+	RING_START_TEST_WRITE_PEER,
+	RING_START_TEST_READBACK,
+	RING_START_TEST_ENABLE,
+};
+
+struct ring_start_test_io {
+	u32 index;
+	enum ring_start_test_event events[8];
+	u8 event_count;
+	bool peer_written;
+};
+
+static void ring_start_test_record(struct ring_start_test_io *io,
+				   enum ring_start_test_event event)
+{
+	io->events[io->event_count++] = event;
+}
+
+static void ring_start_test_write_desc32(void *ctx, struct tb_ring *ring,
+					 u32 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 12) {
+		ring_start_test_record(io, RING_START_TEST_COUNT);
+	} else if (offset == 8) {
+		ring_start_test_record(io, RING_START_TEST_WRITE_PEER);
+		if (ring->is_tx)
+			io->index = (io->index & 0xffff) | (value & 0xffff0000);
+		else
+			io->index = (io->index & 0xffff0000) | (value & 0xffff);
+		io->peer_written = true;
+	}
+}
+
+static void ring_start_test_write_desc64(void *ctx, struct tb_ring *ring,
+					 u64 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (!offset)
+		ring_start_test_record(io, RING_START_TEST_BASE);
+}
+
+static void ring_start_test_write_options32(void *ctx, struct tb_ring *ring,
+					    u32 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 4)
+		ring_start_test_record(io, RING_START_TEST_AUX);
+	else if (!offset && value & RING_FLAG_ENABLE)
+		ring_start_test_record(io, RING_START_TEST_ENABLE);
+}
+
+static u32 ring_start_test_read_desc32(void *ctx, struct tb_ring *ring,
+				       u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 8)
+		ring_start_test_record(io, io->peer_written ?
+				       RING_START_TEST_READBACK :
+				       RING_START_TEST_READ_RETAINED);
+	return io->index;
+}
+
+static const struct ring_start_io_ops ring_start_test_ops = {
+	.write_desc32 = ring_start_test_write_desc32,
+	.write_desc64 = ring_start_test_write_desc64,
+	.write_options32 = ring_start_test_write_options32,
+	.read_desc32 = ring_start_test_read_desc32,
+};
+
 static void ring_quarantine_test_callback(struct tb_ring *ring,
 					  struct ring_frame *frame,
 					  bool canceled)
@@ -2842,8 +3023,117 @@ static void tb_test_ring_quarantine_detaches_leaf_lifetime(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_nhi_has_quarantined_rings(nhi));
 }
 
+static void tb_test_ring_restart_rebases_retained_rx_producer(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = false,
+	};
+	u32 index = 31 << 16;
+
+	ring_prepare_start(&ring, index);
+
+	KUNIT_EXPECT_EQ(test, (u16)31, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)31, ring.tail);
+}
+
+static void tb_test_ring_restart_rebases_retained_tx_consumer(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = true,
+	};
+	u32 index = 47;
+
+	ring_prepare_start(&ring, index);
+
+	KUNIT_EXPECT_EQ(test, (u16)47, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)47, ring.tail);
+}
+
+static void tb_test_ring_restart_requires_both_indices_aligned(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = false,
+	};
+	u32 retained = 31 << 16;
+
+	KUNIT_ASSERT_TRUE(test, ring_prepare_start(&ring, retained));
+	KUNIT_EXPECT_FALSE(test,
+			   ring_start_indices_match(&ring, retained));
+	KUNIT_EXPECT_TRUE(test,
+			  ring_start_indices_match(&ring, 31 << 16 | 31));
+}
+
+static void tb_test_ring_restart_synchronizes_before_enable(struct kunit *test)
+{
+	static const enum ring_start_test_event expected[] = {
+		RING_START_TEST_BASE,
+		RING_START_TEST_COUNT,
+		RING_START_TEST_AUX,
+		RING_START_TEST_READ_RETAINED,
+		RING_START_TEST_WRITE_PEER,
+		RING_START_TEST_READBACK,
+		RING_START_TEST_ENABLE,
+	};
+	struct tb_ring ring = {
+		.size = 2048,
+		.flags = RING_FLAG_FRAME,
+		.is_tx = false,
+	};
+	struct ring_start_test_io io = {
+		.index = 31 << 16,
+	};
+	enum ring_start_result result;
+	u32 initial = 0, final = 0;
+	int i;
+
+	result = ring_program_start(&ring, &ring_start_test_ops, &io,
+				    &initial, &final);
+	KUNIT_ASSERT_EQ(test, RING_START_OK, result);
+	KUNIT_ASSERT_EQ(test, (u8)ARRAY_SIZE(expected), io.event_count);
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, expected[i], io.events[i]);
+	KUNIT_EXPECT_EQ(test, (u32)(31 << 16), initial);
+	KUNIT_EXPECT_EQ(test, (u32)(31 << 16 | 31), final);
+
+	memset(&ring, 0, sizeof(ring));
+	ring.size = 2048;
+	ring.flags = RING_FLAG_FRAME;
+	ring.is_tx = true;
+	memset(&io, 0, sizeof(io));
+	io.index = 47;
+	result = ring_program_start(&ring, &ring_start_test_ops, &io,
+				    &initial, &final);
+	KUNIT_ASSERT_EQ(test, RING_START_OK, result);
+	KUNIT_ASSERT_EQ(test, (u8)ARRAY_SIZE(expected), io.event_count);
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, expected[i], io.events[i]);
+	KUNIT_EXPECT_EQ(test, (u32)47, initial);
+	KUNIT_EXPECT_EQ(test, (u32)(47 << 16 | 47), final);
+}
+
+static void tb_test_ring_restart_rejects_invalid_retained_index(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 32,
+		.is_tx = false,
+	};
+	u32 index = 33 << 16;
+
+	KUNIT_EXPECT_FALSE(test, ring_prepare_start(&ring, index));
+	KUNIT_EXPECT_EQ(test, (u16)0, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)0, ring.tail);
+}
+
 static struct kunit_case tb_ring_quarantine_cases[] = {
 	KUNIT_CASE(tb_test_ring_quarantine_detaches_leaf_lifetime),
+	KUNIT_CASE(tb_test_ring_restart_rebases_retained_rx_producer),
+	KUNIT_CASE(tb_test_ring_restart_rebases_retained_tx_consumer),
+	KUNIT_CASE(tb_test_ring_restart_requires_both_indices_aligned),
+	KUNIT_CASE(tb_test_ring_restart_synchronizes_before_enable),
+	KUNIT_CASE(tb_test_ring_restart_rejects_invalid_retained_index),
 	{}
 };
 
