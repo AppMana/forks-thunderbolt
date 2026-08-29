@@ -309,6 +309,18 @@ static void tbframe_hw_rx_callback(struct tb_ring *ring,
 						    struct tbframe_frame_priv,
 						    rf);
 	bool bad = rf->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN);
+	struct tb_ring_snapshot snapshot;
+
+	if (!canceled && bad && !tb_ring_snapshot(ring, &snapshot))
+		pr_warn_ratelimited("%s: RX descriptor error flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x ring_index=%#x sw_head=%u sw_tail=%u hw_prod=%u hw_cons=%u queued=%u in_flight=%u\n",
+				    f->link->name, rf->flags,
+				    !!(rf->flags & RING_DESC_CRC_ERROR),
+				    !!(rf->flags & RING_DESC_BUFFER_OVERRUN),
+				    rf->size, rf->sof, rf->eof,
+				    snapshot.index_raw, snapshot.sw_head,
+				    snapshot.sw_tail, snapshot.hw_producer,
+				    snapshot.hw_consumer, snapshot.queued,
+				    snapshot.in_flight);
 
 	if (!canceled)
 		dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
