@@ -485,6 +485,14 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 	return TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED;
 }
 
+static inline bool
+tb_nhi_runtime_recovery_proof_matches(enum tb_nhi_runtime_recovery_state state,
+				      u64 failed_route, u64 proven_route)
+{
+	return state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
+	       failed_route == proven_route;
+}
+
 /* Keep recovery policy independent from the ICM startup proof machine above. */
 static inline enum tb_nhi_recovery_state
 tb_nhi_recovery_next(enum tb_nhi_recovery_state state,

@@ -384,7 +384,8 @@ tbframe_hw_report_data_path_failure(void *data,
 {
 	struct tbframe_hw *hw = data;
 
-	return tb_nhi_request_runtime_recovery(hw->xd->tb->nhi, first, last,
+	return tb_nhi_request_runtime_recovery(hw->xd->tb->nhi, hw->xd->route,
+					       first, last,
 					       control_healthy, true);
 }
 
@@ -392,7 +393,7 @@ static void tbframe_hw_report_data_proven(void *data)
 {
 	struct tbframe_hw *hw = data;
 
-	tb_nhi_runtime_data_path_proven(hw->xd->tb->nhi);
+	tb_nhi_runtime_data_path_proven(hw->xd->tb->nhi, hw->xd->route);
 }
 
 static int tbframe_hw_loop_control_request(struct tbframe_hw *hw,

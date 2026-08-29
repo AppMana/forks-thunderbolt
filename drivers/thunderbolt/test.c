@@ -3712,6 +3712,28 @@ static void tb_test_nhi_runtime_recovery_requires_data_proof(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
 }
 
+/* A healthy sibling route must not certify the route that requested recovery. */
+static void tb_test_nhi_runtime_recovery_rejects_sibling_route_proof(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
+	u64 failed_route = 1;
+	u64 proven_route = 3;
+	enum tb_nhi_runtime_recovery_event event =
+		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
+
+	if (tb_nhi_runtime_recovery_proof_matches(state, failed_route,
+						  proven_route))
+		state = tb_nhi_runtime_recovery_next(state, event);
+
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
+	proven_route = failed_route;
+	if (tb_nhi_runtime_recovery_proof_matches(state, failed_route,
+						  proven_route))
+		state = tb_nhi_runtime_recovery_next(state, event);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
+}
+
 static void tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence(struct kunit *test)
 {
 	struct tb_ring_snapshot first = {
@@ -6421,6 +6443,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_a_separate_machine),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_sibling_route_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),

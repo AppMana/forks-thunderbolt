@@ -102,13 +102,13 @@ int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
 int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
 int tb_ring_process_completions(struct tb_ring *ring);
-int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
+int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
 				    bool control_healthy,
 				    bool end_to_end_failed);
 bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
-void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi);
+void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route);
 
 static inline bool
 tb_nhi_tx_stalled(const struct tb_ring_snapshot *first,

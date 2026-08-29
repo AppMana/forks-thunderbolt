@@ -65,6 +65,7 @@ struct nhi_runtime_recovery_record {
 	unsigned int domain;
 	u8 bus;
 	u8 devfn;
+	u64 route;
 	enum tb_nhi_runtime_recovery_state state;
 };
 
@@ -308,7 +309,7 @@ out:
 	kfree(recovery);
 }
 
-int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
+int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
 				    bool control_healthy,
@@ -343,7 +344,8 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 	list_for_each_entry(record, &nhi_runtime_recoveries, list) {
 		if (!nhi_runtime_recovery_matches(record, pdev))
 			continue;
-		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING) {
+		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
+		    record->route == route) {
 			event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 			record->state = tb_nhi_runtime_recovery_next(record->state, event);
 			ret = -EHWPOISON;
@@ -356,6 +358,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 	new_record->domain = pci_domain_nr(pdev->bus);
 	new_record->bus = pdev->bus->number;
 	new_record->devfn = pdev->devfn;
+	new_record->route = route;
 	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
 	event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 	new_record->state = tb_nhi_runtime_recovery_next(state, event);
@@ -385,24 +388,38 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(tb_nhi_request_runtime_recovery);
 
-void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi)
+void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
 {
+	struct nhi_runtime_recovery_record *record, *tmp;
+	enum tb_nhi_runtime_recovery_event event;
 	struct pci_dev *pdev;
-	enum tb_nhi_runtime_recovery_state state;
+	bool complete = false;
 
 	if (!nhi)
 		return;
 	pdev = nhi->pdev;
-	state = nhi_runtime_recovery_get(pdev);
-	if (state != TB_NHI_RUNTIME_RECOVERY_VERIFYING)
-		return;
 
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
-	if (state == TB_NHI_RUNTIME_RECOVERY_COMPLETE) {
-		dev_info(&pdev->dev,
-			 "data traffic proved the recovered controller operational\n");
-		nhi_runtime_recovery_clear(pdev);
+	mutex_lock(&nhi_runtime_recoveries_lock);
+	list_for_each_entry_safe(record, tmp, &nhi_runtime_recoveries, list) {
+		if (!nhi_runtime_recovery_matches(record, pdev) ||
+		    !tb_nhi_runtime_recovery_proof_matches(record->state,
+							  record->route,
+							  route))
+			continue;
+		event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
+		record->state = tb_nhi_runtime_recovery_next(record->state, event);
+		if (record->state == TB_NHI_RUNTIME_RECOVERY_COMPLETE) {
+			list_del(&record->list);
+			kfree(record);
+			complete = true;
+		}
+		break;
 	}
+	mutex_unlock(&nhi_runtime_recoveries_lock);
+	if (complete)
+		dev_info(&pdev->dev,
+			 "data traffic on route %llx proved the recovered controller operational\n",
+			 route);
 }
 EXPORT_SYMBOL_GPL(tb_nhi_runtime_data_path_proven);
 
