@@ -75,6 +75,24 @@ static u32 adm_ctrl_psn[ADM_POOL];
 static u64 adm_ctrl_orig[ADM_POOL];
 static DEFINE_SPINLOCK(adm_ctrl_lock);
 
+#define ADM_WIRE_DEPTH		ADM_POOL
+
+struct adm_wire_packet {
+	void *dst_link;
+	u16 len;
+	u8 data[ADM_FRAME_BYTES];
+};
+
+static struct adm_wire_packet adm_wire[ADM_WIRE_DEPTH];
+static unsigned int adm_wire_head;
+static unsigned int adm_wire_tail;
+static unsigned int adm_wire_count;
+static void *adm_wire_a;
+static void *adm_wire_b;
+static bool adm_wire_forward;
+static unsigned int adm_wire_drop_ctrl;
+static DEFINE_SPINLOCK(adm_wire_lock);
+
 /*
  * Optional peer-RX model.  A successful local xmit does not recycle a peer
  * descriptor: tests explicitly consume remote frames.  This is deliberately
@@ -188,6 +206,23 @@ static int adm_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 		atomic_inc(&adm_ctrl_sent);
 		spin_unlock_irqrestore(&adm_ctrl_lock, flags);
 	}
+	if (adm_wire_forward && frame->is_ctrl && adm_wire_drop_ctrl) {
+		adm_wire_drop_ctrl--;
+	} else if (adm_wire_forward) {
+		spin_lock_irqsave(&adm_wire_lock, flags);
+		if (WARN_ON_ONCE(adm_wire_count == ADM_WIRE_DEPTH)) {
+			spin_unlock_irqrestore(&adm_wire_lock, flags);
+			adm_frame_release(frame);
+			return -ENOSPC;
+		}
+		adm_wire[adm_wire_tail].dst_link =
+			(void *)link == adm_wire_a ? adm_wire_b : adm_wire_a;
+		adm_wire[adm_wire_tail].len = frame->len;
+		memcpy(adm_wire[adm_wire_tail].data, frame->data, frame->len);
+		adm_wire_tail = (adm_wire_tail + 1) % ADM_WIRE_DEPTH;
+		adm_wire_count++;
+		spin_unlock_irqrestore(&adm_wire_lock, flags);
+	}
 	adm_frame_release(frame);
 	return 0;
 }
@@ -218,6 +253,29 @@ static const struct tbrxe_transport_ops adm_transport = {
 	.link_name		= adm_link_name,
 	.link_info		= adm_link_info,
 };
+
+static bool adm_wire_pump_one(void)
+{
+	struct adm_wire_packet packet;
+	struct tbframe_frame frame = {};
+	unsigned long flags;
+
+	spin_lock_irqsave(&adm_wire_lock, flags);
+	if (!adm_wire_count) {
+		spin_unlock_irqrestore(&adm_wire_lock, flags);
+		return false;
+	}
+	packet = adm_wire[adm_wire_head];
+	adm_wire_head = (adm_wire_head + 1) % ADM_WIRE_DEPTH;
+	adm_wire_count--;
+	spin_unlock_irqrestore(&adm_wire_lock, flags);
+
+	frame.data = packet.data;
+	frame.len = packet.len;
+	frame.pdf = TBFRAME_PDF_DATA;
+	tbrxe_frame_client_ops()->rx(NULL, packet.dst_link, &frame);
+	return true;
+}
 
 
 /*
@@ -464,6 +522,82 @@ static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
 {
 	return adm_connect_mtu(qp, dest_qpn, dgid, sgid_index, timeout,
 			       IB_MTU_2048);
+}
+
+static int adm_connect_pair(struct ib_qp *qp, u32 dest_qpn,
+			    const union ib_gid *dgid, u8 sgid_index,
+			    u32 sq_psn, u32 rq_psn)
+{
+	struct ib_qp_attr attr = {};
+	int err;
+
+	attr.qp_state = IB_QPS_INIT;
+	attr.pkey_index = 0;
+	attr.port_num = 1;
+	attr.qp_access_flags = IB_ACCESS_LOCAL_WRITE;
+	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_PKEY_INDEX |
+			   IB_QP_PORT | IB_QP_ACCESS_FLAGS);
+	if (err)
+		return err;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_RTR;
+	attr.path_mtu = IB_MTU_256;
+	attr.dest_qp_num = dest_qpn;
+	attr.rq_psn = rq_psn;
+	attr.max_dest_rd_atomic = 1;
+	attr.min_rnr_timer = 12;
+	attr.ah_attr.type = rdma_ah_find_type(qp->device, 1);
+	rdma_ah_set_port_num(&attr.ah_attr, 1);
+	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0,
+			sgid_index, 64, 0);
+	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_AV |
+			   IB_QP_PATH_MTU | IB_QP_DEST_QPN | IB_QP_RQ_PSN |
+			   IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER);
+	if (err)
+		return err;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_RTS;
+	attr.sq_psn = sq_psn;
+	attr.timeout = 14;
+	attr.retry_cnt = 7;
+	attr.rnr_retry = 7;
+	attr.max_rd_atomic = 1;
+	return ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_SQ_PSN |
+			    IB_QP_TIMEOUT | IB_QP_RETRY_CNT |
+			    IB_QP_RNR_RETRY | IB_QP_MAX_QP_RD_ATOMIC);
+}
+
+static int adm_wire_wait_pair(struct ib_cq *scq, struct ib_cq *rcq)
+{
+	struct ib_wc wc;
+	bool send_done = false;
+	bool recv_done = false;
+	int i, n;
+
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		while (adm_wire_pump_one())
+			;
+
+		if (!send_done) {
+			n = ib_poll_cq(scq, 1, &wc);
+			if (n < 0 || (n == 1 && wc.status != IB_WC_SUCCESS))
+				return n < 0 ? n : -EIO;
+			send_done = n == 1;
+		}
+		if (!recv_done) {
+			n = ib_poll_cq(rcq, 1, &wc);
+			if (n < 0 || (n == 1 && wc.status != IB_WC_SUCCESS))
+				return n < 0 ? n : -EIO;
+			recv_done = n == 1;
+		}
+		if (send_done && recv_done)
+			return 0;
+		msleep(ADM_POLL_MS);
+	}
+
+	return -ETIMEDOUT;
 }
 
 /*
@@ -1482,6 +1616,156 @@ static void tbrxe_responder_defers_qp_error_until_invalid_nak_sent(struct kunit 
 	tbrxe_set_transport_ops(NULL);
 }
 
+/* Exercise the same two-device RC ping-pong shape used by latency tools.
+ * Requests and cumulative ACKs cross the transport boundary instead of the
+ * engine's self-GID shortcut, so admission release is driven only by the real
+ * requester, responder and completer paths.
+ */
+static void tbrxe_admission_wire_pingpong_makes_progress(struct kunit *test)
+{
+	static int fake_link_a;
+	static int fake_link_b;
+	struct ib_cq_init_attr cq_attr = { .cqe = 16 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 4,
+			.max_recv_wr = 4,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_recv_wr *bad_rwr;
+	const struct ib_send_wr *bad_swr;
+	struct ib_recv_wr rwr = {};
+	struct ib_send_wr swr = {};
+	struct ib_sge rsge = {};
+	struct ib_sge ssge = {};
+	struct rxe_dev *rxe_a;
+	struct rxe_dev *rxe_b;
+	union ib_gid gid_a, gid_b;
+	u8 gid_index_a = 0;
+	u8 gid_index_b = 0;
+	struct ib_pd *pd_a;
+	struct ib_pd *pd_b;
+	struct ib_cq *scq_a;
+	struct ib_cq *rcq_a;
+	struct ib_cq *scq_b;
+	struct ib_cq *rcq_b;
+	struct ib_qp *qp_a;
+	struct ib_qp *qp_b;
+	u8 *src_a, *src_b, *dst_a, *dst_b;
+	const u64 eui_a = TBRXE_TEST_LOCAL_EUI64;
+	const u64 eui_b = TBRXE_TEST_PEER_EUI64;
+	const size_t wire_msg_len = 128 * 256;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	adm_wire_head = 0;
+	adm_wire_tail = 0;
+	adm_wire_count = 0;
+	adm_wire_drop_ctrl = 40;
+	adm_wire_a = &fake_link_a;
+	adm_wire_b = &fake_link_b;
+	adm_wire_forward = true;
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window_ids(&fake_link_a, 192, eui_a, eui_b);
+	tbrxe_test_link_up_window_ids(&fake_link_b, 192, eui_b, eui_a);
+	rxe_a = tbrxe_test_dev(&fake_link_a);
+	rxe_b = tbrxe_test_dev(&fake_link_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe_b);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid_eui64(rxe_a, &gid_a,
+						   &gid_index_a, eui_a), 0);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid_eui64(rxe_b, &gid_b,
+						   &gid_index_b, eui_b), 0);
+
+	src_a = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	src_b = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	dst_a = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	dst_b = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dst_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dst_b);
+	memset(src_a, 0xa5, wire_msg_len);
+	memset(src_b, 0x5a, wire_msg_len);
+
+	pd_a = ib_alloc_pd(&rxe_a->ib_dev, 0);
+	pd_b = ib_alloc_pd(&rxe_b->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd_b);
+	scq_a = ib_create_cq(&rxe_a->ib_dev, NULL, NULL, NULL, &cq_attr);
+	rcq_a = ib_create_cq(&rxe_a->ib_dev, NULL, NULL, NULL, &cq_attr);
+	scq_b = ib_create_cq(&rxe_b->ib_dev, NULL, NULL, NULL, &cq_attr);
+	rcq_b = ib_create_cq(&rxe_b->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq_b);
+	qp_init.send_cq = scq_a;
+	qp_init.recv_cq = rcq_a;
+	qp_a = ib_create_qp(pd_a, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp_a);
+	qp_init.send_cq = scq_b;
+	qp_init.recv_cq = rcq_b;
+	qp_b = ib_create_qp(pd_b, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp_b);
+	KUNIT_ASSERT_EQ(test, adm_connect_pair(qp_a, qp_b->qp_num, &gid_b,
+					       gid_index_a, 0x100, 0x300), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect_pair(qp_b, qp_a->qp_num, &gid_a,
+					       gid_index_b, 0x300, 0x100), 0);
+
+	rwr.sg_list = &rsge;
+	rwr.num_sge = 1;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < 1; i++) {
+		rsge.addr = (uintptr_t)dst_b;
+		rsge.length = wire_msg_len;
+		rsge.lkey = pd_b->local_dma_lkey;
+		rwr.wr_id = 2 * i;
+		KUNIT_ASSERT_EQ(test, ib_post_recv(qp_b, &rwr, &bad_rwr), 0);
+		ssge.addr = (uintptr_t)src_a;
+		ssge.length = wire_msg_len;
+		ssge.lkey = pd_a->local_dma_lkey;
+		swr.wr_id = 2 * i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(qp_a, &swr, &bad_swr), 0);
+		KUNIT_ASSERT_EQ(test, adm_wire_wait_pair(scq_a, rcq_b), 0);
+
+		rsge.addr = (uintptr_t)dst_a;
+		rsge.lkey = pd_a->local_dma_lkey;
+		rwr.wr_id = 2 * i + 1;
+		KUNIT_ASSERT_EQ(test, ib_post_recv(qp_a, &rwr, &bad_rwr), 0);
+		ssge.addr = (uintptr_t)src_b;
+		ssge.lkey = pd_b->local_dma_lkey;
+		swr.wr_id = 2 * i + 1;
+		KUNIT_ASSERT_EQ(test, ib_post_send(qp_b, &swr, &bad_swr), 0);
+		KUNIT_ASSERT_EQ(test, adm_wire_wait_pair(scq_b, rcq_a), 0);
+	}
+	KUNIT_EXPECT_EQ(test, memcmp(src_a, dst_b, wire_msg_len), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(src_b, dst_a, wire_msg_len), 0);
+
+	adm_wire_forward = false;
+	ib_destroy_qp(qp_b);
+	ib_destroy_qp(qp_a);
+	ib_destroy_cq(scq_b);
+	ib_destroy_cq(rcq_b);
+	ib_destroy_cq(scq_a);
+	ib_destroy_cq(rcq_a);
+	ib_dealloc_pd(pd_b);
+	ib_dealloc_pd(pd_a);
+	tbrxe_test_link_down(&fake_link_b);
+	tbrxe_test_link_down(&fake_link_a);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE(tbrxe_admission_window_bounds_unacked),
 	KUNIT_CASE(tbrxe_admission_charge_released_on_destroy),
@@ -1494,6 +1778,7 @@ static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE_SLOW(tbrxe_responder_retries_psn_nak_after_backpressure),
 	KUNIT_CASE_SLOW(tbrxe_responder_retries_rnr_nak_after_backpressure),
 	KUNIT_CASE_SLOW(tbrxe_responder_defers_qp_error_until_invalid_nak_sent),
+	KUNIT_CASE_SLOW(tbrxe_admission_wire_pingpong_makes_progress),
 	{}
 };
 

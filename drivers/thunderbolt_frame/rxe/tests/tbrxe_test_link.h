@@ -24,11 +24,13 @@
 #define TBRXE_TEST_LOCAL_EUI64	0x005cdcfffe4360e9ull
 #define TBRXE_TEST_PEER_EUI64	0x00a1b2fffec3d4e5ull
 
-static inline void tbrxe_test_link_up_window(void *fake_link, u16 data_window)
+static inline void
+tbrxe_test_link_up_window_ids(void *fake_link, u16 data_window,
+			      u64 local_eui64, u64 peer_eui64)
 {
 	struct tbframe_link_info info = {
-		.gid_eui64	= TBRXE_TEST_PEER_EUI64,
-		.local_gid_eui64 = TBRXE_TEST_LOCAL_EUI64,
+		.gid_eui64	= peer_eui64,
+		.local_gid_eui64 = local_eui64,
 		.rx_ring_entries = data_window + TBFRAME_CTRL_RESERVE,
 		.data_window	= data_window,
 		.max_payload	= TBFRAME_MAX_FRAME,
@@ -38,6 +40,13 @@ static inline void tbrxe_test_link_up_window(void *fake_link, u16 data_window)
 	};
 
 	tbrxe_frame_client_ops()->link_up(NULL, fake_link, &info);
+}
+
+static inline void tbrxe_test_link_up_window(void *fake_link, u16 data_window)
+{
+	tbrxe_test_link_up_window_ids(fake_link, data_window,
+				      TBRXE_TEST_LOCAL_EUI64,
+				      TBRXE_TEST_PEER_EUI64);
 }
 
 static inline void tbrxe_test_link_up(void *fake_link)
@@ -75,8 +84,8 @@ static inline void tbrxe_test_peer_gid(union ib_gid *gid)
  * identity link-local address, then wait for ib_core to turn it into a
  * GID table entry. Returns 0 and fills @gid/@gid_index on success.
  */
-static inline int tbrxe_test_gid(struct rxe_dev *rxe, union ib_gid *gid,
-				 u8 *gid_index)
+static inline int tbrxe_test_gid_eui64(struct rxe_dev *rxe, union ib_gid *gid,
+				       u8 *gid_index, u64 local_eui64)
 {
 	struct ib_device *ibdev = &rxe->ib_dev;
 	const struct ib_gid_attr *attr;
@@ -94,7 +103,7 @@ static inline int tbrxe_test_gid(struct rxe_dev *rxe, union ib_gid *gid,
 	memset(gid, 0, sizeof(*gid));
 	gid->raw[0] = 0xfe;
 	gid->raw[1] = 0x80;
-	put_unaligned_be64(TBRXE_TEST_LOCAL_EUI64, &gid->raw[8]);
+	put_unaligned_be64(local_eui64, &gid->raw[8]);
 
 	for (i = 0; i < 500; i++) {
 		attr = rdma_find_gid_by_port(ibdev, gid,
@@ -110,6 +119,13 @@ static inline int tbrxe_test_gid(struct rxe_dev *rxe, union ib_gid *gid,
 	}
 	dev_put(ndev);
 	return -ETIMEDOUT;
+}
+
+static inline int tbrxe_test_gid(struct rxe_dev *rxe, union ib_gid *gid,
+				 u8 *gid_index)
+{
+	return tbrxe_test_gid_eui64(rxe, gid, gid_index,
+				    TBRXE_TEST_LOCAL_EUI64);
 }
 
 #endif /* TBRXE_TEST_LINK_H */

@@ -175,15 +175,21 @@ Correctness never depends on hardware E2E.
   `RXE_INFLIGHT_SKBS_PER_QP_HIGH` analog, plus the 128-PSN unacked window)
   summed over the link; the tbframe admission check refuses `xmit` beyond
   the link cap and invokes the `tx_released` upcall as completions drain.
-- Admission records every request frame actually put on the wire, keyed by
-  QP and PSN. ACK/NAK progress releases records below the peer's cumulative
-  PSN; QP reset/error and session-ring replacement release the corresponding
+- Admission records every unique outstanding request PSN, keyed by QP and
+  PSN. ACK/NAK progress releases records below the peer's cumulative PSN; QP
+  reset/error and session-ring replacement release the corresponding
   generation. Rewinding the local requester cursor for retry releases
-  nothing: cursor position is not evidence of peer consumption.
+  nothing, but retransmitting an already-recorded PSN does not charge it
+  again. The frame RX callback copies the request into an skb and returns
+  before the responder emits an ACK, so the physical RX descriptor is already
+  recyclable when ACK state is pending. Retry state and descriptor admission
+  are separate state machines.
 - Retransmissions (PSNs below the QP's committed send high water) may use a
   replay reserve held inside `data_window`: for valid negotiated rings,
   `min(32, data_window / 8)` records are unavailable to fresh requests but
-  available to replay. Every replay requests an immediate cumulative ACK;
+  available to a replay PSN not present in the current generation. Replays of
+  an already-recorded PSN need no additional record. Every replay requests an
+  immediate cumulative ACK;
   otherwise the reserve can fill before the ordinary periodic ACK cadence
   reaches an ACK-requesting packet. This recovers a lost ACK after the fresh
   window filled without forgetting the original flight. The separate

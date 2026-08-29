@@ -660,7 +660,7 @@ int rxe_requester(struct rxe_qp *qp)
 	struct rxe_ah *ah;
 	struct rxe_av *av;
 	unsigned long flags;
-	bool admitted = false;
+	bool credit_charged = false;
 
 	spin_lock_irqsave(&qp->state_lock, flags);
 	if (unlikely(!qp->valid)) {
@@ -792,12 +792,12 @@ int rxe_requester(struct rxe_qp *qp)
 	 * under the admission lock so the release sweep cannot miss it);
 	 * ACK-driven release reschedules the send task.
 	 */
-	if (qp_type(qp) == IB_QPT_RC && !tbrxe_admit(qp)) {
+	if (qp_type(qp) == IB_QPT_RC &&
+	    !tbrxe_admit(qp, &credit_charged)) {
 		if (ah)
 			rxe_put(ah);
 		goto exit;
 	}
-	admitted = qp_type(qp) == IB_QPT_RC;
 
 	skb = init_req_packet(qp, av, wqe, opcode, payload, &pkt);
 	if (unlikely(!skb)) {
@@ -840,12 +840,12 @@ int rxe_requester(struct rxe_qp *qp)
 	update_wqe_state(qp, wqe, &pkt);
 	update_wqe_psn(qp, wqe, &pkt, payload);
 	update_state(qp, &pkt);
-	/* Commit the next never-sent PSN.  The per-wire-frame record remains
-	 * charged until ACK/NAK progress proves peer consumption.
+	/* Commit the next never-sent PSN. The unique outstanding-PSN record
+	 * remains charged until ACK/NAK progress proves peer consumption.
 	 */
-	if (admitted) {
+	if (qp_type(qp) == IB_QPT_RC) {
 		tbrxe_credit_commit(qp);
-		admitted = false;
+		credit_charged = false;
 	}
 
 	/* A non-zero return value will cause rxe_do_task to
@@ -864,7 +864,7 @@ exit:
 	/* Return only this invocation's pre-charge when no frame reached the
 	 * wire.  Retry cursor rewind must never release older records.
 	 */
-	if (admitted)
+	if (credit_charged)
 		tbrxe_unadmit(qp);
 	ret = -EAGAIN;
 out:

@@ -295,11 +295,10 @@ struct rxe_qp {
 	int			need_req_skb;
 	int			need_resp_skb;
 
-	/* Mode A engine-side admission (wire-spec section 6).  Each entry is
-	 * one actually transmitted request frame which has not yet been
-	 * proven consumed by ACK/NAK progress.  Keeping the wire PSNs, rather
-	 * than deriving a count from the mutable requester cursor, makes retry
-	 * rewind independent from peer-consumption credit.
+	/* Mode A engine-side admission (wire-spec section 6). Each entry is one
+	 * unique outstanding request PSN. Keeping wire PSNs, rather than deriving
+	 * a count from the mutable requester cursor, makes retry rewind independent
+	 * from peer-consumption credit without charging duplicate retransmissions.
 	 */
 	u32			*tbl_credits;
 	u16			tbl_credit_count;

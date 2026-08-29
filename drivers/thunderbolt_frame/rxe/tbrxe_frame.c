@@ -200,12 +200,19 @@ struct rxe_dev *tbrxe_link_device(struct tbframe_link *tblink)
  * the RX descriptor before its engine emits the ACK). No credit messages
  * exist.
  *
- * Accounting: each RC request frame pre-charges one record containing its
- * wire PSN in tbrxe_admit().  Successful transmission commits the requester's
- * high-water PSN.  ACK/NAK progress releases every record whose PSN precedes
- * comp.psn; reset/error/destroy releases all records.  Critically, retry
- * rewind changes req.psn but releases no record: a send cursor is not evidence
- * that the peer consumed a descriptor.
+ * Accounting: each unique outstanding RC request PSN pre-charges one record
+ * in tbrxe_admit(). Successful transmission commits the requester's high-water
+ * PSN. ACK/NAK progress releases every record whose PSN precedes comp.psn;
+ * reset/error/destroy releases all records. Retry rewind changes req.psn but
+ * releases no record, while retransmitting an already-recorded PSN does not
+ * charge it twice.
+ *
+ * Retry state and physical admission are deliberately separate. The frame
+ * service recycles an RX descriptor after its client callback returns; RXE
+ * copies the frame into an skb during that callback, before the asynchronous
+ * responder emits an ACK. A lost ACK therefore does not leave that descriptor
+ * occupied, and counting every replay as another occupied descriptor creates
+ * a terminal feedback loop once the bounded per-QP ledger fills.
  *
  * A small bounded part of data_window is held back from fresh requests for
  * retransmission (a PSN below the committed high water).  That avoids deadlock
@@ -285,13 +292,16 @@ static void tbrxe_credit_generation_locked(struct rxe_qp *qp,
 	qp->tbl_generation = link->credit_generation;
 }
 
-bool tbrxe_admit(struct rxe_qp *qp)
+bool tbrxe_admit(struct rxe_qp *qp, bool *charged)
 {
 	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
 	unsigned long flags;
+	u16 i;
+	bool duplicate = false;
 	bool replay;
 	bool ok = true;
 
+	*charged = false;
 	if (!link)
 		return true;
 
@@ -299,10 +309,20 @@ bool tbrxe_admit(struct rxe_qp *qp)
 	tbrxe_credit_generation_locked(qp, link);
 	replay = qp->tbl_high_valid &&
 		 psn_compare(qp->req.psn, qp->tbl_high_psn) < 0;
-	if (link->unacked >= tbrxe_link_wire_window(link) ||
+	if (replay) {
+		for (i = 0; i < qp->tbl_credit_count; i++) {
+			if ((qp->tbl_credits[i] & BTH_PSN_MASK) ==
+			    (qp->req.psn & BTH_PSN_MASK)) {
+				duplicate = true;
+				break;
+			}
+		}
+	}
+	if (!duplicate &&
+	    (link->unacked >= tbrxe_link_wire_window(link) ||
 	    (!replay &&
 	     link->fresh_unacked >= tbrxe_link_fresh_window(link)) ||
-	    qp->tbl_credit_count >= qp->tbl_credit_cap) {
+	    qp->tbl_credit_count >= qp->tbl_credit_cap)) {
 		/* Park flag BEFORE the waiters flag, under the same lock the
 		 * release path takes: a concurrent release that observes
 		 * admission_waiters and sweeps is then guaranteed to see
@@ -311,12 +331,13 @@ bool tbrxe_admit(struct rxe_qp *qp)
 		qp->need_req_skb = 1;
 		link->admission_waiters = true;
 		ok = false;
-	} else {
+	} else if (!duplicate) {
 		link->unacked++;
 		if (!replay)
 			link->fresh_unacked++;
 		qp->tbl_credits[qp->tbl_credit_count++] = qp->req.psn |
 			(replay ? TBRXE_CREDIT_REPLAY : 0);
+		*charged = true;
 	}
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 	return ok;
@@ -331,7 +352,6 @@ bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn)
 {
 	struct tbrxe_link *link = to_rdev(qp->ibqp.device)->tbl_link;
 	unsigned long flags;
-	u32 credit;
 	bool replay = false;
 
 	if (!link || qp_type(qp) != IB_QPT_RC)
@@ -339,11 +359,8 @@ bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn)
 
 	spin_lock_irqsave(&tbrxe.lock, flags);
 	tbrxe_credit_generation_locked(qp, link);
-	if (qp->tbl_credit_count) {
-		credit = qp->tbl_credits[qp->tbl_credit_count - 1];
-		replay = (credit & TBRXE_CREDIT_REPLAY) &&
-			 (credit & BTH_PSN_MASK) == (psn & BTH_PSN_MASK);
-	}
+	if (qp->tbl_high_valid)
+		replay = psn_compare(psn, qp->tbl_high_psn) < 0;
 	spin_unlock_irqrestore(&tbrxe.lock, flags);
 
 	return replay;

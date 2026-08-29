@@ -102,12 +102,12 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
 const char *rxe_parent_name(struct rxe_dev *rxe, unsigned int port_num);
 
 /* Mode A engine-side admission (tbrxe_frame.c, wire-spec section 6):
- * every transmitted request gets a PSN credit record.  ACK/NAK progress,
- * reset or destroy release records; retry cursor rewind does not.
+ * every unique outstanding request PSN gets one credit record. ACK/NAK
+ * progress, reset or destroy release records; retry cursor rewind does not.
  */
 int tbrxe_credit_init(struct rxe_qp *qp);
 void tbrxe_credit_cleanup(struct rxe_qp *qp);
-bool tbrxe_admit(struct rxe_qp *qp);
+bool tbrxe_admit(struct rxe_qp *qp, bool *charged);
 bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn);
 void tbrxe_unadmit(struct rxe_qp *qp);
 void tbrxe_credit_commit(struct rxe_qp *qp);
