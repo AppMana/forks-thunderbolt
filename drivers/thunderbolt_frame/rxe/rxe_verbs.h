@@ -292,6 +292,7 @@ struct rxe_qp {
 	atomic_t		ssn;
 	atomic_t		skb_out;
 	int			need_req_skb;
+	int			need_resp_skb;
 
 	/* Mode A engine-side admission (wire-spec section 6).  Each entry is
 	 * one actually transmitted request frame which has not yet been

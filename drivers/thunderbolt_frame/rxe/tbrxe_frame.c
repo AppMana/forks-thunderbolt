@@ -841,17 +841,18 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
 
 		err = tbrxe.ops->alloc_frame(link->tblink, paylen, is_ctrl,
 					     &frame);
-		spin_unlock_irqrestore(&tbrxe.lock, flags);
-		if (err) {
-			if (err == -ENOSPC && pkt->qp) {
-				/* Admission window closed: park the QP;
-				 * tx_released() reschedules it.
-				 */
+		if (err == -ENOSPC && pkt->qp) {
+			/* Keep requester and responder backpressure independent.
+			 * The release path observes these flags under this lock.
+			 */
+			if (is_ctrl)
+				pkt->qp->need_resp_skb = 1;
+			else
 				pkt->qp->need_req_skb = 1;
-				smp_wmb();
-			}
-			return NULL;
 		}
+		spin_unlock_irqrestore(&tbrxe.lock, flags);
+		if (err)
+			return NULL;
 
 		skb = alloc_skb(sizeof(struct tbrxe_txinfo), GFP_ATOMIC);
 		if (unlikely(!skb)) {
@@ -976,6 +977,8 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
 	}
 
 	rxe_counter_inc(rxe, RXE_CNT_SENT_PKTS);
+	if (pkt->mask & RXE_ACK_MASK)
+		qp->need_resp_skb = 0;
 	goto done;
 
 drop:
@@ -1150,7 +1153,8 @@ static void tbrxe_kick_parked_qps(struct rxe_dev *rxe)
 			continue;
 		if (qp->need_req_skb)
 			rxe_sched_task(&qp->send_task);
-		rxe_sched_task(&qp->recv_task);
+		if (qp->need_resp_skb)
+			rxe_sched_task(&qp->recv_task);
 		rxe_put(qp);
 	}
 }

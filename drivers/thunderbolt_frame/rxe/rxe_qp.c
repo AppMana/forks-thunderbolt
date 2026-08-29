@@ -531,6 +531,8 @@ static void rxe_qp_reset(struct rxe_qp *qp)
 	qp->comp.retrans_shift = 0;
 	qp->req.wait_for_rnr_timer = 0;
 	qp->req.noack_pkts = 0;
+	qp->need_req_skb = 0;
+	qp->need_resp_skb = 0;
 	qp->resp.msn = 0;
 	qp->resp.opcode = -1;
 	qp->resp.drop_msg = 0;
