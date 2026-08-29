@@ -381,6 +381,7 @@ static void tbframe_datapath_proof_does_not_survive_a_session(struct kunit *test
 	{
 		u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
 
+		fx->mock.peer.session_cookie ^= BIT_ULL(7);
 		KUNIT_ASSERT_GE(test,
 				tbframe_mock_build_peer_msg(fx,
 							    TBFRAME_WIRE_OP_HELLO,
@@ -427,6 +428,7 @@ static void tbframe_datapath_late_frame_cannot_prove_next_session(struct kunit *
 	{
 		u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
 
+		fx->mock.peer.session_cookie ^= BIT_ULL(11);
 		KUNIT_ASSERT_GE(test,
 				tbframe_mock_build_peer_msg(fx,
 							    TBFRAME_WIRE_OP_HELLO,
@@ -458,6 +460,7 @@ static void tbframe_datapath_old_descriptor_cannot_prove_new_session(struct kuni
 	KUNIT_ASSERT_NOT_NULL(test, old);
 
 	fx->mock.datapath_dead = true;
+	fx->mock.peer.session_cookie ^= BIT_ULL(13);
 	KUNIT_ASSERT_GE(test,
 			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
 						    msg, sizeof(msg)),

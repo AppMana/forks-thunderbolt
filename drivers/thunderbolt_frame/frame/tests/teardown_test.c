@@ -174,16 +174,48 @@ static void tbframe_teardown_inbound_bye_quiesces_then_acks(struct kunit *test)
 }
 
 /*
- * A peer's BYE is a HOLD, not a hardware teardown: the session goes down
- * for the client (admission closed, TX flushed, link_down LOGOUT) but
- * rings/paths/HopIDs are kept -- the RX keeps absorbing the peer's
- * teardown residue, and skipping the local hardware cycle halves the
- * path disable/enable churn per peer reload (each cycle risks the
- * router-level born-dead pairing). The deferred teardown runs at the
- * head of the step kicked by the returning peer's HELLO, immediately
- * before the aligned rebuild.
+ * BYE_ACK is a distributed fence: it tells the peer that this lifetime can no
+ * longer put a frame on the old route.  Merely asking the TX ring to flush is
+ * insufficient when a descriptor remains posted.  Keep the ACK withheld
+ * until teardown has produced an observable descriptor/ring fence.
  */
-static void tbframe_teardown_bye_holds_hardware(struct kunit *test)
+static void
+tbframe_teardown_bye_ack_requires_descriptor_fence(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.hold_keepalives = true;
+	tbframe_link_verify_step(fx->link);
+	KUNIT_ASSERT_FALSE(test, list_empty(&fx->mock.tx_queue));
+
+	fx->mock.have_response = false;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+	flush_workqueue(fx->tf.wq);
+
+	/* Teardown cancels the descriptor before allowing the retry's ACK. */
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx->mock.tx_queue));
+	KUNIT_EXPECT_GE(test,
+			tbframe_mock_hw_call_pos(&fx->mock,
+						 TBFRAME_HW_STOP_RINGS, 0), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_EXPECT_TRUE(test, fx->mock.have_response);
+}
+
+/*
+ * A peer's BYE closes the old hardware lifetime before the ACK certifies that
+ * no more frames can arrive from this side.  The returning HELLO therefore
+ * starts from a stopped ring and removed paths rather than deferring that
+ * fence until after the replacement lifetime is already negotiating.
+ */
+static void tbframe_teardown_bye_fences_hardware(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
@@ -198,19 +230,19 @@ static void tbframe_teardown_bye_holds_hardware(struct kunit *test)
 	flush_workqueue(fx->tf.wq);
 	KUNIT_ASSERT_EQ(test, 1u, fx->client.down_count);
 
-	/* Quiesced for the client, hardware untouched. */
+	/* Quiesced for the client and fenced at the hardware boundary. */
 	KUNIT_EXPECT_GE(test,
 			tbframe_mock_hw_call_pos(&fx->mock,
 						 TBFRAME_HW_QUIESCE_TX, 0), 0);
-	KUNIT_EXPECT_EQ(test, -1,
+	KUNIT_EXPECT_GE(test,
 			tbframe_mock_hw_call_pos(&fx->mock,
-						 TBFRAME_HW_STOP_RINGS, 0));
-	KUNIT_EXPECT_EQ(test, -1,
+						 TBFRAME_HW_STOP_RINGS, 0), 0);
+	KUNIT_EXPECT_GE(test,
 			tbframe_mock_hw_call_pos(&fx->mock,
-						 TBFRAME_HW_DISABLE_PATHS, 0));
+						 TBFRAME_HW_DISABLE_PATHS, 0), 0);
 	KUNIT_EXPECT_TRUE(test, fx->mock.rings_alloced);
 
-	/* The returning peer's HELLO triggers teardown + aligned rebuild. */
+	/* The returning peer's HELLO triggers the aligned rebuild. */
 	KUNIT_ASSERT_GE(test,
 			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
 						    msg, sizeof(msg)), 0);
@@ -380,7 +412,8 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_session_reset_keeps_dma_storage),
 	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
-	KUNIT_CASE(tbframe_teardown_bye_holds_hardware),
+	KUNIT_CASE(tbframe_teardown_bye_ack_requires_descriptor_fence),
+	KUNIT_CASE(tbframe_teardown_bye_fences_hardware),
 	KUNIT_CASE(tbframe_teardown_terminal_down_after_logout),
 	KUNIT_CASE(tbframe_teardown_publisher_drain_poisons),
 	KUNIT_CASE(tbframe_teardown_bounded_leak_no_hang),

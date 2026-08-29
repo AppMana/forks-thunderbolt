@@ -857,7 +857,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	bool was_up, deliver_down, terminal = false, hold;
+	bool was_up, deliver_down, terminal = false;
 	bool had_rings, rings_running, had_paths, had_hopid;
 	unsigned int drain_ms;
 	u16 remote_hopid;
@@ -866,16 +866,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 
 	lockdep_assert_held(&link->session_lock);
 
-	/*
-	 * A LOGOUT down is a HOLD: the peer told us it is tearing down and
-	 * will re-negotiate. Quiesce for the client (state, admission, TX
-	 * flush, link_down) but keep rings/paths/HopIDs -- our RX keeps
-	 * absorbing the peer's teardown residue, and skipping the hardware
-	 * cycle halves the path disable/enable churn per peer reload. The
-	 * deferred hardware teardown (->hw_stale) runs at the head of the
-	 * next session step, right before the aligned rebuild.
-	 */
-	hold = reason == TBFRAME_DOWN_LOGOUT && !link->removing;
 	/*
 	 * Requester and responder sessions have independent lifetimes.  A
 	 * peer-driven SUPERSEDE/LOGOUT advances the remote identity, but the
@@ -890,8 +880,8 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	if (link->state != TBFRAME_STATE_DEAD)
 		link->state = TBFRAME_STATE_INIT;
 	had_rings = link->rings_allocated;
-	rings_running = link->rings_up || link->hw_stale;
-	had_paths = link->paths_enabled || link->hw_stale;
+	rings_running = link->rings_up;
+	had_paths = link->paths_enabled;
 	had_hopid = link->in_hopid_held;
 	/*
 	 * NOT link->remote_hopid: that field tracks the peer's latest HELLO
@@ -901,10 +891,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	remote_hopid = link->active_remote_hopid;
 	link->rings_up = false;
 	link->paths_enabled = false;
-	if (hold)
-		link->hw_stale = true;
-	else
-		link->in_hopid_held = false;
+	link->in_hopid_held = false;
 	link->hello_done = false;
 	link->needs_down = false;
 	link->tx_blocked = false;
@@ -994,9 +981,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_quiesced = true;
 	spin_unlock_irqrestore(&link->lock, flags);
 
-	if (hold)
-		goto deliver;
-
 	/*
 	 * BYE after our own quiesce (the ack contract is symmetric: each
 	 * side certifies its TX is silent), before any path teardown. Only
@@ -1042,12 +1026,9 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	if (had_hopid)
 		link->ops->release_in_hopid(link->hw, remote_hopid);
 	spin_lock_irqsave(&link->lock, flags);
-	link->hw_stale = false;
 	if (terminal)
 		link->rings_allocated = false;
 	spin_unlock_irqrestore(&link->lock, flags);
-
-deliver:
 
 	/*
 	 * The transmit HopID is deliberately NOT rotated across sessions.
@@ -1090,12 +1071,10 @@ deliver:
 	}
 
 	/*
-	 * Automatic re-handshake for every reason but the terminal ones and
-	 * the LOGOUT hold: after a peer's BYE this side deliberately WAITS
-	 * for the peer's fresh HELLO (which kicks the step immediately) so
-	 * the deferred hardware teardown and both rebuilds run in lockstep.
-	 * A safety re-kick at the settle interval covers a peer whose
-	 * return HELLO was lost.
+	 * Automatic re-handshake for every reason but the terminal ones.  After a
+	 * peer's BYE the old hardware is already fenced, but this side waits for
+	 * the peer's fresh HELLO so both rebuilds start together.  A safety re-kick
+	 * at the settle interval covers a peer whose return HELLO was lost.
 	 */
 	if (reason == TBFRAME_DOWN_LOGOUT) {
 		tbframe_link_kick(link,
@@ -1129,7 +1108,7 @@ deliver:
 static void __tbframe_link_session_step(struct tbframe_link *link)
 {
 	unsigned long flags;
-	bool hello_done, rings_up, ready_sent, down, hw_stale;
+	bool hello_done, rings_up, ready_sent, down;
 	enum tbframe_down_reason reason;
 	int ret;
 
@@ -1163,29 +1142,6 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 					  TBFRAME_SESSION_PEER :
 					  TBFRAME_SESSION_LOCAL);
 		return;
-	}
-
-	/*
-	 * Deferred hardware teardown from a LOGOUT hold: the peer is (re)
-	 * negotiating now, so tear the stale session hardware down and fall
-	 * through to the aligned rebuild in this same step.
-	 */
-	spin_lock_irqsave(&link->lock, flags);
-	hw_stale = link->hw_stale;
-	spin_unlock_irqrestore(&link->lock, flags);
-	if (hw_stale) {
-		/*
-		 * This is the deferred hardware half of the peer's LOGOUT, not a
-		 * new local VERIFY transition.  The returning peer consumed our
-		 * current identity in HELLO_ACK before kicking this step.
-		 */
-		tbframe_link_down_session(link, TBFRAME_DOWN_VERIFY,
-					  TBFRAME_SESSION_PEER);
-		spin_lock_irqsave(&link->lock, flags);
-		hello_done = link->hello_done;
-		rings_up = link->rings_up;
-		ready_sent = link->hs.request_sent;
-		spin_unlock_irqrestore(&link->lock, flags);
 	}
 
 	if (!hello_done) {
@@ -1539,15 +1495,28 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		}
 		tbframe_ready_responder_reset(link);
 		/*
-		 * An inbound HELLO while established means the peer restarted
-		 * without a link edge; our session points at its freed rings.
-		 * Supersede (shared cross-driver contract) and let the session
-		 * work run the full down/re-handshake.
+		 * An inbound HELLO naming a different established lifetime means
+		 * the peer restarted without a link edge; our session points at
+		 * its freed rings.  An exact retry of the current HELLO remains
+		 * idempotent and can be ACKed without disturbing the data path.
 		 */
-		if (link->state == TBFRAME_STATE_UP && !link->needs_down) {
+		if (link->state == TBFRAME_STATE_UP && !link->needs_down &&
+		    !tbframe_link_remote_matches_locked(link, &remote)) {
 			tb_xdomain_handshake_supersede(&link->hs);
 			link->needs_down = true;
 			link->down_reason = TBFRAME_DOWN_SUPERSEDE;
+			/*
+			 * A replacement-lifetime HELLO is itself the peer's
+			 * teardown request.  Do not ACK it from the old lifetime:
+			 * the peer would be free to enable its replacement paths
+			 * before session work has stopped our rings and removed the
+			 * old hop entries.  The retry after that fence is answered.
+			 */
+			link->hello_attempts = 0;
+			link->hs.attempts = 0;
+			tbframe_link_kick_locked(link, 0);
+			spin_unlock_irqrestore(&link->lock, flags);
+			return 1;
 		}
 		/* Peer is actively negotiating: re-arm our retry budgets. */
 		link->hello_attempts = 0;
@@ -1625,7 +1594,8 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		 * torn down; the peer retries BYE (bounded) and the retry
 		 * lands after our down has run.
 		 */
-		quiesced = link->state != TBFRAME_STATE_UP && link->tx_quiesced;
+		quiesced = link->state != TBFRAME_STATE_UP &&
+			link->tx_quiesced && !link->ring_posted;
 		spin_unlock_irqrestore(&link->lock, flags);
 		if (!quiesced)
 			return 1;

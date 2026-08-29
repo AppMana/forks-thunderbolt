@@ -316,10 +316,9 @@ static void tbframe_session_peer_supersede_keeps_local_identity(struct kunit *te
 }
 
 /*
- * LOGOUT keeps the peer-facing local identity while the old hardware is held,
- * but the deferred teardown is a second transition.  A returning peer has
- * already consumed our HELLO_ACK before that teardown runs, so the teardown
- * must not silently advance the identity that the peer just negotiated.
+ * LOGOUT keeps the peer-facing local identity while fencing the old hardware.
+ * A returning peer rebuilds from that same local identity, so the peer-owned
+ * transition must not silently advance the identity it previously negotiated.
  */
 static void tbframe_session_logout_rebuild_keeps_local_identity(struct kunit *test)
 {
@@ -336,10 +335,11 @@ static void tbframe_session_logout_rebuild_keeps_local_identity(struct kunit *te
 	KUNIT_ASSERT_EQ(test, 1,
 			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
 	flush_workqueue(fx->tf.wq);
-	KUNIT_ASSERT_TRUE(test, fx->link->hw_stale);
+	KUNIT_ASSERT_FALSE(test, fx->mock.rings_started);
+	KUNIT_ASSERT_FALSE(test, fx->mock.paths_on);
 	KUNIT_ASSERT_EQ(test, local_cookie, fx->link->local_cookie);
 
-	/* The peer advances its identity and consumes our current HELLO_ACK. */
+	/* The peer advances its identity and starts the fenced rebuild. */
 	fx->mock.peer.session_cookie ^= BIT_ULL(31);
 	KUNIT_ASSERT_GE(test,
 			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,

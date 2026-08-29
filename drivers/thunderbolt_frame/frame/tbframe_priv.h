@@ -289,7 +289,6 @@ struct tbframe_link {
 	 * kicked by the returning peer's HELLO -- immediately before the
 	 * aligned rebuild.
 	 */
-	bool			hw_stale;
 	/*
 	 * The remote HopID the CURRENT session actually allocated its in-HopID
 	 * with and enabled its paths on. An inbound HELLO rewrites
