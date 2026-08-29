@@ -63,6 +63,8 @@
  */
 #define TBFRAME_PROBE_INTERVAL_MS	500
 #define TBFRAME_PROBE_RETRIES		30
+/* Bound the grace for frames authenticated by the immediately prior session. */
+#define TBFRAME_STALE_DRAIN_RETRIES	TBFRAME_PROBE_RETRIES
 /*
  * Level-triggered silence detector for an ESTABLISHED session: with keepalive
  * negotiated a healthy link delivers at least one frame per verify interval,
@@ -180,10 +182,10 @@ struct tbframe_hw_ops {
 	/* level-triggered: 1 programmed, 0 gone, <0 unknown (not dead) */
 	int	(*paths_active)(void *hw, int local_hopid, int remote_hopid);
 	int	(*tx_snapshot)(void *hw, struct tb_ring_snapshot *snapshot);
-	int	(*report_tx_stall)(void *hw,
-				   const struct tb_ring_snapshot *first,
-				   const struct tb_ring_snapshot *last,
-				   bool control_healthy);
+	int	(*report_data_path_failure)(void *hw,
+					    const struct tb_ring_snapshot *first,
+					    const struct tb_ring_snapshot *last,
+					    bool control_healthy);
 	void	(*report_data_proven)(void *hw);
 	int	(*control_request)(void *hw, const void *req, size_t req_len,
 				   void *resp, size_t resp_len,
@@ -330,6 +332,8 @@ struct tbframe_link {
 	u64			data_rx_oversize;
 	u64			data_rx_stale;
 	u64			data_rx_bad_cookie;
+	u64			data_rx_prior_cookie;
+	u64			data_rx_prior_cookie_mark;
 	u64			data_tx_done;
 	u64			data_tx_done_mark;
 	u64			data_tx_submitted;
@@ -342,9 +346,10 @@ struct tbframe_link {
 	u64			data_generation;
 	unsigned int		probe_attempts;
 	unsigned int		probe_failures;
+	unsigned int		stale_drain_budget;
 	unsigned int		silent_ticks;
-	struct tb_ring_snapshot	tx_stall_first;
-	bool			tx_stall_first_valid;
+	struct tb_ring_snapshot	data_path_sample;
+	bool			data_path_sample_valid;
 
 	bool			needs_down;
 	enum tbframe_down_reason down_reason;
@@ -370,6 +375,7 @@ struct tbframe_link {
 	u16			remote_rx_entries;
 	u32			remote_caps;
 	u64			remote_cookie;
+	u64			previous_remote_cookie;
 	u64			remote_gid_eui64;
 
 	/* Mode A admission (spec §6) */

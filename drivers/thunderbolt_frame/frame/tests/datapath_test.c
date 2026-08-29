@@ -127,11 +127,82 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+}
+
+/*
+ * Local TX completion only proves that the NHI accepted a descriptor.  It
+ * does not prove that the frame crossed the fabric.  Two complete failed
+ * end-to-end proof episodes must therefore request controller recovery even
+ * when the local consumer index continues to advance.
+ */
+static void tbframe_datapath_end_to_end_failure_escalates_with_moving_consumer(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	fx->mock.datapath_dead = true;
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
+		tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
+		tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+}
+
+/*
+ * Frames already resident in the fabric can arrive after a session rebuild.
+ * Their authenticated-but-old cookie proves that traffic is draining, not
+ * that another destructive rebuild is useful.  The proof state machine must
+ * wait for the negotiated lifetime without continually moving the target.
+ */
+static void tbframe_datapath_stale_backlog_drains_without_session_churn(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	u64 stale_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	unsigned int i;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.peer.session_cookie ^= BIT_ULL(0);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx,
+						    TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)),
+			0);
+	tbframe_link_handle_packet(fx->link, msg, sizeof(msg));
+	fx->mock.datapath_dead = false;
+	fx->mock.stale_peer_cookie = stale_cookie;
+	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES + 1;
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
+		tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 2u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 2u, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_releases);
+}
+
+/* Unknown cookies are not evidence that a prior negotiated lifetime drains. */
+static void tbframe_datapath_unknown_cookie_cannot_defer_recovery(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	fx->mock.stale_peer_cookie = fx->mock.peer.session_cookie ^ BIT_ULL(0);
+	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES * 4;
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES * 3; i++)
+		tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 2u);
 }
 
 /* A healthy data path is proven on the first attempt and goes up normally. */
@@ -408,6 +479,9 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
+	KUNIT_CASE(tbframe_datapath_end_to_end_failure_escalates_with_moving_consumer),
+	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
+	KUNIT_CASE(tbframe_datapath_unknown_cookie_cannot_defer_recovery),
 	KUNIT_CASE(tbframe_datapath_live_ring_declares_up),
 	KUNIT_CASE(tbframe_datapath_recovery_proof_requires_tx_and_rx),
 	KUNIT_CASE(tbframe_datapath_unprovable_peer_stays_down),

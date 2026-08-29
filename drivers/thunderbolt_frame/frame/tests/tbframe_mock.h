@@ -47,8 +47,10 @@ struct tbframe_mock {
 	 * peer's verify cadence does.
 	 */
 	bool		datapath_dead;
+	u64		stale_peer_cookie;
+	unsigned int	stale_peer_keepalives;
 	bool		tx_consumer_stalled;
-	unsigned int	tx_stall_reports;
+	unsigned int	data_path_failure_reports;
 	unsigned int	data_proven_reports;
 	/*
 	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
@@ -364,7 +366,12 @@ static void __tbframe_mock_deliver_peer_keepalive(struct tbframe_mock *m)
 	list_del_init(&rf->list);
 	m->rx_posted_count--;
 	f = container_of(rf, struct tbframe_frame_priv, rf);
-	tbframe_wire_put_le64(f->frame.data, m->peer.session_cookie);
+	if (m->stale_peer_keepalives) {
+		m->stale_peer_keepalives--;
+		tbframe_wire_put_le64(f->frame.data, m->stale_peer_cookie);
+	} else {
+		tbframe_wire_put_le64(f->frame.data, m->peer.session_cookie);
+	}
 	m->peer_keepalives++;
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
@@ -469,16 +476,17 @@ static int tbframe_mock_tx_snapshot(void *data,
 	return 0;
 }
 
-static int tbframe_mock_report_tx_stall(void *data,
-					const struct tb_ring_snapshot *first,
-					const struct tb_ring_snapshot *last,
-					bool control_healthy)
+static int
+tbframe_mock_report_data_path_failure(void *data,
+				      const struct tb_ring_snapshot *first,
+				      const struct tb_ring_snapshot *last,
+				      bool control_healthy)
 {
 	struct tbframe_mock *m = data;
 
-	if (!tb_nhi_tx_stalled(first, last, control_healthy))
+	if (!control_healthy)
 		return -EAGAIN;
-	m->tx_stall_reports++;
+	m->data_path_failure_reports++;
 	return 0;
 }
 
@@ -602,7 +610,7 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.disable_paths		= tbframe_mock_disable_paths,
 	.paths_active		= tbframe_mock_paths_active,
 	.tx_snapshot		= tbframe_mock_tx_snapshot,
-	.report_tx_stall	= tbframe_mock_report_tx_stall,
+	.report_data_path_failure = tbframe_mock_report_data_path_failure,
 	.report_data_proven	= tbframe_mock_report_data_proven,
 	.control_request	= tbframe_mock_control_request,
 	.control_response	= tbframe_mock_control_response,

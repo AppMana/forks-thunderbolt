@@ -3631,18 +3631,26 @@ static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *tes
 	KUNIT_EXPECT_TRUE(test, supported);
 	KUNIT_EXPECT_FALSE(test,
 		tb_nhi_arc_cio_recovery_supported(vendor, device));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_nhi_runtime_recovery_supported(vendor, device));
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_TRUE(test, supported);
 	KUNIT_EXPECT_FALSE(test,
 		tb_nhi_arc_cio_recovery_supported(vendor, device));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_nhi_runtime_recovery_supported(vendor, device));
 	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_FALSE(test, supported);
+	KUNIT_EXPECT_FALSE(test,
+			   tb_nhi_runtime_recovery_supported(vendor, device));
 	vendor = PCI_VENDOR_ID_AMD;
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_FALSE(test, supported);
+	KUNIT_EXPECT_FALSE(test,
+			   tb_nhi_runtime_recovery_supported(vendor, device));
 }
 
 static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *test)
@@ -3654,9 +3662,9 @@ static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *tes
 
 /*
  * Runtime data-path recovery is independent from startup proof and probe
- * recovery. A controller can complete both of those and later stop consuming
- * non-control TX descriptors while ring 0 remains healthy. Reusing the
- * completed startup state would make that failure unactionable.
+ * recovery. A controller can complete both of those and later lose its data
+ * path while ring 0 remains healthy. Reusing the completed startup state
+ * would make that failure unactionable.
  */
 static void tb_test_nhi_runtime_recovery_is_a_separate_machine(struct kunit *test)
 {
@@ -3664,7 +3672,7 @@ static void tb_test_nhi_runtime_recovery_is_a_separate_machine(struct kunit *tes
 	enum tb_nhi_runtime_recovery_state runtime =
 		TB_NHI_RUNTIME_RECOVERY_IDLE;
 
-	runtime = tb_nhi_runtime_recovery_next(runtime, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+	runtime = tb_nhi_runtime_recovery_next(runtime, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
 
 	KUNIT_EXPECT_EQ(test, startup, TB_NHI_RECOVERY_COMPLETE);
 	KUNIT_EXPECT_EQ(test, runtime,
@@ -3676,18 +3684,18 @@ static void tb_test_nhi_runtime_recovery_is_bounded(struct kunit *test)
 	enum tb_nhi_runtime_recovery_state state =
 		TB_NHI_RUNTIME_RECOVERY_IDLE;
 
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
 	KUNIT_ASSERT_EQ(test, state,
 			TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING);
 	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED);
 	KUNIT_ASSERT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_PENDING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_ICM_RESET_SUCCEEDED);
+			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED);
 	KUNIT_ASSERT_EQ(test, state,
 			TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING);
 	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED);
 	KUNIT_ASSERT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED);
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
 	KUNIT_EXPECT_EQ(test, state,
 			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
 	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
@@ -3704,6 +3712,29 @@ static void tb_test_nhi_runtime_recovery_requires_data_proof(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
 }
 
+static void tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence(struct kunit *test)
+{
+	struct tb_ring_snapshot first = {
+		.size = 32,
+		.hw_producer = 4,
+		.hw_consumer = 2,
+		.options = BIT(31),
+		.running = true,
+		.indices_valid = true,
+	};
+	struct tb_ring_snapshot last = first;
+	bool evidence;
+
+	last.hw_producer = 6;
+	last.hw_consumer = 5;
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true, false);
+	KUNIT_EXPECT_FALSE(test, evidence);
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true, true);
+	KUNIT_EXPECT_TRUE(test, evidence);
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, false, true);
+	KUNIT_EXPECT_FALSE(test, evidence);
+}
+
 static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *test)
 {
 	enum tb_nhi_runtime_recovery_state state;
@@ -3713,8 +3744,8 @@ static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *tes
 	KUNIT_EXPECT_EQ(test, state,
 			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
 
-	state = TB_NHI_RUNTIME_RECOVERY_ICM_RESET_PENDING;
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_ICM_RESET_FAILED);
+	state = TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING;
+	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_FAILED);
 	KUNIT_EXPECT_EQ(test, state,
 			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
 
@@ -6390,6 +6421,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_a_separate_machine),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
 	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),

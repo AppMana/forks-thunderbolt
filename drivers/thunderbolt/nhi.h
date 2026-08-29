@@ -105,7 +105,8 @@ int tb_ring_process_completions(struct tb_ring *ring);
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy);
+				    bool control_healthy,
+				    bool end_to_end_failed);
 bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi);
 
@@ -123,6 +124,22 @@ tb_nhi_tx_stalled(const struct tb_ring_snapshot *first,
 		return false;
 
 	return first->hw_consumer == last->hw_consumer;
+}
+
+static inline bool
+tb_nhi_runtime_recovery_evidence(const struct tb_ring_snapshot *first,
+				 const struct tb_ring_snapshot *last,
+				 bool control_healthy,
+				 bool end_to_end_failed)
+{
+	if (!first || !last || !control_healthy ||
+	    !first->running || !last->running ||
+	    !first->indices_valid || !last->indices_valid ||
+	    first->size != last->size)
+		return false;
+
+	return end_to_end_failed ||
+		tb_nhi_tx_stalled(first, last, control_healthy);
 }
 
 /**
@@ -209,6 +226,12 @@ static inline bool tb_nhi_arc_cio_recovery_supported(u16 vendor, u16 device)
 	(void)vendor;
 	(void)device;
 	return false;
+}
+
+static inline bool
+tb_nhi_runtime_recovery_supported(u16 vendor, u16 device)
+{
+	return tb_nhi_recovery_supported(vendor, device);
 }
 
 static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)

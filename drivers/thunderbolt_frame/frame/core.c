@@ -135,6 +135,11 @@ static void tbframe_link_apply_remote_locked(struct tbframe_link *link,
 					     const struct tbframe_wire_hello *h)
 {
 	lockdep_assert_held(&link->lock);
+	if (link->remote_cookie && link->remote_cookie != h->session_cookie) {
+		link->previous_remote_cookie = link->remote_cookie;
+		link->stale_drain_budget = TBFRAME_STALE_DRAIN_RETRIES;
+		link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
+	}
 	link->remote_hopid = h->transmit_hopid;
 	link->remote_rx_entries = clamp_t(u16, h->rx_ring_entries, 1, 4096);
 	link->remote_caps = h->capabilities;
@@ -342,6 +347,7 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	link->data_generation++;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
+	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
 	link->silent_ticks = 0;
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -454,30 +460,26 @@ static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
 	return ret;
 }
 
-static bool tbframe_link_sample_tx_stall(struct tbframe_link *link,
-					 struct tb_ring_snapshot *first,
-					 struct tb_ring_snapshot *last)
+static bool tbframe_link_sample_tx_path(struct tbframe_link *link,
+					struct tb_ring_snapshot *first,
+					struct tb_ring_snapshot *last)
 {
 	unsigned long flags;
-	bool comparable = false;
+	bool have_previous;
 
 	if (!link->ops->tx_snapshot ||
 	    link->ops->tx_snapshot(link->hw, last))
 		return false;
 
 	spin_lock_irqsave(&link->lock, flags);
-	if (link->tx_stall_first_valid &&
-	    link->tx_stall_first.size == last->size &&
-	    link->tx_stall_first.hw_consumer == last->hw_consumer) {
-		*first = link->tx_stall_first;
-		comparable = true;
-	} else {
-		link->tx_stall_first = *last;
-		link->tx_stall_first_valid = true;
-	}
+	have_previous = link->data_path_sample_valid;
+	if (have_previous)
+		*first = link->data_path_sample;
+	link->data_path_sample = *last;
+	link->data_path_sample_valid = true;
 	spin_unlock_irqrestore(&link->lock, flags);
 
-	return comparable;
+	return have_previous;
 }
 
 /*
@@ -509,7 +511,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	struct tb_ring_snapshot first, last;
 	unsigned long flags;
 	unsigned int attempts, failures;
-	bool comparable, proven, warned;
+	bool sampled, proven, stale_draining, warned;
 	u32 remote_caps;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -539,16 +541,21 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 
 	/* Best effort: a full ring or a wedged TX just costs this attempt. */
 	tbframe_link_send_keepalive(link, true);
-	comparable = tbframe_link_sample_tx_stall(link, &first, &last);
+	sampled = tbframe_link_sample_tx_path(link, &first, &last);
 
 	spin_lock_irqsave(&link->lock, flags);
 	proven = link->data_proven;
-	attempts = proven ? 0 : ++link->probe_attempts;
+	stale_draining = link->stale_drain_budget &&
+		link->data_rx_prior_cookie != link->data_rx_prior_cookie_mark;
+	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
+	if (stale_draining)
+		link->stale_drain_budget--;
+	attempts = proven || stale_draining ? 0 : ++link->probe_attempts;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (proven)
 		return true;
 
-	if (attempts < TBFRAME_PROBE_RETRIES) {
+	if (stale_draining || attempts < TBFRAME_PROBE_RETRIES) {
 		tbframe_link_kick(link,
 				  msecs_to_jiffies(TBFRAME_PROBE_INTERVAL_MS));
 		return false;
@@ -572,13 +579,14 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 		tbframe_link_kick_locked(link, 0);
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
-	if (failures >= 2 && comparable &&
-	    link->ops->report_tx_stall) {
+	if (failures >= 2 && sampled &&
+	    link->ops->report_data_path_failure) {
 		int ret;
 
-		ret = link->ops->report_tx_stall(link->hw, &first, &last, true);
+		ret = link->ops->report_data_path_failure(link->hw, &first,
+							  &last, true);
 		if (!ret)
-			pr_warn("%s: hardware TX consumer did not move across a complete proof interval after a ring/path rebuild; requested bounded controller recovery\n",
+			pr_warn("%s: end-to-end data remained unproven after a complete ring/path rebuild; requested bounded controller recovery\n",
 				link->name);
 	}
 	/*
@@ -910,11 +918,12 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->data_proof_unavailable_warned = false;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
+	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
 	link->silent_ticks = 0;
 	link->probe_attempts = 0;
 	link->data_tx_done_mark = link->data_tx_done;
 	link->controller_proof_reported = false;
-	link->tx_stall_first_valid = false;
+	link->data_path_sample_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	tbframe_hello_responder_reset(link);
 	tbframe_ready_responder_reset(link);
@@ -1882,6 +1891,8 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			link->probe_failures = 0;
 		} else if (proof && cookie != link->remote_cookie) {
 			link->data_rx_bad_cookie++;
+			if (cookie == link->previous_remote_cookie)
+				link->data_rx_prior_cookie++;
 			cookie_mismatch = true;
 			expected_cookie = link->remote_cookie;
 			local_cookie = link->local_cookie;

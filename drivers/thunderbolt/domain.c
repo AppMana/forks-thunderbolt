@@ -14,6 +14,7 @@
 #include <linux/random.h>
 #include <crypto/hash.h>
 
+#include "dma_port.h"
 #include "tb.h"
 
 static DEFINE_IDA(tb_domain_ida);
@@ -566,6 +567,30 @@ err_ctl_stop:
  * Stops the domain, removes it from the system and releases all
  * resources once the last reference has been released.
  */
+static int tb_domain_runtime_power_cycle(struct tb *tb)
+{
+	struct pci_dev *pdev = tb->nhi->pdev;
+	bool tx_consumed = false;
+	int port, ret;
+
+	port = dma_port_for_nhi(pdev->vendor, pdev->device);
+	if (port < 0)
+		return port;
+
+	ret = dma_port_power_cycle_raw(tb->ctl, port, &tx_consumed);
+	if (!ret || (ret == -ETIMEDOUT && tx_consumed)) {
+		tb_warn(tb,
+			"runtime recovery dispatched a host-router power cycle on DMA port %d; requiring a fresh probe\n",
+			port);
+		return 0;
+	}
+
+	tb_err(tb,
+	       "runtime host-router power cycle lacked request-local TX completion proof (error %d)\n",
+	       ret);
+	return ret ?: -EIO;
+}
+
 int tb_domain_remove(struct tb *tb, bool runtime_reset)
 {
 	int ret = 0;
@@ -574,6 +599,15 @@ int tb_domain_remove(struct tb *tb, bool runtime_reset)
 	if (tb->cm_ops->stop)
 		tb->cm_ops->stop(tb);
 	mutex_unlock(&tb->lock);
+
+	/*
+	 * Service removal above quiesces the data paths while ring 0 is still
+	 * alive.  The host-router power-cycle mailbox is carried by ring 0, so
+	 * it must be dispatched before tb_domain_ctl_stop().  A fresh PCI probe,
+	 * followed by real data-path proof, is the only success criterion.
+	 */
+	if (runtime_reset)
+		ret = tb_domain_runtime_power_cycle(tb);
 
 	/* Stop the domain control traffic; see tb_domain_ctl_stop(). */
 	tb_domain_ctl_stop(tb);
@@ -591,13 +625,6 @@ int tb_domain_remove(struct tb *tb, bool runtime_reset)
 
 	if (tb->cm_ops->deinit)
 		tb->cm_ops->deinit(tb);
-	if (runtime_reset) {
-		if (tb->cm_ops->quiesced_reset)
-			ret = tb->cm_ops->quiesced_reset(tb);
-		else
-			ret = -EOPNOTSUPP;
-	}
-
 	/*
 	 * Release everything backed by the NHI before PCI remove can unmap its
 	 * BAR and free device-managed storage. The domain device itself may stay

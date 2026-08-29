@@ -279,7 +279,7 @@ static void nhi_runtime_recovery_workfn(struct work_struct *work)
 		goto out;
 
 	dev_warn(recovery->dev,
-		 "proven non-control TX stall; quiescing the domain for one ARC/CIO recovery\n");
+		 "proven end-to-end data-path failure; quiescing the domain for one host-router power cycle\n");
 	device_release_driver(recovery->dev);
 
 	state = nhi_runtime_recovery_get(pdev);
@@ -290,7 +290,7 @@ static void nhi_runtime_recovery_workfn(struct work_struct *work)
 			nhi_runtime_recovery_set(pdev, state);
 		}
 		dev_err(recovery->dev,
-			"runtime recovery could not quiesce and reset the controller; a power-removal reset is required\n");
+			"runtime recovery could not quiesce and power-cycle the host router; a power-removal reset is required\n");
 		goto out;
 	}
 
@@ -311,7 +311,8 @@ out:
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy)
+				    bool control_healthy,
+				    bool end_to_end_failed)
 {
 	struct nhi_runtime_recovery_record *record, *new_record;
 	struct nhi_runtime_recovery_work *recovery;
@@ -323,9 +324,10 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 	if (!nhi || !first || !last)
 		return -EINVAL;
 	pdev = nhi->pdev;
-	if (!tb_nhi_arc_cio_recovery_supported(pdev->vendor, pdev->device))
+	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
-	if (!tb_nhi_tx_stalled(first, last, control_healthy))
+	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy,
+					      end_to_end_failed))
 		return -EAGAIN;
 
 	recovery = kzalloc(sizeof(*recovery), GFP_KERNEL);
@@ -342,7 +344,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 		if (!nhi_runtime_recovery_matches(record, pdev))
 			continue;
 		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING) {
-			event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+			event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 			record->state = tb_nhi_runtime_recovery_next(record->state, event);
 			ret = -EHWPOISON;
 		} else {
@@ -355,7 +357,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi,
 	new_record->bus = pdev->bus->number;
 	new_record->devfn = pdev->devfn;
 	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
-	event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+	event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 	new_record->state = tb_nhi_runtime_recovery_next(state, event);
 	list_add_tail(&new_record->list, &nhi_runtime_recoveries);
 	new_record = NULL;
@@ -366,7 +368,7 @@ unlock:
 		kfree(recovery);
 		if (ret == -EHWPOISON)
 			dev_err(&pdev->dev,
-				"non-control TX remained stalled after ARC/CIO recovery; a power-removal reset is required\n");
+				"the end-to-end data path failed again after host-router recovery; a power-removal reset is required\n");
 		return ret;
 	}
 
@@ -2318,7 +2320,7 @@ release_domain:
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
 		nhi_runtime_recovery_set(pdev, runtime_state);
 		dev_info(dev,
-			 "controller reprobed after ARC/CIO reset; awaiting data-path proof\n");
+			 "controller reprobed after host-router power cycle; awaiting data-path proof\n");
 	}
 	pci_set_drvdata(pdev, tb);
 
@@ -2353,13 +2355,13 @@ static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 		runtime_event = TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED;
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
 		runtime_event = reset_ret ?
-			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_FAILED :
-			TB_NHI_RUNTIME_RECOVERY_ICM_RESET_SUCCEEDED;
+			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_FAILED :
+			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED;
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
 		nhi_runtime_recovery_set(pdev, runtime_state);
 		if (reset_ret)
 			dev_err(&pdev->dev,
-				"quiesced ARC/CIO reset failed (%d); a power-removal reset is required\n",
+				"quiesced host-router power cycle failed (%d); a power-removal reset is required\n",
 				reset_ret);
 	}
 	nhi_shutdown(nhi);
