@@ -116,6 +116,18 @@ struct tbframe_ready_responder {
 	struct tbframe_wire_hello peer;
 };
 
+/*
+ * Inbound HELLO responder state is independent from the correlated outbound
+ * HELLO requester.  The control dispatch path can observe a peer's next
+ * lifetime while the requester is still waiting for an ACK from its previous
+ * lifetime; keeping this snapshot separate prevents the older reply from
+ * silently replacing the newer observation.
+ */
+struct tbframe_hello_responder {
+	bool seen;
+	struct tbframe_wire_hello peer;
+};
+
 struct tbframe_frame_priv {
 	struct tbframe_frame	frame;	/* public part, must stay first */
 	struct tbframe_link	*link;
@@ -285,6 +297,7 @@ struct tbframe_link {
 	u16			active_remote_hopid;
 	/* Outbound READY requester and inbound READY responder are independent. */
 	struct tb_xdomain_handshake hs;	/* requester + zombie predicate */
+	struct tbframe_hello_responder hello_responder;
 	struct tbframe_ready_responder ready_responder;
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;

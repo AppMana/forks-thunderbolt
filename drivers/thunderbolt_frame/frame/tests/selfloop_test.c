@@ -56,6 +56,8 @@ struct selfloop_end {
 
 	u8		last_response[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	bool		have_response;
+	bool		inject_restart_before_hello_ack;
+	bool		restart_injected;
 
 	/* client events for THIS link */
 	unsigned int	up_count;
@@ -281,7 +283,11 @@ static int selfloop_control_request(void *data, const void *req,
 {
 	struct selfloop_end *e = data;
 	struct selfloop_end *peer = selfloop_peer(e);
+	struct tbframe_wire_hello request_hello;
+	struct tbframe_wire_info request_info;
 	u8 buf[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	u8 stale_response[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	int ret;
 
 	if (req_len > sizeof(buf) || resp_len > sizeof(buf))
 		return -EINVAL;
@@ -292,6 +298,43 @@ static int selfloop_control_request(void *data, const void *req,
 	tbframe_link_handle_packet(selfloop_peer_link(e), buf, req_len);
 	if (!peer->have_response)
 		return -ETIMEDOUT;
+
+	/*
+	 * Model the real control-ring ordering where an unsolicited HELLO can be
+	 * dispatched while a synchronous HELLO request is still waiting for its
+	 * correlated response.  Preserve the already-built (now stale) ACK,
+	 * advance the peer's local lifetime, and dispatch its new HELLO before
+	 * allowing the old ACK to return to the requester.
+	 */
+	ret = tbframe_wire_parse_hello(req, req_len, &request_hello,
+				       &request_info);
+	if (!ret && request_info.op == TBFRAME_WIRE_OP_HELLO &&
+	    e->inject_restart_before_hello_ack && !e->restart_injected) {
+		struct tbframe_link *peer_link = selfloop_peer_link(e);
+		struct tbframe_wire_hello restarted = { };
+
+		memcpy(stale_response, peer->last_response,
+		       sizeof(stale_response));
+		e->restart_injected = true;
+		peer_link->local_cookie ^= BIT_ULL(41);
+		if (!peer_link->local_cookie)
+			peer_link->local_cookie = 1;
+		restarted.proto_version = TBFRAME_WIRE_VERSION;
+		restarted.transmit_hopid = peer_link->local_hopid;
+		restarted.rx_ring_entries = e->fx->tf.ring_entries;
+		restarted.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+		restarted.gid_eui64 = peer_link->local_gid_eui64;
+		restarted.session_cookie = peer_link->local_cookie;
+		ret = tbframe_wire_build_hello(buf, sizeof(buf), &restarted,
+					       TBFRAME_WIRE_OP_HELLO, 0,
+					       e->route, 0);
+		if (ret < 0)
+			return ret;
+		tbframe_link_handle_packet(e->fx->link[e->idx], buf,
+					   sizeof(buf));
+		memcpy(peer->last_response, stale_response,
+		       sizeof(stale_response));
+	}
 
 	memcpy(buf, peer->last_response, sizeof(buf));
 	selfloop_patch_route(buf, e->route);
@@ -472,6 +515,37 @@ static void selfloop_bring_up(struct kunit *test, struct selfloop_fixture *fx)
 	KUNIT_ASSERT_EQ(test, 1u, fx->end[1].up_count);
 }
 
+static void selfloop_drive_sessions(struct selfloop_fixture *fx)
+{
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		tbframe_link_session_step(fx->link[0]);
+		tbframe_link_session_step(fx->link[1]);
+		flush_workqueue(fx->tf.wq);
+		if (fx->link[0]->state == TBFRAME_STATE_UP &&
+		    fx->link[1]->state == TBFRAME_STATE_UP &&
+		    !fx->link[0]->needs_down && !fx->link[1]->needs_down)
+			break;
+	}
+}
+
+static void selfloop_send_keepalive(struct kunit *test,
+				    struct selfloop_fixture *fx, int from)
+{
+	struct tbframe_link *link = fx->link[from];
+	struct tbframe_frame *f;
+
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_alloc_frame(link, TBFRAME_KEEPALIVE_LEN, true,
+					    &f));
+	tbframe_wire_put_le64(f->data, link->local_cookie);
+	f->len = TBFRAME_KEEPALIVE_LEN;
+	f->pdf = TBFRAME_PDF_KEEPALIVE;
+	KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(link, f));
+	KUNIT_ASSERT_TRUE(test, selfloop_deliver_one(fx, from));
+}
+
 /* tests */
 
 /* Same host UUID on every side: identity must still be per-link unique. */
@@ -530,6 +604,29 @@ static void selfloop_dual_bringup(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1, fx->end[0].last_info.width);
 }
 
+/*
+ * Requester and responder HELLO observations are independent.  If a peer's
+ * new unsolicited HELLO is dispatched while an older correlated HELLO_ACK is
+ * still returning, the old requester reply must not overwrite the newer
+ * responder observation and program paths for the retired peer lifetime.
+ */
+static void selfloop_stale_hello_ack_cannot_overwrite_new_hello(struct kunit *test)
+{
+	struct selfloop_fixture *fx = test->priv;
+	u64 initial_peer_cookie = fx->link[1]->local_cookie;
+
+	fx->end[0].inject_restart_before_hello_ack = true;
+	tbframe_link_session_step(fx->link[0]);
+
+	KUNIT_ASSERT_TRUE(test, fx->end[0].restart_injected);
+	KUNIT_ASSERT_NE(test, initial_peer_cookie,
+			fx->link[1]->local_cookie);
+	KUNIT_EXPECT_FALSE(test, fx->link[0]->hello_done);
+	KUNIT_EXPECT_FALSE(test, fx->link[0]->rings_up);
+	KUNIT_EXPECT_NE(test, initial_peer_cookie,
+			fx->link[0]->remote_cookie);
+}
+
 static void selfloop_bidirectional_data(struct kunit *test)
 {
 	struct selfloop_fixture *fx = test->priv;
@@ -565,6 +662,55 @@ static void selfloop_bidirectional_data(struct kunit *test)
 	 */
 	KUNIT_EXPECT_EQ(test, 0u, fx->end[0].tx_released_count);
 	KUNIT_EXPECT_EQ(test, 0u, fx->end[1].tx_released_count);
+}
+
+/*
+ * A local verify restart advances only the initiator's identity.  The peer
+ * observes BYE/HELLO through its independent responder state machine and
+ * must converge on that identity without advancing its own in response.
+ * Finally move real keepalives both ways: matching control-plane HELLOs are
+ * insufficient if either data-plane cookie is still one generation behind.
+ */
+static void selfloop_asymmetric_verify_reauthenticates(struct kunit *test)
+{
+	struct selfloop_fixture *fx = test->priv;
+	u64 local_cookie[2];
+	u64 bad_cookie[2];
+	int i;
+
+	selfloop_bring_up(test, fx);
+	for (i = 0; i < 2; i++) {
+		local_cookie[i] = fx->link[i]->local_cookie;
+		bad_cookie[i] = fx->link[i]->data_rx_bad_cookie;
+	}
+
+	/* End A alone detects a locally observed dead path. */
+	fx->end[0].paths_active_ret = 0;
+	tbframe_link_verify_step(fx->link[0]);
+	fx->end[0].paths_active_ret = 1;
+	KUNIT_ASSERT_TRUE(test, fx->link[0]->needs_down);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_DOWN_VERIFY,
+			fx->link[0]->down_reason);
+
+	selfloop_drive_sessions(fx);
+
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_STATE_UP, fx->link[0]->state);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_STATE_UP, fx->link[1]->state);
+	KUNIT_EXPECT_NE(test, local_cookie[0], fx->link[0]->local_cookie);
+	KUNIT_EXPECT_EQ(test, local_cookie[1], fx->link[1]->local_cookie);
+	KUNIT_EXPECT_EQ(test, fx->link[1]->local_cookie,
+			fx->link[0]->remote_cookie);
+	KUNIT_EXPECT_EQ(test, fx->link[0]->local_cookie,
+			fx->link[1]->remote_cookie);
+
+	selfloop_send_keepalive(test, fx, 0);
+	selfloop_send_keepalive(test, fx, 1);
+	flush_workqueue(fx->tf.wq);
+	for (i = 0; i < 2; i++) {
+		KUNIT_EXPECT_EQ(test, bad_cookie[i],
+				fx->link[i]->data_rx_bad_cookie);
+		KUNIT_EXPECT_TRUE(test, fx->link[i]->data_proven);
+	}
 }
 
 static void selfloop_bye_teardown(struct kunit *test)
@@ -614,8 +760,10 @@ static void selfloop_test_exit(struct kunit *test)
 
 static struct kunit_case selfloop_cases[] = {
 	KUNIT_CASE(selfloop_identity_distinct),
+	KUNIT_CASE(selfloop_stale_hello_ack_cannot_overwrite_new_hello),
 	KUNIT_CASE(selfloop_dual_bringup),
 	KUNIT_CASE(selfloop_bidirectional_data),
+	KUNIT_CASE(selfloop_asymmetric_verify_reauthenticates),
 	KUNIT_CASE(selfloop_bye_teardown),
 	{}
 };

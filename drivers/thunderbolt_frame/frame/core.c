@@ -31,6 +31,7 @@
 static void tbframe_session_workfn(struct work_struct *work);
 static void tbframe_tx_released_workfn(struct work_struct *work);
 static void tbframe_verify_workfn(struct work_struct *work);
+static void tbframe_hello_responder_reset(struct tbframe_link *link);
 static void tbframe_ready_responder_reset(struct tbframe_link *link);
 static int __tbframe_alloc_frame(struct tbframe_link *link, u16 len,
 				 bool is_ctrl, bool pre_up,
@@ -157,6 +158,18 @@ tbframe_link_remote_matches_locked(const struct tbframe_link *link,
 	       h->session_cookie == link->remote_cookie;
 }
 
+static bool tbframe_hello_matches(const struct tbframe_wire_hello *a,
+				  const struct tbframe_wire_hello *b)
+{
+	return a->proto_version == b->proto_version &&
+	       a->transmit_hopid == b->transmit_hopid &&
+	       clamp_t(u16, a->rx_ring_entries, 1, 4096) ==
+		clamp_t(u16, b->rx_ring_entries, 1, 4096) &&
+	       a->capabilities == b->capabilities &&
+	       a->gid_eui64 == b->gid_eui64 &&
+	       a->session_cookie == b->session_cookie;
+}
+
 static void tbframe_link_fill_local_hello(struct tbframe_link *link,
 					  struct tbframe_wire_hello *hello)
 {
@@ -229,6 +242,20 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 	}
 
 	spin_lock_irqsave(&link->lock, flags);
+	/*
+	 * A peer may restart while control_request() waits: its new unsolicited
+	 * HELLO is dispatched independently before the correlated ACK from the
+	 * old request is returned.  The responder snapshot is the later observed
+	 * lifetime in that ordering.  Never let the older requester reply replace
+	 * it and program paths for a session the peer has already retired.
+	 */
+	if (link->hello_responder.seen &&
+	    !tbframe_hello_matches(&remote, &link->hello_responder.peer)) {
+		spin_unlock_irqrestore(&link->lock, flags);
+		pr_warn_ratelimited("%s: HELLO_ACK crossed a newer peer HELLO; ignoring stale response\n",
+				    link->name);
+		return -ESTALE;
+	}
 	tbframe_link_apply_remote_locked(link, &remote);
 	link->hello_done = true;
 	if (link->ready_responder.state != TBFRAME_READY_RESPONDER_WAITING) {
@@ -632,6 +659,13 @@ static void tbframe_ready_responder_reset(struct tbframe_link *link)
 	       sizeof(link->ready_responder.peer));
 }
 
+static void tbframe_hello_responder_reset(struct tbframe_link *link)
+{
+	link->hello_responder.seen = false;
+	memset(&link->hello_responder.peer, 0,
+	       sizeof(link->hello_responder.peer));
+}
+
 /*
  * Finish an inbound READY that arrived before the local paths were enabled.
  * The responder is independent of the outbound READY requester: simultaneous
@@ -882,6 +916,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->controller_proof_reported = false;
 	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
+	tbframe_hello_responder_reset(link);
 	tbframe_ready_responder_reset(link);
 	if (owner == TBFRAME_SESSION_LOCAL)
 		link->local_cookie = next_cookie;
@@ -1479,6 +1514,8 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 			return 1;
 		}
 		spin_lock_irqsave(&link->lock, flags);
+		link->hello_responder.peer = remote;
+		link->hello_responder.seen = true;
 		if (link->hello_done &&
 		    !tbframe_link_remote_matches_locked(link, &remote) &&
 		    link->state != TBFRAME_STATE_UP) {
@@ -1491,7 +1528,6 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 					    link->name);
 			return 1;
 		}
-		tbframe_link_apply_remote_locked(link, &remote);
 		tbframe_ready_responder_reset(link);
 		/*
 		 * An inbound HELLO while established means the peer restarted
@@ -1504,7 +1540,6 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 			link->needs_down = true;
 			link->down_reason = TBFRAME_DOWN_SUPERSEDE;
 		}
-		link->hello_done = true;
 		/* Peer is actively negotiating: re-arm our retry budgets. */
 		link->hello_attempts = 0;
 		link->hs.attempts = 0;
@@ -1810,8 +1845,9 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	struct tbframe_link *link = f->link;
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
-	u64 cookie = 0;
+	u64 cookie = 0, expected_cookie = 0, local_cookie = 0, generation = 0;
 	bool controller_proven = false, current_generation, proof, up;
+	bool cookie_mismatch = false;
 
 	if (canceled) {
 		tbframe_frame_putback_rx(f);
@@ -1846,6 +1882,10 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			link->probe_failures = 0;
 		} else if (proof && cookie != link->remote_cookie) {
 			link->data_rx_bad_cookie++;
+			cookie_mismatch = true;
+			expected_cookie = link->remote_cookie;
+			local_cookie = link->local_cookie;
+			generation = link->data_generation;
 		}
 		link->silent_ticks = 0;
 	} else if (bad) {
@@ -1862,6 +1902,10 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	}
 	up = current_generation && link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);
+	if (cookie_mismatch)
+		pr_warn_ratelimited("%s: data keepalive belongs to another peer lifetime: received_cookie=%016llx expected_cookie=%016llx local_cookie=%016llx generation=%llu\n",
+				    link->name, cookie, expected_cookie,
+				    local_cookie, generation);
 	if (controller_proven && link->ops->report_data_proven)
 		link->ops->report_data_proven(link->hw);
 
@@ -2235,6 +2279,7 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	link->state = TBFRAME_STATE_INIT;
 	link->tx_quiesced = true;
 	tb_xdomain_handshake_reset(&link->hs);
+	tbframe_hello_responder_reset(link);
 	tbframe_ready_responder_reset(link);
 
 	ret = ops->alloc_out_hopid(hw);
