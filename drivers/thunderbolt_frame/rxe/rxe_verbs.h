@@ -261,6 +261,7 @@ struct rxe_qp {
 	struct rxe_pool_elem	elem;
 	struct ib_qp_attr	attr;
 	unsigned int		valid;
+	bool			cleanup_prepared;
 	unsigned int		mtu;
 	bool			is_user;
 

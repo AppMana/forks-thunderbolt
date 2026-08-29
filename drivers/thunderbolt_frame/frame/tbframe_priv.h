@@ -63,7 +63,7 @@
  */
 #define TBFRAME_PROBE_INTERVAL_MS	500
 #define TBFRAME_PROBE_RETRIES		30
-/* Bound the grace for frames authenticated by the immediately prior session. */
+/* Bound the grace for authenticated frames retained from an older session. */
 #define TBFRAME_STALE_DRAIN_RETRIES	TBFRAME_PROBE_RETRIES
 /*
  * Level-triggered silence detector for an ESTABLISHED session: with keepalive
@@ -113,7 +113,7 @@ enum tbframe_ready_responder_state {
 
 struct tbframe_ready_responder {
 	enum tbframe_ready_responder_state state;
-	u8 seq;
+	u32 seq;
 	u8 xdomain_sequence;
 	struct tbframe_wire_hello peer;
 };
@@ -307,6 +307,7 @@ struct tbframe_link {
 	struct tb_xdomain_handshake hs;	/* requester + zombie predicate */
 	struct tbframe_hello_responder hello_responder;
 	struct tbframe_ready_responder ready_responder;
+	u32			request_seq;
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
 
@@ -339,7 +340,6 @@ struct tbframe_link {
 	u64			data_rx_stale;
 	u64			data_rx_bad_cookie;
 	u64			data_rx_prior_cookie;
-	u64			data_rx_prior_cookie_mark;
 	u64			data_tx_done;
 	u64			data_tx_done_mark;
 	u64			data_tx_submitted;
@@ -352,6 +352,7 @@ struct tbframe_link {
 	u64			data_generation;
 	unsigned int		probe_attempts;
 	unsigned int		probe_failures;
+	bool			stale_drain_active;
 	unsigned int		stale_drain_budget;
 	unsigned int		silent_ticks;
 	struct tb_ring_snapshot	data_path_sample;

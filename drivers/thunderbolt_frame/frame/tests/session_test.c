@@ -185,6 +185,54 @@ static void tbframe_session_unsolicited_hello_ack_cannot_seed_session(struct kun
 }
 
 /*
+ * A response that arrives after its HELLO requester timed out must not satisfy
+ * a later HELLO attempt.  Replaying the response through control_request()
+ * (rather than calling a copied matcher) exercises the production wire parser
+ * and the exact point where the peer cookie becomes session state.
+ */
+static void
+tbframe_session_delayed_hello_ack_cannot_seed_new_attempt(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 stale_cookie = fx->mock.peer.session_cookie;
+
+	/* The first real HELLO's ACK remains in the control channel past timeout. */
+	fx->mock.delay_next_hello_ack = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->mock.delayed_hello_ack_pending);
+	KUNIT_ASSERT_FALSE(test, fx->link->hello_done);
+
+	/* The peer advances before the next real HELLO attempt is issued. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(29);
+	KUNIT_ASSERT_NE(test, stale_cookie, fx->mock.peer.session_cookie);
+	tbframe_link_session_step(fx->link);
+
+	/* An ACK correlated to the expired attempt cannot seed current state. */
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_NE(test, stale_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+/*
+ * Existing responders cache READY's private sequence in eight bits before
+ * echoing it.  READY is also bound to the peer cookie negotiated by HELLO, so
+ * preserve that deployed wire behavior while HELLO uses full-width request
+ * correlation to protect the identity transition itself.
+ */
+static void tbframe_session_ready_sequence_interoperates_with_u8_peer(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+
+	fx->link->request_seq = 0x12345600;
+	fx->mock.ready_ack_u8_seq = true;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_STATE_UP, fx->link->state);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+/*
  * READY belongs to the peer instance negotiated by HELLO.  A delayed READY
  * from an earlier instance must not satisfy the responder half of the current
  * handshake or receive an acknowledgement for paths it does not own.
@@ -454,6 +502,8 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
 	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
 	KUNIT_CASE(tbframe_session_unsolicited_hello_ack_cannot_seed_session),
+	KUNIT_CASE(tbframe_session_delayed_hello_ack_cannot_seed_new_attempt),
+	KUNIT_CASE(tbframe_session_ready_sequence_interoperates_with_u8_peer),
 	KUNIT_CASE(tbframe_session_stale_ready_cannot_complete_responder),
 	KUNIT_CASE(tbframe_session_stale_ready_ack_cannot_complete_requester),
 	KUNIT_CASE(tbframe_session_crossed_hello_cookies_cannot_mix),

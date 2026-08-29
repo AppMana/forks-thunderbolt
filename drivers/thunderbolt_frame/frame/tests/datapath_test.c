@@ -180,7 +180,7 @@ static void tbframe_datapath_stale_backlog_drains_without_session_churn(struct k
 	tbframe_link_handle_packet(fx->link, msg, sizeof(msg));
 	fx->mock.datapath_dead = false;
 	fx->mock.stale_peer_cookie = stale_cookie;
-	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES + 1;
+	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES - 2;
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
@@ -190,20 +190,148 @@ static void tbframe_datapath_stale_backlog_drains_without_session_churn(struct k
 	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_releases);
 }
 
-/* Unknown cookies are not evidence that a prior negotiated lifetime drains. */
-static void tbframe_datapath_unknown_cookie_cannot_defer_recovery(struct kunit *test)
+/*
+ * A recreated link has no in-memory record of cookies from before its own
+ * lifetime, but the fabric can still hold frames from them.  Authenticated
+ * mismatches must receive the same bounded drain allowance as a remembered
+ * immediately prior cookie; the negotiated control session remains the
+ * authority, and a later frame from that peer must prove the existing rings
+ * without another hardware rebuild.
+ */
+static void tbframe_datapath_forgotten_backlog_drains_without_session_churn(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
 
-	fx->mock.stale_peer_cookie = fx->mock.peer.session_cookie ^ BIT_ULL(0);
-	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES * 4;
+	fx->mock.stale_peer_cookie = fx->mock.peer.session_cookie ^ BIT_ULL(9);
+	fx->mock.stale_peer_keepalives = TBFRAME_PROBE_RETRIES - 2;
 
-	for (i = 0; i < TBFRAME_PROBE_RETRIES * 3; i++)
+	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
 
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+}
+
+/*
+ * Fabric residue can arrive at the peer's keepalive cadence rather than on
+ * every proof probe.  Sparse authenticated stale frames still receive a
+ * bounded grace period without an immediate hardware rebuild.
+ */
+static void tbframe_datapath_sparse_backlog_gets_drain_grace(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int cycle, i;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+
+	for (cycle = 0; cycle < 2; cycle++) {
+		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
+
+		KUNIT_ASSERT_NOT_NULL(test, f);
+		tbframe_wire_put_le64(f->frame.data,
+				      fx->mock.peer.session_cookie ^ BIT_ULL(23));
+		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+					 TBFRAME_PDF_KEEPALIVE, false);
+		tbframe_link_session_step(fx->link);
+		for (i = 0; i < TBFRAME_PROBE_RETRIES / 3; i++)
+			tbframe_link_session_step(fx->link);
+	}
+
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+}
+
+/*
+ * A wrong identity that occupies the whole bounded drain window is not enough
+ * to condemn the negotiated peer: a deep fabric backlog can do that.  A fresh
+ * correlated HELLO naming the same peer must extend draining in place rather
+ * than rebuild working rings.
+ */
+static void tbframe_datapath_persistent_mismatch_revalidates_same_peer(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	u64 local_cookie;
+	unsigned int i;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	local_cookie = fx->link->local_cookie;
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES; i++) {
+		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
+
+		KUNIT_ASSERT_NOT_NULL(test, f);
+		tbframe_wire_put_le64(f->frame.data,
+				      fx->mock.peer.session_cookie ^ BIT_ULL(31));
+		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+					 TBFRAME_PDF_KEEPALIVE, false);
+		tbframe_link_session_step(fx->link);
+	}
+
+	KUNIT_EXPECT_FALSE(test, fx->link->needs_down);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.in_hopid_allocs);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.in_hopid_releases);
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/* A changed fresh HELLO confirms that the mismatch is a peer replacement. */
+static void tbframe_datapath_persistent_mismatch_revalidates_changed_peer(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	u64 local_cookie;
+	unsigned int i;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	local_cookie = fx->link->local_cookie;
+	fx->mock.peer.session_cookie ^= BIT_ULL(37);
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES; i++) {
+		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
+
+		KUNIT_ASSERT_NOT_NULL(test, f);
+		tbframe_wire_put_le64(f->frame.data,
+				      fx->mock.peer.session_cookie);
+		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+					 TBFRAME_PDF_KEEPALIVE, false);
+		tbframe_link_session_step(fx->link);
+	}
+
+	KUNIT_EXPECT_TRUE(test, fx->link->needs_down);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_SUPERSEDE,
+			fx->link->down_reason);
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/* An unknown cookie cannot defer recovery when control identity is unavailable. */
+static void tbframe_datapath_unconfirmed_cookie_cannot_defer_recovery(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	fx->mock.control_err = -ETIMEDOUT;
+
+	for (i = 0; i < TBFRAME_PROBE_RETRIES; i++) {
+		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
+
+		KUNIT_ASSERT_NOT_NULL(test, f);
+		tbframe_wire_put_le64(f->frame.data,
+				      fx->mock.peer.session_cookie ^ BIT_ULL(0));
+		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+					 TBFRAME_PDF_KEEPALIVE, false);
+		tbframe_link_session_step(fx->link);
+	}
+
 	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
-	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 2u);
+	KUNIT_EXPECT_TRUE(test, fx->link->needs_down);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_VERIFY,
+			fx->link->down_reason);
 }
 
 /* A healthy data path is proven on the first attempt and goes up normally. */
@@ -485,7 +613,11 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
 	KUNIT_CASE(tbframe_datapath_moving_consumer_does_not_escalate_controller),
 	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
-	KUNIT_CASE(tbframe_datapath_unknown_cookie_cannot_defer_recovery),
+	KUNIT_CASE(tbframe_datapath_forgotten_backlog_drains_without_session_churn),
+	KUNIT_CASE(tbframe_datapath_sparse_backlog_gets_drain_grace),
+	KUNIT_CASE(tbframe_datapath_persistent_mismatch_revalidates_same_peer),
+	KUNIT_CASE(tbframe_datapath_persistent_mismatch_revalidates_changed_peer),
+	KUNIT_CASE(tbframe_datapath_unconfirmed_cookie_cannot_defer_recovery),
 	KUNIT_CASE(tbframe_datapath_live_ring_declares_up),
 	KUNIT_CASE(tbframe_datapath_recovery_proof_requires_tx_and_rx),
 	KUNIT_CASE(tbframe_datapath_unprovable_peer_stays_down),

@@ -17,6 +17,7 @@
  */
 
 #include <kunit/test.h>
+#include <linux/kthread.h>
 #include <linux/netdevice.h>
 #include <rdma/ib_verbs.h>
 
@@ -275,12 +276,210 @@ static void tbrxe_lifecycle_session_bounce_keeps_one_device(struct kunit *test)
 	tbrxe_test_link_down(&fake_link);
 }
 
+struct lifecycle_destroy_ctx {
+	struct completion done;
+	struct ib_qp *qp;
+	int ret;
+};
+
+static int lifecycle_destroy_qp_thread(void *data)
+{
+	struct lifecycle_destroy_ctx *ctx = data;
+
+	ctx->ret = ib_destroy_qp(ctx->qp);
+	complete(&ctx->done);
+	return 0;
+}
+
+static void tbrxe_lifecycle_destroy_drains_parked_packet(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 4 };
+	struct ib_qp_init_attr qp_attr = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	struct lifecycle_destroy_ctx ctx;
+	struct task_struct *task;
+	struct rxe_qp *rqp;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	struct ib_cq *scq, *rcq;
+	struct ib_pd *pd;
+	struct sk_buff *skb;
+	unsigned long done;
+
+	tbrxe_set_transport_ops(&lifecycle_transport);
+	tbrxe_test_link_up(&fake_link);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	scq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq);
+	rcq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq);
+	qp_attr.send_cq = scq;
+	qp_attr.recv_cq = rcq;
+	ctx.qp = ib_create_qp(pd, &qp_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ctx.qp);
+	rqp = to_rqp(ctx.qp);
+
+	/* This is the ownership state left when the responder consumes a
+	 * request but cannot allocate its control response: the packet stays
+	 * queued, holding the QP and device, until tx_released reschedules it.
+	 * Destroy must not depend on that external event.
+	 */
+	skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, skb);
+	KUNIT_ASSERT_TRUE(test, ib_device_try_get(dev));
+	KUNIT_ASSERT_TRUE(test, rxe_get(rqp));
+	skb_queue_tail(&rqp->req_pkts, skb);
+	rqp->need_resp_skb = 1;
+
+	init_completion(&ctx.done);
+	ctx.ret = -EINPROGRESS;
+	task = kthread_run(lifecycle_destroy_qp_thread, &ctx,
+			   "tbrxe-destroy-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, task);
+
+	done = wait_for_completion_timeout(&ctx.done, msecs_to_jiffies(250));
+	KUNIT_EXPECT_NE(test, done, 0UL);
+
+	/* RED cleanup: do not make a failing test pay the driver's 50 second
+	 * reference timeout. GREEN has already consumed the packet and never
+	 * enters this branch.
+	 */
+	if (!done) {
+		skb = skb_dequeue(&rqp->req_pkts);
+		if (skb) {
+			rxe_put(rqp);
+			kfree_skb(skb);
+			ib_device_put(dev);
+		}
+		KUNIT_ASSERT_NE(test,
+				wait_for_completion_timeout(&ctx.done,
+							    msecs_to_jiffies(5000)),
+				0UL);
+	}
+	KUNIT_EXPECT_EQ(test, ctx.ret, 0);
+
+	ib_destroy_cq(scq);
+	ib_destroy_cq(rcq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+static void tbrxe_lifecycle_destroy_rejects_late_packet(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 4 };
+	struct ib_qp_init_attr qp_attr = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	struct lifecycle_destroy_ctx ctx;
+	struct task_struct *task;
+	struct rxe_qp *rqp;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	struct ib_cq *scq, *rcq;
+	struct ib_pd *pd;
+	struct sk_buff *req_skb, *resp_skb;
+	unsigned long done;
+
+	tbrxe_set_transport_ops(&lifecycle_transport);
+	tbrxe_test_link_up(&fake_link);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	scq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq);
+	rcq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq);
+	qp_attr.send_cq = scq;
+	qp_attr.recv_cq = rcq;
+	ctx.qp = ib_create_qp(pd, &qp_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ctx.qp);
+	rqp = to_rqp(ctx.qp);
+
+	/* Model RX after hdr_check has acquired both references, but before it
+	 * reaches rxe_resp_queue_pkt(). Quiescing must close this queue race.
+	 */
+	req_skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, req_skb);
+	KUNIT_ASSERT_TRUE(test, ib_device_try_get(dev));
+	KUNIT_ASSERT_TRUE(test, rxe_get(rqp));
+	resp_skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, resp_skb);
+	KUNIT_ASSERT_TRUE(test, ib_device_try_get(dev));
+	KUNIT_ASSERT_TRUE(test, rxe_get(rqp));
+	rxe_qp_prepare_cleanup(rqp);
+	rxe_resp_queue_pkt(rqp, req_skb);
+	SKB_TO_PKT(resp_skb)->rxe = rxe;
+	rxe_comp_queue_pkt(rqp, resp_skb);
+
+	init_completion(&ctx.done);
+	ctx.ret = -EINPROGRESS;
+	task = kthread_run(lifecycle_destroy_qp_thread, &ctx,
+			   "tbrxe-late-rx-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, task);
+
+	done = wait_for_completion_timeout(&ctx.done, msecs_to_jiffies(250));
+	KUNIT_EXPECT_NE(test, done, 0UL);
+	if (!done) {
+		req_skb = skb_dequeue(&rqp->req_pkts);
+		if (req_skb) {
+			rxe_put(rqp);
+			kfree_skb(req_skb);
+			ib_device_put(dev);
+		}
+		resp_skb = skb_dequeue(&rqp->resp_pkts);
+		if (resp_skb) {
+			rxe_put(rqp);
+			kfree_skb(resp_skb);
+			ib_device_put(dev);
+		}
+		KUNIT_ASSERT_NE(test,
+				wait_for_completion_timeout(&ctx.done,
+							    msecs_to_jiffies(5000)),
+				0UL);
+	}
+	KUNIT_EXPECT_EQ(test, ctx.ret, 0);
+
+	ib_destroy_cq(scq);
+	ib_destroy_cq(rcq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_lifecycle_cases[] = {
 	KUNIT_CASE(tbrxe_lifecycle_owns_driver_id),
 	KUNIT_CASE(tbrxe_lifecycle_publish_cycles),
 	KUNIT_CASE(tbrxe_lifecycle_unregister_sweeps_live_links),
 	KUNIT_CASE(tbrxe_lifecycle_unpublish_waits_for_refs),
 	KUNIT_CASE(tbrxe_lifecycle_session_bounce_keeps_one_device),
+	KUNIT_CASE(tbrxe_lifecycle_destroy_drains_parked_packet),
+	KUNIT_CASE(tbrxe_lifecycle_destroy_rejects_late_packet),
 	{}
 };
 

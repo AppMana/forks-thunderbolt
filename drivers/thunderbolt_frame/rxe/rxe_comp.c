@@ -200,9 +200,20 @@ void retransmit_timer(struct timer_list *t)
 
 void rxe_comp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&qp->state_lock, flags);
+	if (!qp->valid) {
+		spin_unlock_irqrestore(&qp->state_lock, flags);
+		rxe_put(qp);
+		kfree_skb(skb);
+		ib_device_put(qp->ibqp.device);
+		return;
+	}
 	rxe_counter_inc(SKB_TO_PKT(skb)->rxe, RXE_CNT_SENDER_SCHED);
 	skb_queue_tail(&qp->resp_pkts, skb);
 	rxe_sched_task(&qp->send_task);
+	spin_unlock_irqrestore(&qp->state_lock, flags);
 }
 
 static inline enum comp_state get_wqe(struct rxe_qp *qp,

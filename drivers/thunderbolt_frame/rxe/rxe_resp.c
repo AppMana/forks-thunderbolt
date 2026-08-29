@@ -49,8 +49,19 @@ static char *resp_state_name[] = {
 /* rxe_recv calls here to add a request packet to the input queue */
 void rxe_resp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&qp->state_lock, flags);
+	if (!qp->valid) {
+		spin_unlock_irqrestore(&qp->state_lock, flags);
+		rxe_put(qp);
+		kfree_skb(skb);
+		ib_device_put(qp->ibqp.device);
+		return;
+	}
 	skb_queue_tail(&qp->req_pkts, skb);
 	rxe_sched_task(&qp->recv_task);
+	spin_unlock_irqrestore(&qp->state_lock, flags);
 }
 
 static inline enum resp_states get_req(struct rxe_qp *qp,

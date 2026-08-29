@@ -50,6 +50,17 @@ static u64 tbframe_new_session_cookie(u64 previous)
 	return cookie;
 }
 
+static u32 tbframe_link_next_request_seq(struct tbframe_link *link)
+{
+	unsigned long flags;
+	u32 seq;
+
+	spin_lock_irqsave(&link->lock, flags);
+	seq = ++link->request_seq;
+	spin_unlock_irqrestore(&link->lock, flags);
+	return seq;
+}
+
 void tbframe_state_init(struct tbframe *tf)
 {
 	mutex_init(&tf->lock);
@@ -137,8 +148,6 @@ static void tbframe_link_apply_remote_locked(struct tbframe_link *link,
 	lockdep_assert_held(&link->lock);
 	if (link->remote_cookie && link->remote_cookie != h->session_cookie) {
 		link->previous_remote_cookie = link->remote_cookie;
-		link->stale_drain_budget = TBFRAME_STALE_DRAIN_RETRIES;
-		link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
 	}
 	link->remote_hopid = h->transmit_hopid;
 	link->remote_rx_entries = clamp_t(u16, h->rx_ring_entries, 1, 4096);
@@ -210,20 +219,21 @@ static void tbframe_link_reannounce(struct tbframe_link *link)
 		link->ops->reannounce(link->hw);
 }
 
-static int tbframe_link_hello_once(struct tbframe_link *link)
+static int tbframe_link_query_hello(struct tbframe_link *link,
+				    struct tbframe_wire_hello *remote)
 {
 	u8 req[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	u8 resp[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	struct tbframe_wire_hello local;
-	struct tbframe_wire_hello remote;
 	struct tbframe_wire_info info;
-	unsigned long flags;
+	u32 request_seq;
 	int ret;
 
 	tbframe_link_fill_local_hello(link, &local);
+	request_seq = tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
-				       TBFRAME_WIRE_OP_HELLO, 0, link->route,
-				       link->local_hopid & 0x3);
+				       TBFRAME_WIRE_OP_HELLO, request_seq,
+				       link->route, request_seq & 0x3);
 	if (ret < 0)
 		return ret;
 
@@ -234,17 +244,31 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 	if (ret)
 		return ret;
 
-	ret = tbframe_wire_parse_hello(resp, sizeof(resp), &remote, &info);
+	ret = tbframe_wire_parse_hello(resp, sizeof(resp), remote, &info);
 	if (ret)
 		return ret;
-	if (info.op != TBFRAME_WIRE_OP_HELLO_ACK)
+	if (info.op != TBFRAME_WIRE_OP_HELLO_ACK ||
+	    info.seq != request_seq ||
+	    info.xdomain_sequence != (request_seq & 0x3))
 		return -EPROTO;
-	if (remote.proto_version != TBFRAME_WIRE_VERSION) {
+	if (remote->proto_version != TBFRAME_WIRE_VERSION) {
 		pr_warn_ratelimited("%s: peer speaks tbframe v%u, this module speaks v%u; refusing session\n",
-				    link->name, remote.proto_version,
+				    link->name, remote->proto_version,
 				    TBFRAME_WIRE_VERSION);
 		return -EPROTO;
 	}
+	return 0;
+}
+
+static int tbframe_link_hello_once(struct tbframe_link *link)
+{
+	struct tbframe_wire_hello remote;
+	unsigned long flags;
+	int ret;
+
+	ret = tbframe_link_query_hello(link, &remote);
+	if (ret)
+		return ret;
 
 	spin_lock_irqsave(&link->lock, flags);
 	/*
@@ -278,6 +302,52 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 		link->name, remote.transmit_hopid, remote.rx_ring_entries,
 		remote.capabilities);
 	return 0;
+}
+
+/*
+ * A persistent pre-UP cookie mismatch is ambiguous: it can be a deep fabric
+ * backlog or proof that the negotiated peer lifetime has been replaced.
+ * Re-read the authoritative control identity without mutating the programmed
+ * data path.  Only a changed HELLO permits peer-owned teardown.
+ */
+static void tbframe_link_revalidate_stale_data(struct tbframe_link *link)
+{
+	struct tbframe_wire_hello remote;
+	unsigned long flags;
+	bool changed = false;
+	int ret;
+
+	ret = tbframe_link_query_hello(link, &remote);
+	spin_lock_irqsave(&link->lock, flags);
+	if (ret) {
+		if (!link->needs_down) {
+			link->needs_down = true;
+			link->down_reason = TBFRAME_DOWN_VERIFY;
+			tbframe_link_kick_locked(link, 0);
+		}
+	} else if (!tbframe_link_remote_matches_locked(link, &remote)) {
+		changed = true;
+		if (!link->needs_down) {
+			link->needs_down = true;
+			link->down_reason = TBFRAME_DOWN_SUPERSEDE;
+			tbframe_link_kick_locked(link, 0);
+		}
+	} else if (!link->needs_down) {
+		link->stale_drain_budget = TBFRAME_STALE_DRAIN_RETRIES;
+		link->probe_attempts = 0;
+		tbframe_link_kick_locked(link, msecs_to_jiffies(TBFRAME_PROBE_INTERVAL_MS));
+	}
+	spin_unlock_irqrestore(&link->lock, flags);
+
+	if (ret)
+		pr_warn_ratelimited("%s: could not revalidate peer identity while stale data drains: %d\n",
+				    link->name, ret);
+	else if (changed)
+		pr_warn("%s: fresh HELLO names a replacement peer lifetime; restarting peer-owned negotiation\n",
+			link->name);
+	else
+		pr_info_ratelimited("%s: fresh HELLO confirms the negotiated peer while stale data drains\n",
+				    link->name);
 }
 
 static void tbframe_frame_putback_rx(struct tbframe_frame_priv *f)
@@ -393,7 +463,8 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	link->data_generation++;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
-	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
+	link->stale_drain_active = false;
+	link->stale_drain_budget = 0;
 	link->silent_ticks = 0;
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -589,7 +660,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	struct tb_ring_snapshot first, last;
 	unsigned long flags;
 	unsigned int attempts, failures;
-	bool sampled, proven, stale_draining, warned;
+	bool sampled, proven, stale_draining, stale_expired, warned;
 	u32 remote_caps;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -623,15 +694,22 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 
 	spin_lock_irqsave(&link->lock, flags);
 	proven = link->data_proven;
-	stale_draining = link->stale_drain_budget &&
-		link->data_rx_prior_cookie != link->data_rx_prior_cookie_mark;
-	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
-	if (stale_draining)
+	stale_draining = link->stale_drain_active &&
+		link->stale_drain_budget;
+	stale_expired = false;
+	if (stale_draining) {
 		link->stale_drain_budget--;
+		link->probe_attempts = 0;
+		stale_expired = !link->stale_drain_budget;
+	}
 	attempts = proven || stale_draining ? 0 : ++link->probe_attempts;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (proven)
 		return true;
+	if (stale_expired) {
+		tbframe_link_revalidate_stale_data(link);
+		return false;
+	}
 
 	if (stale_draining || attempts < TBFRAME_PROBE_RETRIES) {
 		tbframe_link_kick(link,
@@ -694,12 +772,15 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	struct tbframe_wire_hello remote;
 	struct tbframe_wire_info info;
 	unsigned long flags;
+	u32 request_seq;
 	int ret;
 
 	tbframe_link_fill_local_hello(link, &local);
+	/* Deployed responders retain READY correlation in eight bits. */
+	request_seq = (u8)tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
-				       TBFRAME_WIRE_OP_READY, 0, link->route,
-				       link->local_hopid & 0x3);
+				       TBFRAME_WIRE_OP_READY, request_seq,
+				       link->route, request_seq & 0x3);
 	if (ret < 0)
 		return ret;
 
@@ -713,7 +794,9 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	ret = tbframe_wire_parse_hello(resp, sizeof(resp), &remote, &info);
 	if (ret)
 		return ret;
-	if (info.op != TBFRAME_WIRE_OP_READY_ACK)
+	if (info.op != TBFRAME_WIRE_OP_READY_ACK ||
+	    info.seq != request_seq ||
+	    info.xdomain_sequence != (request_seq & 0x3))
 		return -EPROTO;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -763,7 +846,8 @@ static int tbframe_link_flush_ready_response(struct tbframe_link *link)
 	struct tbframe_wire_hello local;
 	u8 reply[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	unsigned long flags;
-	u8 seq, xdomain_sequence;
+	u32 seq;
+	u8 xdomain_sequence;
 	int ret;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -822,12 +906,14 @@ static void tbframe_link_bye(struct tbframe_link *link)
 	struct tbframe_wire_hello remote;
 	struct tbframe_wire_info info;
 	unsigned int i;
+	u32 request_seq;
 	int ret;
 
 	tbframe_link_fill_local_hello(link, &local);
+	request_seq = tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
-				       TBFRAME_WIRE_OP_BYE, 0, link->route,
-				       link->local_hopid & 0x3);
+				       TBFRAME_WIRE_OP_BYE, request_seq,
+				       link->route, request_seq & 0x3);
 	if (ret < 0)
 		return;
 
@@ -840,7 +926,9 @@ static void tbframe_link_bye(struct tbframe_link *link)
 			continue;
 		if (!tbframe_wire_parse_hello(resp, sizeof(resp), &remote,
 					      &info) &&
-		    info.op == TBFRAME_WIRE_OP_BYE_ACK)
+		    info.op == TBFRAME_WIRE_OP_BYE_ACK &&
+		    info.seq == request_seq &&
+		    info.xdomain_sequence == (request_seq & 0x3))
 			return;
 	}
 	pr_info("%s: BYE unacknowledged; proceeding with teardown\n",
@@ -981,7 +1069,8 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	link->data_proof_unavailable_warned = false;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
-	link->data_rx_prior_cookie_mark = link->data_rx_prior_cookie;
+	link->stale_drain_active = false;
+	link->stale_drain_budget = 0;
 	link->silent_ticks = 0;
 	link->probe_attempts = 0;
 	link->data_tx_done_mark = link->data_tx_done;
@@ -1958,6 +2047,15 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			link->data_rx_bad_cookie++;
 			if (cookie == link->previous_remote_cookie)
 				link->data_rx_prior_cookie++;
+			if (link->state != TBFRAME_STATE_UP &&
+			    link->rings_up && link->paths_enabled &&
+			    !link->stale_drain_active) {
+				link->stale_drain_active = true;
+				link->stale_drain_budget =
+					TBFRAME_STALE_DRAIN_RETRIES;
+				link->probe_attempts = 0;
+				tbframe_link_kick_locked(link, 0);
+			}
 			cookie_mismatch = true;
 			expected_cookie = link->remote_cookie;
 			local_cookie = link->local_cookie;
@@ -2336,6 +2434,7 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 	link->route = route;
 	link->local_gid_eui64 = gid_eui64;
 	link->local_cookie = tbframe_new_session_cookie(0);
+	link->request_seq = get_random_u32();
 	snprintf(link->name, sizeof(link->name), "tbframe0x%llx", route);
 
 	mutex_init(&link->session_lock);

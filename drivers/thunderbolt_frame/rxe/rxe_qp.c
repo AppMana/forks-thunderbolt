@@ -802,13 +802,16 @@ int rxe_qp_chk_destroy(struct rxe_qp *qp)
 	return 0;
 }
 
-/* called when the last reference to the qp is dropped */
-static void rxe_qp_do_cleanup(struct work_struct *work)
+void rxe_qp_prepare_cleanup(struct rxe_qp *qp)
 {
-	struct rxe_qp *qp = container_of(work, typeof(*qp), cleanup_work.work);
 	unsigned long flags;
 
 	spin_lock_irqsave(&qp->state_lock, flags);
+	if (qp->cleanup_prepared) {
+		spin_unlock_irqrestore(&qp->state_lock, flags);
+		return;
+	}
+	qp->cleanup_prepared = true;
 	qp->valid = 0;
 	spin_unlock_irqrestore(&qp->state_lock, flags);
 	qp->qp_timeout_jiffies = 0;
@@ -837,6 +840,14 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 	/* flush out any receive wr's or pending requests */
 	rxe_sender(qp);
 	rxe_receiver(qp);
+}
+
+/* called when the last reference to the qp is dropped */
+static void rxe_qp_do_cleanup(struct work_struct *work)
+{
+	struct rxe_qp *qp = container_of(work, typeof(*qp), cleanup_work.work);
+
+	rxe_qp_prepare_cleanup(qp);
 
 	if (qp->sq.queue)
 		rxe_queue_cleanup(qp->sq.queue);

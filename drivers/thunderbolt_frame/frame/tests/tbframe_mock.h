@@ -35,6 +35,16 @@ struct tbframe_mock {
 	int		control_err;	/* fail every control request */
 	bool		fail_ready;	/* fail only READY requests */
 	u16		response_op;	/* non-zero overrides the protocol reply op */
+	/*
+	 * Control-channel delay model: capture the next HELLO_ACK but report the
+	 * request timed out, then return that exact old wire response to the next
+	 * HELLO.  This models a response retained past its requester lifetime;
+	 * production still performs all request construction and response parsing.
+	 */
+	bool		delay_next_hello_ack;
+	bool		delayed_hello_ack_pending;
+	u8		delayed_hello_ack[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	bool		ready_ack_u8_seq;
 	bool		never_cancel;	/* dead hw: stop_rings returns nothing */
 	int		paths_active_ret;
 	/*
@@ -553,6 +563,15 @@ static int tbframe_mock_control_request(void *data, const void *req,
 		return m->control_err;
 	if (m->fail_ready && info.op == TBFRAME_WIRE_OP_READY)
 		return -ETIMEDOUT;
+	if (info.op == TBFRAME_WIRE_OP_HELLO &&
+	    m->delayed_hello_ack_pending) {
+		if (resp_len < sizeof(m->delayed_hello_ack))
+			return -ENOSPC;
+		memcpy(resp, m->delayed_hello_ack,
+		       sizeof(m->delayed_hello_ack));
+		m->delayed_hello_ack_pending = false;
+		return 0;
+	}
 
 	switch (info.op) {
 	case TBFRAME_WIRE_OP_HELLO:
@@ -592,8 +611,18 @@ static int tbframe_mock_control_request(void *data, const void *req,
 	if (m->response_op)
 		ack_op = m->response_op;
 	ret = tbframe_wire_build_hello(resp, resp_len, &m->peer, ack_op,
-				       info.seq, m->route,
+				       info.op == TBFRAME_WIRE_OP_READY &&
+				       m->ready_ack_u8_seq ? (u8)info.seq : info.seq,
+				       m->route,
 				       info.xdomain_sequence);
+	if (ret >= 0 && info.op == TBFRAME_WIRE_OP_HELLO &&
+	    m->delay_next_hello_ack) {
+		memcpy(m->delayed_hello_ack, resp,
+		       sizeof(m->delayed_hello_ack));
+		m->delay_next_hello_ack = false;
+		m->delayed_hello_ack_pending = true;
+		return -ETIMEDOUT;
+	}
 	return ret < 0 ? ret : 0;
 }
 
