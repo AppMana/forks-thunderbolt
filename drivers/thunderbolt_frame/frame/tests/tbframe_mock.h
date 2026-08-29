@@ -50,7 +50,7 @@ struct tbframe_mock {
 	u64		stale_peer_cookie;
 	unsigned int	stale_peer_keepalives;
 	bool		tx_consumer_stalled;
-	unsigned int	data_path_failure_reports;
+	unsigned int	tx_stall_reports;
 	unsigned int	data_proven_reports;
 	/*
 	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
@@ -477,16 +477,16 @@ static int tbframe_mock_tx_snapshot(void *data,
 }
 
 static int
-tbframe_mock_report_data_path_failure(void *data,
-				      const struct tb_ring_snapshot *first,
-				      const struct tb_ring_snapshot *last,
-				      bool control_healthy)
+tbframe_mock_report_tx_stall(void *data,
+			     const struct tb_ring_snapshot *first,
+			     const struct tb_ring_snapshot *last,
+			     bool control_healthy)
 {
 	struct tbframe_mock *m = data;
 
-	if (!control_healthy)
+	if (!tb_nhi_tx_stalled(first, last, control_healthy))
 		return -EAGAIN;
-	m->data_path_failure_reports++;
+	m->tx_stall_reports++;
 	return 0;
 }
 
@@ -610,7 +610,7 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.disable_paths		= tbframe_mock_disable_paths,
 	.paths_active		= tbframe_mock_paths_active,
 	.tx_snapshot		= tbframe_mock_tx_snapshot,
-	.report_data_path_failure = tbframe_mock_report_data_path_failure,
+	.report_tx_stall	= tbframe_mock_report_tx_stall,
 	.report_data_proven	= tbframe_mock_report_data_proven,
 	.control_request	= tbframe_mock_control_request,
 	.control_response	= tbframe_mock_control_response,

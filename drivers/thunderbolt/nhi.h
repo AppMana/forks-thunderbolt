@@ -105,8 +105,7 @@ int tb_ring_process_completions(struct tb_ring *ring);
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy,
-				    bool end_to_end_failed);
+				    bool control_healthy);
 bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route);
 
@@ -129,17 +128,12 @@ tb_nhi_tx_stalled(const struct tb_ring_snapshot *first,
 static inline bool
 tb_nhi_runtime_recovery_evidence(const struct tb_ring_snapshot *first,
 				 const struct tb_ring_snapshot *last,
-				 bool control_healthy,
-				 bool end_to_end_failed)
+				 bool control_healthy)
 {
-	if (!first || !last || !control_healthy ||
-	    !first->running || !last->running ||
-	    !first->indices_valid || !last->indices_valid ||
-	    first->size != last->size)
+	if (!first || !last)
 		return false;
 
-	return end_to_end_failed ||
-		tb_nhi_tx_stalled(first, last, control_healthy);
+	return tb_nhi_tx_stalled(first, last, control_healthy);
 }
 
 /**

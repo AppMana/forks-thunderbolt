@@ -312,8 +312,7 @@ out:
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy,
-				    bool end_to_end_failed)
+				    bool control_healthy)
 {
 	struct nhi_runtime_recovery_record *record, *new_record;
 	struct nhi_runtime_recovery_work *recovery;
@@ -327,8 +326,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	pdev = nhi->pdev;
 	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
-	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy,
-					      end_to_end_failed))
+	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy))
 		return -EAGAIN;
 
 	recovery = kzalloc(sizeof(*recovery), GFP_KERNEL);
@@ -346,7 +344,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 			continue;
 		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
 		    record->route == route) {
-			event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
+			event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
 			record->state = tb_nhi_runtime_recovery_next(record->state, event);
 			ret = -EHWPOISON;
 		} else {
@@ -360,7 +358,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	new_record->devfn = pdev->devfn;
 	new_record->route = route;
 	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
-	event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
+	event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
 	new_record->state = tb_nhi_runtime_recovery_next(state, event);
 	list_add_tail(&new_record->list, &nhi_runtime_recoveries);
 	new_record = NULL;

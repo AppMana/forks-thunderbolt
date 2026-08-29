@@ -127,20 +127,19 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.tx_stall_reports);
 }
 
 /*
- * Local TX completion only proves that the NHI accepted a descriptor.  It
- * does not prove that the frame crossed the fabric.  Two complete failed
- * end-to-end proof episodes must therefore request controller recovery even
- * when the local consumer index continues to advance.
+ * An advancing hardware consumer disproves a controller-local TX stall.
+ * End-to-end silence still rebuilds the route, but it must not power-cycle
+ * the controller and disrupt unrelated routes.
  */
-static void tbframe_datapath_end_to_end_failure_escalates_with_moving_consumer(struct kunit *test)
+static void tbframe_datapath_moving_consumer_does_not_escalate_controller(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
@@ -149,11 +148,13 @@ static void tbframe_datapath_end_to_end_failure_escalates_with_moving_consumer(s
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 3u);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases, 2u);
 }
 
 /*
@@ -482,7 +483,7 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
-	KUNIT_CASE(tbframe_datapath_end_to_end_failure_escalates_with_moving_consumer),
+	KUNIT_CASE(tbframe_datapath_moving_consumer_does_not_escalate_controller),
 	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_unknown_cookie_cannot_defer_recovery),
 	KUNIT_CASE(tbframe_datapath_live_ring_declares_up),

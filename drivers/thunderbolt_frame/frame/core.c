@@ -580,13 +580,13 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (failures >= 2 && sampled &&
-	    link->ops->report_data_path_failure) {
+	    tb_nhi_tx_stalled(&first, &last, true) &&
+	    link->ops->report_tx_stall) {
 		int ret;
 
-		ret = link->ops->report_data_path_failure(link->hw, &first,
-							  &last, true);
+		ret = link->ops->report_tx_stall(link->hw, &first, &last, true);
 		if (!ret)
-			pr_warn("%s: end-to-end data remained unproven after a complete ring/path rebuild; requested bounded controller recovery\n",
+			pr_warn("%s: local TX consumer remained stalled after a complete ring/path rebuild; requested bounded controller recovery\n",
 				link->name);
 	}
 	/*
