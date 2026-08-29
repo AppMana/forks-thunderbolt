@@ -316,6 +316,42 @@ static void tbframe_session_peer_supersede_keeps_local_identity(struct kunit *te
 }
 
 /*
+ * LOGOUT keeps the peer-facing local identity while the old hardware is held,
+ * but the deferred teardown is a second transition.  A returning peer has
+ * already consumed our HELLO_ACK before that teardown runs, so the teardown
+ * must not silently advance the identity that the peer just negotiated.
+ */
+static void tbframe_session_logout_rebuild_keeps_local_identity(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 local_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	tbframe_mock_link_up(test, fx);
+	local_cookie = fx->link->local_cookie;
+
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_TRUE(test, fx->link->hw_stale);
+	KUNIT_ASSERT_EQ(test, local_cookie, fx->link->local_cookie);
+
+	/* The peer advances its identity and consumes our current HELLO_ACK. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/*
  * A session cookie authenticates data frames for one negotiated lifetime.
  * Reusing it after teardown lets delayed frames from the old rings prove the
  * replacement session even though they predate its HELLO/READY exchange.
@@ -422,6 +458,7 @@ static struct kunit_case tbframe_session_cases[] = {
 	KUNIT_CASE(tbframe_session_stale_ready_ack_cannot_complete_requester),
 	KUNIT_CASE(tbframe_session_crossed_hello_cookies_cannot_mix),
 	KUNIT_CASE(tbframe_session_peer_supersede_keeps_local_identity),
+	KUNIT_CASE(tbframe_session_logout_rebuild_keeps_local_identity),
 	KUNIT_CASE(tbframe_session_teardown_rotates_local_cookie),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}

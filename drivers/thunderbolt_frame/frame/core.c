@@ -804,8 +804,14 @@ static void tbframe_link_maybe_up(struct tbframe_link *link)
  * consumer evidence to the bounded controller-recovery machine. Every wait
  * below is bounded and poisons the link on expiry.
  */
+enum tbframe_session_owner {
+	TBFRAME_SESSION_LOCAL,
+	TBFRAME_SESSION_PEER,
+};
+
 static void tbframe_link_down_session(struct tbframe_link *link,
-				      enum tbframe_down_reason reason)
+				      enum tbframe_down_reason reason,
+				      enum tbframe_session_owner owner)
 {
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
@@ -814,7 +820,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	unsigned int drain_ms;
 	u16 remote_hopid;
 	u64 next_cookie = tbframe_new_session_cookie(link->local_cookie);
-	bool rotate_local_cookie;
 	int active;
 
 	lockdep_assert_held(&link->session_lock);
@@ -838,9 +843,6 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	 * cookie behind.  Locally initiated teardown still advances our cookie
 	 * and retains the stale-frame protection at that ownership boundary.
 	 */
-	rotate_local_cookie = reason != TBFRAME_DOWN_SUPERSEDE &&
-			      reason != TBFRAME_DOWN_LOGOUT;
-
 	spin_lock_irqsave(&link->lock, flags);
 	was_up = link->state == TBFRAME_STATE_UP;
 	if (link->state != TBFRAME_STATE_DEAD)
@@ -881,7 +883,7 @@ static void tbframe_link_down_session(struct tbframe_link *link,
 	link->tx_stall_first_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	tbframe_ready_responder_reset(link);
-	if (rotate_local_cookie)
+	if (owner == TBFRAME_SESSION_LOCAL)
 		link->local_cookie = next_cookie;
 	spin_unlock_irqrestore(&link->lock, flags);
 
@@ -1111,7 +1113,11 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	if (down) {
-		tbframe_link_down_session(link, reason);
+		tbframe_link_down_session(link, reason,
+					  reason == TBFRAME_DOWN_SUPERSEDE ||
+					  reason == TBFRAME_DOWN_LOGOUT ?
+					  TBFRAME_SESSION_PEER :
+					  TBFRAME_SESSION_LOCAL);
 		return;
 	}
 
@@ -1124,7 +1130,13 @@ static void __tbframe_link_session_step(struct tbframe_link *link)
 	hw_stale = link->hw_stale;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (hw_stale) {
-		tbframe_link_down_session(link, TBFRAME_DOWN_VERIFY);
+		/*
+		 * This is the deferred hardware half of the peer's LOGOUT, not a
+		 * new local VERIFY transition.  The returning peer consumed our
+		 * current identity in HELLO_ACK before kicking this step.
+		 */
+		tbframe_link_down_session(link, TBFRAME_DOWN_VERIFY,
+					  TBFRAME_SESSION_PEER);
 		spin_lock_irqsave(&link->lock, flags);
 		hello_done = link->hello_done;
 		rings_up = link->rings_up;
@@ -2317,7 +2329,7 @@ int tbframe_link_destroy(struct tbframe_link *link,
 	cancel_work_sync(&link->verify_work);
 
 	mutex_lock(&link->session_lock);
-	tbframe_link_down_session(link, reason);
+	tbframe_link_down_session(link, reason, TBFRAME_SESSION_LOCAL);
 	mutex_unlock(&link->session_lock);
 
 	cancel_work_sync(&link->tx_released_work);
@@ -2428,7 +2440,8 @@ static void tbframe_link_cancel_activity(struct tbframe_link *link,
 static void tbframe_link_down_parked(struct tbframe_link *link)
 {
 	mutex_lock(&link->session_lock);
-	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
+	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED,
+				  TBFRAME_SESSION_LOCAL);
 	mutex_unlock(&link->session_lock);
 }
 
@@ -2464,7 +2477,8 @@ void tbframe_link_shutdown(struct tbframe_link *link)
 	cancel_work_sync(&link->verify_work);
 
 	mutex_lock(&link->session_lock);
-	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED);
+	tbframe_link_down_session(link, TBFRAME_DOWN_CLOSED,
+				  TBFRAME_SESSION_LOCAL);
 	mutex_unlock(&link->session_lock);
 
 	cancel_work_sync(&link->tx_released_work);
