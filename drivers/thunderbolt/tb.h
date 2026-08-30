@@ -46,6 +46,14 @@ bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool bonding_possible,
 					       bool bonded);
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
+struct tb_cfg_request_state
+tb_test_xdomain_packet_state(bool expects_peer_response,
+			     bool *has_local_classifier);
+bool tb_test_xdomain_response_should_defer(void);
+bool tb_test_xdomain_response_should_retry(bool local_failed,
+					   bool local_timed_out,
+					   int result,
+					   unsigned int attempt);
 bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
 enum tb_cfg_request_event
 tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,

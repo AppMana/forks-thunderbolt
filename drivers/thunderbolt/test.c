@@ -7965,6 +7965,88 @@ static void tb_test_ctl_local_status_slot_blocks_reuse(struct kunit *test)
 			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_TIMED_OUT));
 }
 
+static void tb_test_ctl_all_xdomain_packets_own_local_completion(struct kunit *test)
+{
+	const bool expects_peer_response[] = { true, false };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(expects_peer_response); i++) {
+		struct ctl_xdomain_packet_model model;
+		struct tb_cfg_request_state actual;
+		bool has_local_classifier;
+
+		model = ctl_model_xdomain_packet(expects_peer_response[i]);
+		actual = tb_test_xdomain_packet_state(expects_peer_response[i],
+						      &has_local_classifier);
+
+		KUNIT_EXPECT_EQ(test, has_local_classifier,
+				model.owns_local_completion);
+		KUNIT_EXPECT_EQ(test,
+				tb_cfg_local_slot_is_owned(actual.local),
+				model.owns_local_completion);
+		KUNIT_EXPECT_EQ(test, actual.peer == TB_CFG_PEER_WAITING,
+				model.waits_for_peer);
+	}
+}
+
+static void tb_test_ctl_local_only_packet_reaches_terminal_state(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_DISABLED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_service_response_does_not_wait_in_rx_dispatch(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, tb_test_xdomain_response_should_defer(),
+			ctl_model_service_response_deferred());
+}
+
+static void tb_test_ctl_local_only_result_matches_command_status(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_ACCEPTED, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_ACCEPTED, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_FAILED, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_FAILED, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_TIMED_OUT, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_TIMED_OUT, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_TIMED_OUT, -ESHUTDOWN),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_TIMED_OUT,
+					    -ESHUTDOWN));
+}
+
+static void tb_test_ctl_response_retries_only_firmware_rejection(struct kunit *test)
+{
+#define EXPECT_RETRY(_failed, _timed_out, _result, _attempt) \
+	KUNIT_EXPECT_EQ(test, \
+		tb_test_xdomain_response_should_retry((_failed), (_timed_out), \
+						       (_result), (_attempt)), \
+		ctl_model_response_should_retry((_failed), (_timed_out), \
+						(_result), (_attempt)))
+
+	EXPECT_RETRY(true, false, -EIO, 0);
+	EXPECT_RETRY(true, false, -EIO, 8);
+	EXPECT_RETRY(true, false, -EIO, 9);
+	EXPECT_RETRY(false, true, -ETIMEDOUT, 0);
+	EXPECT_RETRY(false, false, -EIO, 0);
+	EXPECT_RETRY(false, false, -ESHUTDOWN, 0);
+
+#undef EXPECT_RETRY
+}
+
 static void tb_test_ctl_local_status_error_does_not_abort_peer(struct kunit *test)
 {
 	struct tb_cfg_request_state state = {
@@ -8363,6 +8445,11 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),
 	KUNIT_CASE(tb_test_ctl_stop_releases_both_request_machines),
 	KUNIT_CASE(tb_test_ctl_local_status_slot_blocks_reuse),
+	KUNIT_CASE(tb_test_ctl_all_xdomain_packets_own_local_completion),
+	KUNIT_CASE(tb_test_ctl_local_only_packet_reaches_terminal_state),
+	KUNIT_CASE(tb_test_ctl_service_response_does_not_wait_in_rx_dispatch),
+	KUNIT_CASE(tb_test_ctl_local_only_result_matches_command_status),
+	KUNIT_CASE(tb_test_ctl_response_retries_only_firmware_rejection),
 	KUNIT_CASE(tb_test_ctl_local_status_error_does_not_abort_peer),
 	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),

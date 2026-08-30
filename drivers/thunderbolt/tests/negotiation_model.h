@@ -1202,6 +1202,46 @@ struct ctl_transaction_model {
 	enum ctl_peer_model_state peer;
 };
 
+struct ctl_xdomain_packet_model {
+	bool owns_local_completion;
+	bool waits_for_peer;
+};
+
+static inline struct ctl_xdomain_packet_model
+ctl_model_xdomain_packet(bool expects_peer_response)
+{
+	return (struct ctl_xdomain_packet_model) {
+		.owns_local_completion = true,
+		.waits_for_peer = expects_peer_response,
+	};
+}
+
+static inline bool ctl_model_service_response_deferred(void)
+{
+	/* Service callbacks can run in the control RX dispatch worker. */
+	return true;
+}
+
+static inline int
+ctl_model_local_only_result(enum ctl_submit_model_state state,
+			    int current_result)
+{
+	if (current_result)
+		return current_result;
+	if (state == CTL_SUBMIT_MODEL_FAILED)
+		return -EIO;
+	if (state == CTL_SUBMIT_MODEL_TIMED_OUT)
+		return -ETIMEDOUT;
+	return 0;
+}
+
+static inline bool
+ctl_model_response_should_retry(bool local_failed, bool local_timed_out,
+				int result, unsigned int attempt)
+{
+	return local_failed && !local_timed_out && result == -EIO && attempt < 9;
+}
+
 static inline enum ctl_transaction_model_action
 ctl_model_transaction_step(struct ctl_transaction_model *state,
 			   enum ctl_transaction_model_event event)

@@ -159,6 +159,25 @@ static void tb_ctl_req_work_put(struct tb_ctl *ctl)
 		wake_up_all(&ctl->req_work_wait);
 }
 
+bool tb_ctl_async_work_get(struct tb_ctl *ctl)
+{
+	bool acquired = false;
+
+	mutex_lock(&ctl->request_queue_lock);
+	if (ctl->running) {
+		atomic_inc(&ctl->req_works);
+		acquired = true;
+	}
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return acquired;
+}
+
+void tb_ctl_async_work_put(struct tb_ctl *ctl)
+{
+	tb_ctl_req_work_put(ctl);
+}
+
 /**
  * tb_cfg_request_alloc() - Allocates a new config request
  *
@@ -1045,7 +1064,12 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	}
 
 	res = req->result;
+	if (hold_local && state.peer == TB_CFG_PEER_DISABLED)
+		res.err = tb_cfg_local_only_result(state.local, res.err);
 	res.tx_state = tb_cfg_request_read_state(req).tx;
+	res.local_failed = hold_local && state.local == TB_CFG_LOCAL_FAILED;
+	res.local_timed_out = hold_local &&
+		state.local == TB_CFG_LOCAL_TIMED_OUT;
 	return res;
 }
 

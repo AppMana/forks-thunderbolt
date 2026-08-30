@@ -26,6 +26,8 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 void tb_ctl_start(struct tb_ctl *ctl);
 void tb_ctl_stop(struct tb_ctl *ctl);
 void tb_ctl_free(struct tb_ctl *ctl);
+bool tb_ctl_async_work_get(struct tb_ctl *ctl);
+void tb_ctl_async_work_put(struct tb_ctl *ctl);
 
 struct tb_ctl_stats {
 	u32 tx_done;
@@ -62,6 +64,8 @@ struct tb_cfg_result {
 	enum tb_cfg_error tb_error; /* valid if err == 1 */
 	/* State of this request's own TX descriptor when the result was read. */
 	enum tb_cfg_tx_state tx_state;
+	bool local_failed;
+	bool local_timed_out;
 };
 
 struct tb_cfg_request;
@@ -142,10 +146,6 @@ static inline enum tb_cfg_request_action
 tb_cfg_request_state_step(struct tb_cfg_request_state *state,
 			  enum tb_cfg_request_event event)
 {
-	if (state->local == TB_CFG_LOCAL_DISABLED ||
-	    state->peer == TB_CFG_PEER_DISABLED)
-		return TB_CFG_REQUEST_ACTION_NONE;
-
 	switch (event) {
 	case TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED:
 		if (state->local == TB_CFG_LOCAL_WAITING)
@@ -202,6 +202,18 @@ static inline bool tb_cfg_local_slot_may_claim(bool occupied)
 static inline bool tb_cfg_local_slot_is_owned(enum tb_cfg_local_state state)
 {
 	return state == TB_CFG_LOCAL_WAITING;
+}
+
+static inline int
+tb_cfg_local_only_result(enum tb_cfg_local_state state, int current_result)
+{
+	if (current_result)
+		return current_result;
+	if (state == TB_CFG_LOCAL_FAILED)
+		return -EIO;
+	if (state == TB_CFG_LOCAL_TIMED_OUT)
+		return -ETIMEDOUT;
+	return 0;
 }
 
 /**

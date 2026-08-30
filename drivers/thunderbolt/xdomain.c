@@ -25,6 +25,8 @@
 #define XDOMAIN_DEFAULT_TIMEOUT			1000	/* ms */
 #define XDOMAIN_BONDING_TIMEOUT			10000	/* ms */
 #define XDOMAIN_RETRIES				10
+#define XDOMAIN_PACKET_RETRIES			10
+#define XDOMAIN_PACKET_RETRY_DELAY_MS		100
 /*
  * Lane-bonding re-arm from ENUMERATED: bounded attempts, doubling spacing
  * (10 s, 20 s, 40 s, 80 s, 160 s ~ 5 min total), sized to outlive the
@@ -132,6 +134,14 @@ struct xdomain_request_work {
 	struct work_struct work;
 	struct tb_xdp_header *pkg;
 	struct tb *tb;
+};
+
+struct xdomain_response_work {
+	struct work_struct work;
+	struct tb_ctl *ctl;
+	enum tb_cfg_pkg_type type;
+	size_t size;
+	u8 response[];
 };
 
 static bool tb_xdomain_enabled = true;
@@ -463,27 +473,101 @@ static bool tb_xdomain_copy(struct tb_cfg_request *req,
 	return true;
 }
 
-static void response_ready(void *data)
+static void tb_xdomain_init_packet_state(struct tb_cfg_request *req,
+					 bool expects_peer_response)
 {
-	tb_cfg_request_put(data);
+	req->intermediate = tb_xdomain_intermediate;
+	req->state.local = TB_CFG_LOCAL_WAITING;
+	if (expects_peer_response)
+		req->state.peer = TB_CFG_PEER_WAITING;
+}
+
+static bool tb_xdomain_response_should_retry(const struct tb_cfg_result *res,
+					     unsigned int attempt)
+{
+	return res->local_failed && !res->local_timed_out && res->err == -EIO &&
+		attempt + 1 < XDOMAIN_PACKET_RETRIES;
 }
 
 static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 				 size_t size, enum tb_cfg_pkg_type type)
 {
-	struct tb_cfg_request *req;
+	unsigned int attempt;
 
-	req = tb_cfg_request_alloc();
-	if (!req)
+	for (attempt = 0; attempt < XDOMAIN_PACKET_RETRIES; attempt++) {
+		struct tb_cfg_request *req;
+		struct tb_cfg_result res;
+
+		req = tb_cfg_request_alloc();
+		if (!req)
+			return -ENOMEM;
+
+		req->match = tb_xdomain_match;
+		req->copy = tb_xdomain_copy;
+		req->request = response;
+		req->request_size = size;
+		req->request_type = type;
+		tb_xdomain_init_packet_state(req, false);
+
+		res = tb_cfg_request_sync(ctl, req, XDOMAIN_DEFAULT_TIMEOUT);
+		tb_cfg_request_put(req);
+
+		if (!tb_xdomain_response_should_retry(&res, attempt))
+			return res.err == 1 ? -EIO : res.err;
+		msleep(XDOMAIN_PACKET_RETRY_DELAY_MS);
+	}
+
+	return -EIO;
+}
+
+static bool tb_xdomain_response_should_defer(void)
+{
+	return true;
+}
+
+static void tb_xdomain_response_work(struct work_struct *work)
+{
+	struct xdomain_response_work *xw =
+		container_of(work, typeof(*xw), work);
+	struct tb_ctl *ctl = xw->ctl;
+	int ret;
+
+	ret = __tb_xdomain_response(ctl, xw->response, xw->size, xw->type);
+	if (ret && ret != -ENOTCONN && ret != -ESHUTDOWN)
+		pr_warn_ratelimited("failed to send deferred XDomain response: %d\n",
+				    ret);
+
+	kfree(xw);
+	/* Last touch: tb_ctl_free() may proceed when this reaches zero. */
+	tb_ctl_async_work_put(ctl);
+}
+
+static int tb_xdomain_queue_response(struct tb_ctl *ctl, const void *response,
+				     size_t size, enum tb_cfg_pkg_type type)
+{
+	struct xdomain_response_work *xw;
+
+	xw = kmalloc(struct_size(xw, response, size), GFP_KERNEL);
+	if (!xw)
 		return -ENOMEM;
 
-	req->match = tb_xdomain_match;
-	req->copy = tb_xdomain_copy;
-	req->request = response;
-	req->request_size = size;
-	req->request_type = type;
+	if (!tb_ctl_async_work_get(ctl)) {
+		kfree(xw);
+		return -ENOTCONN;
+	}
 
-	return tb_cfg_request(ctl, req, response_ready, req);
+	INIT_WORK(&xw->work, tb_xdomain_response_work);
+	xw->ctl = ctl;
+	xw->type = type;
+	xw->size = size;
+	memcpy(xw->response, response, size);
+	if (!schedule_work(&xw->work)) {
+		tb_ctl_async_work_put(ctl);
+		kfree(xw);
+		return -EBUSY;
+	}
+
+	return 0;
 }
 
 /**
@@ -501,6 +585,10 @@ static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 int tb_xdomain_response(struct tb_xdomain *xd, const void *response,
 			size_t size, enum tb_cfg_pkg_type type)
 {
+	if (tb_xdomain_response_should_defer())
+		return tb_xdomain_queue_response(xd->tb->ctl, response, size,
+						 type);
+
 	return __tb_xdomain_response(xd->tb->ctl, response, size, type);
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_response);
@@ -526,8 +614,7 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	req->response = response;
 	req->response_size = response_size;
 	req->response_type = response_type;
-	req->state.local = TB_CFG_LOCAL_WAITING;
-	req->state.peer = TB_CFG_PEER_WAITING;
+	tb_xdomain_init_packet_state(req, true);
 
 	res = tb_cfg_request_sync(ctl, req, timeout_msec);
 
@@ -2889,6 +2976,37 @@ static bool tb_xdomain_announce_ready(bool needs_uuid, bool uuid_verified)
 }
 
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct tb_cfg_request_state
+tb_test_xdomain_packet_state(bool expects_peer_response,
+			     bool *has_local_classifier)
+{
+	struct tb_cfg_request req = { };
+
+	tb_xdomain_init_packet_state(&req, expects_peer_response);
+	*has_local_classifier = req.intermediate != NULL;
+
+	return req.state;
+}
+
+bool tb_test_xdomain_response_should_defer(void)
+{
+	return tb_xdomain_response_should_defer();
+}
+
+bool tb_test_xdomain_response_should_retry(bool local_failed,
+					   bool local_timed_out,
+					   int result,
+					   unsigned int attempt)
+{
+	struct tb_cfg_result res = {
+		.err = result,
+		.local_failed = local_failed,
+		.local_timed_out = local_timed_out,
+	};
+
+	return tb_xdomain_response_should_retry(&res, attempt);
+}
+
 bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known)
 {
 	return tb_xdomain_initial_needs_uuid(remote_uuid_known);
