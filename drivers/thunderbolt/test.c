@@ -8047,6 +8047,62 @@ static void tb_test_ctl_response_retries_only_firmware_rejection(struct kunit *t
 #undef EXPECT_RETRY
 }
 
+static void
+tb_test_ctl_request_retries_only_firmware_rejection(struct kunit *test)
+{
+	const struct {
+		bool failed;
+		bool timed_out;
+		int result;
+		unsigned int attempt;
+	} cases[] = {
+		{ true, false, -EIO, 0 },
+		{ true, false, -EIO, 8 },
+		{ true, false, -EIO, 9 },
+		{ false, true, -ETIMEDOUT, 0 },
+		{ false, false, -EIO, 0 },
+		{ false, false, -ESHUTDOWN, 0 },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		const typeof(cases[0]) *c = &cases[i];
+		unsigned int attempt = c->attempt;
+		bool failed = c->failed;
+		bool timed_out = c->timed_out;
+		int result = c->result;
+		bool actual, expected;
+
+		actual = tb_test_xdomain_request_should_retry(failed, timed_out, result, attempt);
+		expected = ctl_model_response_should_retry(failed, timed_out, result, attempt);
+		KUNIT_EXPECT_EQ(test, actual, expected);
+	}
+}
+
+static void
+tb_test_ctl_peer_waiter_is_independent_of_local_sender(struct kunit *test)
+{
+	struct tb_cfg_request_state peer_only = {
+		.local = TB_CFG_LOCAL_DISABLED,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	struct tb_cfg_request_state local_only = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+	struct tb_cfg_request_state generic = {
+		.local = TB_CFG_LOCAL_DISABLED,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&peer_only),
+			(int)ctl_model_request_match_owner(false, true));
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&local_only),
+			(int)ctl_model_request_match_owner(true, false));
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&generic),
+			(int)ctl_model_request_match_owner(false, false));
+}
+
 static void tb_test_ctl_local_status_error_does_not_abort_peer(struct kunit *test)
 {
 	struct tb_cfg_request_state state = {
@@ -8450,6 +8506,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_service_response_does_not_wait_in_rx_dispatch),
 	KUNIT_CASE(tb_test_ctl_local_only_result_matches_command_status),
 	KUNIT_CASE(tb_test_ctl_response_retries_only_firmware_rejection),
+	KUNIT_CASE(tb_test_ctl_request_retries_only_firmware_rejection),
+	KUNIT_CASE(tb_test_ctl_peer_waiter_is_independent_of_local_sender),
 	KUNIT_CASE(tb_test_ctl_local_status_error_does_not_abort_peer),
 	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),

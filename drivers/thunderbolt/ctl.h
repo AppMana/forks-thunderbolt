@@ -204,6 +204,22 @@ static inline bool tb_cfg_local_slot_is_owned(enum tb_cfg_local_state state)
 	return state == TB_CFG_LOCAL_WAITING;
 }
 
+enum tb_cfg_match_owner {
+	TB_CFG_MATCH_GENERIC,
+	TB_CFG_MATCH_PEER,
+	TB_CFG_MATCH_NONE,
+};
+
+static inline enum tb_cfg_match_owner
+tb_cfg_request_match_owner(const struct tb_cfg_request_state *state)
+{
+	if (state->peer != TB_CFG_PEER_DISABLED)
+		return TB_CFG_MATCH_PEER;
+	if (state->local != TB_CFG_LOCAL_DISABLED)
+		return TB_CFG_MATCH_NONE;
+	return TB_CFG_MATCH_GENERIC;
+}
+
 static inline int
 tb_cfg_local_only_result(enum tb_cfg_local_state state, int current_result)
 {
@@ -294,11 +310,16 @@ static inline bool tb_cfg_request_work_runs_callback(unsigned long flags)
 struct tb_cfg_request *tb_cfg_request_alloc(void);
 void tb_cfg_request_get(struct tb_cfg_request *req);
 void tb_cfg_request_put(struct tb_cfg_request *req);
+typedef int (*tb_cfg_submit_fn)(void *data);
 int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 		   void (*callback)(void *), void *callback_data);
 void tb_cfg_request_cancel(struct tb_cfg_request *req, int err);
 struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 			struct tb_cfg_request *req, int timeout_msec);
+struct tb_cfg_result
+tb_cfg_request_sync_receive(struct tb_ctl *ctl, struct tb_cfg_request *req,
+			    int timeout_msec, tb_cfg_submit_fn submit,
+			    void *submit_data);
 
 static inline u64 tb_cfg_get_route(const struct tb_cfg_header *header)
 {

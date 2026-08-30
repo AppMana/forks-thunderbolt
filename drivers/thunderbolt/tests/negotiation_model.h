@@ -1242,6 +1242,22 @@ ctl_model_response_should_retry(bool local_failed, bool local_timed_out,
 	return local_failed && !local_timed_out && result == -EIO && attempt < 9;
 }
 
+enum ctl_match_owner_model {
+	CTL_MATCH_MODEL_GENERIC,
+	CTL_MATCH_MODEL_PEER,
+	CTL_MATCH_MODEL_NONE,
+};
+
+static inline enum ctl_match_owner_model
+ctl_model_request_match_owner(bool local_sender, bool peer_waiter)
+{
+	if (peer_waiter)
+		return CTL_MATCH_MODEL_PEER;
+	if (local_sender)
+		return CTL_MATCH_MODEL_NONE;
+	return CTL_MATCH_MODEL_GENERIC;
+}
+
 static inline enum ctl_transaction_model_action
 ctl_model_transaction_step(struct ctl_transaction_model *state,
 			   enum ctl_transaction_model_event event)

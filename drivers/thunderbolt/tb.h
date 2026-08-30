@@ -54,6 +54,10 @@ bool tb_test_xdomain_response_should_retry(bool local_failed,
 					   bool local_timed_out,
 					   int result,
 					   unsigned int attempt);
+bool tb_test_xdomain_request_should_retry(bool local_failed,
+					  bool local_timed_out,
+					  int result,
+					  unsigned int attempt);
 bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
 enum tb_cfg_request_event
 tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,

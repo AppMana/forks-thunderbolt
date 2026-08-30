@@ -144,6 +144,13 @@ struct xdomain_response_work {
 	u8 response[];
 };
 
+struct xdomain_request_submit {
+	struct tb_ctl *ctl;
+	const void *request;
+	size_t request_size;
+	enum tb_cfg_pkg_type request_type;
+};
+
 static bool tb_xdomain_enabled = true;
 module_param_named(xdomain, tb_xdomain_enabled, bool, 0444);
 MODULE_PARM_DESC(xdomain, "allow XDomain protocol (default: true)");
@@ -482,15 +489,15 @@ static void tb_xdomain_init_packet_state(struct tb_cfg_request *req,
 		req->state.peer = TB_CFG_PEER_WAITING;
 }
 
-static bool tb_xdomain_response_should_retry(const struct tb_cfg_result *res,
-					     unsigned int attempt)
+static bool tb_xdomain_packet_should_retry(const struct tb_cfg_result *res,
+					   unsigned int attempt)
 {
 	return res->local_failed && !res->local_timed_out && res->err == -EIO &&
 		attempt + 1 < XDOMAIN_PACKET_RETRIES;
 }
 
-static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
-				 size_t size, enum tb_cfg_pkg_type type)
+static int tb_xdomain_send_packet(struct tb_ctl *ctl, const void *packet,
+				  size_t size, enum tb_cfg_pkg_type type)
 {
 	unsigned int attempt;
 
@@ -504,7 +511,7 @@ static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 
 		req->match = tb_xdomain_match;
 		req->copy = tb_xdomain_copy;
-		req->request = response;
+		req->request = packet;
 		req->request_size = size;
 		req->request_type = type;
 		tb_xdomain_init_packet_state(req, false);
@@ -512,12 +519,18 @@ static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 		res = tb_cfg_request_sync(ctl, req, XDOMAIN_DEFAULT_TIMEOUT);
 		tb_cfg_request_put(req);
 
-		if (!tb_xdomain_response_should_retry(&res, attempt))
+		if (!tb_xdomain_packet_should_retry(&res, attempt))
 			return res.err == 1 ? -EIO : res.err;
 		msleep(XDOMAIN_PACKET_RETRY_DELAY_MS);
 	}
 
 	return -EIO;
+}
+
+static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
+				 size_t size, enum tb_cfg_pkg_type type)
+{
+	return tb_xdomain_send_packet(ctl, response, size, type);
 }
 
 static bool tb_xdomain_response_should_defer(void)
@@ -593,11 +606,26 @@ int tb_xdomain_response(struct tb_xdomain *xd, const void *response,
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_response);
 
+static int tb_xdomain_submit_request(void *data)
+{
+	struct xdomain_request_submit *submit = data;
+
+	return tb_xdomain_send_packet(submit->ctl, submit->request,
+				      submit->request_size,
+				      submit->request_type);
+}
+
 static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	size_t request_size, enum tb_cfg_pkg_type request_type, void *response,
 	size_t response_size, enum tb_cfg_pkg_type response_type,
 	unsigned int timeout_msec)
 {
+	struct xdomain_request_submit submit = {
+		.ctl = ctl,
+		.request = request,
+		.request_size = request_size,
+		.request_type = request_type,
+	};
 	struct tb_cfg_request *req;
 	struct tb_cfg_result res;
 
@@ -606,7 +634,6 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 		return -ENOMEM;
 
 	req->match = tb_xdomain_match;
-	req->intermediate = tb_xdomain_intermediate;
 	req->copy = tb_xdomain_copy;
 	req->request = request;
 	req->request_size = request_size;
@@ -614,9 +641,10 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	req->response = response;
 	req->response_size = response_size;
 	req->response_type = response_type;
-	tb_xdomain_init_packet_state(req, true);
+	req->state.peer = TB_CFG_PEER_WAITING;
 
-	res = tb_cfg_request_sync(ctl, req, timeout_msec);
+	res = tb_cfg_request_sync_receive(ctl, req, timeout_msec,
+					  tb_xdomain_submit_request, &submit);
 
 	tb_cfg_request_put(req);
 
@@ -3004,7 +3032,21 @@ bool tb_test_xdomain_response_should_retry(bool local_failed,
 		.local_timed_out = local_timed_out,
 	};
 
-	return tb_xdomain_response_should_retry(&res, attempt);
+	return tb_xdomain_packet_should_retry(&res, attempt);
+}
+
+bool tb_test_xdomain_request_should_retry(bool local_failed,
+					  bool local_timed_out,
+					  int result,
+					  unsigned int attempt)
+{
+	struct tb_cfg_result res = {
+		.err = result,
+		.local_failed = local_failed,
+		.local_timed_out = local_timed_out,
+	};
+
+	return tb_xdomain_packet_should_retry(&res, attempt);
 }
 
 bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known)

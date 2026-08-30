@@ -280,6 +280,11 @@ tb_cfg_request_find(struct tb_ctl *ctl, struct ctl_pkg *pkg)
 
 	mutex_lock(&pkg->ctl->request_queue_lock);
 	list_for_each_entry(iter, &pkg->ctl->request_queue, list) {
+		struct tb_cfg_request_state state;
+
+		state = tb_cfg_request_read_state(iter);
+		if (tb_cfg_request_match_owner(&state) == TB_CFG_MATCH_NONE)
+			continue;
 		tb_cfg_request_get(iter);
 		if (iter->match(iter, pkg)) {
 			req = iter;
@@ -719,15 +724,20 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	req = tb_cfg_request_find(pkg->ctl, pkg);
 	if (req) {
 		struct tb_cfg_request_state state;
+		enum tb_cfg_match_owner owner;
 
 		state = tb_cfg_request_read_state(req);
-		if (state.local != TB_CFG_LOCAL_DISABLED) {
+		owner = tb_cfg_request_match_owner(&state);
+		if (owner == TB_CFG_MATCH_PEER) {
 			event = TB_CFG_REQUEST_EVENT_PEER_MATCHED;
 			action = tb_cfg_request_update_state(req, event);
 			if (action != TB_CFG_REQUEST_ACTION_COMPLETE) {
 				tb_cfg_request_put(req);
 				req = NULL;
 			}
+		} else if (owner == TB_CFG_MATCH_NONE) {
+			tb_cfg_request_put(req);
+			req = NULL;
 		}
 	}
 	xdomain_tx_status = !req && tb_ctl_is_xdomain_tx_status(frame->eof,
@@ -902,6 +912,83 @@ void tb_cfg_request_cancel(struct tb_cfg_request *req, int err)
 static void tb_cfg_request_complete(void *data)
 {
 	complete(data);
+}
+
+static int tb_cfg_request_receive(struct tb_ctl *ctl,
+				  struct tb_cfg_request *req,
+				  void (*callback)(void *),
+				  void *callback_data)
+{
+	int ret;
+
+	req->flags = 0;
+	req->callback = callback;
+	req->callback_data = callback_data;
+	INIT_WORK(&req->work, tb_cfg_request_work);
+	INIT_LIST_HEAD(&req->list);
+
+	tb_cfg_request_get(req);
+	ret = tb_cfg_request_enqueue(ctl, req);
+	if (ret)
+		tb_cfg_request_put(req);
+
+	return ret;
+}
+
+/**
+ * tb_cfg_request_sync_receive() - Arm a response waiter before submitting
+ * @ctl: Control channel to use
+ * @req: Receive-only request matcher and response storage
+ * @timeout_msec: Overall deadline, including submission
+ * @submit: Function that submits the independently completed command
+ * @submit_data: Data passed to @submit
+ *
+ * The receive waiter is queued first and remains queued while @submit runs.
+ * This is needed when command submission and the peer response are separate
+ * state machines and the peer may answer before local submission completes.
+ */
+struct tb_cfg_result
+tb_cfg_request_sync_receive(struct tb_ctl *ctl, struct tb_cfg_request *req,
+			    int timeout_msec, tb_cfg_submit_fn submit,
+			    void *submit_data)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_msec);
+	struct tb_cfg_result res = { 0 };
+	DECLARE_COMPLETION_ONSTACK(done);
+	unsigned long remaining;
+	bool completed;
+	int ret;
+
+	ret = tb_cfg_request_receive(ctl, req, tb_cfg_request_complete, &done);
+	if (ret) {
+		res.err = ret;
+		return res;
+	}
+
+	ret = submit(submit_data);
+	if (ret) {
+		tb_cfg_request_cancel(req, ret);
+		flush_work(&req->work);
+		res = req->result;
+		res.err = ret;
+		return res;
+	}
+
+	remaining = time_before(jiffies, deadline) ? deadline - jiffies : 0;
+	completed = try_wait_for_completion(&done);
+	if (!completed && remaining)
+		completed = wait_for_completion_timeout(&done, remaining);
+	if (!completed) {
+		tb_cfg_request_update_state(req,
+					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+		atomic_inc(&ctl->consec_timeouts);
+		tb_cfg_request_cancel(req, -ETIMEDOUT);
+	}
+
+	flush_work(&req->work);
+	res = req->result;
+	res.tx_state = tb_cfg_request_read_state(req).tx;
+	return res;
 }
 
 /**
