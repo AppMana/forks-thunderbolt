@@ -171,3 +171,6 @@ module_exit(tbframe_exit);
 
 MODULE_DESCRIPTION("Lossless frame service over Thunderbolt/USB4 XDomain DMA rings");
 MODULE_LICENSE("GPL");
+#ifdef TBV_PKG_VERSION
+MODULE_VERSION(TBV_PKG_VERSION);
+#endif

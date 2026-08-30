@@ -71,6 +71,10 @@ ifeq ($(DEBUG),1)
 ccflags-y += -DDEBUG
 endif
 
+ifneq ($(TBV_PKG_VERSION),)
+ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
+endif
+
 .PHONY: all clean modules modules_install
 
 all: modules
