@@ -48,15 +48,15 @@ struct tb_ctl {
 	struct ctl_pkg *rx_packets[TB_CTL_RX_PKG_COUNT];
 	struct mutex request_queue_lock;
 	struct list_head request_queue;
-	/* PDF 0xc has no sequence token, so local commands share one slot. */
-	struct semaphore xdomain_tx_sem;
+	/* Ring-0 firmware commands can lose completions when they overlap. */
+	struct semaphore command_sem;
 	bool xdomain_tx_occupied;
 	bool running;
 	/* Best-effort hardware cleanup uses a fail-fast admission policy. */
 	bool teardown;
 	/*
 	 * Requests whose ->work has been accepted by system_wq and synchronous
-	 * local-slot owners that have not finished. tb_cfg_request_work()
+	 * command-slot owners that have not finished. tb_cfg_request_work()
 	 * dereferences req->ctl AFTER the
 	 * callback (tb_cfg_request_dequeue() takes ctl->request_queue_lock),
 	 * so the ctl must outlive every such item. Nothing else ties them
@@ -369,7 +369,6 @@ static void tb_cfg_request_release_local_slot(struct tb_cfg_request *req)
 		return;
 
 	WRITE_ONCE(ctl->xdomain_tx_occupied, false);
-	up(&ctl->xdomain_tx_sem);
 }
 
 /* utility functions */
@@ -1011,16 +1010,19 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	struct tb_cfg_request_state state;
 	struct tb_cfg_result res = { 0 };
 	DECLARE_COMPLETION_ONSTACK(done);
-	bool hold_local;
+	bool hold_command, hold_local;
 	int ret;
 
 	hold_local = req->state.local != TB_CFG_LOCAL_DISABLED;
-	if (hold_local) {
+	hold_command = tb_cfg_request_owns_command_slot(req->request_type);
+	if (hold_command) {
 		/* Account before sleeping so control teardown cannot free ctl
-		 * while this request is queued behind the unsequenced local slot.
+		 * while this request is queued behind another firmware command.
 		 */
 		atomic_inc(&ctl->req_works);
-		down(&ctl->xdomain_tx_sem);
+		down(&ctl->command_sem);
+	}
+	if (hold_local) {
 		WARN_ON(!tb_cfg_local_slot_may_claim(READ_ONCE(ctl->xdomain_tx_occupied)));
 		WRITE_ONCE(ctl->xdomain_tx_occupied, true);
 		set_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags);
@@ -1034,8 +1036,10 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		res.tx_state = tb_cfg_request_read_state(req).tx;
 		if (hold_local)
 			tb_cfg_request_release_local_slot(req);
-		if (hold_local)
+		if (hold_command) {
+			up(&ctl->command_sem);
 			tb_ctl_req_work_put(ctl);
+		}
 		return res;
 	}
 
@@ -1146,8 +1150,6 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 		tb_cfg_request_dequeue(req);
 		tb_cfg_request_release_local_slot(req);
 		tb_cfg_request_put(req);
-		/* Last touch of @ctl: tb_ctl_free() may proceed after this. */
-		tb_ctl_req_work_put(ctl);
 	}
 
 	res = req->result;
@@ -1157,6 +1159,11 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 	res.local_failed = hold_local && state.local == TB_CFG_LOCAL_FAILED;
 	res.local_timed_out = hold_local &&
 		state.local == TB_CFG_LOCAL_TIMED_OUT;
+	if (hold_command) {
+		up(&ctl->command_sem);
+		/* Last touch of @ctl: tb_ctl_free() may proceed after this. */
+		tb_ctl_req_work_put(ctl);
+	}
 	return res;
 }
 
@@ -1240,7 +1247,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 	ctl->callback_data = cb_data;
 
 	mutex_init(&ctl->request_queue_lock);
-	sema_init(&ctl->xdomain_tx_sem, 1);
+	sema_init(&ctl->command_sem, 1);
 	init_waitqueue_head(&ctl->req_work_wait);
 	INIT_LIST_HEAD(&ctl->request_queue);
 	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", &nhi->pdev->dev,
@@ -1289,7 +1296,7 @@ void tb_ctl_free(struct tb_ctl *ctl)
 	/*
 	 * Request work dereferences this object after its callback. Control stop
 	 * has already terminated both request state machines and released the
-	 * unsequenced local slot, so this is a local workqueue drain, not a wait
+	 * firmware command slot, so this is a local workqueue drain, not a wait
 	 * for firmware or a peer. It runs without the domain lock.
 	 */
 	wait_event(ctl->req_work_wait, !atomic_read(&ctl->req_works));

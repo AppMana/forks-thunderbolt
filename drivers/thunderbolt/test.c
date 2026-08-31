@@ -7965,6 +7965,17 @@ static void tb_test_ctl_local_status_slot_blocks_reuse(struct kunit *test)
 			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_TIMED_OUT));
 }
 
+static void
+tb_test_ctl_icm_and_xdomain_commands_do_not_overlap(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_request_owns_command_slot(TB_CFG_PKG_XDOMAIN_REQ));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_request_owns_command_slot(TB_CFG_PKG_ICM_CMD));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_request_owns_command_slot(TB_CFG_PKG_WRITE));
+}
+
 static void tb_test_ctl_all_xdomain_packets_own_local_completion(struct kunit *test)
 {
 	const bool expects_peer_response[] = { true, false };
@@ -8501,6 +8512,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),
 	KUNIT_CASE(tb_test_ctl_stop_releases_both_request_machines),
 	KUNIT_CASE(tb_test_ctl_local_status_slot_blocks_reuse),
+	KUNIT_CASE(tb_test_ctl_icm_and_xdomain_commands_do_not_overlap),
 	KUNIT_CASE(tb_test_ctl_all_xdomain_packets_own_local_completion),
 	KUNIT_CASE(tb_test_ctl_local_only_packet_reaches_terminal_state),
 	KUNIT_CASE(tb_test_ctl_service_response_does_not_wait_in_rx_dispatch),

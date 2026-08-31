@@ -204,6 +204,20 @@ static inline bool tb_cfg_local_slot_is_owned(enum tb_cfg_local_state state)
 	return state == TB_CFG_LOCAL_WAITING;
 }
 
+/* Requests selected here exclude every other synchronous ring-0 command. */
+static inline bool
+tb_cfg_request_owns_command_slot(enum tb_cfg_pkg_type type)
+{
+	switch (type) {
+	case TB_CFG_PKG_ICM_CMD:
+	case TB_CFG_PKG_XDOMAIN_REQ:
+	case TB_CFG_PKG_XDOMAIN_RESP:
+		return true;
+	default:
+		return false;
+	}
+}
+
 enum tb_cfg_match_owner {
 	TB_CFG_MATCH_GENERIC,
 	TB_CFG_MATCH_PEER,
