@@ -9,11 +9,13 @@ power cycle as dispatched after only the local DMA config-write transaction had
 been consumed. It did not establish that the controller could carry out the
 requested transition.
 
-The implementation in this tree adds the missing preflight and makes it a hard
-prerequisite for runtime dispatch. Its state and ordering contracts are covered
-by red-first KUnit tests. Hardware validation must still prove bidirectional
-payload traffic; link enumeration, service negotiation, `LOWER_UP`, and local
-TX completion are not accepted as data-path proof.
+The implementation in this tree adds the missing preflight, performs its
+root-router mail commands with the sequence identity used by Intel's driver,
+and makes successful preparation a hard prerequisite for runtime dispatch. Its
+state, ordering, and exact packet-encoding contracts are covered by red-first
+KUnit tests. Hardware validation must still prove bidirectional payload
+traffic; link enumeration, service negotiation, `LOWER_UP`, and local TX
+completion are not accepted as data-path proof.
 
 ## Observable failure
 
@@ -48,6 +50,13 @@ Established by live observation:
 3. A module unload/reload alone does not recover that state.
 4. Before this change, the relevant Maple Ridge systems had all three Windows
    preflight bits clear.
+5. With the preflight ordered while topology was still valid, both PCIe proxy
+   writes and the root-router read completed, but the root-router write failed
+   immediately with `-EIO`.
+6. Repeating only the root write through debugfs on a bound, otherwise intact
+   controller failed in the same way. Register `0x13e` remained readable and
+   retained value zero. Teardown timing, service removal, and an unplugged
+   software object therefore cannot explain this failure.
 
 Established by the Intel Windows binary:
 
@@ -58,6 +67,12 @@ Established by the Intel Windows binary:
    dispatch.
 4. The subsequent command writes the DMA-port power-cycle mailbox and uses a
    25-second command timeout.
+5. Both device-configuration mail commands used for register `0x13e` set
+   address bit 27, which is sequence identity 1 in Linux's
+   `tb_cfg_address` layout.
+6. The Maple Ridge `8086:1137` device policy explicitly enables the
+   plug-event-delay workaround; it is not an optional step Linux can skip on
+   this controller.
 
 The remaining hypothesis to prove on hardware is that performing this sequence
 lets the controller execute a real recovery transition and restores payload
@@ -81,6 +96,17 @@ image virtual addresses from the complete decompilation.
    - read root-router config dword `0x13e`;
    - set `BIT(21)` and write the dword back.
 
+For Maple Ridge NHI device `8086:1137`, that policy is enabled. The complete
+constructor path is `FUN_140146b60` -> `FUN_140144738` -> `FUN_140048254` ->
+`FUN_140048c54`. `FUN_140048254` passes one as argument 12;
+`FUN_140048c54` stores it at device-info offset `0x7c` and emits the label
+`Enable plug event delay for power cycle`. `HostControllerPowerCycle::Init`
+(`FUN_1402383bc`) copies offset `0x7c` to the power-cycle object's offset 300,
+and `FUN_140239048` tests that byte before calling `FUN_140237d68`. The
+`0x1137` device-table entry reaches this constructor path. Consequently,
+omitting register `0x13e` would diverge from the controller-specific Windows
+policy rather than avoid a questionable workaround.
+
 Only after that succeeds does `HostControllerPowerCycle::RunPowerCycle` create
 and send the command. `PowerCycleCommand::Send` (`FUN_140171d60`,
 `0x140171d60`) constructs the value `0x40000001` and issues the DMA-port config
@@ -90,6 +116,31 @@ The upstream-proxy API addresses registers by dword index. Linux PCI config
 accessors address bytes, so the corresponding offsets are `0x143 * 4` and
 `0x175 * 4`. Root-router config space is already addressed in dwords by
 `tb_sw_read()` and `tb_sw_write()`.
+
+### Exact device-config packet construction
+
+The decompiled read and write command implementations independently construct
+the same 32-bit address word:
+
+- `ReadConfigurationRegistersCommand::Send` (`FUN_14028e564`) assigns the
+  dword index to bits 12:0, length to 18:13, DMA port to 24:19,
+  configuration space to 26:25, and then unconditionally sets bit 27.
+- `WriteConfigurationRegistersCommand<...MAIL>::Send`
+  (`FUN_14028e370`) derives length from the payload, assigns all the same
+  fields, and likewise unconditionally sets bit 27.
+
+For route zero, device configuration space, port zero, one dword, and dword
+index `0x13e`, the third request dword is therefore:
+
+```
+offset 0x13e | length (1 << 13) | space (2 << 25) | sequence (1 << 27)
+  = 0x0c00213e
+```
+
+Linux defines bits 28:27 as the two-bit `seq` field. This is not a new or
+undocumented packet flag: the difference is sequence 1 versus sequence 0.
+The Windows read wrapper (`FUN_14027f100`) and synchronous write wrapper
+(`FUN_140173178`) each use a 25-second timeout for this command stream.
 
 ## The Linux defect
 
@@ -147,7 +198,45 @@ stop notification admission
 The companion failure test proves that a failed early preflight still completes
 ordinary teardown but never reaches mailbox dispatch.
 
+### Correct ordering exposed a third, wire-level bug
+
+After the ordering fix, a live runtime-recovery attempt progressed farther:
+
+```
+PCIe proxy dword 0x143 write succeeds
+  -> PCIe proxy dword 0x175 write succeeds
+  -> root dword 0x13e read succeeds
+  -> root dword 0x13e write returns -EIO immediately
+  -> preflight fails
+  -> mailbox dispatch count remains zero
+```
+
+An isolated debugfs write reproduced the immediate failure while the root
+router was still bound and readable. That experiment falsified the theory that
+the write failed because domain teardown had already removed the service or
+invalidated topology.
+
+The actual mismatch was in the request address dword. Generic Linux config I/O
+starts a fresh request stream at sequence zero. Its first packet for this write
+was `0x0400213e`. Intel's device-config mail command sends sequence one, making
+the same packet `0x0c00213e`. Generic Linux retries advance the sequence only
+after `-ETIMEDOUT`; a controller error response terminates the loop. An
+immediate rejection of sequence zero can therefore never fall through to the
+sequence-one packet by accident.
+
+The repair does not change the sequence convention for ordinary router, port,
+path, or counter access. The runtime power-cycle preflight now owns a
+single-request command stream, explicitly selects sequence one for both the
+read and the write, and uses the Windows command's 25-second timeout. The raw
+result is logged before errno translation, including `err`, `tb_error`, reply
+route and port, request-local TX state, and sequence. This distinguishes a
+controller protocol rejection from a timeout, shutdown, or local-send failure.
+
 ## Why PDF `0xc` and PDF `0x7` are not contradictory
+
+The `0x0c00213e` address dword above is unrelated to PDF `0xc`. The former is a
+packed configuration address whose high byte happens to begin with `0x0c`; the
+latter is a control-ring packet type.
 
 The Intel Windows stack models XDomain communication with two independent state
 machines. Combining them loses real event order and creates false timeouts or
@@ -254,7 +343,24 @@ The tests now enforce:
   recovery state;
 - preflight failure returns the original error and performs zero dispatches;
 - ICM preparation orders exit-L1, root read, then root write; and
-- the root write preserves existing bits while setting `BIT(21)`.
+- the root write preserves existing bits while setting `BIT(21)`; and
+- the shared production sequence selector packs the exact device-config
+  address `0x0c00213e`, rather than the rejected generic encoding
+  `0x0400213e`.
+
+For the packet test, production initially still selected the generic first
+attempt. The focused KUnit emitted two failures:
+
+```
+address.seq: expected 1, observed 0
+encoded: expected 0x0c00213e, observed 0x0400213e
+```
+
+Only after that red result was captured did production switch the two
+preflight requests to its controller-specific one-request stream. The same
+test then passed. The test builds a real `tb_cfg_address` using the sequence
+selector called by production and copies its packed dword; it does not use a
+separate test encoder.
 
 This test shape avoids a cheating test: expected state transitions existed
 before the production call was added, and the test invokes the shared

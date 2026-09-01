@@ -1573,12 +1573,6 @@ tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 	struct tb_cfg_result res = { 0 };
 	struct cfg_read_pkg request = {
 		.header = tb_cfg_make_header(route),
-		.addr = {
-			.port = port,
-			.space = space,
-			.offset = offset,
-			.length = length,
-		},
 	};
 	struct cfg_write_pkg reply;
 	int retries = 0;
@@ -1592,8 +1586,8 @@ tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 			return res;
 		}
 
-		request.addr.seq = tb_cfg_request_sequence(first_attempt +
-							       retries++);
+		request.addr = tb_cfg_make_address(port, space, offset, length,
+						   first_attempt + retries++);
 
 		req->match = tb_cfg_match;
 		req->copy = tb_cfg_copy;
@@ -1674,17 +1668,13 @@ tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 static struct tb_cfg_result
 tb_cfg_write_raw_retries(struct tb_ctl *ctl, const void *buffer, u64 route,
 			 u32 port, enum tb_cfg_space space, u32 offset,
-			 u32 length, int timeout_msec, unsigned int max_retries)
+			 u32 length, int timeout_msec,
+			 unsigned int first_attempt,
+			 unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_write_pkg request = {
 		.header = tb_cfg_make_header(route),
-		.addr = {
-			.port = port,
-			.space = space,
-			.offset = offset,
-			.length = length,
-		},
 	};
 	struct cfg_read_pkg reply;
 	int retries = 0;
@@ -1700,7 +1690,8 @@ tb_cfg_write_raw_retries(struct tb_ctl *ctl, const void *buffer, u64 route,
 			return res;
 		}
 
-		request.addr.seq = retries++;
+		request.addr = tb_cfg_make_address(port, space, offset, length,
+						   first_attempt + retries++);
 
 		req->match = tb_cfg_match;
 		req->copy = tb_cfg_copy;
@@ -1735,21 +1726,54 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 		u32 offset, u32 length, int timeout_msec)
 {
 	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
-					length, timeout_msec, TB_CTL_RETRIES);
+					length, timeout_msec, 0, TB_CTL_RETRIES);
 }
 
+/**
+ * tb_cfg_write_raw_once() - issue one config-space write in a request stream
+ * @ctl: Pointer to the control channel
+ * @buffer: Data to write
+ * @route: Route string of the router
+ * @port: Port number when writing to %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword offset of the register to start writing
+ * @length: Number of dwords to write
+ * @timeout_msec: Timeout in ms how long to wait for the response
+ * @attempt: Attempt identity in the caller-owned request stream
+ *
+ * Controller-specific command streams may require a particular sequence
+ * identity on their first and only request. Keep that choice separate from
+ * the generic write helper, which starts at sequence zero and retries only
+ * requests that time out.
+ */
 struct tb_cfg_result
 tb_cfg_write_raw_once(struct tb_ctl *ctl, const void *buffer, u64 route,
 			      u32 port, enum tb_cfg_space space, u32 offset,
-			      u32 length, int timeout_msec)
+			      u32 length, int timeout_msec,
+			      unsigned int attempt)
 {
 	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
-					length, timeout_msec, 1);
+					length, timeout_msec, attempt, 1);
 }
 
-static int tb_cfg_get_error(struct tb_ctl *ctl, enum tb_cfg_space space,
-			    const struct tb_cfg_result *res)
+/**
+ * tb_cfg_result_to_errno() - translate a raw configuration-space result
+ * @ctl: Pointer to the control channel
+ * @space: Configuration space used by the request
+ * @res: Raw result returned by a configuration-space helper
+ *
+ * Callers that need the protocol error and request-local TX state for their
+ * own diagnostics can log the raw result first and use this helper for the
+ * conventional Linux errno mapping.
+ */
+int tb_cfg_result_to_errno(struct tb_ctl *ctl, enum tb_cfg_space space,
+			   const struct tb_cfg_result *res)
 {
+	if (res->err <= 0)
+		return res->err;
+	if (res->err != 1)
+		return -EIO;
+
 	/*
 	 * For unimplemented ports access to port config space may return
 	 * TB_CFG_ERROR_INVALID_CONFIG_SPACE (alternatively their type is
@@ -1782,7 +1806,7 @@ int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		return tb_cfg_get_error(ctl, space, &res);
+		return tb_cfg_result_to_errno(ctl, space, &res);
 
 	case -ETIMEDOUT:
 		tb_ctl_warn(ctl, "%llx: timeout reading config space %u from %#x\n",
@@ -1811,7 +1835,7 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		return tb_cfg_get_error(ctl, space, &res);
+		return tb_cfg_result_to_errno(ctl, space, &res);
 
 	case -ETIMEDOUT:
 		tb_ctl_warn(ctl, "%llx: timeout writing config space %u to %#x\n",

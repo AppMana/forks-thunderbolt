@@ -43,6 +43,7 @@
 #define ICM_PCIE_UPSTREAM_VESC_REG51_L1_EXIT	BIT(19)
 #define ICM_ROOT_PLUG_EVENT_DELAY	0x13e
 #define ICM_ROOT_PLUG_EVENT_DELAY_ENABLE	BIT(21)
+#define ICM_POWER_CYCLE_CONFIG_TIMEOUT	25000	/* ms */
 
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE	0x1133
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE	0x1136
@@ -3096,21 +3097,49 @@ static int icm_runtime_power_cycle_exit_pcie_l1(struct tb *tb, void *data)
 	return 0;
 }
 
+static u8 icm_runtime_power_cycle_config_sequence(void)
+{
+	/* Intel's device-config mail commands use sequence 1. */
+	return 1;
+}
+
 static int icm_runtime_power_cycle_read_root(struct tb *tb, u32 *value,
 					     void *data)
 {
+	struct tb_cfg_result res;
+	u8 sequence;
+
 	if (!tb->root_switch)
 		return -ENODEV;
 
-	return tb_sw_read(tb->root_switch, value, TB_CFG_SWITCH,
-			  ICM_ROOT_PLUG_EVENT_DELAY, 1);
+	sequence = icm_runtime_power_cycle_config_sequence();
+	res = tb_cfg_read_raw_once(tb->ctl, value, tb_route(tb->root_switch), 0,
+				   TB_CFG_SWITCH, ICM_ROOT_PLUG_EVENT_DELAY, 1,
+				   ICM_POWER_CYCLE_CONFIG_TIMEOUT, sequence);
+	if (res.err)
+		tb_err(tb,
+		       "root plug-event-delay read failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
+		       res.err, res.tb_error, res.response_route,
+		       res.response_port, res.tx_state, sequence);
+	return tb_cfg_result_to_errno(tb->ctl, TB_CFG_SWITCH, &res);
 }
 
 static int icm_runtime_power_cycle_write_root(struct tb *tb, u32 value,
 					      void *data)
 {
-	return tb_sw_write(tb->root_switch, &value, TB_CFG_SWITCH,
-			   ICM_ROOT_PLUG_EVENT_DELAY, 1);
+	struct tb_cfg_result res;
+	u8 sequence = icm_runtime_power_cycle_config_sequence();
+
+	res = tb_cfg_write_raw_once(tb->ctl, &value, tb_route(tb->root_switch),
+				    0, TB_CFG_SWITCH,
+				    ICM_ROOT_PLUG_EVENT_DELAY, 1,
+				    ICM_POWER_CYCLE_CONFIG_TIMEOUT, sequence);
+	if (res.err)
+		tb_err(tb,
+		       "root plug-event-delay write failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
+		       res.err, res.tb_error, res.response_route,
+		       res.response_port, res.tx_state, sequence);
+	return tb_cfg_result_to_errno(tb->ctl, TB_CFG_SWITCH, &res);
 }
 
 static int icm_runtime_power_cycle_preflight(struct tb *tb)
@@ -4296,12 +4325,38 @@ static void icm_runtime_power_cycle_preflight_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx.written_value, BIT(7) | BIT(21));
 }
 
+/*
+ * Intel's controller stack sends the plug-event-delay device-config access
+ * with sequence 1.  The address dword is the actual on-wire layout used by
+ * cfg_read_pkg and cfg_write_pkg, so this detects a sequence-0 request rather
+ * than merely restating a high-level preflight transition.
+ */
+static void icm_runtime_power_cycle_config_packet_test(struct kunit *test)
+{
+	struct tb_cfg_address address;
+	struct tb_cfg_address generic;
+	u32 generic_encoded;
+	u32 encoded;
+
+	generic = tb_cfg_make_address(0, TB_CFG_SWITCH,
+				      ICM_ROOT_PLUG_EVENT_DELAY, 1, 0);
+	address = tb_cfg_make_address(0, TB_CFG_SWITCH,
+				      ICM_ROOT_PLUG_EVENT_DELAY, 1,
+				      icm_runtime_power_cycle_config_sequence());
+	memcpy(&generic_encoded, &generic, sizeof(generic_encoded));
+	memcpy(&encoded, &address, sizeof(encoded));
+	KUNIT_EXPECT_EQ(test, generic_encoded, 0x0400213eU);
+	KUNIT_EXPECT_EQ(test, (u32)address.seq, 1U);
+	KUNIT_EXPECT_EQ(test, encoded, 0x0c00213eU);
+}
+
 static struct kunit_case icm_teardown_test_cases[] = {
 	KUNIT_CASE(icm_stopping_rejects_late_notification_test),
 	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
 	KUNIT_CASE(icm_finalize_unproven_non_dma_test),
 	KUNIT_CASE(icm_finalize_proven_revoke_test),
 	KUNIT_CASE(icm_runtime_power_cycle_preflight_test),
+	KUNIT_CASE(icm_runtime_power_cycle_config_packet_test),
 	{}
 };
 
