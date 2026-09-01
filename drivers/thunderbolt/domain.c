@@ -577,7 +577,7 @@ tb_domain_power_cycle_dispatch_result(int error, bool tx_consumed)
 		return result;
 	}
 
-	result.error = error ?: -EIO;
+	result.error = error > 0 ? -EIO : error ?: -EIO;
 	return result;
 }
 
@@ -594,8 +594,9 @@ tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 {
 	struct pci_dev *pdev = tb->nhi->pdev;
 	struct tb_domain_reset_result result;
-	bool tx_consumed = false;
-	int port, ret;
+	struct tb_cfg_result res;
+	bool tx_consumed;
+	int port;
 
 	port = dma_port_for_nhi(pdev->vendor, pdev->device);
 	if (port < 0) {
@@ -603,8 +604,9 @@ tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 		return result;
 	}
 
-	ret = dma_port_power_cycle_raw(tb->ctl, port, &tx_consumed);
-	result = tb_domain_power_cycle_dispatch_result(ret, tx_consumed);
+	res = dma_port_power_cycle_raw(tb->ctl, port);
+	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
+	result = tb_domain_power_cycle_dispatch_result(res.err, tx_consumed);
 	if (!result.error) {
 		tb_warn(tb,
 			"runtime recovery dispatched a host-router power cycle on DMA port %d; requiring a fresh probe\n",
@@ -612,9 +614,15 @@ tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 		return result;
 	}
 
-	tb_err(tb,
-	       "runtime host-router power cycle lacked request-local TX completion proof (error %d)\n",
-	       ret);
+	if (res.err == 1)
+		tb_err(tb,
+		       "runtime host-router power cycle rejected: tb_error=%u response=%#llx:%u tx_state=%u\n",
+		       res.tb_error, res.response_route, res.response_port,
+		       res.tx_state);
+	else
+		tb_err(tb,
+		       "runtime host-router power cycle lacked request-local TX completion proof: error=%d tx_state=%u\n",
+		       res.err, res.tx_state);
 	return result;
 }
 

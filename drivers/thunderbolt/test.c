@@ -2687,6 +2687,11 @@ tb_test_domain_power_cycle_completion_mapping(struct kunit *test)
 	result = tb_test_domain_power_cycle_dispatch_result(-ETIMEDOUT, false);
 	KUNIT_EXPECT_EQ(test, result.error, -ETIMEDOUT);
 	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
+
+	/* A controller CFG_ERROR is not a Linux errno and must not escape as 1. */
+	result = tb_test_domain_power_cycle_dispatch_result(1, true);
+	KUNIT_EXPECT_EQ(test, result.error, -EIO);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
 }
 
 static void

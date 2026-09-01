@@ -3002,8 +3002,9 @@ static int icm_root_power_cycle(struct tb *tb)
 	struct icm *icm = tb_priv(tb);
 	enum tb_icm_root_recovery_state state = TB_ICM_ROOT_RECOVERY_IDLE;
 	struct pci_dev *pdev = tb->nhi->pdev;
-	bool tx_consumed = false;
-	int port, ret;
+	struct tb_cfg_result res;
+	bool tx_consumed;
+	int port;
 
 	state = tb_icm_root_recovery_next(
 		state, icm->root_config_timed_out ?
@@ -3025,18 +3026,25 @@ static int icm_root_power_cycle(struct tb *tb)
 	tb_warn(tb,
 		"root config did not answer after DriverReady; issuing one host-router power-cycle request on DMA port %d\n",
 		port);
-	ret = dma_port_power_cycle_raw(tb->ctl, port, &tx_consumed);
+	res = dma_port_power_cycle_raw(tb->ctl, port);
+	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
 	state = tb_icm_root_recovery_next(
-		state, tb_icm_root_recovery_command_event(ret, tx_consumed));
+		state, tb_icm_root_recovery_command_event(res.err, tx_consumed));
 	if (state != TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED) {
-		tb_err(tb,
-		       "host-router power-cycle request has no request-local TX completion proof (error %d); refusing to claim dispatch\n",
-		       ret);
-		return ret;
+		if (res.err == 1)
+			tb_err(tb,
+			       "host-router power-cycle request rejected: tb_error=%u response=%#llx:%u tx_state=%u\n",
+			       res.tb_error, res.response_route,
+			       res.response_port, res.tx_state);
+		else
+			tb_err(tb,
+			       "host-router power-cycle request has no request-local TX completion proof: error=%d tx_state=%u\n",
+			       res.err, res.tx_state);
+		return res.err > 0 ? -EIO : res.err;
 	}
 
 	icm->root_power_cycle_dispatched = true;
-	if (ret == -ETIMEDOUT)
+	if (res.err == -ETIMEDOUT)
 		tb_warn(tb,
 			"host-router power-cycle request was consumed but got no reply; treating execution as unproven and requiring a fresh probe\n");
 	else

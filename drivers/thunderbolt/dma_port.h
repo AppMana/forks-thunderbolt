@@ -15,6 +15,7 @@
 struct tb_switch;
 struct tb_dma_port;
 struct tb_ctl;
+struct tb_cfg_result;
 
 #define DMA_PORT_CSS_ADDRESS		0x3fffff
 #define DMA_PORT_CSS_MAX_SIZE		SZ_128
@@ -47,6 +48,6 @@ int dma_port_flash_update_auth_status(struct tb_dma_port *dma, u32 *status);
 int dma_port_flash_write(struct tb_dma_port *dma, unsigned int address,
 			 const void *buf, size_t size);
 int dma_port_power_cycle(struct tb_dma_port *dma);
-int dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port, bool *tx_consumed);
+struct tb_cfg_result dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port);
 
 #endif

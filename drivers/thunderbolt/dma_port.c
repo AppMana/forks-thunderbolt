@@ -455,15 +455,11 @@ int dma_port_power_cycle(struct tb_dma_port *dma)
 	return dma_port_request(dma, in, 150);
 }
 
-int dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port, bool *tx_consumed)
+struct tb_cfg_result dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port)
 {
-	struct tb_cfg_result res;
 	u32 request = DMA_PORT_POWER_CYCLE_REQUEST;
 
-	res = tb_cfg_write_raw_once(ctl, &request, 0, port, TB_CFG_PORT,
-				    DMA_PORT_MAIL_IN, 1,
-				    DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS);
-	if (tx_consumed)
-		*tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
-	return res.err;
+	return tb_cfg_write_raw_once(ctl, &request, 0, port, TB_CFG_PORT,
+				     DMA_PORT_MAIL_IN, 1,
+				     DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS);
 }
