@@ -38,7 +38,7 @@ static inline int dma_port_for_nhi(u16 vendor, u16 device)
 	switch (device) {
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
-		return 7;
+		return 0xb;
 	default:
 		return -ENODEV;
 	}

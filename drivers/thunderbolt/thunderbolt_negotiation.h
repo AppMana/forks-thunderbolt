@@ -197,6 +197,67 @@ static inline bool tb_xdomain_announce_should_warn(unsigned int failures)
 	return failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
 }
 
+/*
+ * Control-channel liveness is independent of discovery and announcement.
+ * An absent peer may leave announcement retrying forever, but a route that was
+ * previously proven and is still delivering inbound service requests is not
+ * absent. If announcements in the opposite direction reach saturated backoff,
+ * the controller owns a persistent one-way failure and needs bounded recovery.
+ */
+enum tb_xdomain_control_state {
+	TB_XDOMAIN_CONTROL_UNPROVEN,
+	TB_XDOMAIN_CONTROL_QUIET,
+	TB_XDOMAIN_CONTROL_PEER_ACTIVE,
+	TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED,
+	TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED,
+};
+
+enum tb_xdomain_control_event {
+	TB_XDOMAIN_CONTROL_PEER_PROVEN,
+	TB_XDOMAIN_CONTROL_INBOUND_PROGRESS,
+	TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED,
+	TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED,
+	TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED,
+	TB_XDOMAIN_CONTROL_STOPPED,
+};
+
+static inline enum tb_xdomain_control_state
+tb_xdomain_control_next(enum tb_xdomain_control_state state,
+			 enum tb_xdomain_control_event event)
+{
+	if (event == TB_XDOMAIN_CONTROL_STOPPED)
+		return TB_XDOMAIN_CONTROL_UNPROVEN;
+
+	switch (state) {
+	case TB_XDOMAIN_CONTROL_UNPROVEN:
+		if (event == TB_XDOMAIN_CONTROL_PEER_PROVEN)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+			return TB_XDOMAIN_CONTROL_PEER_ACTIVE;
+		break;
+	case TB_XDOMAIN_CONTROL_QUIET:
+		if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+			return TB_XDOMAIN_CONTROL_PEER_ACTIVE;
+		break;
+	case TB_XDOMAIN_CONTROL_PEER_ACTIVE:
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED)
+			return TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED;
+		break;
+	case TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED:
+		if (event == TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED)
+			return TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED;
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		break;
+	case TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED:
+		break;
+	}
+
+	return state;
+}
+
 /**
  * struct tb_xdomain_handshake - common login/HELLO negotiation state
  * @request_sent: we have sent our LOGIN/HELLO to the peer

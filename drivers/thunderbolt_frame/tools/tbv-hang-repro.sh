@@ -150,12 +150,12 @@ preflight() {
 }
 
 snapshot() {
-	local node="$1" role="$2" tag="$3"
+	local node="$1" role="$2" tag="$3" dev="$4"
 	{
 		printf '### node=%s tag=%s t=%s\n' "$node" "$tag" "$(date -Is)"
 		# The expansions below intentionally execute on the remote host.
 		# shellcheck disable=SC2016
-		ssh_node "$node" 'MOD='"$MODULE"'; echo "@@@HOST@@@"; printf "hostname=%s boot_id=%s uptime=%s kernel=%s loaded_version=%s loaded_src=%s\n" "$(hostname)" "$(cat /proc/sys/kernel/random/boot_id)" "$(cut -d. -f1 /proc/uptime)" "$(uname -r)" "$(modinfo -F version "$MOD" 2>/dev/null || echo none)" "$(cat /sys/module/"$MOD"/srcversion 2>/dev/null || echo none)"; echo "@@@PARAMS@@@"; for p in /sys/module/"$MOD"/parameters/*; do [ -r "$p" ] && printf "%s=%s\n" "${p##*/}" "$(cat "$p")"; done; echo "@@@SUMMARY@@@"; sudo -n cat /sys/kernel/debug/"$MOD"/summary 2>/dev/null || true; echo "@@@PEERS@@@"; sudo -n cat /sys/kernel/debug/"$MOD"/peers 2>/dev/null || true; echo "@@@DMESG@@@"; sudo -n dmesg | grep -E "tbframe|tbrxe" | tail -30 || true' 30
+		ssh_node "$node" 'MOD='"$MODULE"' DEV='"$dev"'; echo "@@@HOST@@@"; printf "hostname=%s boot_id=%s uptime=%s kernel=%s loaded_version=%s loaded_src=%s\n" "$(hostname)" "$(cat /proc/sys/kernel/random/boot_id)" "$(cut -d. -f1 /proc/uptime)" "$(uname -r)" "$(modinfo -F version "$MOD" 2>/dev/null || echo none)" "$(cat /sys/module/"$MOD"/srcversion 2>/dev/null || echo none)"; echo "@@@PARAMS@@@"; for p in /sys/module/"$MOD"/parameters/*; do [ -r "$p" ] && printf "%s=%s\n" "${p##*/}" "$(cat "$p")"; done; echo "@@@SUMMARY@@@"; sudo -n cat /sys/kernel/debug/"$MOD"/summary 2>/dev/null || true; echo "@@@PEERS@@@"; sudo -n cat /sys/kernel/debug/"$MOD"/peers 2>/dev/null || true; echo "@@@QP@@@"; rdma resource show qp link "$DEV/1" 2>/dev/null || true; echo "@@@STAT@@@"; rdma statistic show link "$DEV/1" 2>/dev/null || true; echo "@@@DMESG@@@"; sudo -n dmesg | grep -E "tbframe|tbrxe" | tail -30 || true' 30
 	} >> "$OUTDIR/counters-$role.txt" 2>&1
 }
 
@@ -263,7 +263,7 @@ fi
 
 printf '== %s(%s) <- %s(%s) bootstrap=%s size=%s tx_depth=%s qps=%s\n' \
 	"$SERVER" "$SDEV" "$CLIENT" "$CDEV" "$oob" "$SIZE" "$TX_DEPTH" "$QPS"
-if ! snapshot "$SERVER" server pre || ! snapshot "$CLIENT" client pre; then
+if ! snapshot "$SERVER" server pre "$SDEV" || ! snapshot "$CLIENT" client pre "$CDEV"; then
 	printf 'ERROR: initial state capture failed\n' >&2
 	exit 1
 fi
@@ -339,8 +339,8 @@ for round in $(seq 1 "$ROUNDS"); do
 	if [[ "$client_rc" -ne 0 || "$server_rc" != 0 ]]; then
 		printf '!! round %s did not complete (client=%s server=%s elapsed=%ss) -- capturing live failure state\n' \
 			"$round" "$client_rc" "$server_rc" "$elapsed"
-		snapshot "$SERVER" server "hang-round$round" || true
-		snapshot "$CLIENT" client "hang-round$round" || true
+		snapshot "$SERVER" server "hang-round$round" "$SDEV" || true
+		snapshot "$CLIENT" client "hang-round$round" "$CDEV" || true
 		for role in server client; do
 			if [[ "$role" == server ]]; then node="$SERVER"; else node="$CLIENT"; fi
 			ssh_node "$node" 'echo "## dmesg"; sudo -n dmesg | tail -200; echo "## blocked processes"; ps -eo pid,stat,wchan:32,comm | grep -E "ib_write_bw|tbv|D " || true' 40 \
@@ -358,8 +358,8 @@ done
 cleanup_all
 trap - EXIT INT TERM HUP
 post_capture_ok=1
-snapshot "$SERVER" server post || post_capture_ok=0
-snapshot "$CLIENT" client post || post_capture_ok=0
+snapshot "$SERVER" server post "$SDEV" || post_capture_ok=0
+snapshot "$CLIENT" client post "$CDEV" || post_capture_ok=0
 
 if [[ "$failed_round" -ne 0 ]]; then
 	printf '== FAILURE reproduced at round %s; captures in %s\n' "$failed_round" "$OUTDIR"

@@ -40,6 +40,7 @@
 #define XDOMAIN_UUID_BACKOFF_MAX_SHIFT		6
 #define XDOMAIN_QUARANTINE_RETRY_MS		1000
 #define XDOMAIN_QUARANTINE_PATH_RETRIES		3
+#define XDOMAIN_CONTROL_RX_EVIDENCE_MS		(5 * 60 * 1000)
 
 enum {
 	XDOMAIN_STATE_INIT,
@@ -1210,6 +1211,39 @@ static void start_handshake(struct tb_xdomain *xd)
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
 }
 
+static void
+tb_xdomain_control_event(struct tb_xdomain *xd,
+			 enum tb_xdomain_control_event event)
+{
+	mutex_lock(&xd->lock);
+	if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+		xd->control_rx_jiffies = jiffies;
+	xd->control_health_state = tb_xdomain_control_next(
+		xd->control_health_state, event);
+	mutex_unlock(&xd->lock);
+}
+
+static bool tb_xdomain_control_recovery_required(struct tb_xdomain *xd)
+{
+	bool recent, required = false;
+
+	mutex_lock(&xd->lock);
+	recent = xd->control_rx_jiffies &&
+		time_before(jiffies, xd->control_rx_jiffies +
+			    msecs_to_jiffies(XDOMAIN_CONTROL_RX_EVIDENCE_MS));
+	if (recent && xd->control_health_state ==
+		      TB_XDOMAIN_CONTROL_PEER_ACTIVE) {
+		xd->control_health_state = tb_xdomain_control_next(
+			xd->control_health_state,
+			TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+		required = xd->control_health_state ==
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED;
+	}
+	mutex_unlock(&xd->lock);
+
+	return required;
+}
+
 /* Can be called from state_work */
 static void __stop_handshake(struct tb_xdomain *xd)
 {
@@ -1223,6 +1257,7 @@ static void __stop_handshake(struct tb_xdomain *xd)
 	WRITE_ONCE(xd->properties_changed_retries, TB_XDOMAIN_ANNOUNCE_STOPPED);
 	cancel_delayed_work_sync(&xd->properties_changed_work);
 	xd->state_retries = 0;
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_STOPPED);
 }
 
 static void stop_handshake(struct tb_xdomain *xd)
@@ -2155,6 +2190,7 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 	}
 
 	enumerate_services(xd);
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_PEER_PROVEN);
 	return 0;
 
 err_free_dir:
@@ -2716,6 +2752,28 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		 */
 		if (failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
 			WRITE_ONCE(xd->properties_changed_retries, failures + 1);
+
+		/*
+		 * Do not mistake an absent peer for failed hardware. Recovery is
+		 * eligible only after a previously correlated inbound service
+		 * request proves this peer is still active, while announcements in
+		 * the opposite direction have reached saturated backoff.
+		 */
+		if (failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT &&
+		    tb_xdomain_control_recovery_required(xd)) {
+			int recovery_ret;
+
+			dev_err(&xd->dev,
+				"one-way XDomain control failure persisted at saturated backoff; requesting controller recovery\n");
+			recovery_ret = tb_nhi_request_control_recovery(xd->tb->nhi,
+								xd->route);
+			if (recovery_ret && recovery_ret != -EALREADY)
+				dev_err(&xd->dev,
+					"failed to dispatch control-path recovery: %d\n",
+					recovery_ret);
+			tb_xdomain_control_event(
+				xd, TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
+		}
 		queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
 				   msecs_to_jiffies(tb_xdomain_announce_delay_ms(failures)));
 		return;
@@ -2724,6 +2782,8 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 	if (READ_ONCE(xd->properties_changed_retries) !=
 	    TB_XDOMAIN_ANNOUNCE_STOPPED)
 		WRITE_ONCE(xd->properties_changed_retries, 0);
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED);
+	tb_nhi_runtime_control_path_proven(xd->tb->nhi, xd->route);
 }
 
 static ssize_t device_show(struct device *dev, struct device_attribute *attr,
@@ -4391,6 +4451,9 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 	route = ((u64)hdr->xd_hdr.route_hi << 32 | hdr->xd_hdr.route_lo) &
 		~BIT_ULL(63);
 	source_xd = tb_xdomain_find_by_route_locked(tb, route);
+	if (source_xd)
+		tb_xdomain_control_event(source_xd,
+					 TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
 
 	/*
 	 * The dispatch lock is held across the whole walk including the

@@ -131,6 +131,10 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
+
+	for (i = 0; i < 2 * (TBFRAME_PROBE_RETRIES + 4); i++)
+		tbframe_link_session_step(fx->link);
 	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
 }
 
@@ -156,9 +160,56 @@ static void tbframe_datapath_e2e_failure_escalates_with_moving_consumer(struct k
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
+
+	for (i = 0; i < 2 * (TBFRAME_PROBE_RETRIES + 4); i++)
+		tbframe_link_session_step(fx->link);
 	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
-	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 3u);
-	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases, 2u);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs,
+			TBFRAME_AMBIGUOUS_RECOVERY_FAILURES + 1u);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases,
+			TBFRAME_AMBIGUOUS_RECOVERY_FAILURES);
+}
+
+/*
+ * A receive-only proof must not hide a failed local transmitter.  Descriptor
+ * completion only proves that the local NHI consumed a buffer; the peer must
+ * authenticate receipt before the session is published.  Once a full local
+ * rebuild has failed, recovery belongs to this transmitter's controller.
+ */
+static void tbframe_datapath_one_way_local_tx_failure_recovers_local(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	fx->mock.local_tx_dead = true;
+
+	for (i = 0; i < 2 * TBFRAME_PROBE_RETRIES + 6; i++)
+		tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_GT(test, fx->link->data_rx, 0ull);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+}
+
+/*
+ * The mirror-image failure is not evidence against the local transmitter.
+ * The peer that still receives our probes has the directional evidence needed
+ * to recover itself; this receiver must rebuild without resetting the wrong
+ * controller.
+ */
+static void tbframe_datapath_one_way_peer_tx_failure_avoids_local_recovery(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	fx->mock.peer_tx_dead = true;
+
+	for (i = 0; i < 2 * TBFRAME_PROBE_RETRIES + 6; i++)
+		tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 }
 
 /*
@@ -235,8 +286,9 @@ static void tbframe_datapath_sparse_backlog_gets_drain_grace(struct kunit *test)
 		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
 
 		KUNIT_ASSERT_NOT_NULL(test, f);
-		tbframe_wire_put_le64(f->frame.data,
-				      fx->mock.peer.session_cookie ^ BIT_ULL(23));
+		tbframe_mock_fill_keepalive(
+			f, fx->mock.peer.session_cookie ^ BIT_ULL(23),
+			cycle + 1, 0, 0);
 		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 					 TBFRAME_PDF_KEEPALIVE, false);
 		tbframe_link_session_step(fx->link);
@@ -268,8 +320,9 @@ static void tbframe_datapath_persistent_mismatch_revalidates_same_peer(struct ku
 		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
 
 		KUNIT_ASSERT_NOT_NULL(test, f);
-		tbframe_wire_put_le64(f->frame.data,
-				      fx->mock.peer.session_cookie ^ BIT_ULL(31));
+		tbframe_mock_fill_keepalive(
+			f, fx->mock.peer.session_cookie ^ BIT_ULL(31),
+			i + 1, 0, 0);
 		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 					 TBFRAME_PDF_KEEPALIVE, false);
 		tbframe_link_session_step(fx->link);
@@ -297,8 +350,8 @@ static void tbframe_datapath_persistent_mismatch_revalidates_changed_peer(struct
 		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
 
 		KUNIT_ASSERT_NOT_NULL(test, f);
-		tbframe_wire_put_le64(f->frame.data,
-				      fx->mock.peer.session_cookie);
+		tbframe_mock_fill_keepalive(f, fx->mock.peer.session_cookie,
+					 i + 1, 0, 0);
 		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 					 TBFRAME_PDF_KEEPALIVE, false);
 		tbframe_link_session_step(fx->link);
@@ -325,8 +378,9 @@ static void tbframe_datapath_unconfirmed_cookie_cannot_defer_recovery(struct kun
 		struct tbframe_frame_priv *f = tbframe_mock_pop_rx(fx);
 
 		KUNIT_ASSERT_NOT_NULL(test, f);
-		tbframe_wire_put_le64(f->frame.data,
-				      fx->mock.peer.session_cookie ^ BIT_ULL(0));
+		tbframe_mock_fill_keepalive(
+			f, fx->mock.peer.session_cookie ^ BIT_ULL(0),
+			i + 1, 0, 0);
 		tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 					 TBFRAME_PDF_KEEPALIVE, false);
 		tbframe_link_session_step(fx->link);
@@ -436,8 +490,8 @@ static void tbframe_datapath_wrong_cookie_cannot_prove(struct kunit *test)
 	f = tbframe_mock_pop_rx(fx);
 	KUNIT_ASSERT_NOT_NULL(test, f);
 
-	tbframe_wire_put_le64(f->frame.data,
-			      fx->mock.peer.session_cookie ^ BIT_ULL(0));
+	tbframe_mock_fill_keepalive(
+		f, fx->mock.peer.session_cookie ^ BIT_ULL(0), 1, 0, 0);
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	tbframe_link_session_step(fx->link);
@@ -494,6 +548,24 @@ static void tbframe_datapath_healthy_survives_verify(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, 0u, fx->client.down_count);
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+/* An established session must also notice that peer acknowledgements stop. */
+static void tbframe_datapath_tx_silence_after_up_tears_down(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	unsigned int i;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.local_tx_dead = true;
+
+	for (i = 0; i < TBFRAME_DATA_SILENCE_TICKS + 1; i++)
+		tbframe_link_verify_step(fx->link);
+
+	KUNIT_EXPECT_TRUE(test, fx->link->needs_down);
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_DOWN_VERIFY,
+			fx->link->down_reason);
+	KUNIT_EXPECT_FALSE(test, fx->link->data_tx_proven);
 }
 
 /*
@@ -602,7 +674,9 @@ static void tbframe_datapath_old_descriptor_cannot_prove_new_session(struct kuni
 	tbframe_link_session_step(fx->link);
 	tbframe_link_session_step(fx->link);
 
-	tbframe_wire_put_le64(old->frame.data, fx->mock.peer.session_cookie);
+	tbframe_mock_fill_keepalive(old, fx->mock.peer.session_cookie,
+				1, fx->link->local_cookie,
+				fx->link->keepalive_tx_seq);
 	tbframe_core_rx_complete(old, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	tbframe_link_session_step(fx->link);
@@ -616,6 +690,8 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
 	KUNIT_CASE(tbframe_datapath_e2e_failure_escalates_with_moving_consumer),
+	KUNIT_CASE(tbframe_datapath_one_way_local_tx_failure_recovers_local),
+	KUNIT_CASE(tbframe_datapath_one_way_peer_tx_failure_avoids_local_recovery),
 	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_forgotten_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_sparse_backlog_gets_drain_grace),
@@ -630,6 +706,7 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_wrong_cookie_cannot_prove),
 	KUNIT_CASE(tbframe_datapath_silence_after_up_tears_down),
 	KUNIT_CASE(tbframe_datapath_healthy_survives_verify),
+	KUNIT_CASE(tbframe_datapath_tx_silence_after_up_tears_down),
 	KUNIT_CASE(tbframe_datapath_proof_does_not_survive_a_session),
 	KUNIT_CASE(tbframe_datapath_late_frame_cannot_prove_next_session),
 	KUNIT_CASE(tbframe_datapath_old_descriptor_cannot_prove_new_session),

@@ -184,8 +184,26 @@ static bool tbframe_hello_matches(const struct tbframe_wire_hello *a,
 	       a->session_cookie == b->session_cookie;
 }
 
+static u32 tbframe_link_supported_caps(const struct tbframe *tf)
+{
+	u32 capabilities = 0;
+
+	if (tf->e2e)
+		capabilities |= TBFRAME_WIRE_CAP_E2E;
+	if (tf->keepalive)
+		capabilities |= TBFRAME_WIRE_CAP_KEEPALIVE |
+			TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
+	return capabilities;
+}
+
+/*
+ * Keep capability offer and selection as separate protocol states. HELLO may
+ * offer every locally supported bit; HELLO_ACK and all later messages carry
+ * only the intersection selected for this session.
+ */
 static void tbframe_link_fill_local_hello(struct tbframe_link *link,
-					  struct tbframe_wire_hello *hello)
+					  struct tbframe_wire_hello *hello,
+					  u32 peer_caps)
 {
 	struct tbframe *tf = link->tf;
 
@@ -193,12 +211,39 @@ static void tbframe_link_fill_local_hello(struct tbframe_link *link,
 	hello->proto_version = TBFRAME_WIRE_VERSION;
 	hello->transmit_hopid = link->local_hopid;
 	hello->rx_ring_entries = tf->ring_entries;
-	if (tf->e2e)
-		hello->capabilities |= TBFRAME_WIRE_CAP_E2E;
-	if (tf->keepalive)
-		hello->capabilities |= TBFRAME_WIRE_CAP_KEEPALIVE;
+	hello->capabilities = tbframe_link_supported_caps(tf) & peer_caps;
 	hello->gid_eui64 = link->local_gid_eui64;
 	hello->session_cookie = link->local_cookie;
+}
+
+static u32 tbframe_link_hello_offer_mask(struct tbframe_link *link)
+{
+	unsigned long flags;
+	u32 peer_caps = U32_MAX;
+
+	/*
+	 * A crossed peer HELLO is already an authoritative offer. Restrict a
+	 * retry to that intersection so deployed responders which compare their
+	 * requester and responder snapshots can converge after one crossed offer.
+	 */
+	spin_lock_irqsave(&link->lock, flags);
+	if (link->hello_selection_pending)
+		peer_caps = link->hello_selection_caps;
+	else if (link->hello_responder.seen)
+		peer_caps = link->hello_responder.peer.capabilities;
+	spin_unlock_irqrestore(&link->lock, flags);
+	return peer_caps;
+}
+
+static u32 tbframe_link_selected_peer_caps(struct tbframe_link *link)
+{
+	unsigned long flags;
+	u32 peer_caps;
+
+	spin_lock_irqsave(&link->lock, flags);
+	peer_caps = link->remote_caps;
+	spin_unlock_irqrestore(&link->lock, flags);
+	return peer_caps;
 }
 
 /*
@@ -220,7 +265,8 @@ static void tbframe_link_reannounce(struct tbframe_link *link)
 }
 
 static int tbframe_link_query_hello(struct tbframe_link *link,
-				    struct tbframe_wire_hello *remote)
+				    struct tbframe_wire_hello *remote,
+				    u32 *offered_caps)
 {
 	u8 req[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	u8 resp[TBFRAME_WIRE_HELLO_MSG_SIZE];
@@ -229,7 +275,10 @@ static int tbframe_link_query_hello(struct tbframe_link *link,
 	u32 request_seq;
 	int ret;
 
-	tbframe_link_fill_local_hello(link, &local);
+	tbframe_link_fill_local_hello(link, &local,
+				      tbframe_link_hello_offer_mask(link));
+	if (offered_caps)
+		*offered_caps = local.capabilities;
 	request_seq = tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
 				       TBFRAME_WIRE_OP_HELLO, request_seq,
@@ -264,11 +313,32 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 {
 	struct tbframe_wire_hello remote;
 	unsigned long flags;
+	u32 offered_caps, selected_caps;
+	unsigned int round;
 	int ret;
 
-	ret = tbframe_link_query_hello(link, &remote);
-	if (ret)
-		return ret;
+	for (round = 0; round < 2; round++) {
+		ret = tbframe_link_query_hello(link, &remote, &offered_caps);
+		if (ret)
+			return ret;
+		selected_caps = tbframe_link_supported_caps(link->tf) &
+			remote.capabilities;
+		if (offered_caps == selected_caps)
+			break;
+
+		/*
+		 * Confirm a strict downgrade before READY. This bounded second
+		 * HELLO makes both requester and responder snapshots name the
+		 * selected wire layout, including when only one endpoint treats
+		 * HELLO_ACK as a selection rather than another offer.
+		 */
+		spin_lock_irqsave(&link->lock, flags);
+		link->hello_selection_pending = true;
+		link->hello_selection_caps = selected_caps;
+		spin_unlock_irqrestore(&link->lock, flags);
+	}
+	if (offered_caps != selected_caps)
+		return -EPROTO;
 
 	spin_lock_irqsave(&link->lock, flags);
 	/*
@@ -287,6 +357,8 @@ static int tbframe_link_hello_once(struct tbframe_link *link)
 	}
 	tbframe_link_apply_remote_locked(link, &remote);
 	link->hello_done = true;
+	link->hello_selection_pending = false;
+	link->hello_selection_caps = 0;
 	if (link->ready_responder.state != TBFRAME_READY_RESPONDER_WAITING) {
 		if (tbframe_link_remote_matches_locked(
 				link, &link->ready_responder.peer))
@@ -317,7 +389,7 @@ static void tbframe_link_revalidate_stale_data(struct tbframe_link *link)
 	bool changed = false;
 	int ret;
 
-	ret = tbframe_link_query_hello(link, &remote);
+	ret = tbframe_link_query_hello(link, &remote, NULL);
 	spin_lock_irqsave(&link->lock, flags);
 	if (ret) {
 		if (!link->needs_down) {
@@ -463,9 +535,16 @@ static int tbframe_link_bring_up(struct tbframe_link *link)
 	link->data_generation++;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
+	link->data_rx_proven = false;
+	link->data_tx_proven = false;
+	link->keepalive_tx_seq = 0;
+	link->keepalive_tx_acked = 0;
+	link->keepalive_tx_ack_mark = 0;
+	link->keepalive_peer_seq = 0;
 	link->stale_drain_active = false;
 	link->stale_drain_budget = 0;
 	link->silent_ticks = 0;
+	link->tx_silent_ticks = 0;
 	spin_unlock_irqrestore(&link->lock, flags);
 
 	ret = link->ops->alloc_rings(link->hw, tf->ring_entries,
@@ -594,15 +673,34 @@ err_free_rings:
  */
 static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
 {
+	struct tbframe_wire_keepalive keepalive;
 	struct tbframe_frame *f;
+	unsigned long flags;
+	u16 keepalive_len;
+	bool directional;
 	int ret;
 
-	ret = __tbframe_alloc_frame(link, TBFRAME_KEEPALIVE_LEN, true, pre_up,
+	spin_lock_irqsave(&link->lock, flags);
+	directional = link->remote_caps & TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
+	spin_unlock_irqrestore(&link->lock, flags);
+	keepalive_len = directional ? TBFRAME_KEEPALIVE_LEN :
+		TBFRAME_WIRE_KEEPALIVE_LEGACY_SIZE;
+	ret = __tbframe_alloc_frame(link, keepalive_len, true, pre_up,
 				    &f);
 	if (ret)
 		return ret;
 	f->pdf = TBFRAME_PDF_KEEPALIVE;
-	tbframe_wire_put_le64(f->data, link->local_cookie);
+	spin_lock_irqsave(&link->lock, flags);
+	keepalive.session_cookie = link->local_cookie;
+	keepalive.sequence = ++link->keepalive_tx_seq;
+	keepalive.ack_cookie = link->keepalive_peer_seq ?
+		link->remote_cookie : 0;
+	keepalive.ack_sequence = link->keepalive_peer_seq;
+	spin_unlock_irqrestore(&link->lock, flags);
+	if (directional)
+		tbframe_wire_build_keepalive(f->data, &keepalive);
+	else
+		tbframe_wire_put_le64(f->data, keepalive.session_cookie);
 	ret = __tbframe_xmit(link, f, pre_up);
 	if (ret)
 		tbframe_frame_free(link, f);
@@ -660,7 +758,8 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	struct tb_ring_snapshot first, last;
 	unsigned long flags;
 	unsigned int attempts, failures;
-	bool sampled, proven, stale_draining, stale_expired, warned;
+	bool sampled, proven, rx_proven, tx_proven;
+	bool stale_draining, stale_expired, warned;
 	u32 remote_caps;
 
 	spin_lock_irqsave(&link->lock, flags);
@@ -728,6 +827,8 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	spin_lock_irqsave(&link->lock, flags);
 	link->probe_attempts = 0;
 	failures = ++link->probe_failures;
+	rx_proven = link->data_rx_proven;
+	tx_proven = link->data_tx_proven;
 	link->data_proof_unavailable_warned = false;
 	if (!link->needs_down) {
 		link->needs_down = true;
@@ -735,15 +836,23 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 		tbframe_link_kick_locked(link, 0);
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
-	if (failures >= 2 && sampled &&
+	/*
+	 * Receive proof plus a missing authenticated acknowledgement identifies
+	 * the local transmit direction.  Escalate that endpoint promptly.  With
+	 * no receive evidence the fault is ambiguous, so delay local recovery and
+	 * let a peer that can still receive identify its own transmitter first.
+	 */
+	if (failures >= 2 &&
+	    ((rx_proven && !tx_proven) ||
+	     failures >= TBFRAME_AMBIGUOUS_RECOVERY_FAILURES) && sampled &&
 	    link->ops->report_data_path_failure) {
 		int ret;
 
 		ret = link->ops->report_data_path_failure(link->hw, &first,
 							  &last, true);
 		if (!ret)
-			pr_warn("%s: end-to-end data remained unproven after a complete ring/path rebuild; requested bounded controller recovery\n",
-				link->name);
+			pr_warn("%s: directional data proof failed after session rebuilds (rx_proven=%u tx_proven=%u); requested bounded local controller recovery\n",
+				link->name, rx_proven, tx_proven);
 	}
 	/*
 	 * Report the counters, not just the verdict. rx_bad moving means the
@@ -751,11 +860,13 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	 * connector fault. Everything flat means nothing arrived at all. Both
 	 * present as "dead" and the remedies are completely different.
 	 */
-	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but no authenticated keepalive crossed the data ring in %u probes over %u ms; generation=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; refusing to declare the link up and rebuilding the session hardware\n",
+	pr_err("%s: DATA PATH DEAD: paths enabled local_hopid=%d remote_hopid=%u and the control plane is healthy, but bidirectional keepalive proof did not complete in %u probes over %u ms; generation=%llu rx_proven=%u tx_proven=%u tx_seq=%llu tx_acked=%llu peer_seq=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; refusing to declare the link up and rebuilding the session hardware\n",
 	       link->name, link->local_hopid, link->active_remote_hopid,
 	       TBFRAME_PROBE_RETRIES,
 	       TBFRAME_PROBE_RETRIES * TBFRAME_PROBE_INTERVAL_MS,
-	       link->data_generation, link->ring_posted,
+	       link->data_generation, rx_proven, tx_proven,
+	       link->keepalive_tx_seq, link->keepalive_tx_acked,
+	       link->keepalive_peer_seq, link->ring_posted,
 	       link->data_tx_submitted,
 	       link->data_tx_done, link->data_tx_canceled,
 	       link->data_tx_ring_err, link->data_rx_bad,
@@ -775,7 +886,8 @@ static int tbframe_link_ready_once(struct tbframe_link *link)
 	u32 request_seq;
 	int ret;
 
-	tbframe_link_fill_local_hello(link, &local);
+	tbframe_link_fill_local_hello(link, &local,
+				      tbframe_link_selected_peer_caps(link));
 	/* Deployed responders retain READY correlation in eight bits. */
 	request_seq = (u8)tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
@@ -867,7 +979,8 @@ static int tbframe_link_flush_ready_response(struct tbframe_link *link)
 	xdomain_sequence = link->ready_responder.xdomain_sequence;
 	spin_unlock_irqrestore(&link->lock, flags);
 
-	tbframe_link_fill_local_hello(link, &local);
+	tbframe_link_fill_local_hello(link, &local,
+				      tbframe_link_selected_peer_caps(link));
 	ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
 				       TBFRAME_WIRE_OP_READY_ACK, seq,
 				       link->route, xdomain_sequence);
@@ -909,7 +1022,8 @@ static void tbframe_link_bye(struct tbframe_link *link)
 	u32 request_seq;
 	int ret;
 
-	tbframe_link_fill_local_hello(link, &local);
+	tbframe_link_fill_local_hello(link, &local,
+				      tbframe_link_selected_peer_caps(link));
 	request_seq = tbframe_link_next_request_seq(link);
 	ret = tbframe_wire_build_hello(req, sizeof(req), &local,
 				       TBFRAME_WIRE_OP_BYE, request_seq,
@@ -1060,6 +1174,8 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	link->needs_down = false;
 	link->tx_blocked = false;
 	link->hello_attempts = 0;
+	link->hello_selection_pending = false;
+	link->hello_selection_caps = 0;
 	/*
 	 * The proof is per-session: the next session gets restarted rings, a
 	 * fresh in-HopID and freshly programmed hop entries, so evidence from
@@ -1069,9 +1185,16 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	link->data_proof_unavailable_warned = false;
 	link->data_rx = 0;
 	link->data_rx_tick_mark = 0;
+	link->data_rx_proven = false;
+	link->data_tx_proven = false;
+	link->keepalive_tx_seq = 0;
+	link->keepalive_tx_acked = 0;
+	link->keepalive_tx_ack_mark = 0;
+	link->keepalive_peer_seq = 0;
 	link->stale_drain_active = false;
 	link->stale_drain_budget = 0;
 	link->silent_ticks = 0;
+	link->tx_silent_ticks = 0;
 	link->probe_attempts = 0;
 	link->data_tx_done_mark = link->data_tx_done;
 	link->controller_proof_reported = false;
@@ -1476,8 +1599,10 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 		return;
 
 	if (tf->keepalive && (remote_caps & TBFRAME_WIRE_CAP_KEEPALIVE)) {
-		bool silent;
-		u64 seen;
+		bool rx_silent, tx_silent;
+		bool directional = remote_caps &
+			TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
+		u64 acked, seen;
 
 		/* Charged to the control reserve; skip a tick when full. */
 		tbframe_link_send_keepalive(link, false);
@@ -1485,35 +1610,52 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 		/*
 		 * Level-triggered dead-path detector for an ESTABLISHED
 		 * session. With keepalive negotiated both ends emit a frame
-		 * per verify interval, so a run of intervals in which nothing
-		 * at all arrived is conclusive evidence that the bulk path is
-		 * dead -- the one condition paths_active() above cannot see,
-		 * because the hop entries of a dead path still read back
-		 * enabled. Without this, the 2026-08-23 dead links would have
-		 * stayed "healthy" until an operator ran ib_send_bw.
+		 * per verify interval. Track received frames and authenticated
+		 * acknowledgements separately: receive progress cannot prove the
+		 * local transmit direction, and local descriptor completion cannot
+		 * prove that a frame reached the peer.
 		 */
 		spin_lock_irqsave(&link->lock, flags);
 		seen = link->data_rx;
+		acked = link->keepalive_tx_acked;
 		if (seen != link->data_rx_tick_mark) {
 			link->data_rx_tick_mark = seen;
 			link->silent_ticks = 0;
-			silent = false;
+			rx_silent = false;
 		} else {
-			silent = ++link->silent_ticks >=
+			rx_silent = ++link->silent_ticks >=
 				 TBFRAME_DATA_SILENCE_TICKS;
 		}
-		if (silent && link->state == TBFRAME_STATE_UP &&
+		if (!directional) {
+			link->tx_silent_ticks = 0;
+			tx_silent = false;
+		} else if (acked != link->keepalive_tx_ack_mark) {
+			link->keepalive_tx_ack_mark = acked;
+			link->tx_silent_ticks = 0;
+			tx_silent = false;
+		} else {
+			tx_silent = ++link->tx_silent_ticks >=
+				 TBFRAME_DATA_SILENCE_TICKS;
+		}
+		if ((rx_silent || tx_silent) &&
+		    link->state == TBFRAME_STATE_UP &&
 		    !link->needs_down) {
 			link->needs_down = true;
 			link->down_reason = TBFRAME_DOWN_VERIFY;
 			link->data_proven = false;
+			if (rx_silent)
+				link->data_rx_proven = false;
+			if (tx_silent)
+				link->data_tx_proven = false;
 			link->silent_ticks = 0;
+			link->tx_silent_ticks = 0;
 			tbframe_link_kick_locked(link, 0);
 		} else {
-			silent = false;
+			rx_silent = false;
+			tx_silent = false;
 		}
 		spin_unlock_irqrestore(&link->lock, flags);
-		if (silent) {
+		if (rx_silent || tx_silent) {
 			/*
 			 * Counters read outside the lock on purpose: they are
 			 * monotonic u64 diagnostics on a 64-bit target, so a
@@ -1521,10 +1663,13 @@ void tbframe_link_verify_step(struct tbframe_link *link)
 			 * again here just to print would be the only reason
 			 * to reacquire it.
 			 */
-			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for %u verify intervals (%u ms) while keepalives were being sent; generation=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; tearing the session down\n",
+			pr_err("%s: DATA PATH DEAD: hop entries still read back enabled, but directional keepalive progress stopped for %u verify intervals (%u ms); rx_silent=%u tx_silent=%u generation=%llu tx_seq=%llu tx_acked=%llu peer_seq=%llu ring_posted=%u tx_sub=%llu tx_done=%llu tx_canceled=%llu tx_ringerr=%llu rx_bad=%llu rx_oversize=%llu rx_stale=%llu rx_bad_cookie=%llu; tearing the session down\n",
 			       link->name, TBFRAME_DATA_SILENCE_TICKS,
 			       TBFRAME_DATA_SILENCE_TICKS * tf->verify_ms,
-			       link->data_generation, link->ring_posted,
+			       rx_silent, tx_silent, link->data_generation,
+			       link->keepalive_tx_seq,
+			       link->keepalive_tx_acked,
+			       link->keepalive_peer_seq, link->ring_posted,
 			       link->data_tx_submitted,
 			       link->data_tx_done, link->data_tx_canceled,
 			       link->data_tx_ring_err, link->data_rx_bad,
@@ -1708,7 +1853,8 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		tbframe_link_kick_locked(link, 0);
 		spin_unlock_irqrestore(&link->lock, flags);
 
-		tbframe_link_fill_local_hello(link, &local);
+		tbframe_link_fill_local_hello(link, &local,
+					      remote.capabilities);
 		ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
 					       TBFRAME_WIRE_OP_HELLO_ACK,
 					       info.seq, link->route,
@@ -1784,7 +1930,8 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		if (!quiesced)
 			return 1;
 
-		tbframe_link_fill_local_hello(link, &local);
+		tbframe_link_fill_local_hello(link, &local,
+					      remote.capabilities);
 		ret = tbframe_wire_build_hello(reply, sizeof(reply), &local,
 					       TBFRAME_WIRE_OP_BYE_ACK,
 					       info.seq, link->route,
@@ -2005,21 +2152,32 @@ static void tbframe_tx_released_workfn(struct work_struct *work)
 void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			      u16 len, u8 pdf, bool bad)
 {
+	struct tbframe_wire_keepalive keepalive = {};
 	struct tbframe_link *link = f->link;
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
 	u64 cookie = 0, expected_cookie = 0, local_cookie = 0, generation = 0;
-	bool controller_proven = false, current_generation, proof, up;
+	bool controller_proven = false, current_generation, directional, proof, up;
 	bool cookie_mismatch = false;
 
 	if (canceled) {
 		tbframe_frame_putback_rx(f);
 		return;
 	}
+	directional = READ_ONCE(link->remote_caps) &
+		TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
 	proof = !bad && pdf == TBFRAME_PDF_KEEPALIVE &&
-		len == TBFRAME_KEEPALIVE_LEN;
-	if (proof)
-		cookie = tbframe_wire_get_le64(f->frame.data);
+		len == (directional ? TBFRAME_KEEPALIVE_LEN :
+		       TBFRAME_WIRE_KEEPALIVE_LEGACY_SIZE);
+	if (proof) {
+		if (directional) {
+			tbframe_wire_parse_keepalive(f->frame.data, &keepalive);
+			cookie = keepalive.session_cookie;
+			proof = keepalive.sequence != 0;
+		} else {
+			cookie = tbframe_wire_get_le64(f->frame.data);
+		}
+	}
 
 	spin_lock_irqsave(&link->lock, flags);
 	/*
@@ -2038,11 +2196,29 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 		 * that some descriptor completed; it does not prove peer identity.
 		 */
 		if (proof && cookie == link->remote_cookie &&
-		    link->rings_up && link->paths_enabled &&
-		    !link->data_proven) {
-			link->data_proven = true;
-			link->probe_attempts = 0;
-			link->probe_failures = 0;
+		    link->rings_up && link->paths_enabled) {
+			link->data_rx_proven = true;
+			if (!directional) {
+				/* Deployed v3 proof semantics during a rolling update. */
+				link->data_tx_proven = true;
+			} else if (keepalive.sequence > link->keepalive_peer_seq) {
+				link->keepalive_peer_seq = keepalive.sequence;
+			}
+			if (directional &&
+			    keepalive.ack_cookie == link->local_cookie &&
+			    keepalive.ack_sequence &&
+			    keepalive.ack_sequence <= link->keepalive_tx_seq) {
+				link->data_tx_proven = true;
+				link->keepalive_tx_acked = max_t(u64,
+					link->keepalive_tx_acked,
+					keepalive.ack_sequence);
+			}
+			if (link->data_rx_proven && link->data_tx_proven &&
+			    !link->data_proven) {
+				link->data_proven = true;
+				link->probe_attempts = 0;
+				link->probe_failures = 0;
+			}
 		} else if (proof && cookie != link->remote_cookie) {
 			link->data_rx_bad_cookie++;
 			if (cookie == link->previous_remote_cookie)

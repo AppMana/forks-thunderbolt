@@ -534,12 +534,21 @@ static void selfloop_send_keepalive(struct kunit *test,
 				    struct selfloop_fixture *fx, int from)
 {
 	struct tbframe_link *link = fx->link[from];
+	struct tbframe_wire_keepalive keepalive;
 	struct tbframe_frame *f;
+	unsigned long flags;
 
 	KUNIT_ASSERT_EQ(test, 0,
 			tbframe_alloc_frame(link, TBFRAME_KEEPALIVE_LEN, true,
 					    &f));
-	tbframe_wire_put_le64(f->data, link->local_cookie);
+	spin_lock_irqsave(&link->lock, flags);
+	keepalive.session_cookie = link->local_cookie;
+	keepalive.sequence = ++link->keepalive_tx_seq;
+	keepalive.ack_cookie = link->keepalive_peer_seq ?
+		link->remote_cookie : 0;
+	keepalive.ack_sequence = link->keepalive_peer_seq;
+	spin_unlock_irqrestore(&link->lock, flags);
+	tbframe_wire_build_keepalive(f->data, &keepalive);
 	f->len = TBFRAME_KEEPALIVE_LEN;
 	f->pdf = TBFRAME_PDF_KEEPALIVE;
 	KUNIT_ASSERT_EQ(test, 0, tbframe_xmit(link, f));
@@ -705,6 +714,7 @@ static void selfloop_asymmetric_verify_reauthenticates(struct kunit *test)
 
 	selfloop_send_keepalive(test, fx, 0);
 	selfloop_send_keepalive(test, fx, 1);
+	selfloop_send_keepalive(test, fx, 0);
 	flush_workqueue(fx->tf.wq);
 	for (i = 0; i < 2; i++) {
 		KUNIT_EXPECT_EQ(test, bad_cookie[i],

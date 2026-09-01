@@ -178,7 +178,9 @@ static void tbframe_cookie_mismatch_zombie(struct kunit *test)
 	/* A keepalive echoing the negotiated cookie is benign. */
 	f = tbframe_mock_pop_rx(fx);
 	KUNIT_ASSERT_NOT_NULL(test, f);
-	tbframe_wire_put_le64(f->frame.data, fx->mock.peer.session_cookie);
+	tbframe_mock_fill_keepalive(f, fx->mock.peer.session_cookie, 1,
+				fx->link->local_cookie,
+				fx->link->keepalive_tx_seq);
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	flush_workqueue(fx->tf.wq);
@@ -192,7 +194,7 @@ static void tbframe_cookie_mismatch_zombie(struct kunit *test)
 	 */
 	f = tbframe_mock_pop_rx(fx);
 	KUNIT_ASSERT_NOT_NULL(test, f);
-	tbframe_wire_put_le64(f->frame.data, ~fx->mock.peer.session_cookie);
+	tbframe_mock_fill_keepalive(f, ~fx->mock.peer.session_cookie, 2, 0, 0);
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	flush_workqueue(fx->tf.wq);

@@ -1307,6 +1307,10 @@ struct announce_state {
 	bool armed;		/* properties_changed_work is queued */
 	bool delivered;		/* the peer acknowledged the notification */
 	bool stopped;		/* TB_XDOMAIN_ANNOUNCE_STOPPED published */
+	bool peer_previously_proven; /* a response established this peer */
+	bool inbound_peer_control; /* peer still transmits on this route */
+	bool recovery_requested; /* controller recovery was escalated */
+	enum tb_xdomain_control_state control_state;
 };
 
 /* Independent policy oracle for a peer that remains absent after fast probe. */
@@ -1333,6 +1337,14 @@ static inline void announce_stop(struct announce_state *a)
 	a->armed = false;
 }
 
+/* A route-correlated inbound request proves that the known peer is present. */
+static inline void announce_note_inbound_peer_control(struct announce_state *a)
+{
+	a->inbound_peer_control = true;
+	a->control_state = tb_xdomain_control_next(
+		a->control_state, TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
+}
+
 /* One scheduled run of properties_changed_work. */
 static inline void announce_tick(struct announce_state *a, bool peer_present)
 {
@@ -1345,6 +1357,8 @@ static inline void announce_tick(struct announce_state *a, bool peer_present)
 	if (peer_present) {
 		a->delivered = true;
 		a->failures = 0;
+		a->control_state = tb_xdomain_control_next(
+			a->control_state, TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED);
 		a->armed = false;	/* nothing left to announce */
 		return;
 	}
@@ -1363,6 +1377,19 @@ static inline void announce_tick(struct announce_state *a, bool peer_present)
 		a->errs++;
 	if (a->failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
 		a->failures++;
+	if (a->peer_previously_proven && a->inbound_peer_control &&
+	    a->failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT) {
+		a->control_state = tb_xdomain_control_next(
+			a->control_state,
+			TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+		if (a->control_state ==
+		    TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED) {
+			a->recovery_requested = true;
+			a->control_state = tb_xdomain_control_next(
+				a->control_state,
+				TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
+		}
+	}
 	a->armed = true;		/* the announce never gives up */
 }
 

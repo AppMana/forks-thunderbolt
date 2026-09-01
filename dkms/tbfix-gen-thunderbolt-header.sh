@@ -69,6 +69,10 @@ add_uuid_retry=1; grep -q 'uuid_retry_failures' "$src" && add_uuid_retry=0
 # Preserve a failed core path teardown across the later is_unplugged service
 # unbind phase; consumers must not turn an unresolved tuple into success.
 add_path_teardown_err=1; grep -q 'path_teardown_err' "$src" && add_path_teardown_err=0
+# Independent XDomain control-health state. The timestamp is refreshed only by
+# route-correlated inbound service traffic; the state prevents repeated reset
+# dispatch from an announcement worker that deliberately retries forever.
+add_control_health=1; grep -q 'control_rx_jiffies' "$src" && add_control_health=0
 
 # Struct-scoped transformation. Anchors:
 #   1. inside struct tb_protocol_handler, after the
@@ -85,7 +89,8 @@ awk -v add_handler="$add_handler" \
     -v add_rearm="$add_rearm" \
     -v add_uuid_verified="$add_uuid_verified" \
     -v add_uuid_retry="$add_uuid_retry" \
-    -v add_path_teardown_err="$add_path_teardown_err" '
+    -v add_path_teardown_err="$add_path_teardown_err" \
+    -v add_control_health="$add_control_health" '
 
 
 	add_reannounce == 1 && \
@@ -111,6 +116,10 @@ awk -v add_handler="$add_handler" \
 			print "\tunsigned int uuid_retry_failures;"
 		if (add_path_teardown_err == 1)
 			print "\tint path_teardown_err;"
+		if (add_control_health == 1) {
+			print "\tunsigned long control_rx_jiffies;"
+			print "\tu8 control_health_state;"
+		}
 		print "};"
 		in_xd = 0
 		next
@@ -207,7 +216,9 @@ for tok in \
 	'bonding_rearm_attempts' \
 	'bool uuid_verified;' \
 	'uuid_retry_failures' \
-	'path_teardown_err'
+	'path_teardown_err' \
+	'control_rx_jiffies' \
+	'control_health_state'
 do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2

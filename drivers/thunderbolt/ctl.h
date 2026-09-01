@@ -246,6 +246,12 @@ tb_cfg_local_only_result(enum tb_cfg_local_state state, int current_result)
 	return 0;
 }
 
+static inline unsigned long
+tb_cfg_deadline_remaining(unsigned long now, unsigned long deadline)
+{
+	return time_before(now, deadline) ? deadline - now : 0;
+}
+
 /**
  * struct tb_cfg_request - Control channel request
  * @kref: Reference count

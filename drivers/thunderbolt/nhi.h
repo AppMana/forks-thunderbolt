@@ -108,8 +108,10 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    bool control_healthy,
 				    bool end_to_end_failed);
 int tb_nhi_request_quarantine_recovery(struct tb_nhi *nhi, u64 route);
+int tb_nhi_request_control_recovery(struct tb_nhi *nhi, u64 route);
 bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route);
+void tb_nhi_runtime_control_path_proven(struct tb_nhi *nhi, u64 route);
 bool tb_nhi_has_quarantined_rings(struct tb_nhi *nhi);
 void tb_nhi_finalize_quarantined_rings(struct tb_nhi *nhi,
 				       bool controller_reset_proven);

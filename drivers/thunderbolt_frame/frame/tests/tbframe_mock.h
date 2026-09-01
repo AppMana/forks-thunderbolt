@@ -57,6 +57,12 @@ struct tbframe_mock {
 	 * peer's verify cadence does.
 	 */
 	bool		datapath_dead;
+	/* Directional faults: local TX cannot reach the peer, or vice versa. */
+	bool		local_tx_dead;
+	bool		peer_tx_dead;
+	u64		peer_keepalive_seq;
+	u64		peer_ack_cookie;
+	u64		peer_ack_sequence;
 	u64		stale_peer_cookie;
 	unsigned int	stale_peer_keepalives;
 	bool		tx_consumer_stalled;
@@ -119,6 +125,7 @@ struct tbframe_mock {
 	u8		last_response[TBFRAME_WIRE_HELLO_MSG_SIZE];
 	bool		have_response;
 	u16		req_ops[TBFRAME_MOCK_MAX_REQS];
+	u32		req_caps[TBFRAME_MOCK_MAX_REQS];
 	unsigned int	req_count;
 	unsigned int	bye_count;
 	bool		bye_rings_started;
@@ -381,8 +388,16 @@ static int tbframe_mock_post_rx(void *data, struct tbframe_frame_priv *f)
  */
 static void __tbframe_mock_deliver_peer_keepalive(struct tbframe_mock *m)
 {
+	struct tbframe_wire_keepalive keepalive = {
+		.session_cookie = m->peer.session_cookie,
+		.sequence = ++m->peer_keepalive_seq,
+		.ack_cookie = m->peer_ack_cookie,
+		.ack_sequence = m->peer_ack_sequence,
+	};
 	struct tbframe_frame_priv *f;
 	struct ring_frame *rf;
+	bool directional = m->peer.capabilities &
+		TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
 
 	if (list_empty(&m->rx_posted))
 		return;
@@ -393,18 +408,24 @@ static void __tbframe_mock_deliver_peer_keepalive(struct tbframe_mock *m)
 	f = container_of(rf, struct tbframe_frame_priv, rf);
 	if (m->stale_peer_keepalives) {
 		m->stale_peer_keepalives--;
-		tbframe_wire_put_le64(f->frame.data, m->stale_peer_cookie);
-	} else {
-		tbframe_wire_put_le64(f->frame.data, m->peer.session_cookie);
+		keepalive.session_cookie = m->stale_peer_cookie;
+		keepalive.ack_cookie = 0;
+		keepalive.ack_sequence = 0;
 	}
+	if (directional)
+		tbframe_wire_build_keepalive(f->frame.data, &keepalive);
+	else
+		tbframe_wire_put_le64(f->frame.data, keepalive.session_cookie);
 	m->peer_keepalives++;
-	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
+	tbframe_core_rx_complete(f, false,
+				directional ? TBFRAME_KEEPALIVE_LEN :
+				TBFRAME_WIRE_KEEPALIVE_LEGACY_SIZE,
 				 TBFRAME_PDF_KEEPALIVE, false);
 }
 
 static void tbframe_mock_peer_keepalive(struct tbframe_mock *m)
 {
-	if (m->datapath_dead)
+	if (m->datapath_dead || m->peer_tx_dead)
 		return;
 
 	__tbframe_mock_deliver_peer_keepalive(m);
@@ -419,7 +440,17 @@ static int tbframe_mock_ring_tx(void *data, struct tbframe_frame_priv *f)
 		return -ESHUTDOWN;
 
 	if (keepalive) {
+		struct tbframe_wire_keepalive sent;
+
 		m->keepalives_sent++;
+		memset(&sent, 0, sizeof(sent));
+		if (f->frame.len == TBFRAME_KEEPALIVE_LEN)
+			tbframe_wire_parse_keepalive(f->frame.data, &sent);
+		if (f->frame.len == TBFRAME_KEEPALIVE_LEN &&
+		    !m->datapath_dead && !m->local_tx_dead) {
+			m->peer_ack_cookie = sent.session_cookie;
+			m->peer_ack_sequence = sent.sequence;
+		}
 		tbframe_mock_peer_keepalive(m);
 		/*
 		 * Complete it the way the hardware does, so a keepalive never
@@ -556,8 +587,11 @@ static int tbframe_mock_control_request(void *data, const void *req,
 	ret = tbframe_wire_parse_hello(req, req_len, &local, &info);
 	if (ret)
 		return ret;
-	if (m->req_count < TBFRAME_MOCK_MAX_REQS)
-		m->req_ops[m->req_count++] = info.op;
+	if (m->req_count < TBFRAME_MOCK_MAX_REQS) {
+		m->req_ops[m->req_count] = info.op;
+		m->req_caps[m->req_count] = local.capabilities;
+		m->req_count++;
+	}
 	m->last_request_tx_hopid = local.transmit_hopid;
 
 	if (m->control_err)
@@ -727,7 +761,8 @@ static int tbframe_mock_fixture_init(struct kunit *test,
 	fx->mock.peer.proto_version = TBFRAME_WIRE_VERSION;
 	fx->mock.peer.transmit_hopid = 9;
 	fx->mock.peer.rx_ring_entries = TBFRAME_MOCK_RING;
-	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE |
+		TBFRAME_WIRE_CAP_KEEPALIVE_ACK;
 	fx->mock.peer.gid_eui64 = 0xabcdef0102030405ull;
 	fx->mock.peer.session_cookie = 0x1111222233334444ull;
 
@@ -773,6 +808,20 @@ tbframe_mock_pop_rx(struct tbframe_mock_fixture *fx)
 	list_del_init(&rf->list);
 	fx->mock.rx_posted_count--;
 	return container_of(rf, struct tbframe_frame_priv, rf);
+}
+
+static __maybe_unused void
+tbframe_mock_fill_keepalive(struct tbframe_frame_priv *f, u64 cookie, u64 seq,
+			    u64 ack_cookie, u64 ack_seq)
+{
+	const struct tbframe_wire_keepalive keepalive = {
+		.session_cookie = cookie,
+		.sequence = seq,
+		.ack_cookie = ack_cookie,
+		.ack_sequence = ack_seq,
+	};
+
+	tbframe_wire_build_keepalive(f->frame.data, &keepalive);
 }
 
 /* Complete the oldest queued TX frame as the hardware would. */

@@ -34,7 +34,7 @@
 #define TBFRAME_RETRY_DELAY_MS		200
 #define TBFRAME_HELLO_RETRIES		5
 #define TBFRAME_READY_RETRIES		10
-#define TBFRAME_KEEPALIVE_LEN		8
+#define TBFRAME_KEEPALIVE_LEN		TBFRAME_WIRE_KEEPALIVE_SIZE
 #define TBFRAME_BYE_TIMEOUT_MS		1000
 #define TBFRAME_BYE_RETRIES		4
 /* LOGOUT re-handshake settle: outlast the peer's whole BYE budget. */
@@ -51,18 +51,20 @@
  * link whose data path is dead reports link up, PORT_ACTIVE, populated GIDs
  * and "READY confirmed" while ib_send_bw moves 0.00 MB/s. These constants
  * bound an explicit proof: after READY (which certifies BOTH ends' paths are
- * enabled) the session refuses to declare itself UP until at least one good
- * frame has actually been RECEIVED on the data ring.
- *
- * The prover needs no new wire op and no capability negotiation: both ends
- * already emit a keepalive frame on the data ring once per verify interval
- * when keepalive is negotiated (the default), so a peer running an older
- * build that reaches UP on its own still supplies the evidence within one of
- * its verify intervals. The budget is therefore sized to outlast a peer
- * verify interval comfortably: 30 * 500 ms = 15 s vs a 5 s default.
+ * enabled) the session refuses to declare itself UP until authenticated
+ * keepalives prove both receive and transmit directions. The budget is sized
+ * to outlast a peer verify interval comfortably: 30 * 500 ms = 15 s vs a 5 s
+ * default.
  */
 #define TBFRAME_PROBE_INTERVAL_MS	500
 #define TBFRAME_PROBE_RETRIES		30
+/*
+ * A missing receive direction does not identify the faulty controller: the
+ * local receiver, remote transmitter, or cable may be responsible.  Give the
+ * peer's directional transmitter detector time to act before the symmetric
+ * last-resort recovery.
+ */
+#define TBFRAME_AMBIGUOUS_RECOVERY_FAILURES	4
 /* Bound the grace for authenticated frames retained from an older session. */
 #define TBFRAME_STALE_DRAIN_RETRIES	TBFRAME_PROBE_RETRIES
 /*
@@ -307,6 +309,8 @@ struct tbframe_link {
 	struct tb_xdomain_handshake hs;	/* requester + zombie predicate */
 	struct tbframe_hello_responder hello_responder;
 	struct tbframe_ready_responder ready_responder;
+	bool			hello_selection_pending;
+	u32			hello_selection_caps;
 	u32			request_seq;
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
@@ -325,6 +329,12 @@ struct tbframe_link {
 	 */
 	u64			data_rx;
 	u64			data_rx_tick_mark;
+	bool			data_rx_proven;
+	bool			data_tx_proven;
+	u64			keepalive_tx_seq;
+	u64			keepalive_tx_acked;
+	u64			keepalive_tx_ack_mark;
+	u64			keepalive_peer_seq;
 	/*
 	 * Diagnostic only -- never gate anything on these. A dead data path
 	 * says nothing about WHY it is dead, and the distinction matters:
@@ -355,6 +365,7 @@ struct tbframe_link {
 	bool			stale_drain_active;
 	unsigned int		stale_drain_budget;
 	unsigned int		silent_ticks;
+	unsigned int		tx_silent_ticks;
 	struct tb_ring_snapshot	data_path_sample;
 	bool			data_path_sample_valid;
 

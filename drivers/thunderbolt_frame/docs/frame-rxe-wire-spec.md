@@ -94,7 +94,7 @@ HELLO payload (new, replaces the legacy tbv HELLO):
 | proto_version | u16 | this spec, starts at 1; mismatch = refuse session |
 | transmit_hopid | u16 | HopID the sender transmits on |
 | rx_ring_entries | u16 | power of two, 256..4096; basis of Mode A window |
-| capabilities | u32 | bit 0: E2E supported; bit 1: keepalive; rest reserved |
+| capabilities | u32 | bit 0: E2E supported; bit 1: keepalive; bit 2: directional keepalive acknowledgement; rest reserved |
 | gid_eui64 | u64 | sender's per-link ULA EUI-64 (GID derivation) |
 | session_cookie | u64 | random per boot; echoed in keepalives |
 
@@ -104,6 +104,16 @@ READY_ACK is withheld while a teardown of the current session is pending:
 the ack certifies the paths it vouches for, and certifying entries that
 are queued for removal lets the peer stream a full TX ring into a
 half-torn-down path (the 2026-08-18 router egress wedge).
+
+Capabilities have distinct offer and selection states. An initial HELLO may
+offer every locally supported bit. HELLO_ACK carries the intersection selected
+by the responder, and READY and every later session message carry only that
+selection. If HELLO_ACK selects a strict subset, the requester sends one
+bounded confirmation HELLO containing the selection before READY. This second
+round is required during a rolling update: an older responder may compare its
+inbound HELLO snapshot with its own requester snapshot and otherwise reject the
+selected subset as a crossed stale lifetime. Offer, selection confirmation,
+and readiness are separate transitions; none is inferred from another.
 
 BYE (op 5) / BYE_ACK (op 6), additive: orderly-teardown quiesce, the
 ThunderboltIP logout analog. A side about to tear its session down for a
@@ -123,9 +133,17 @@ egress persistently (credit state, reset-only recovery); measured on the
 - Level-triggered verify: `tb_xdomain_paths_active()` read-back on a timer
   (default 5 s) while the session is up; failure -> `link_down(reason)` and
   re-handshake. Hardware hot-events are hints, never the mechanism.
-- Optional keepalive frames (capability bit 1) carry the session cookie; a
-  cookie mismatch is a supersede signal (peer rebooted within one verify
-  interval).
+- Optional legacy keepalive frames (capability bit 1 without bit 2) carry the
+  8-byte session cookie; a cookie mismatch is a supersede signal (peer rebooted
+  within one verify interval).
+- Directional keepalives (capability bits 1 and 2) carry the session cookie,
+  a nonzero transmit sequence, and the most recent peer cookie and sequence as
+  an authenticated acknowledgement. Receiving a peer sequence proves the
+  receive direction; receiving an acknowledgement of a sequence from the
+  current local cookie proves the transmit direction. A session is not UP
+  until both proofs exist. The 32-byte format is selected only when both ends
+  negotiated bit 2; a rolling peer continues to receive the legacy 8-byte
+  format under the same wire-v3 envelope.
 
 ## 4. ICRC
 

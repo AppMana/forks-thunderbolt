@@ -11,6 +11,92 @@
  */
 #include "tbframe_mock.h"
 
+/*
+ * Directional keepalive acknowledgements are an additive capability, not a
+ * new framing protocol. A rolling update must keep the deployed v3 HELLO
+ * envelope so an upgraded endpoint can negotiate a legacy keepalive with its
+ * not-yet-upgraded neighbour.
+ */
+static void tbframe_session_directional_keepalive_rolls_with_v3(struct kunit *test)
+{
+	struct tbframe_wire_hello hello = {
+		.proto_version = 3,
+		.transmit_hopid = 12,
+		.rx_ring_entries = 256,
+		.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE,
+		.gid_eui64 = 0x1122334455667788ULL,
+		.session_cookie = 0x8877665544332211ULL,
+	};
+	struct tbframe_wire_hello parsed = {};
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	int ret;
+
+	ret = tbframe_wire_build_hello(msg, sizeof(msg), &hello,
+				       TBFRAME_WIRE_OP_HELLO, 1, 1, 1);
+	KUNIT_ASSERT_EQ(test, ret, (int)sizeof(msg));
+	KUNIT_EXPECT_EQ(test, tbframe_wire_peek_version(msg, sizeof(msg)), 3);
+	KUNIT_EXPECT_EQ(test,
+			tbframe_wire_parse_hello(msg, sizeof(msg), &parsed, NULL),
+			0);
+}
+
+/*
+ * HELLO is a capability offer; HELLO_ACK is the selected intersection.  If
+ * an upgraded endpoint echoes its whole offer to a legacy requester, the two
+ * endpoints select different keepalive layouts and READY can succeed over a
+ * data path on which neither endpoint can parse the other's proof frames.
+ */
+static void tbframe_session_legacy_hello_selects_legacy_keepalive(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_wire_hello selected = {};
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_wire_parse_hello(fx->mock.last_response,
+						 sizeof(fx->mock.last_response),
+						 &selected, NULL));
+	KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+			selected.capabilities);
+}
+
+static void tbframe_session_legacy_selection_survives_ready(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned int i;
+
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.up_count);
+	KUNIT_ASSERT_GE(test, fx->mock.req_count, 3u);
+	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_WIRE_OP_HELLO,
+			fx->mock.req_ops[0]);
+	KUNIT_EXPECT_EQ(test,
+			(u32)(TBFRAME_WIRE_CAP_KEEPALIVE |
+			      TBFRAME_WIRE_CAP_KEEPALIVE_ACK),
+			fx->mock.req_caps[0]);
+	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_WIRE_OP_HELLO,
+			fx->mock.req_ops[1]);
+	KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+			fx->mock.req_caps[1]);
+	for (i = 0; i < fx->mock.req_count; i++) {
+		if (fx->mock.req_ops[i] != TBFRAME_WIRE_OP_READY)
+			continue;
+		KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+				fx->mock.req_caps[i]);
+		return;
+	}
+	KUNIT_FAIL(test, "session never sent READY");
+}
+
 static void tbframe_session_happy_path(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -496,6 +582,9 @@ static void tbframe_session_test_exit(struct kunit *test)
 }
 
 static struct kunit_case tbframe_session_cases[] = {
+	KUNIT_CASE(tbframe_session_directional_keepalive_rolls_with_v3),
+	KUNIT_CASE(tbframe_session_legacy_hello_selects_legacy_keepalive),
+	KUNIT_CASE(tbframe_session_legacy_selection_survives_ready),
 	KUNIT_CASE(tbframe_session_happy_path),
 	KUNIT_CASE(tbframe_session_ready_withheld_until_paths),
 	KUNIT_CASE(tbframe_session_early_ready_is_acked_after_paths),

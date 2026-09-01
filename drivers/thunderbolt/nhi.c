@@ -72,6 +72,7 @@ struct nhi_runtime_recovery_record {
 struct nhi_runtime_recovery_work {
 	struct work_struct work;
 	struct device *dev;
+	bool control_plane;
 };
 
 static LIST_HEAD(nhi_probe_recoveries);
@@ -279,8 +280,12 @@ static void nhi_runtime_recovery_workfn(struct work_struct *work)
 	if (state != TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING)
 		goto out;
 
-	dev_warn(recovery->dev,
-		 "proven end-to-end data-path failure; quiescing the domain for one host-router power cycle\n");
+	if (recovery->control_plane)
+		dev_warn(recovery->dev,
+			 "proven one-way control-path failure; quiescing the domain for one host-router power cycle\n");
+	else
+		dev_warn(recovery->dev,
+			 "proven end-to-end data-path failure; quiescing the domain for one host-router power cycle\n");
 	device_release_driver(recovery->dev);
 
 	state = nhi_runtime_recovery_get(pdev);
@@ -309,7 +314,8 @@ out:
 	kfree(recovery);
 }
 
-static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route)
+static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route,
+					 bool control_plane)
 {
 	struct nhi_runtime_recovery_record *record, *new_record;
 	struct nhi_runtime_recovery_work *recovery;
@@ -365,6 +371,7 @@ unlock:
 
 	INIT_WORK(&recovery->work, nhi_runtime_recovery_workfn);
 	recovery->dev = get_device(&pdev->dev);
+	recovery->control_plane = control_plane;
 	if (!queue_work(nhi_probe_recovery_wq, &recovery->work)) {
 		put_device(recovery->dev);
 		kfree(recovery);
@@ -392,7 +399,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 					      end_to_end_failed))
 		return -EAGAIN;
 
-	return tb_nhi_queue_runtime_recovery(nhi, route);
+	return tb_nhi_queue_runtime_recovery(nhi, route, false);
 }
 EXPORT_SYMBOL_GPL(tb_nhi_request_runtime_recovery);
 
@@ -412,7 +419,26 @@ int tb_nhi_request_quarantine_recovery(struct tb_nhi *nhi, u64 route)
 	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
 
-	return tb_nhi_queue_runtime_recovery(nhi, route);
+	return tb_nhi_queue_runtime_recovery(nhi, route, false);
+}
+
+/*
+ * A known peer continuing to deliver route-correlated requests while every
+ * outbound announcement times out is directional controller evidence. It is
+ * stronger than peer absence and uses the same serialized, one-shot recovery
+ * machine as a proven DMA failure.
+ */
+int tb_nhi_request_control_recovery(struct tb_nhi *nhi, u64 route)
+{
+	struct pci_dev *pdev;
+
+	if (!nhi)
+		return -EINVAL;
+	pdev = nhi->pdev;
+	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
+		return -EOPNOTSUPP;
+
+	return tb_nhi_queue_runtime_recovery(nhi, route, true);
 }
 
 void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
@@ -449,6 +475,11 @@ void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
 			 route);
 }
 EXPORT_SYMBOL_GPL(tb_nhi_runtime_data_path_proven);
+
+void tb_nhi_runtime_control_path_proven(struct tb_nhi *nhi, u64 route)
+{
+	tb_nhi_runtime_data_path_proven(nhi, route);
+}
 
 static void nhi_probe_reprobe_work(struct work_struct *work)
 {

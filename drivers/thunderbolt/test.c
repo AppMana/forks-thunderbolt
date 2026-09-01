@@ -5498,10 +5498,10 @@ static void tb_test_maple_root_power_cycle_encoding(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dma_port_config_sequence(), 1);
 	KUNIT_EXPECT_EQ(test,
 			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
-				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI), 7);
+				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI), 0xb);
 	KUNIT_EXPECT_EQ(test,
 			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
-				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI), 7);
+				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI), 0xb);
 	KUNIT_EXPECT_LT(test,
 			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
 				PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI), 0);
@@ -6953,6 +6953,7 @@ static void tb_test_xdomain_peer_never_answers_leaves_no_latch(struct kunit *tes
 	/* Still trying, at the ceiling, in silence. */
 	KUNIT_EXPECT_TRUE(test, a.armed);
 	KUNIT_EXPECT_FALSE(test, a.delivered);
+	KUNIT_EXPECT_FALSE(test, a.recovery_requested);
 	KUNIT_EXPECT_LE(test, a.errs, TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1u);
 	KUNIT_EXPECT_EQ(test, tb_xdomain_announce_delay_ms(a.failures),
 			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS <<
@@ -7058,6 +7059,75 @@ static void tb_test_xdomain_announce_stops_deterministically(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, a.stopped);
 	announce_tick(&a, /*peer_present=*/true);
 	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * Discovery and property announcement are separate state machines, but the
+ * announcement machine currently treats every missing response as an absent
+ * peer. That is false when the same, previously proven route is still sending
+ * us control requests: receive progress proves the peer is present while the
+ * repeated announcement timeouts prove that the opposite direction is stuck.
+ * Infinite backoff preserves the broken one-way state forever.
+ *
+ * Keep this as an independent behavioural model. It intentionally goes RED
+ * until the production announcement state machine gains a bounded recovery
+ * transition; merely making the retry timer run forever must not satisfy it.
+ */
+static void
+tb_test_xdomain_one_way_control_failure_requests_recovery(struct kunit *test)
+{
+	struct announce_state a = {
+		.peer_previously_proven = true,
+		.control_state = TB_XDOMAIN_CONTROL_QUIET,
+	};
+	unsigned int i;
+
+	announce_arm(&a);
+	announce_note_inbound_peer_control(&a);
+
+	/* Exhaust the fast attempts and reach the saturated backoff state. */
+	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++)
+		announce_tick(&a, /*peer_present=*/false);
+
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_FALSE(test, a.delivered);
+	KUNIT_EXPECT_TRUE(test, a.peer_previously_proven);
+	KUNIT_EXPECT_TRUE(test, a.inbound_peer_control);
+	KUNIT_EXPECT_TRUE(test, a.recovery_requested);
+}
+
+static void tb_test_xdomain_control_recovery_is_bounded(struct kunit *test)
+{
+	enum tb_xdomain_control_state state = TB_XDOMAIN_CONTROL_UNPROVEN;
+
+	/* Discovery proof alone never resets a controller. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_PEER_PROVEN);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_QUIET);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_QUIET);
+
+	/* Inbound progress supplies the independent opposite-direction proof. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_PEER_ACTIVE);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED);
+
+	/* Repeated failures cannot dispatch a second recovery episode. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED);
+	state = tb_xdomain_control_next(state, TB_XDOMAIN_CONTROL_STOPPED);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_UNPROVEN);
 }
 
 /*
@@ -7994,6 +8064,20 @@ static void tb_test_ctl_split_state_records_local_acceptance(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
 }
 
+/*
+ * Submission can consume nearly the whole response budget. If the deadline
+ * passes between checking it and subtracting the current tick, unsigned
+ * underflow must not turn a millisecond-scale timeout into an unbounded wait.
+ */
+static void tb_test_ctl_response_deadline_cannot_underflow(struct kunit *test)
+{
+	unsigned long deadline = 100;
+	unsigned long now = deadline + 1;
+
+	KUNIT_EXPECT_EQ(test, 0ul,
+			tb_cfg_deadline_remaining(now, deadline));
+}
+
 static void tb_test_ctl_split_state_preserves_accept_on_peer_timeout(struct kunit *test)
 {
 	struct tb_cfg_request_state state = {
@@ -8476,6 +8560,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_peer_answers_after_many_attempts),
 	KUNIT_CASE(tb_test_xdomain_announce_rearms_mid_backoff),
 	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
+	KUNIT_CASE(tb_test_xdomain_one_way_control_failure_requests_recovery),
+	KUNIT_CASE(tb_test_xdomain_control_recovery_is_bounded),
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
 	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
@@ -8607,6 +8693,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_native_error_fails_request),
 	KUNIT_CASE(tb_test_ctl_liveness_threshold),
 	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_classification),
+	KUNIT_CASE(tb_test_ctl_response_deadline_cannot_underflow),
 	KUNIT_CASE(tb_test_ctl_split_state_records_local_acceptance),
 	KUNIT_CASE(tb_test_ctl_split_state_preserves_accept_on_peer_timeout),
 	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),

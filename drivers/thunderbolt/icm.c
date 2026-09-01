@@ -37,13 +37,37 @@
 #define PHY_PORT_CS1_LINK_STATE_MASK	GENMASK(29, 26)
 #define PHY_PORT_CS1_LINK_STATE_SHIFT	26
 
-#define ICM_PCIE_UPSTREAM_VESC_REG1	(0x143 * sizeof(u32))
+#define ICM_PCIE_UPSTREAM_VESC_REG1	0x143
 #define ICM_PCIE_UPSTREAM_VESC_REG1_L1_DISABLE	BIT(3)
-#define ICM_PCIE_UPSTREAM_VESC_REG51	(0x175 * sizeof(u32))
+#define ICM_PCIE_UPSTREAM_VESC_REG51	0x175
 #define ICM_PCIE_UPSTREAM_VESC_REG51_L1_EXIT	BIT(19)
+#define ICM_PCIE_UPSTREAM_PROXY_WR_DATA	0x43
+#define ICM_PCIE_UPSTREAM_PROXY_COMMAND	0x44
+#define ICM_PCIE_UPSTREAM_PROXY_RD_DATA	0x45
+#define ICM_PCIE_UPSTREAM_PROXY_OFFSET_MASK	GENMASK(9, 0)
+#define ICM_PCIE_UPSTREAM_PROXY_BRIDGE	BIT(10)
+#define ICM_PCIE_UPSTREAM_PROXY_WRITE	BIT(21)
+#define ICM_PCIE_UPSTREAM_PROXY_COMMAND_VALUE	(2 << 22)
+#define ICM_PCIE_UPSTREAM_PROXY_REQUEST	BIT(30)
+#define ICM_PCIE_UPSTREAM_PROXY_TIMEOUT	BIT(31)
+#define ICM_PCIE_UPSTREAM_PROXY_TIMEOUT_MS	1000
 #define ICM_ROOT_PLUG_EVENT_DELAY	0x13e
 #define ICM_ROOT_PLUG_EVENT_DELAY_ENABLE	BIT(21)
 #define ICM_POWER_CYCLE_CONFIG_TIMEOUT	25000	/* ms */
+
+static u32 icm_pcie_upstream_proxy_command(u32 index, bool write)
+{
+	u32 command;
+
+	command = index & ICM_PCIE_UPSTREAM_PROXY_OFFSET_MASK;
+	command |= ICM_PCIE_UPSTREAM_PROXY_BRIDGE;
+	command |= ICM_PCIE_UPSTREAM_PROXY_COMMAND_VALUE;
+	command |= ICM_PCIE_UPSTREAM_PROXY_REQUEST;
+	if (write)
+		command |= ICM_PCIE_UPSTREAM_PROXY_WRITE;
+
+	return command;
+}
 
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE	0x1133
 #define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE	0x1136
@@ -365,14 +389,22 @@ static int pcie2cio_read(struct icm *icm, enum tb_cfg_space cs,
 	cmd |= (port << PCIE2CIO_CMD_PORT_SHIFT) & PCIE2CIO_CMD_PORT_MASK;
 	cmd |= (cs << PCIE2CIO_CMD_CS_SHIFT) & PCIE2CIO_CMD_CS_MASK;
 	cmd |= PCIE2CIO_CMD_START;
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO command write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	ret = pci2cio_wait_completion(icm, 5000);
 	if (ret)
 		return ret;
 
-	pci_read_config_dword(pdev, vnd_cap + PCIE2CIO_RDDATA, data);
-	return 0;
+	ret = pci_read_config_dword(pdev, vnd_cap + PCIE2CIO_RDDATA, data);
+	if (ret == PCIBIOS_SUCCESSFUL)
+		return 0;
+
+	pci_err(pdev, "PCIe2CIO result read failed: status %#x\n", ret);
+	return -EIO;
 }
 
 static int pcie2cio_write(struct icm *icm, enum tb_cfg_space cs,
@@ -380,15 +412,24 @@ static int pcie2cio_write(struct icm *icm, enum tb_cfg_space cs,
 {
 	struct pci_dev *pdev = icm->upstream_port;
 	int vnd_cap = icm->vnd_cap;
+	int ret;
 	u32 cmd;
 
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_WRDATA, data);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_WRDATA, data);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO data write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	cmd = index;
 	cmd |= (port << PCIE2CIO_CMD_PORT_SHIFT) & PCIE2CIO_CMD_PORT_MASK;
 	cmd |= (cs << PCIE2CIO_CMD_CS_SHIFT) & PCIE2CIO_CMD_CS_MASK;
 	cmd |= PCIE2CIO_CMD_WRITE | PCIE2CIO_CMD_START;
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO command write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	return pci2cio_wait_completion(icm, 5000);
 }
@@ -3065,36 +3106,40 @@ __icm_runtime_power_cycle_preflight(struct tb *tb,
 	return ret;
 }
 
+static int icm_pcie_upstream_proxy_read(struct tb *tb, u32 index,
+					u32 *value);
+static int icm_pcie_upstream_proxy_write(struct tb *tb, u32 index,
+					 u32 value);
+
 static int icm_runtime_power_cycle_exit_pcie_l1(struct tb *tb, void *data)
 {
-	struct pci_dev *upstream = get_upstream_port(tb->nhi->pdev);
 	u32 value;
 	int ret;
 
-	if (!upstream)
+	if (!tb->root_switch)
 		return -ENODEV;
 
-	ret = pci_read_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG1,
-				    &value);
-	if (ret != PCIBIOS_SUCCESSFUL)
-		return pcibios_err_to_errno(ret);
+	ret = icm_pcie_upstream_proxy_read(tb,
+					   ICM_PCIE_UPSTREAM_VESC_REG1,
+					   &value);
+	if (ret)
+		return ret;
 	value |= ICM_PCIE_UPSTREAM_VESC_REG1_L1_DISABLE;
-	ret = pci_write_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG1,
-				     value);
-	if (ret != PCIBIOS_SUCCESSFUL)
-		return pcibios_err_to_errno(ret);
+	ret = icm_pcie_upstream_proxy_write(tb,
+					    ICM_PCIE_UPSTREAM_VESC_REG1,
+					    value);
+	if (ret)
+		return ret;
 
-	ret = pci_read_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG51,
-				    &value);
-	if (ret != PCIBIOS_SUCCESSFUL)
-		return pcibios_err_to_errno(ret);
+	ret = icm_pcie_upstream_proxy_read(tb,
+					   ICM_PCIE_UPSTREAM_VESC_REG51,
+					   &value);
+	if (ret)
+		return ret;
 	value |= ICM_PCIE_UPSTREAM_VESC_REG51_L1_EXIT;
-	ret = pci_write_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG51,
-				     value);
-	if (ret != PCIBIOS_SUCCESSFUL)
-		return pcibios_err_to_errno(ret);
-
-	return 0;
+	return icm_pcie_upstream_proxy_write(tb,
+					     ICM_PCIE_UPSTREAM_VESC_REG51,
+					     value);
 }
 
 static u8 icm_runtime_power_cycle_config_sequence(void)
@@ -3103,43 +3148,159 @@ static u8 icm_runtime_power_cycle_config_sequence(void)
 	return 1;
 }
 
-static int icm_runtime_power_cycle_read_root(struct tb *tb, u32 *value,
-					     void *data)
+static int icm_runtime_power_cycle_read_config(struct tb *tb, u32 offset,
+					       u32 *value)
 {
 	struct tb_cfg_result res;
-	u8 sequence;
+	u8 sequence = icm_runtime_power_cycle_config_sequence();
 
 	if (!tb->root_switch)
 		return -ENODEV;
 
-	sequence = icm_runtime_power_cycle_config_sequence();
 	res = tb_cfg_read_raw_once(tb->ctl, value, tb_route(tb->root_switch), 0,
-				   TB_CFG_SWITCH, ICM_ROOT_PLUG_EVENT_DELAY, 1,
+				   TB_CFG_SWITCH, offset, 1,
 				   ICM_POWER_CYCLE_CONFIG_TIMEOUT, sequence);
 	if (res.err)
 		tb_err(tb,
-		       "root plug-event-delay read failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
-		       res.err, res.tb_error, res.response_route,
+		       "runtime power-cycle config read %#x failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
+		       offset, res.err, res.tb_error, res.response_route,
 		       res.response_port, res.tx_state, sequence);
+
 	return tb_cfg_result_to_errno(tb->ctl, TB_CFG_SWITCH, &res);
+}
+
+static int icm_runtime_power_cycle_write_config(struct tb *tb, u32 offset,
+						u32 value)
+{
+	struct tb_cfg_result res;
+	u8 sequence = icm_runtime_power_cycle_config_sequence();
+
+	if (!tb->root_switch)
+		return -ENODEV;
+
+	res = tb_cfg_write_raw_once(tb->ctl, &value, tb_route(tb->root_switch),
+				    0, TB_CFG_SWITCH, offset, 1,
+				    ICM_POWER_CYCLE_CONFIG_TIMEOUT, sequence);
+	if (res.err)
+		tb_err(tb,
+		       "runtime power-cycle config write %#x failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
+		       offset, res.err, res.tb_error, res.response_route,
+		       res.response_port, res.tx_state, sequence);
+
+	return tb_cfg_result_to_errno(tb->ctl, TB_CFG_SWITCH, &res);
+}
+
+struct icm_pcie_upstream_proxy_ops {
+	int (*read)(struct tb *tb, u32 offset, u32 *value, void *data);
+	int (*write)(struct tb *tb, u32 offset, u32 value, void *data);
+};
+
+static int icm_pcie_upstream_proxy_read_config(struct tb *tb, u32 offset,
+					       u32 *value, void *data)
+{
+	return icm_runtime_power_cycle_read_config(tb, offset, value);
+}
+
+static int icm_pcie_upstream_proxy_write_config(struct tb *tb, u32 offset,
+						u32 value, void *data)
+{
+	return icm_runtime_power_cycle_write_config(tb, offset, value);
+}
+
+static const struct icm_pcie_upstream_proxy_ops icm_pcie_upstream_proxy_ops = {
+	.read = icm_pcie_upstream_proxy_read_config,
+	.write = icm_pcie_upstream_proxy_write_config,
+};
+
+static int
+__icm_pcie_upstream_proxy_wait(struct tb *tb,
+			       const struct icm_pcie_upstream_proxy_ops *ops,
+			       u32 *command, void *data)
+{
+	unsigned long timeout = jiffies +
+		msecs_to_jiffies(ICM_PCIE_UPSTREAM_PROXY_TIMEOUT_MS);
+	int ret;
+
+	do {
+		ret = ops->read(tb, ICM_PCIE_UPSTREAM_PROXY_COMMAND,
+				command, data);
+		if (ret)
+			return ret;
+
+		if (!(*command & ICM_PCIE_UPSTREAM_PROXY_REQUEST)) {
+			if (*command & ICM_PCIE_UPSTREAM_PROXY_TIMEOUT)
+				return -ETIMEDOUT;
+			return 0;
+		}
+
+		usleep_range(50, 100);
+	} while (time_before(jiffies, timeout));
+
+	return -ETIMEDOUT;
+}
+
+static int
+__icm_pcie_upstream_proxy_read(struct tb *tb,
+			       const struct icm_pcie_upstream_proxy_ops *ops,
+			       u32 index, u32 *value, void *data)
+{
+	u32 command = icm_pcie_upstream_proxy_command(index, false);
+	int ret;
+
+	ret = ops->write(tb, ICM_PCIE_UPSTREAM_PROXY_COMMAND, command, data);
+	if (ret)
+		return ret;
+
+	ret = __icm_pcie_upstream_proxy_wait(tb, ops, &command, data);
+	if (ret)
+		return ret;
+
+	return ops->read(tb, ICM_PCIE_UPSTREAM_PROXY_RD_DATA, value, data);
+}
+
+static int
+__icm_pcie_upstream_proxy_write(struct tb *tb,
+				const struct icm_pcie_upstream_proxy_ops *ops,
+				u32 index, u32 value, void *data)
+{
+	u32 command = icm_pcie_upstream_proxy_command(index, true);
+	int ret;
+
+	ret = ops->write(tb, ICM_PCIE_UPSTREAM_PROXY_WR_DATA, value, data);
+	if (ret)
+		return ret;
+
+	ret = ops->write(tb, ICM_PCIE_UPSTREAM_PROXY_COMMAND, command, data);
+	if (ret)
+		return ret;
+
+	return __icm_pcie_upstream_proxy_wait(tb, ops, &command, data);
+}
+
+static int icm_pcie_upstream_proxy_read(struct tb *tb, u32 index, u32 *value)
+{
+	return __icm_pcie_upstream_proxy_read(tb, &icm_pcie_upstream_proxy_ops,
+					      index, value, NULL);
+}
+
+static int icm_pcie_upstream_proxy_write(struct tb *tb, u32 index, u32 value)
+{
+	return __icm_pcie_upstream_proxy_write(tb, &icm_pcie_upstream_proxy_ops,
+					       index, value, NULL);
+}
+
+static int icm_runtime_power_cycle_read_root(struct tb *tb, u32 *value,
+					     void *data)
+{
+	return icm_runtime_power_cycle_read_config(
+		tb, ICM_ROOT_PLUG_EVENT_DELAY, value);
 }
 
 static int icm_runtime_power_cycle_write_root(struct tb *tb, u32 value,
 					      void *data)
 {
-	struct tb_cfg_result res;
-	u8 sequence = icm_runtime_power_cycle_config_sequence();
-
-	res = tb_cfg_write_raw_once(tb->ctl, &value, tb_route(tb->root_switch),
-				    0, TB_CFG_SWITCH,
-				    ICM_ROOT_PLUG_EVENT_DELAY, 1,
-				    ICM_POWER_CYCLE_CONFIG_TIMEOUT, sequence);
-	if (res.err)
-		tb_err(tb,
-		       "root plug-event-delay write failed: error=%d tb_error=%u response=%#llx:%u tx_state=%u sequence=%u\n",
-		       res.err, res.tb_error, res.response_route,
-		       res.response_port, res.tx_state, sequence);
-	return tb_cfg_result_to_errno(tb->ctl, TB_CFG_SWITCH, &res);
+	return icm_runtime_power_cycle_write_config(
+		tb, ICM_ROOT_PLUG_EVENT_DELAY, value);
 }
 
 static int icm_runtime_power_cycle_preflight(struct tb *tb)
@@ -4350,6 +4511,127 @@ static void icm_runtime_power_cycle_config_packet_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, encoded, 0x0c00213eU);
 }
 
+/*
+ * PciUpstreamProxy does not address the host PCI bridge directly. Intel's
+ * implementation submits an indirect command through the root router. These
+ * constants are independently derived from the complete command construction,
+ * not from the Linux helper under test.
+ */
+static void icm_pcie_upstream_proxy_command_test(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		icm_pcie_upstream_proxy_command(0x143, false), 0x40800543U);
+	KUNIT_EXPECT_EQ(test,
+		icm_pcie_upstream_proxy_command(0x143, true), 0x40a00543U);
+	KUNIT_EXPECT_EQ(test,
+		icm_pcie_upstream_proxy_command(0x175, false), 0x40800575U);
+	KUNIT_EXPECT_EQ(test,
+		icm_pcie_upstream_proxy_command(0x175, true), 0x40a00575U);
+}
+
+struct icm_pcie_upstream_proxy_test_event {
+	bool write;
+	u32 offset;
+	u32 value;
+};
+
+struct icm_pcie_upstream_proxy_test_ctx {
+	struct icm_pcie_upstream_proxy_test_event events[6];
+	unsigned int nevents;
+	u32 command;
+	u32 read_data;
+	bool target_timeout;
+};
+
+static int icm_pcie_upstream_proxy_test_read(struct tb *tb, u32 offset,
+					     u32 *value, void *data)
+{
+	struct icm_pcie_upstream_proxy_test_ctx *ctx = data;
+	struct icm_pcie_upstream_proxy_test_event *event;
+
+	if (offset == ICM_PCIE_UPSTREAM_PROXY_COMMAND) {
+		*value = ctx->command & ~ICM_PCIE_UPSTREAM_PROXY_REQUEST;
+		if (ctx->target_timeout)
+			*value |= ICM_PCIE_UPSTREAM_PROXY_TIMEOUT;
+	} else if (offset == ICM_PCIE_UPSTREAM_PROXY_RD_DATA) {
+		*value = ctx->read_data;
+	} else {
+		return -EINVAL;
+	}
+
+	event = &ctx->events[ctx->nevents++];
+	event->write = false;
+	event->offset = offset;
+	event->value = *value;
+	return 0;
+}
+
+static int icm_pcie_upstream_proxy_test_write(struct tb *tb, u32 offset,
+					      u32 value, void *data)
+{
+	struct icm_pcie_upstream_proxy_test_ctx *ctx = data;
+	struct icm_pcie_upstream_proxy_test_event *event;
+
+	if (offset != ICM_PCIE_UPSTREAM_PROXY_WR_DATA &&
+	    offset != ICM_PCIE_UPSTREAM_PROXY_COMMAND)
+		return -EINVAL;
+
+	event = &ctx->events[ctx->nevents++];
+	event->write = true;
+	event->offset = offset;
+	event->value = value;
+	if (offset == ICM_PCIE_UPSTREAM_PROXY_COMMAND)
+		ctx->command = value;
+	return 0;
+}
+
+static void icm_pcie_upstream_proxy_state_test(struct kunit *test)
+{
+	static const struct icm_pcie_upstream_proxy_ops ops = {
+		.read = icm_pcie_upstream_proxy_test_read,
+		.write = icm_pcie_upstream_proxy_test_write,
+	};
+	struct icm_pcie_upstream_proxy_test_ctx ctx = {
+		.read_data = 0x081806a1,
+	};
+	u32 value;
+	int ret;
+
+	ret = __icm_pcie_upstream_proxy_read(NULL, &ops, 0x143, &value, &ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, ctx.nevents, 3U);
+	KUNIT_EXPECT_TRUE(test, ctx.events[0].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[0].offset, 0x44U);
+	KUNIT_EXPECT_EQ(test, ctx.events[0].value, 0x40800543U);
+	KUNIT_EXPECT_FALSE(test, ctx.events[1].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[1].offset, 0x44U);
+	KUNIT_EXPECT_EQ(test, ctx.events[1].value, 0x00800543U);
+	KUNIT_EXPECT_FALSE(test, ctx.events[2].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[2].offset, 0x45U);
+	KUNIT_EXPECT_EQ(test, value, 0x081806a1U);
+
+	ctx.nevents = 0;
+	ret = __icm_pcie_upstream_proxy_write(NULL, &ops, 0x143,
+					      value | BIT(3), &ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, ctx.nevents, 3U);
+	KUNIT_EXPECT_TRUE(test, ctx.events[0].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[0].offset, 0x43U);
+	KUNIT_EXPECT_EQ(test, ctx.events[0].value, 0x081806a9U);
+	KUNIT_EXPECT_TRUE(test, ctx.events[1].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[1].offset, 0x44U);
+	KUNIT_EXPECT_EQ(test, ctx.events[1].value, 0x40a00543U);
+	KUNIT_EXPECT_FALSE(test, ctx.events[2].write);
+	KUNIT_EXPECT_EQ(test, ctx.events[2].offset, 0x44U);
+	KUNIT_EXPECT_EQ(test, ctx.events[2].value, 0x00a00543U);
+
+	ctx.nevents = 0;
+	ctx.target_timeout = true;
+	ret = __icm_pcie_upstream_proxy_read(NULL, &ops, 0x175, &value, &ctx);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, 2U);
+}
+
 static struct kunit_case icm_teardown_test_cases[] = {
 	KUNIT_CASE(icm_stopping_rejects_late_notification_test),
 	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
@@ -4357,6 +4639,8 @@ static struct kunit_case icm_teardown_test_cases[] = {
 	KUNIT_CASE(icm_finalize_proven_revoke_test),
 	KUNIT_CASE(icm_runtime_power_cycle_preflight_test),
 	KUNIT_CASE(icm_runtime_power_cycle_config_packet_test),
+	KUNIT_CASE(icm_pcie_upstream_proxy_command_test),
+	KUNIT_CASE(icm_pcie_upstream_proxy_state_test),
 	{}
 };
 

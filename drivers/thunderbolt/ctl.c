@@ -954,6 +954,7 @@ tb_cfg_request_sync_receive(struct tb_ctl *ctl, struct tb_cfg_request *req,
 	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_msec);
 	struct tb_cfg_result res = { 0 };
 	DECLARE_COMPLETION_ONSTACK(done);
+	unsigned long now;
 	unsigned long remaining;
 	bool completed;
 	int ret;
@@ -973,7 +974,8 @@ tb_cfg_request_sync_receive(struct tb_ctl *ctl, struct tb_cfg_request *req,
 		return res;
 	}
 
-	remaining = time_before(jiffies, deadline) ? deadline - jiffies : 0;
+	now = jiffies;
+	remaining = tb_cfg_deadline_remaining(now, deadline);
 	completed = try_wait_for_completion(&done);
 	if (!completed && remaining)
 		completed = wait_for_completion_timeout(&done, remaining);
