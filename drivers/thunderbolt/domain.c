@@ -590,15 +590,12 @@ tb_test_domain_power_cycle_dispatch_result(int error, bool tx_consumed)
 #endif
 
 static struct tb_domain_reset_result
-__tb_domain_runtime_power_cycle(struct tb *tb,
-				const struct tb_domain_runtime_power_cycle_ops *ops,
-				void *data)
+tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 {
 	struct pci_dev *pdev = tb->nhi->pdev;
 	struct tb_domain_reset_result result;
 	struct tb_cfg_result res;
 	bool tx_consumed;
-	int ret;
 	int port;
 
 	port = dma_port_for_nhi(pdev->vendor, pdev->device);
@@ -607,16 +604,7 @@ __tb_domain_runtime_power_cycle(struct tb *tb,
 		return result;
 	}
 
-	ret = ops->preflight(tb, data);
-	if (ret) {
-		result.error = ret;
-		tb_err(tb,
-		       "runtime host-router power-cycle preflight failed: %d\n",
-		       ret);
-		return result;
-	}
-
-	res = ops->dispatch(tb, port, data);
+	res = dma_port_power_cycle_raw(tb->ctl, port);
 	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
 	result = tb_domain_power_cycle_dispatch_result(res.err, tx_consumed);
 	if (!result.error) {
@@ -640,41 +628,18 @@ __tb_domain_runtime_power_cycle(struct tb *tb,
 
 static int tb_domain_runtime_power_cycle_preflight(struct tb *tb, void *data)
 {
+	int ret;
+
 	if (!tb->cm_ops->prepare_runtime_power_cycle)
 		return -EOPNOTSUPP;
 
-	return tb->cm_ops->prepare_runtime_power_cycle(tb);
+	ret = tb->cm_ops->prepare_runtime_power_cycle(tb);
+	if (ret)
+		tb_err(tb,
+		       "runtime host-router power-cycle preflight failed: %d\n",
+		       ret);
+	return ret;
 }
-
-static struct tb_cfg_result
-tb_domain_runtime_power_cycle_dispatch(struct tb *tb, u8 port, void *data)
-{
-	return dma_port_power_cycle_raw(tb->ctl, port);
-}
-
-static const struct tb_domain_runtime_power_cycle_ops
-tb_domain_runtime_power_cycle_ops = {
-	.preflight = tb_domain_runtime_power_cycle_preflight,
-	.dispatch = tb_domain_runtime_power_cycle_dispatch,
-};
-
-static struct tb_domain_reset_result
-tb_domain_runtime_power_cycle(struct tb *tb, void *data)
-{
-	return __tb_domain_runtime_power_cycle(tb,
-					       &tb_domain_runtime_power_cycle_ops,
-					       data);
-}
-
-#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
-struct tb_domain_reset_result
-tb_test_domain_runtime_power_cycle(struct tb *tb,
-				   const struct tb_domain_runtime_power_cycle_ops *ops,
-				   void *data)
-{
-	return __tb_domain_runtime_power_cycle(tb, ops, data);
-}
-#endif
 
 static struct tb_domain_reset_result
 tb_domain_terminal_reset(struct tb *tb, void *data)
@@ -792,6 +757,7 @@ static void tb_domain_remove_unregister(struct tb *tb, void *data)
 
 static const struct tb_domain_remove_ops tb_domain_remove_ops = {
 	.stop = tb_domain_remove_stop,
+	.runtime_power_cycle_preflight = tb_domain_runtime_power_cycle_preflight,
 	.prepare_xdomains = tb_domain_remove_prepare_xdomains,
 	.has_quarantined_rings = tb_domain_has_quarantined_rings,
 	.terminal_reset = tb_domain_terminal_reset,
@@ -814,11 +780,20 @@ static int __tb_domain_remove(struct tb *tb, bool runtime_reset,
 	enum tb_domain_reset_state finalize_state = TB_DOMAIN_RESET_NONE;
 	bool ownership_unresolved;
 	bool rings_quarantined;
+	int preflight_ret = 0;
 	int stop_ret;
 
 	stop_ret = ops->stop(tb, data);
 	/* Join every callback that may still name topology before reset/free. */
 	ops->deinit(tb, data);
+	/*
+	 * Root-router config access refuses an unplugged switch. Perform the
+	 * controller preflight after asynchronous callbacks are quiesced, but
+	 * before prepare_xdomains() invalidates the topology. The mailbox command
+	 * itself remains below, after service removal has released data paths.
+	 */
+	if (runtime_reset && !stop_ret)
+		preflight_ret = ops->runtime_power_cycle_preflight(tb, data);
 	/*
 	 * Detach leaves while their parent topology and the control channel are
 	 * still available, then run service remove callbacks without tb->lock.
@@ -845,7 +820,10 @@ static int __tb_domain_remove(struct tb *tb, bool runtime_reset,
 		else
 			finalize_state = TB_DOMAIN_RESET_FAILED;
 	} else if (runtime_reset) {
-		reset = ops->runtime_power_cycle(tb, data);
+		if (preflight_ret)
+			reset.error = preflight_ret;
+		else
+			reset = ops->runtime_power_cycle(tb, data);
 		if (!reset.error)
 			finalize_state = reset.state;
 		else

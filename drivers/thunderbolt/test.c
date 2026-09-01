@@ -2339,6 +2339,7 @@ tb_test_cm_reset_success_revokes_all_unresolved_dma_once(struct kunit *test)
 
 enum domain_remove_test_event {
 	DOMAIN_REMOVE_STOP,
+	DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 	DOMAIN_REMOVE_PREPARE_XDOMAINS,
 	DOMAIN_REMOVE_TERMINAL_RESET,
 	DOMAIN_REMOVE_RUNTIME_POWER_CYCLE,
@@ -2361,6 +2362,7 @@ struct domain_remove_test_context {
 	enum tb_domain_reset_state terminal_reset_state;
 	enum tb_domain_reset_state runtime_reset_state;
 	int terminal_reset_error;
+	int runtime_preflight_error;
 	int runtime_reset_error;
 	int stop_ret;
 	bool has_quarantined_rings;
@@ -2382,6 +2384,16 @@ static int domain_remove_test_stop(struct tb *tb, void *data)
 
 	domain_remove_test_record(ctx, DOMAIN_REMOVE_STOP);
 	return ctx->stop_ret;
+}
+
+static int
+domain_remove_test_runtime_power_cycle_preflight(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx,
+				  DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT);
+	return ctx->runtime_preflight_error;
 }
 
 static struct tb_domain_reset_result
@@ -2480,6 +2492,8 @@ static void domain_remove_test_unregister_xdomains(struct tb *tb, void *data)
 
 static const struct tb_domain_remove_ops domain_remove_test_ops = {
 	.stop = domain_remove_test_stop,
+	.runtime_power_cycle_preflight =
+		domain_remove_test_runtime_power_cycle_preflight,
 	.prepare_xdomains = domain_remove_test_prepare_xdomains,
 	.has_quarantined_rings = domain_remove_test_has_quarantined_rings,
 	.terminal_reset = domain_remove_test_terminal_reset,
@@ -2494,6 +2508,79 @@ static const struct tb_domain_remove_ops domain_remove_test_ops = {
 	.release = domain_remove_test_release,
 	.unregister_domain = domain_remove_test_unregister_domain,
 };
+
+/*
+ * Root-router config access rejects an already invalidated switch. Runtime
+ * preparation therefore belongs after callback quiesce but before topology is
+ * marked unplugged; command dispatch still belongs after service teardown.
+ */
+static void
+tb_test_domain_runtime_preflight_precedes_topology_invalidation(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb, true,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < min_t(int, ctx.nevents, ARRAY_SIZE(expected)); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+}
+
+static void
+tb_test_domain_runtime_preflight_failure_stops_dispatch(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.runtime_preflight_error = -ENODEV,
+		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb, true,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ENODEV);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < min_t(int, ctx.nevents, ARRAY_SIZE(expected)); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+}
 
 static void
 tb_test_domain_remove_dispatch_is_not_revocation_proof(struct kunit *test)
@@ -2555,6 +2642,7 @@ tb_test_domain_remove_quarantine_requires_proven_terminal_reset(struct kunit *te
 	static const enum domain_remove_test_event expected[] = {
 		DOMAIN_REMOVE_STOP,
 		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 		DOMAIN_REMOVE_PREPARE_XDOMAINS,
 		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
 		DOMAIN_REMOVE_TERMINAL_RESET,
@@ -2593,6 +2681,7 @@ tb_test_domain_remove_failed_reset_detaches_quarantined_rings(struct kunit *test
 	static const enum domain_remove_test_event expected[] = {
 		DOMAIN_REMOVE_STOP,
 		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 		DOMAIN_REMOVE_PREPARE_XDOMAINS,
 		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
 		DOMAIN_REMOVE_TERMINAL_RESET,
@@ -2690,106 +2779,6 @@ tb_test_domain_power_cycle_completion_mapping(struct kunit *test)
 
 	/* A controller CFG_ERROR is not a Linux errno and must not escape as 1. */
 	result = tb_test_domain_power_cycle_dispatch_result(1, true);
-	KUNIT_EXPECT_EQ(test, result.error, -EIO);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
-}
-
-struct runtime_power_cycle_test_ctx {
-	unsigned int preflight_calls;
-	unsigned int dispatch_calls;
-	bool dispatch_saw_preflight;
-	int preflight_error;
-};
-
-static int runtime_power_cycle_test_preflight(struct tb *tb, void *data)
-{
-	struct runtime_power_cycle_test_ctx *ctx = data;
-
-	ctx->preflight_calls++;
-	return ctx->preflight_error;
-}
-
-static struct tb_cfg_result
-runtime_power_cycle_test_dispatch(struct tb *tb, u8 port, void *data)
-{
-	struct runtime_power_cycle_test_ctx *ctx = data;
-
-	ctx->dispatch_calls++;
-	ctx->dispatch_saw_preflight = ctx->preflight_calls == 1;
-	return (struct tb_cfg_result) {
-		.tx_state = TB_CFG_TX_CONSUMED,
-	};
-}
-
-/*
- * The host-router mailbox write is not the start of runtime recovery. The
- * controller-specific preflight must complete first; otherwise a locally
- * consumed write can be mistaken for a power cycle that never happened.
- */
-static void
-tb_test_runtime_power_cycle_requires_preflight_before_dispatch(struct kunit *test)
-{
-	static const struct tb_domain_runtime_power_cycle_ops ops = {
-		.preflight = runtime_power_cycle_test_preflight,
-		.dispatch = runtime_power_cycle_test_dispatch,
-	};
-	struct runtime_power_cycle_test_ctx ctx = {};
-	struct tb_domain_reset_result result;
-	struct pci_dev *pdev;
-	struct tb_nhi *nhi;
-	struct tb *tb;
-
-	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, pdev);
-	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, nhi);
-	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, tb);
-	pdev->vendor = PCI_VENDOR_ID_INTEL;
-	pdev->device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
-	nhi->pdev = pdev;
-	tb->nhi = nhi;
-
-	result = tb_test_domain_runtime_power_cycle(tb, &ops, &ctx);
-
-	KUNIT_EXPECT_EQ(test, ctx.preflight_calls, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.dispatch_calls, 1U);
-	KUNIT_EXPECT_TRUE(test, ctx.dispatch_saw_preflight);
-	KUNIT_EXPECT_EQ(test, result.error, 0);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
-}
-
-static void
-tb_test_runtime_power_cycle_preflight_failure_stops_dispatch(struct kunit *test)
-{
-	static const struct tb_domain_runtime_power_cycle_ops ops = {
-		.preflight = runtime_power_cycle_test_preflight,
-		.dispatch = runtime_power_cycle_test_dispatch,
-	};
-	struct runtime_power_cycle_test_ctx ctx = {
-		.preflight_error = -EIO,
-	};
-	struct tb_domain_reset_result result;
-	struct pci_dev *pdev;
-	struct tb_nhi *nhi;
-	struct tb *tb;
-
-	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, pdev);
-	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, nhi);
-	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, tb);
-	pdev->vendor = PCI_VENDOR_ID_INTEL;
-	pdev->device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
-	nhi->pdev = pdev;
-	tb->nhi = nhi;
-
-	result = tb_test_domain_runtime_power_cycle(tb, &ops, &ctx);
-
-	KUNIT_EXPECT_EQ(test, ctx.preflight_calls, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.dispatch_calls, 0U);
-	KUNIT_EXPECT_FALSE(test, ctx.dispatch_saw_preflight);
 	KUNIT_EXPECT_EQ(test, result.error, -EIO);
 	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
 }
@@ -8574,13 +8563,13 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_tunnel_revocation_survives_deferred_reference),
 	KUNIT_CASE(tb_test_cm_reset_failure_retains_all_unresolved_dma),
 	KUNIT_CASE(tb_test_cm_reset_success_revokes_all_unresolved_dma_once),
+	KUNIT_CASE(tb_test_domain_runtime_preflight_precedes_topology_invalidation),
+	KUNIT_CASE(tb_test_domain_runtime_preflight_failure_stops_dispatch),
 	KUNIT_CASE(tb_test_domain_remove_dispatch_is_not_revocation_proof),
 	KUNIT_CASE(tb_test_domain_remove_quarantine_requires_proven_terminal_reset),
 	KUNIT_CASE(tb_test_domain_remove_failed_reset_detaches_quarantined_rings),
 	KUNIT_CASE(tb_test_domain_failed_reset_reaches_service_disconnect),
 	KUNIT_CASE(tb_test_domain_power_cycle_completion_mapping),
-	KUNIT_CASE(tb_test_runtime_power_cycle_requires_preflight_before_dispatch),
-	KUNIT_CASE(tb_test_runtime_power_cycle_preflight_failure_stops_dispatch),
 	KUNIT_CASE(tb_test_unplugged_xdomain_preserves_teardown_error),
 	KUNIT_CASE(tb_test_domain_remove_collects_late_service_handoff),
 	KUNIT_CASE(tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain),

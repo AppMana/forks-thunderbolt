@@ -125,13 +125,9 @@ struct tb_domain_reset_result {
 	int error;
 };
 
-struct tb_domain_runtime_power_cycle_ops {
-	int (*preflight)(struct tb *tb, void *data);
-	struct tb_cfg_result (*dispatch)(struct tb *tb, u8 port, void *data);
-};
-
 struct tb_domain_remove_ops {
 	int (*stop)(struct tb *tb, void *data);
+	int (*runtime_power_cycle_preflight)(struct tb *tb, void *data);
 	void (*prepare_xdomains)(struct tb *tb, void *data,
 				 bool ownership_unresolved);
 	bool (*has_quarantined_rings)(struct tb *tb, void *data);
@@ -158,10 +154,6 @@ int tb_test_domain_remove_sequence(struct tb *tb, bool runtime_reset,
 				   void *data);
 struct tb_domain_reset_result
 tb_test_domain_power_cycle_dispatch_result(int error, bool tx_consumed);
-struct tb_domain_reset_result
-tb_test_domain_runtime_power_cycle(struct tb *tb,
-				   const struct tb_domain_runtime_power_cycle_ops *ops,
-				   void *data);
 int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd);
 struct tb_xdomain_quarantine_test_ops {
 	int (*disconnect)(void *data, struct tb_xdomain *xd,

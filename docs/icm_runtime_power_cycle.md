@@ -115,6 +115,38 @@ It does not prove that firmware accepted the semantic operation, that the host
 router changed generation, that the PCI function disappeared and returned, or
 that a repaired tunnel carries data.
 
+### First live implementation exposed a second ordering bug
+
+The first preflight implementation correctly placed all preparation before the
+mailbox write, but invoked both from the old late reset slot. Domain removal had
+already called `prepare_xdomains()` by then. That function recursively marks the
+root switch and its children unplugged before service removal. `tb_sw_read()`
+correctly refuses config access through an unplugged switch, so the root-router
+preflight returned `-ENODEV` and the safety gate prevented mailbox dispatch.
+
+The hardware register delta proves where it stopped. On both endpoints,
+upstream dword `0x143` changed from `0x081806a1` to `0x081806a9` and dword
+`0x175` changed from zero to `0x00080000`. The upstream bridge was therefore
+found and both PCIe writes completed. No success message or mailbox dispatch
+followed; the next root-router access returned `-ENODEV`.
+
+This was converted into a second red KUnit before changing the sequencing. The
+test expected preflight between callback quiesce and topology invalidation, but
+the old production order recorded only 11 events and went directly from deinit
+to topology preparation. The corrected path splits preparation from command
+dispatch:
+
+```
+stop notification admission
+  -> synchronously drain callbacks
+  -> controller preflight while root config is valid
+  -> invalidate and unregister topology/services
+  -> dispatch mailbox command
+```
+
+The companion failure test proves that a failed early preflight still completes
+ordinary teardown but never reaches mailbox dispatch.
+
 ## Why PDF `0xc` and PDF `0x7` are not contradictory
 
 The Intel Windows stack models XDomain communication with two independent state
@@ -191,9 +223,12 @@ that:
 3. read-modify-writes root-router config dword `0x13e`; and
 4. returns success only after all three writes succeed.
 
-The domain recovery code calls this operation before the raw DMA mailbox
-command. A missing operation returns `-EOPNOTSUPP`; any read or write failure is
-returned to the caller, and dispatch is skipped.
+The domain recovery code calls this operation after stopping and draining ICM
+callbacks but before topology invalidation. It removes services and releases
+their data paths after the preparation attempt, then sends the raw DMA mailbox
+command only when preparation succeeded. A missing operation returns
+`-EOPNOTSUPP`; any read or write failure is returned to the caller, ordinary
+teardown continues, and dispatch is skipped.
 
 The existing startup recovery remains separate. Startup power cycling is used
 when root-router config access itself failed, so it cannot require a successful
@@ -213,7 +248,8 @@ preflight. The production change made it green.
 
 The tests now enforce:
 
-- preflight occurs exactly once and before mailbox dispatch;
+- preflight occurs exactly once after callback quiesce, before topology
+  invalidation, service removal, and mailbox dispatch;
 - successful local command consumption maps only to the existing dispatched
   recovery state;
 - preflight failure returns the original error and performs zero dispatches;

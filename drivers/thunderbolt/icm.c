@@ -3046,15 +3046,22 @@ __icm_runtime_power_cycle_preflight(struct tb *tb,
 	int ret;
 
 	ret = ops->exit_pcie_l1(tb, data);
-	if (ret)
+	if (ret) {
+		tb_err(tb, "failed to prepare upstream PCIe L1 exit: %d\n", ret);
 		return ret;
+	}
 
 	ret = ops->read_root(tb, &value, data);
-	if (ret)
+	if (ret) {
+		tb_err(tb, "failed to read root plug-event-delay state: %d\n", ret);
 		return ret;
+	}
 
 	value |= ICM_ROOT_PLUG_EVENT_DELAY_ENABLE;
-	return ops->write_root(tb, value, data);
+	ret = ops->write_root(tb, value, data);
+	if (ret)
+		tb_err(tb, "failed to enable root plug-event delay: %d\n", ret);
+	return ret;
 }
 
 static int icm_runtime_power_cycle_exit_pcie_l1(struct tb *tb, void *data)
