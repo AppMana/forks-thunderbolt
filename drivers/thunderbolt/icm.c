@@ -125,6 +125,8 @@ struct usb4_switch_nvm_auth {
 /**
  * struct icm - Internal connection manager private data
  * @request_lock: Makes sure only one message is send to ICM at time
+ * @notification_lock: Serializes notification admission with shutdown
+ * @stopping: Prevents new notification work from being admitted
  * @rescan_work: Work used to rescan the surviving switches after resume
  * @upstream_port: Pointer to the PCIe upstream port this host
  *		   controller is connected. This is only set for systems
@@ -158,6 +160,8 @@ struct usb4_switch_nvm_auth {
  */
 struct icm {
 	struct mutex request_lock;
+	struct mutex notification_lock; /* Protects notification admission */
+	bool stopping;
 	struct delayed_work rescan_work;
 	struct pci_dev *upstream_port;
 	int vnd_cap;
@@ -2578,6 +2582,7 @@ static void icm_handle_notification(struct work_struct *work)
 static void icm_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 			     const void *buf, size_t size)
 {
+	struct icm *icm = tb_priv(tb);
 	struct icm_notification *n;
 
 	n = kmalloc(sizeof(*n), GFP_KERNEL);
@@ -2593,7 +2598,24 @@ static void icm_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 	INIT_WORK(&n->work, icm_handle_notification);
 	n->tb = tb;
 
-	queue_work(tb->wq, &n->work);
+	/*
+	 * Domain teardown keeps ring 0 running until path ownership has been
+	 * resolved, so the control callback can still arrive after ->stop has
+	 * begun removing topology. Serialize the admission decision with
+	 * icm_stop(): work admitted before the gate closes is drained by
+	 * icm_deinit(), and work arriving afterwards is discarded here.
+	 */
+	mutex_lock(&icm->notification_lock);
+	if (!icm->stopping) {
+		queue_work(tb->wq, &n->work);
+		n = NULL;
+	}
+	mutex_unlock(&icm->notification_lock);
+
+	if (n) {
+		kfree(n->pkg);
+		kfree(n);
+	}
 }
 
 static int
@@ -3427,6 +3449,15 @@ static int icm_stop(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 
+	/*
+	 * Close notification admission before any topology is detached. The
+	 * control channel intentionally remains live for the teardown mailbox,
+	 * therefore stopping ring 0 cannot serve as this boundary.
+	 */
+	mutex_lock(&icm->notification_lock);
+	icm->stopping = true;
+	mutex_unlock(&icm->notification_lock);
+
 	cancel_delayed_work(&icm->rescan_work);
 	icm_cancel_pcie_rescan(icm);
 	return __icm_stop(tb, &icm_teardown_ops, NULL);
@@ -3440,19 +3471,18 @@ static void icm_finalize_stop(struct tb *tb,
 }
 
 /*
- * ICM never had a ->deinit, so icm_stop()'s non-sync cancel of rescan_work was
- * the only cancel in the whole path. icm_stop() runs under tb->lock and
- * icm_rescan_work() takes tb->lock, so it CANNOT wait there (that is the
- * appmana-008 inversion). tb_domain_remove() calls ->deinit with the lock
- * dropped, which is where the wait belongs: an armed delayed_work timer
- * survives flush_workqueue() and would otherwise fire after
- * destroy_workqueue(tb->wq) and kfree(tb).
+ * icm_stop() runs under tb->lock, while notification and rescan work take the
+ * same lock, so it cannot synchronously wait for either there. Domain removal
+ * calls ->deinit with tb->lock dropped. The admission gate set by icm_stop()
+ * ensures that this drain is final even though ring 0 remains live until the
+ * teardown mailbox and ownership checks finish.
  */
 static void icm_deinit(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 
 	cancel_delayed_work_sync(&icm->rescan_work);
+	flush_workqueue(tb->wq);
 }
 
 static int icm_disconnect_pcie_paths(struct tb *tb)
@@ -3747,6 +3777,7 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 	INIT_DELAYED_WORK(&icm->rescan_work, icm_rescan_work);
 	INIT_DELAYED_WORK(&icm->pcie_rescan_work, icm_pcie_rescan_work);
 	mutex_init(&icm->request_lock);
+	mutex_init(&icm->notification_lock);
 	INIT_LIST_HEAD(&icm->tunnel_list);
 
 	switch (nhi->pdev->device) {
@@ -3933,6 +3964,10 @@ static void icm_teardown_test_release_auth(struct tb *tb, void *data)
 	ctx->auth_release_calls++;
 }
 
+static void icm_teardown_test_domain_release(struct device *dev)
+{
+}
+
 static void icm_teardown_test_init(struct icm_teardown_test_ctx *ctx)
 {
 	ctx->ops.disconnect_pcie_tunnels = icm_teardown_test_disconnect;
@@ -3959,8 +3994,50 @@ static struct tb *icm_teardown_test_alloc_tb(struct kunit *test)
 	pdev->dev.init_name = "thunderbolt-icm-test";
 	nhi->pdev = pdev;
 	tb->nhi = nhi;
+	tb->dev.release = icm_teardown_test_domain_release;
+	device_initialize(&tb->dev);
+	mutex_init(&tb->lock);
+	mutex_init(&((struct icm *)tb_priv(tb))->notification_lock);
 	INIT_LIST_HEAD(&((struct icm *)tb_priv(tb))->tunnel_list);
 	return tb;
+}
+
+static atomic_t icm_test_notification_calls;
+
+static void icm_test_count_notification(struct tb *tb,
+					const struct icm_pkg_header *hdr)
+{
+	atomic_inc(&icm_test_notification_calls);
+}
+
+/*
+ * Once shutdown closes notification admission, a late ICM packet must not
+ * queue topology work. Otherwise the work can unregister the same XDomain
+ * tree concurrently with domain teardown.
+ */
+static void icm_stopping_rejects_late_notification_test(struct kunit *test)
+{
+	struct icm_icl_event_rtd3_veto event = {
+		.hdr.code = ICM_EVENT_RTD3_VETO,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	tb = icm_teardown_test_alloc_tb(test);
+	tb->wq = alloc_ordered_workqueue("tb-icm-kunit", 0);
+	KUNIT_ASSERT_NOT_NULL(test, tb->wq);
+	tb->root_switch = (struct tb_switch *)tb;
+	icm = tb_priv(tb);
+	icm->rtd3_veto = icm_test_count_notification;
+	icm->stopping = true;
+	atomic_set(&icm_test_notification_calls, 0);
+
+	icm_handle_event(tb, TB_CFG_PKG_ICM_EVENT, &event, sizeof(event));
+	flush_workqueue(tb->wq);
+
+	KUNIT_EXPECT_EQ(test, atomic_read(&icm_test_notification_calls), 0);
+	destroy_workqueue(tb->wq);
+	put_device(&tb->dev);
 }
 
 static void icm_stop_mailbox_ack_needs_readback_test(struct kunit *test)
@@ -4046,6 +4123,7 @@ static void icm_finalize_proven_revoke_test(struct kunit *test)
 }
 
 static struct kunit_case icm_teardown_test_cases[] = {
+	KUNIT_CASE(icm_stopping_rejects_late_notification_test),
 	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
 	KUNIT_CASE(icm_finalize_unproven_non_dma_test),
 	KUNIT_CASE(icm_finalize_proven_revoke_test),
