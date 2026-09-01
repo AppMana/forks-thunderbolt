@@ -37,6 +37,16 @@
 #define PHY_PORT_CS1_LINK_STATE_MASK	GENMASK(29, 26)
 #define PHY_PORT_CS1_LINK_STATE_SHIFT	26
 
+#define ICM_PCIE_UPSTREAM_VESC_REG1	(0x143 * sizeof(u32))
+#define ICM_PCIE_UPSTREAM_VESC_REG1_L1_DISABLE	BIT(3)
+#define ICM_PCIE_UPSTREAM_VESC_REG51	(0x175 * sizeof(u32))
+#define ICM_PCIE_UPSTREAM_VESC_REG51_L1_EXIT	BIT(19)
+#define ICM_ROOT_PLUG_EVENT_DELAY	0x13e
+#define ICM_ROOT_PLUG_EVENT_DELAY_ENABLE	BIT(21)
+
+#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE	0x1133
+#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE	0x1136
+
 #define ICM_TIMEOUT			5000	/* ms */
 #define ICM_RETRIES			3
 
@@ -2255,6 +2265,8 @@ static struct pci_dev *get_upstream_port(struct pci_dev *pdev)
 	case PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_BRIDGE:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE:
 		return parent;
 	}
 
@@ -3019,6 +3031,99 @@ static int icm_firmware_init(struct tb *tb)
 	return 0;
 }
 
+struct icm_power_cycle_preflight_ops {
+	int (*exit_pcie_l1)(struct tb *tb, void *data);
+	int (*read_root)(struct tb *tb, u32 *value, void *data);
+	int (*write_root)(struct tb *tb, u32 value, void *data);
+};
+
+static int
+__icm_runtime_power_cycle_preflight(struct tb *tb,
+				    const struct icm_power_cycle_preflight_ops *ops,
+				    void *data)
+{
+	u32 value;
+	int ret;
+
+	ret = ops->exit_pcie_l1(tb, data);
+	if (ret)
+		return ret;
+
+	ret = ops->read_root(tb, &value, data);
+	if (ret)
+		return ret;
+
+	value |= ICM_ROOT_PLUG_EVENT_DELAY_ENABLE;
+	return ops->write_root(tb, value, data);
+}
+
+static int icm_runtime_power_cycle_exit_pcie_l1(struct tb *tb, void *data)
+{
+	struct pci_dev *upstream = get_upstream_port(tb->nhi->pdev);
+	u32 value;
+	int ret;
+
+	if (!upstream)
+		return -ENODEV;
+
+	ret = pci_read_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG1,
+				    &value);
+	if (ret != PCIBIOS_SUCCESSFUL)
+		return pcibios_err_to_errno(ret);
+	value |= ICM_PCIE_UPSTREAM_VESC_REG1_L1_DISABLE;
+	ret = pci_write_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG1,
+				     value);
+	if (ret != PCIBIOS_SUCCESSFUL)
+		return pcibios_err_to_errno(ret);
+
+	ret = pci_read_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG51,
+				    &value);
+	if (ret != PCIBIOS_SUCCESSFUL)
+		return pcibios_err_to_errno(ret);
+	value |= ICM_PCIE_UPSTREAM_VESC_REG51_L1_EXIT;
+	ret = pci_write_config_dword(upstream, ICM_PCIE_UPSTREAM_VESC_REG51,
+				     value);
+	if (ret != PCIBIOS_SUCCESSFUL)
+		return pcibios_err_to_errno(ret);
+
+	return 0;
+}
+
+static int icm_runtime_power_cycle_read_root(struct tb *tb, u32 *value,
+					     void *data)
+{
+	if (!tb->root_switch)
+		return -ENODEV;
+
+	return tb_sw_read(tb->root_switch, value, TB_CFG_SWITCH,
+			  ICM_ROOT_PLUG_EVENT_DELAY, 1);
+}
+
+static int icm_runtime_power_cycle_write_root(struct tb *tb, u32 value,
+					      void *data)
+{
+	return tb_sw_write(tb->root_switch, &value, TB_CFG_SWITCH,
+			   ICM_ROOT_PLUG_EVENT_DELAY, 1);
+}
+
+static int icm_runtime_power_cycle_preflight(struct tb *tb)
+{
+	static const struct icm_power_cycle_preflight_ops ops = {
+		.exit_pcie_l1 = icm_runtime_power_cycle_exit_pcie_l1,
+		.read_root = icm_runtime_power_cycle_read_root,
+		.write_root = icm_runtime_power_cycle_write_root,
+	};
+	int ret;
+
+	ret = __icm_runtime_power_cycle_preflight(tb, &ops, NULL);
+	if (ret)
+		return ret;
+
+	tb_info(tb,
+		"runtime host-router power-cycle preflight completed: PCIe L1 disabled and root plug-event delay enabled\n");
+	return 0;
+}
+
 static int icm_root_power_cycle(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
@@ -3726,6 +3831,7 @@ static const struct tb_cm_ops icm_mr_ops = {
 	.stop = icm_stop,
 	.finalize_stop = icm_finalize_stop,
 	.deinit = icm_deinit,
+	.prepare_runtime_power_cycle = icm_runtime_power_cycle_preflight,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -4122,11 +4228,73 @@ static void icm_finalize_proven_revoke_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 1U);
 }
 
+enum icm_preflight_test_step {
+	ICM_PREFLIGHT_TEST_EXIT_L1,
+	ICM_PREFLIGHT_TEST_READ_ROOT,
+	ICM_PREFLIGHT_TEST_WRITE_ROOT,
+};
+
+struct icm_preflight_test_ctx {
+	enum icm_preflight_test_step steps[3];
+	unsigned int nsteps;
+	u32 root_value;
+	u32 written_value;
+};
+
+static int icm_preflight_test_exit_l1(struct tb *tb, void *data)
+{
+	struct icm_preflight_test_ctx *ctx = data;
+
+	ctx->steps[ctx->nsteps++] = ICM_PREFLIGHT_TEST_EXIT_L1;
+	return 0;
+}
+
+static int icm_preflight_test_read_root(struct tb *tb, u32 *value, void *data)
+{
+	struct icm_preflight_test_ctx *ctx = data;
+
+	ctx->steps[ctx->nsteps++] = ICM_PREFLIGHT_TEST_READ_ROOT;
+	*value = ctx->root_value;
+	return 0;
+}
+
+static int icm_preflight_test_write_root(struct tb *tb, u32 value, void *data)
+{
+	struct icm_preflight_test_ctx *ctx = data;
+
+	ctx->steps[ctx->nsteps++] = ICM_PREFLIGHT_TEST_WRITE_ROOT;
+	ctx->written_value = value;
+	return 0;
+}
+
+/* Match the host-controller preflight before the DMA mailbox write. */
+static void icm_runtime_power_cycle_preflight_test(struct kunit *test)
+{
+	static const struct icm_power_cycle_preflight_ops ops = {
+		.exit_pcie_l1 = icm_preflight_test_exit_l1,
+		.read_root = icm_preflight_test_read_root,
+		.write_root = icm_preflight_test_write_root,
+	};
+	struct icm_preflight_test_ctx ctx = {
+		.root_value = BIT(7),
+	};
+	int ret;
+
+	ret = __icm_runtime_power_cycle_preflight(NULL, &ops, &ctx);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, ctx.nsteps, 3U);
+	KUNIT_EXPECT_EQ(test, ctx.steps[0], ICM_PREFLIGHT_TEST_EXIT_L1);
+	KUNIT_EXPECT_EQ(test, ctx.steps[1], ICM_PREFLIGHT_TEST_READ_ROOT);
+	KUNIT_EXPECT_EQ(test, ctx.steps[2], ICM_PREFLIGHT_TEST_WRITE_ROOT);
+	KUNIT_EXPECT_EQ(test, ctx.written_value, BIT(7) | BIT(21));
+}
+
 static struct kunit_case icm_teardown_test_cases[] = {
 	KUNIT_CASE(icm_stopping_rejects_late_notification_test),
 	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
 	KUNIT_CASE(icm_finalize_unproven_non_dma_test),
 	KUNIT_CASE(icm_finalize_proven_revoke_test),
+	KUNIT_CASE(icm_runtime_power_cycle_preflight_test),
 	{}
 };
 

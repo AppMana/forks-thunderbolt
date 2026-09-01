@@ -2694,6 +2694,106 @@ tb_test_domain_power_cycle_completion_mapping(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
 }
 
+struct runtime_power_cycle_test_ctx {
+	unsigned int preflight_calls;
+	unsigned int dispatch_calls;
+	bool dispatch_saw_preflight;
+	int preflight_error;
+};
+
+static int runtime_power_cycle_test_preflight(struct tb *tb, void *data)
+{
+	struct runtime_power_cycle_test_ctx *ctx = data;
+
+	ctx->preflight_calls++;
+	return ctx->preflight_error;
+}
+
+static struct tb_cfg_result
+runtime_power_cycle_test_dispatch(struct tb *tb, u8 port, void *data)
+{
+	struct runtime_power_cycle_test_ctx *ctx = data;
+
+	ctx->dispatch_calls++;
+	ctx->dispatch_saw_preflight = ctx->preflight_calls == 1;
+	return (struct tb_cfg_result) {
+		.tx_state = TB_CFG_TX_CONSUMED,
+	};
+}
+
+/*
+ * The host-router mailbox write is not the start of runtime recovery. The
+ * controller-specific preflight must complete first; otherwise a locally
+ * consumed write can be mistaken for a power cycle that never happened.
+ */
+static void
+tb_test_runtime_power_cycle_requires_preflight_before_dispatch(struct kunit *test)
+{
+	static const struct tb_domain_runtime_power_cycle_ops ops = {
+		.preflight = runtime_power_cycle_test_preflight,
+		.dispatch = runtime_power_cycle_test_dispatch,
+	};
+	struct runtime_power_cycle_test_ctx ctx = {};
+	struct tb_domain_reset_result result;
+	struct pci_dev *pdev;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	pdev->vendor = PCI_VENDOR_ID_INTEL;
+	pdev->device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	nhi->pdev = pdev;
+	tb->nhi = nhi;
+
+	result = tb_test_domain_runtime_power_cycle(tb, &ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ctx.preflight_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.dispatch_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.dispatch_saw_preflight);
+	KUNIT_EXPECT_EQ(test, result.error, 0);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
+}
+
+static void
+tb_test_runtime_power_cycle_preflight_failure_stops_dispatch(struct kunit *test)
+{
+	static const struct tb_domain_runtime_power_cycle_ops ops = {
+		.preflight = runtime_power_cycle_test_preflight,
+		.dispatch = runtime_power_cycle_test_dispatch,
+	};
+	struct runtime_power_cycle_test_ctx ctx = {
+		.preflight_error = -EIO,
+	};
+	struct tb_domain_reset_result result;
+	struct pci_dev *pdev;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	pdev->vendor = PCI_VENDOR_ID_INTEL;
+	pdev->device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	nhi->pdev = pdev;
+	tb->nhi = nhi;
+
+	result = tb_test_domain_runtime_power_cycle(tb, &ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ctx.preflight_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.dispatch_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, ctx.dispatch_saw_preflight);
+	KUNIT_EXPECT_EQ(test, result.error, -EIO);
+	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
+}
+
 static void
 tb_test_unplugged_xdomain_preserves_teardown_error(struct kunit *test)
 {
@@ -8479,6 +8579,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_domain_remove_failed_reset_detaches_quarantined_rings),
 	KUNIT_CASE(tb_test_domain_failed_reset_reaches_service_disconnect),
 	KUNIT_CASE(tb_test_domain_power_cycle_completion_mapping),
+	KUNIT_CASE(tb_test_runtime_power_cycle_requires_preflight_before_dispatch),
+	KUNIT_CASE(tb_test_runtime_power_cycle_preflight_failure_stops_dispatch),
 	KUNIT_CASE(tb_test_unplugged_xdomain_preserves_teardown_error),
 	KUNIT_CASE(tb_test_domain_remove_collects_late_service_handoff),
 	KUNIT_CASE(tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain),

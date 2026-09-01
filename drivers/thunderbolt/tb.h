@@ -125,6 +125,11 @@ struct tb_domain_reset_result {
 	int error;
 };
 
+struct tb_domain_runtime_power_cycle_ops {
+	int (*preflight)(struct tb *tb, void *data);
+	struct tb_cfg_result (*dispatch)(struct tb *tb, u8 port, void *data);
+};
+
 struct tb_domain_remove_ops {
 	int (*stop)(struct tb *tb, void *data);
 	void (*prepare_xdomains)(struct tb *tb, void *data,
@@ -153,6 +158,10 @@ int tb_test_domain_remove_sequence(struct tb *tb, bool runtime_reset,
 				   void *data);
 struct tb_domain_reset_result
 tb_test_domain_power_cycle_dispatch_result(int error, bool tx_consumed);
+struct tb_domain_reset_result
+tb_test_domain_runtime_power_cycle(struct tb *tb,
+				   const struct tb_domain_runtime_power_cycle_ops *ops,
+				   void *data);
 int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd);
 struct tb_xdomain_quarantine_test_ops {
 	int (*disconnect)(void *data, struct tb_xdomain *xd,
@@ -687,6 +696,8 @@ struct tb_path {
  * @quiesced_reset: Reset controller firmware after the control channel and
  *		    asynchronous work have been quiesced. Used for both failed
  *		    startup and runtime recovery. Optional.
+ * @prepare_runtime_power_cycle: Perform controller-specific preparation before
+ *				 a runtime host-router power-cycle command.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -731,6 +742,7 @@ struct tb_cm_ops {
 			      bool ownership_unresolved);
 	void (*deinit)(struct tb *tb);
 	int (*quiesced_reset)(struct tb *tb);
+	int (*prepare_runtime_power_cycle)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);

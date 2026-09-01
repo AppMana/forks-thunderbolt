@@ -590,12 +590,15 @@ tb_test_domain_power_cycle_dispatch_result(int error, bool tx_consumed)
 #endif
 
 static struct tb_domain_reset_result
-tb_domain_runtime_power_cycle(struct tb *tb, void *data)
+__tb_domain_runtime_power_cycle(struct tb *tb,
+				const struct tb_domain_runtime_power_cycle_ops *ops,
+				void *data)
 {
 	struct pci_dev *pdev = tb->nhi->pdev;
 	struct tb_domain_reset_result result;
 	struct tb_cfg_result res;
 	bool tx_consumed;
+	int ret;
 	int port;
 
 	port = dma_port_for_nhi(pdev->vendor, pdev->device);
@@ -604,7 +607,16 @@ tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 		return result;
 	}
 
-	res = dma_port_power_cycle_raw(tb->ctl, port);
+	ret = ops->preflight(tb, data);
+	if (ret) {
+		result.error = ret;
+		tb_err(tb,
+		       "runtime host-router power-cycle preflight failed: %d\n",
+		       ret);
+		return result;
+	}
+
+	res = ops->dispatch(tb, port, data);
 	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
 	result = tb_domain_power_cycle_dispatch_result(res.err, tx_consumed);
 	if (!result.error) {
@@ -625,6 +637,44 @@ tb_domain_runtime_power_cycle(struct tb *tb, void *data)
 		       res.err, res.tx_state);
 	return result;
 }
+
+static int tb_domain_runtime_power_cycle_preflight(struct tb *tb, void *data)
+{
+	if (!tb->cm_ops->prepare_runtime_power_cycle)
+		return -EOPNOTSUPP;
+
+	return tb->cm_ops->prepare_runtime_power_cycle(tb);
+}
+
+static struct tb_cfg_result
+tb_domain_runtime_power_cycle_dispatch(struct tb *tb, u8 port, void *data)
+{
+	return dma_port_power_cycle_raw(tb->ctl, port);
+}
+
+static const struct tb_domain_runtime_power_cycle_ops
+tb_domain_runtime_power_cycle_ops = {
+	.preflight = tb_domain_runtime_power_cycle_preflight,
+	.dispatch = tb_domain_runtime_power_cycle_dispatch,
+};
+
+static struct tb_domain_reset_result
+tb_domain_runtime_power_cycle(struct tb *tb, void *data)
+{
+	return __tb_domain_runtime_power_cycle(tb,
+					       &tb_domain_runtime_power_cycle_ops,
+					       data);
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct tb_domain_reset_result
+tb_test_domain_runtime_power_cycle(struct tb *tb,
+				   const struct tb_domain_runtime_power_cycle_ops *ops,
+				   void *data)
+{
+	return __tb_domain_runtime_power_cycle(tb, ops, data);
+}
+#endif
 
 static struct tb_domain_reset_result
 tb_domain_terminal_reset(struct tb *tb, void *data)
