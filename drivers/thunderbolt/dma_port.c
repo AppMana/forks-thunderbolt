@@ -98,7 +98,7 @@ static int dma_port_read(struct tb_ctl *ctl, void *buffer, u64 route,
 	};
 	struct tb_cfg_request *req;
 	struct cfg_write_pkg reply;
-	struct tb_cfg_result res;
+	struct tb_cfg_result res = {};
 
 	req = tb_cfg_request_alloc();
 	if (!req)
@@ -124,13 +124,14 @@ static int dma_port_read(struct tb_ctl *ctl, void *buffer, u64 route,
 	return 0;
 }
 
-static int dma_port_write(struct tb_ctl *ctl, const void *buffer, u64 route,
-			  u32 port, u32 offset, u32 length, int timeout_msec)
+static struct tb_cfg_result
+dma_port_write_result(struct tb_ctl *ctl, const void *buffer, u64 route,
+		      u32 port, u32 offset, u32 length, int timeout_msec)
 {
 	struct cfg_write_pkg request = {
 		.header = tb_cfg_make_header(route),
 		.addr = {
-			.seq = 1,
+			.seq = dma_port_config_sequence(),
 			.port = port,
 			.space = TB_CFG_PORT,
 			.offset = offset,
@@ -139,13 +140,15 @@ static int dma_port_write(struct tb_ctl *ctl, const void *buffer, u64 route,
 	};
 	struct tb_cfg_request *req;
 	struct cfg_read_pkg reply;
-	struct tb_cfg_result res;
+	struct tb_cfg_result res = {};
 
 	memcpy(&request.data, buffer, length * 4);
 
 	req = tb_cfg_request_alloc();
-	if (!req)
-		return -ENOMEM;
+	if (!req) {
+		res.err = -ENOMEM;
+		return res;
+	}
 
 	req->match = dma_port_match;
 	req->copy = dma_port_copy;
@@ -160,7 +163,14 @@ static int dma_port_write(struct tb_ctl *ctl, const void *buffer, u64 route,
 
 	tb_cfg_request_put(req);
 
-	return res.err;
+	return res;
+}
+
+static int dma_port_write(struct tb_ctl *ctl, const void *buffer, u64 route,
+			  u32 port, u32 offset, u32 length, int timeout_msec)
+{
+	return dma_port_write_result(ctl, buffer, route, port, offset, length,
+				     timeout_msec).err;
 }
 
 static int dma_find_port(struct tb_switch *sw)
@@ -459,7 +469,6 @@ struct tb_cfg_result dma_port_power_cycle_raw(struct tb_ctl *ctl, u8 port)
 {
 	u32 request = DMA_PORT_POWER_CYCLE_REQUEST;
 
-	return tb_cfg_write_raw_once(ctl, &request, 0, port, TB_CFG_PORT,
-				     DMA_PORT_MAIL_IN, 1,
+	return dma_port_write_result(ctl, &request, 0, port, DMA_PORT_MAIL_IN, 1,
 				     DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS);
 }

@@ -5405,6 +5405,8 @@ static void tb_test_maple_root_power_cycle_encoding(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, DMA_PORT_MAIL_IN, 0x4fu);
 	KUNIT_EXPECT_EQ(test, DMA_PORT_POWER_CYCLE_REQUEST, 0x40000001u);
+	/* DMA mailbox accesses use their own sequence convention. */
+	KUNIT_EXPECT_EQ(test, dma_port_config_sequence(), 1);
 	KUNIT_EXPECT_EQ(test,
 			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
 				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI), 7);

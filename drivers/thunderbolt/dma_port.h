@@ -25,6 +25,11 @@ struct tb_cfg_result;
 #define DMA_PORT_POWER_CYCLE_REQUEST	0x40000001
 #define DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS	500
 
+static inline u8 dma_port_config_sequence(void)
+{
+	return 1;
+}
+
 static inline int dma_port_for_nhi(u16 vendor, u16 device)
 {
 	if (vendor != PCI_VENDOR_ID_INTEL)
