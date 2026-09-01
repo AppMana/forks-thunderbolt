@@ -435,7 +435,7 @@ enum tb_nhi_runtime_recovery_state {
 };
 
 enum tb_nhi_runtime_recovery_event {
-	TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED,
+	TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED,
 	TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED,
 	TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED,
 	TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED,
@@ -451,7 +451,7 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 {
 	switch (state) {
 	case TB_NHI_RUNTIME_RECOVERY_IDLE:
-		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED)
+		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED)
 			return TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
 		return state;
 
@@ -473,7 +473,7 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 	case TB_NHI_RUNTIME_RECOVERY_VERIFYING:
 		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN)
 			return TB_NHI_RUNTIME_RECOVERY_COMPLETE;
-		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED)
+		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED)
 			return TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED;
 		return state;
 

@@ -334,7 +334,7 @@ static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route)
 			continue;
 		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
 		    record->route == route) {
-			event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+			event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 			record->state = tb_nhi_runtime_recovery_next(record->state, event);
 			ret = -EHWPOISON;
 		} else {
@@ -348,7 +348,7 @@ static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route)
 	new_record->devfn = pdev->devfn;
 	new_record->route = route;
 	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
-	event = TB_NHI_RUNTIME_RECOVERY_DATA_TX_STALLED;
+	event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 	new_record->state = tb_nhi_runtime_recovery_next(state, event);
 	list_add_tail(&new_record->list, &nhi_runtime_recoveries);
 	new_record = NULL;
@@ -378,7 +378,8 @@ unlock:
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy)
+				    bool control_healthy,
+				    bool end_to_end_failed)
 {
 	struct pci_dev *pdev;
 
@@ -387,7 +388,8 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	pdev = nhi->pdev;
 	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
-	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy))
+	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy,
+					      end_to_end_failed))
 		return -EAGAIN;
 
 	return tb_nhi_queue_runtime_recovery(nhi, route);

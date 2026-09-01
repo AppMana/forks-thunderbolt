@@ -127,19 +127,23 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
 }
 
 /*
- * An advancing hardware consumer disproves a controller-local TX stall.
- * End-to-end silence still rebuilds the route, but it must not power-cycle
- * the controller and disrupt unrelated routes.
+ * A moving local descriptor consumer does not prove that a frame escaped the
+ * router egress.  The live failure consumes every keepalive descriptor while
+ * the peer receives no frame from the negotiated lifetime; rebuilding the
+ * same rings and hop entries then repeats forever.  After a complete local
+ * rebuild has failed too, bounded controller recovery is the only remaining
+ * in-driver recovery tier and must be requested even though the descriptor
+ * consumer advanced.
  */
-static void tbframe_datapath_moving_consumer_does_not_escalate_controller(struct kunit *test)
+static void tbframe_datapath_e2e_failure_escalates_with_moving_consumer(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
@@ -148,11 +152,11 @@ static void tbframe_datapath_moving_consumer_does_not_escalate_controller(struct
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 
 	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_stall_reports);
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 3u);
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases, 2u);
 }
@@ -611,7 +615,7 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
-	KUNIT_CASE(tbframe_datapath_moving_consumer_does_not_escalate_controller),
+	KUNIT_CASE(tbframe_datapath_e2e_failure_escalates_with_moving_consumer),
 	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_forgotten_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_sparse_backlog_gets_drain_grace),
