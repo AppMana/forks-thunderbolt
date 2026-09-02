@@ -680,6 +680,36 @@ static void tbframe_datapath_old_descriptor_cannot_prove_new_session(struct kuni
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+/*
+ * A hardware-bad frame must remain excluded from the normal RX contract, but
+ * silently recycling it destroys the only payload evidence that can check the
+ * NHI verdict.  Give the client one synchronous, read-only diagnostic view
+ * before the same descriptor is reposted.
+ */
+static void tbframe_datapath_bad_frame_is_diagnostic_only(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = dp_fx(test);
+	struct tbframe_frame_priv *f;
+	u8 *payload;
+
+	tbframe_mock_link_up(test, fx);
+	f = tbframe_mock_pop_rx(fx);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	payload = f->frame.data;
+	payload[0] = 0x81;
+	payload[1] = 0x02;
+
+	tbframe_core_rx_complete(f, false, 700, TBFRAME_PDF_DATA, true);
+
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.rx_count);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.rx_bad_count);
+	KUNIT_EXPECT_EQ(test, (u16)700, fx->client.last_rx_bad_len);
+	KUNIT_EXPECT_EQ(test, (u8)TBFRAME_PDF_DATA,
+			fx->client.last_rx_bad_pdf);
+	KUNIT_EXPECT_EQ(test, (u8)0x81, fx->client.last_rx_bad_first_byte);
+	KUNIT_EXPECT_EQ(test, TBFRAME_MOCK_RING, fx->mock.rx_posted_count);
+}
+
 static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
@@ -705,6 +735,7 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_proof_does_not_survive_a_session),
 	KUNIT_CASE(tbframe_datapath_late_frame_cannot_prove_next_session),
 	KUNIT_CASE(tbframe_datapath_old_descriptor_cannot_prove_new_session),
+	KUNIT_CASE(tbframe_datapath_bad_frame_is_diagnostic_only),
 	{}
 };
 

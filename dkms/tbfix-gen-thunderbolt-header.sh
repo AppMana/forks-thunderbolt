@@ -56,6 +56,10 @@ add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
 # core when the fabric path cannot be proven drained. The ring stays allocated
 # and non-reusable until the domain has obtained real controller-reset proof.
 add_ring_quarantine=1; grep -q 'tb_ring_quarantine' "$src" && add_ring_quarantine=0
+# Per-ring private completion-correlation storage. The object is allocated and
+# owned by the forked NHI core; service drivers only retrieve the public,
+# immutable evidence through tb_ring_completion_evidence().
+add_completion_records=1; grep -q 'void \*completion_records;' "$src" && add_completion_records=0
 # struct tb_xdomain::bonding_rearm_attempts (xdomain.c: bounded lane-bonding
 # re-arm from ENUMERATED; appended at the END of the struct so every stock
 # member keeps its stock offset for stock-header consumers)
@@ -86,6 +90,7 @@ awk -v add_handler="$add_handler" \
     -v add_removing="$add_removing" \
     -v add_ring_flush="$add_ring_flush" \
     -v add_ring_quarantine="$add_ring_quarantine" \
+    -v add_completion_records="$add_completion_records" \
     -v add_rearm="$add_rearm" \
     -v add_uuid_verified="$add_uuid_verified" \
     -v add_uuid_retry="$add_uuid_retry" \
@@ -130,6 +135,8 @@ awk -v add_handler="$add_handler" \
 			print "\twait_queue_head_t wait;"
 		if (add_ring_quarantine == 1)
 			print "\tbool quarantined;"
+		if (add_completion_records == 1)
+			print "\tvoid *completion_records;"
 		print "};"
 		in_ring = 0
 		next
@@ -213,6 +220,7 @@ for tok in \
 	'TB_RING_HAS_FLUSH' \
 	'TB_RING_HAS_QUARANTINE' \
 	'bool quarantined;' \
+	'void \*completion_records;' \
 	'bonding_rearm_attempts' \
 	'bool uuid_verified;' \
 	'uuid_retry_failures' \

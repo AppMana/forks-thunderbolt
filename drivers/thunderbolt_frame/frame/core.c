@@ -2269,7 +2269,21 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	if (controller_proven && link->ops->report_data_proven)
 		link->ops->report_data_proven(link->hw);
 
-	/* Loss model: CRC drops and post-link_down frames never reach rx(). */
+	/*
+	 * Preserve one read-only client observation of a current-session bad
+	 * payload. This is diagnostic only: it never enters the normal RX state
+	 * machine and the descriptor is recycled immediately afterwards.
+	 */
+	if (current_generation && bad && len <= TBFRAME_MAX_FRAME) {
+		f->frame.len = len;
+		f->frame.pdf = pdf;
+		down_read(&tf->client_rwsem);
+		if (tf->client_ops && tf->client_ops->rx_bad)
+			tf->client_ops->rx_bad(tf->client_ctx, link, &f->frame);
+		up_read(&tf->client_rwsem);
+	}
+
+	/* Loss model: bad and post-link_down frames never reach rx(). */
 	if (!up || bad || len > TBFRAME_MAX_FRAME) {
 		tbframe_frame_recycle_rx(f);
 		return;

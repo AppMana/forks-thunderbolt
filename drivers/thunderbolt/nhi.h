@@ -43,6 +43,41 @@ struct tb_ring_snapshot {
 	bool full;
 };
 
+enum tb_ring_completion_anomaly {
+	TB_RING_COMPLETION_HW_CRC		= BIT(0),
+	TB_RING_COMPLETION_HW_OVERRUN		= BIT(1),
+	TB_RING_COMPLETION_OWNER_MISMATCH	= BIT(2),
+	TB_RING_COMPLETION_DMA_MISMATCH		= BIT(3),
+};
+
+/*
+ * Immutable evidence captured at the exact RX descriptor completion.  In
+ * particular, @slot is the software tail consumed by ring_work(), not the
+ * later live ring index sampled from a service callback.  @generation and
+ * @posted_* are retained when software publishes the slot, so a hardware CRC
+ * report can be distinguished from stale descriptor/list ownership.
+ */
+struct tb_ring_completion_evidence {
+	u64 generation;
+	dma_addr_t posted_phys;
+	dma_addr_t completed_phys;
+	dma_addr_t frame_phys;
+	u32 posted_attributes;
+	u32 completed_attributes;
+	u32 descriptor_time;
+	u32 index_raw;
+	u32 prev_attributes;
+	u32 next_attributes;
+	u32 anomalies;
+	u16 slot;
+	u16 sw_head;
+	u16 sw_tail;
+	u16 length;
+	u16 flags;
+	u8 eof;
+	u8 sof;
+};
+
 enum tb_nhi_ring_stop_step {
 	TB_NHI_RING_STOP_DISABLE	= BIT(0),
 	TB_NHI_RING_STOP_CLEAR_STATE	= BIT(1),
@@ -101,6 +136,9 @@ tb_nhi_tx_descriptor_completed(const struct tb_ring_snapshot *snapshot)
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
 int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
+int tb_ring_completion_evidence(struct tb_ring *ring,
+				struct ring_frame *frame,
+				struct tb_ring_completion_evidence *evidence);
 int tb_ring_process_completions(struct tb_ring *ring);
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,

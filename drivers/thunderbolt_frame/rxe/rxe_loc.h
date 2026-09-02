@@ -203,6 +203,27 @@ int rxe_receiver(struct rxe_qp *qp);
 int rxe_icrc_check(struct sk_buff *skb, struct rxe_pkt_info *pkt);
 void rxe_icrc_generate(struct sk_buff *skb, struct rxe_pkt_info *pkt);
 
+enum tbrxe_bad_frame_icrc {
+	TBRXE_BAD_FRAME_TOO_SHORT,
+	TBRXE_BAD_FRAME_UNSUPPORTED_OPCODE,
+	TBRXE_BAD_FRAME_ICRC_MATCH,
+	TBRXE_BAD_FRAME_ICRC_MISMATCH,
+};
+
+struct tbrxe_bad_frame_diagnostic {
+	enum tbrxe_bad_frame_icrc icrc;
+	u32 qpn;
+	u32 psn;
+	u32 fingerprint;
+	u16 len;
+	u16 header_len;
+	u8 opcode;
+	u8 pad;
+};
+
+void tbrxe_bad_frame_diagnose(const void *data, u16 len,
+			      struct tbrxe_bad_frame_diagnostic *diagnostic);
+
 void rxe_resp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb);
 
 void rxe_comp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb);

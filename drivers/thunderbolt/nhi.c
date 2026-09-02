@@ -974,6 +974,158 @@ static u16 ring_descriptor_flags(u32 word)
 	return (word >> 20) & 0x0fff;
 }
 
+struct tb_ring_completion_record {
+	struct ring_frame *frame;
+	dma_addr_t posted_phys;
+	u32 posted_attributes;
+	u64 generation;
+	u16 slot;
+};
+
+struct tb_ring_completed_record {
+	struct ring_frame *frame;
+	struct tb_ring_completion_evidence evidence;
+};
+
+struct tb_ring_completion_diag {
+	struct tb_ring_completion_record *posted;
+	struct tb_ring_completed_record *completed;
+	u16 completed_count;
+	u16 size;
+};
+
+static void
+tb_ring_completion_record_post(struct tb_ring_completion_record *record,
+			       u16 slot, struct ring_frame *frame,
+			       u32 posted_attributes)
+{
+	u64 generation = record->generation + 1;
+
+	memset(record, 0, sizeof(*record));
+	record->generation = generation;
+	record->slot = slot;
+	record->frame = frame;
+	record->posted_phys = frame->buffer_phy;
+	record->posted_attributes = posted_attributes;
+}
+
+static bool
+tb_ring_completion_record_complete(
+		const struct tb_ring_completion_record *record,
+		struct ring_frame *frame, u32 completed_attributes,
+		dma_addr_t completed_phys, u32 descriptor_time, u16 sw_head,
+		u16 sw_tail, u32 index_raw, u32 prev_attributes,
+		u32 next_attributes, struct tb_ring_completion_evidence *evidence)
+{
+	u16 flags = ring_descriptor_flags(completed_attributes);
+
+	if (!record->generation || !(flags & RING_DESC_COMPLETED))
+		return false;
+
+	memset(evidence, 0, sizeof(*evidence));
+	evidence->generation = record->generation;
+	evidence->posted_phys = record->posted_phys;
+	evidence->completed_phys = completed_phys;
+	evidence->frame_phys = frame->buffer_phy;
+	evidence->posted_attributes = record->posted_attributes;
+	evidence->completed_attributes = completed_attributes;
+	evidence->descriptor_time = descriptor_time;
+	evidence->index_raw = index_raw;
+	evidence->prev_attributes = prev_attributes;
+	evidence->next_attributes = next_attributes;
+	evidence->slot = record->slot;
+	evidence->sw_head = sw_head;
+	evidence->sw_tail = sw_tail;
+	evidence->length = ring_descriptor_length(completed_attributes);
+	evidence->eof = ring_descriptor_eof(completed_attributes);
+	evidence->sof = ring_descriptor_sof(completed_attributes);
+	evidence->flags = flags;
+
+	if (flags & RING_DESC_CRC_ERROR)
+		evidence->anomalies |= TB_RING_COMPLETION_HW_CRC;
+	if (flags & RING_DESC_BUFFER_OVERRUN)
+		evidence->anomalies |= TB_RING_COMPLETION_HW_OVERRUN;
+	if (record->frame != frame)
+		evidence->anomalies |= TB_RING_COMPLETION_OWNER_MISMATCH;
+	if (record->posted_phys != completed_phys ||
+	    completed_phys != frame->buffer_phy)
+		evidence->anomalies |= TB_RING_COMPLETION_DMA_MISMATCH;
+
+	return true;
+}
+
+static struct tb_ring_completion_diag *
+ring_completion_diag(struct tb_ring *ring)
+{
+	return ring->completion_records;
+}
+
+static int ring_completion_diag_alloc(struct tb_ring *ring)
+{
+	struct tb_ring_completion_diag *diag;
+
+	/* TX descriptors do not carry the RX CRC/overrun interpretation. */
+	if (ring->is_tx || !(ring->flags & RING_FLAG_FRAME))
+		return 0;
+
+	diag = kzalloc(sizeof(*diag), GFP_KERNEL);
+	if (!diag)
+		return -ENOMEM;
+	diag->posted = kcalloc(ring->size, sizeof(*diag->posted), GFP_KERNEL);
+	diag->completed = kcalloc(ring->size, sizeof(*diag->completed),
+				 GFP_KERNEL);
+	if (!diag->posted || !diag->completed) {
+		kfree(diag->completed);
+		kfree(diag->posted);
+		kfree(diag);
+		return -ENOMEM;
+	}
+	diag->size = ring->size;
+	ring->completion_records = diag;
+	return 0;
+}
+
+static void ring_completion_diag_free(struct tb_ring *ring)
+{
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
+
+	if (!diag)
+		return;
+	kfree(diag->completed);
+	kfree(diag->posted);
+	kfree(diag);
+	ring->completion_records = NULL;
+}
+
+int tb_ring_completion_evidence(
+		struct tb_ring *ring, struct ring_frame *frame,
+		struct tb_ring_completion_evidence *evidence)
+{
+	struct tb_ring_completion_diag *diag;
+	unsigned long flags;
+	u16 i;
+	int ret = -ENODATA;
+
+	if (!ring || !frame || !evidence)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ring->lock, flags);
+	diag = ring_completion_diag(ring);
+	if (!diag)
+		goto out;
+	for (i = 0; i < diag->completed_count; i++) {
+		if (diag->completed[i].frame != frame)
+			continue;
+		*evidence = diag->completed[i].evidence;
+		ret = 0;
+		break;
+	}
+out:
+	spin_unlock_irqrestore(&ring->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tb_ring_completion_evidence);
+
 /*
  * ring_write_descriptors() - post frames from ring->queue to the controller
  *
@@ -981,13 +1133,18 @@ static u16 ring_descriptor_flags(u32 word)
  */
 static void ring_write_descriptors(struct tb_ring *ring)
 {
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
 	struct ring_frame *frame, *n;
 	struct ring_desc *descriptor;
 	list_for_each_entry_safe(frame, n, &ring->queue, list) {
+		u32 posted_attributes;
+		u16 slot;
+
 		if (ring_full(ring))
 			break;
 		list_move_tail(&frame->list, &ring->in_flight);
-		descriptor = &ring->descriptors[ring->head];
+		slot = ring->head;
+		descriptor = &ring->descriptors[slot];
 		/*
 		 * A reused descriptor still contains POSTED|COMPLETED from its
 		 * previous trip around the ring. Unpublish it before changing
@@ -998,12 +1155,15 @@ static void ring_write_descriptors(struct tb_ring *ring)
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
 		dma_wmb();
-		WRITE_ONCE(descriptor->attributes,
-			   ring_descriptor_word(
-				   ring->is_tx ? frame->size : 0,
-				   ring->is_tx ? frame->eof : 0,
-				   ring->is_tx ? frame->sof : 0,
-				   RING_DESC_POSTED | RING_DESC_INTERRUPT));
+		posted_attributes = ring_descriptor_word(
+			ring->is_tx ? frame->size : 0,
+			ring->is_tx ? frame->eof : 0,
+			ring->is_tx ? frame->sof : 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+		WRITE_ONCE(descriptor->attributes, posted_attributes);
+		if (diag)
+			tb_ring_completion_record_post(&diag->posted[slot], slot,
+						       frame, posted_attributes);
 		/*
 		 * The descriptor must be visible in coherent memory before the
 		 * doorbell tells the device to look at it; the doorbell is an
@@ -1031,12 +1191,15 @@ static void ring_write_descriptors(struct tb_ring *ring)
 static void ring_work(struct work_struct *work)
 {
 	struct tb_ring *ring = container_of(work, typeof(*ring), work);
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
 	struct ring_frame *frame;
 	bool canceled = false;
 	unsigned long flags;
 	LIST_HEAD(done);
 
 	spin_lock_irqsave(&ring->lock, flags);
+	if (diag)
+		diag->completed_count = 0;
 
 	if (!ring->running) {
 		/*  Move all frames to done and mark them as canceled. */
@@ -1047,10 +1210,14 @@ static void ring_work(struct work_struct *work)
 	}
 
 	while (!ring_empty(ring)) {
+		struct ring_desc *descriptor = &ring->descriptors[ring->tail];
 		u32 attributes =
-			READ_ONCE(ring->descriptors[ring->tail].attributes);
+			READ_ONCE(descriptor->attributes);
+		u16 slot = ring->tail;
+		u16 desc_flags;
 
-		if (!(ring_descriptor_flags(attributes) & RING_DESC_COMPLETED))
+		desc_flags = ring_descriptor_flags(attributes);
+		if (!(desc_flags & RING_DESC_COMPLETED))
 			break;
 		/*
 		 * The metadata came from one snapshot above. Order subsequent
@@ -1060,6 +1227,28 @@ static void ring_work(struct work_struct *work)
 		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
+		if (diag &&
+		    desc_flags & (RING_DESC_CRC_ERROR |
+				  RING_DESC_BUFFER_OVERRUN) &&
+		    diag->completed_count < diag->size) {
+			struct tb_ring_completed_record *completed =
+				&diag->completed[diag->completed_count];
+			u16 prev = (slot + ring->size - 1) % ring->size;
+			u16 next = (slot + 1) % ring->size;
+
+			if (tb_ring_completion_record_complete(
+					&diag->posted[slot], frame, attributes,
+					READ_ONCE(descriptor->phys),
+					READ_ONCE(descriptor->time), ring->head,
+					ring->tail,
+					ioread32(ring_desc_base(ring) + 8),
+					READ_ONCE(ring->descriptors[prev].attributes),
+					READ_ONCE(ring->descriptors[next].attributes),
+					&completed->evidence)) {
+				completed->frame = frame;
+				diag->completed_count++;
+			}
+		}
 		list_move_tail(&frame->list, &done);
 		if (!ring->is_tx) {
 			frame->size = ring_descriptor_length(attributes);
@@ -1477,12 +1666,14 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	ring->running = false;
 	ring->start_poll = start_poll;
 	ring->poll_data = poll_data;
+	if (ring_completion_diag_alloc(ring))
+		goto err_free_ring;
 
 	ring->descriptors = dma_alloc_coherent(&ring->nhi->pdev->dev,
 			size * sizeof(*ring->descriptors),
 			&ring->descriptors_dma, GFP_KERNEL | __GFP_ZERO);
 	if (!ring->descriptors)
-		goto err_free_ring;
+		goto err_free_diag;
 
 	if (ring_request_msix(ring, flags & RING_FLAG_NO_SUSPEND))
 		goto err_free_descs;
@@ -1498,6 +1689,8 @@ err_free_descs:
 	dma_free_coherent(&ring->nhi->pdev->dev,
 			  ring->size * sizeof(*ring->descriptors),
 			  ring->descriptors, ring->descriptors_dma);
+err_free_diag:
+	ring_completion_diag_free(ring);
 err_free_ring:
 	kfree(ring);
 
@@ -1924,6 +2117,7 @@ void tb_ring_free(struct tb_ring *ring)
 	 * to finish before freeing the ring.
 	 */
 	flush_work(&ring->work);
+	ring_completion_diag_free(ring);
 	kfree(ring);
 }
 EXPORT_SYMBOL_GPL(tb_ring_free);
@@ -3158,6 +3352,121 @@ static void tb_test_ring_restart_rejects_invalid_retained_index(struct kunit *te
 	KUNIT_EXPECT_EQ(test, (u16)0, ring.tail);
 }
 
+/*
+ * RX descriptor flags are state-dependent: software publishes 0x0c
+ * (POSTED|INTERRUPT), while hardware completion 0x07 means
+ * CRC_ERROR|COMPLETED|BUFFER_OVERRUN.  The raw word alone cannot prove that
+ * the completed descriptor still belongs to the frame at the head of the
+ * in-flight list.  Model the evidence that production must retain at post
+ * time and correlate at completion time.
+ */
+static void tb_test_ring_completion_correlates_exact_owner(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(700, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 37, &frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &frame, completed,
+			frame.buffer_phy, 0, 38, 37, 0x00260025,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test, (u16)37, evidence.slot);
+	KUNIT_EXPECT_EQ(test, (u64)1, evidence.generation);
+	KUNIT_EXPECT_EQ(test, posted, evidence.posted_attributes);
+	KUNIT_EXPECT_EQ(test, completed, evidence.completed_attributes);
+	KUNIT_EXPECT_EQ(test, (u64)frame.buffer_phy,
+			(u64)evidence.posted_phys);
+	KUNIT_EXPECT_EQ(test, (u64)frame.buffer_phy,
+			(u64)evidence.completed_phys);
+	KUNIT_EXPECT_EQ(test, (u16)700, evidence.length);
+	KUNIT_EXPECT_EQ(test, (u8)4, evidence.eof);
+	KUNIT_EXPECT_EQ(test, (u8)0, evidence.sof);
+	KUNIT_EXPECT_EQ(test, (u16)(RING_DESC_CRC_ERROR |
+			RING_DESC_COMPLETED | RING_DESC_INTERRUPT),
+			evidence.flags);
+	KUNIT_EXPECT_EQ(test, (u32)TB_RING_COMPLETION_HW_CRC,
+			evidence.anomalies);
+}
+
+static void tb_test_ring_completion_exposes_owner_and_dma_drift(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame posted_frame = {
+		.buffer_phy = 0x12345000,
+	};
+	struct ring_frame completed_frame = {
+		.buffer_phy = 0x56789000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(956, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 91, &posted_frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &completed_frame,
+			completed, 0xdead0000, 0, 92, 91, 0x005c005b,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test,
+		(u32)(TB_RING_COMPLETION_HW_CRC |
+		      TB_RING_COMPLETION_OWNER_MISMATCH |
+		      TB_RING_COMPLETION_DMA_MISMATCH),
+		evidence.anomalies);
+}
+
+static void tb_test_ring_completion_decodes_rx_0x07_not_posted(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(444, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_BUFFER_OVERRUN);
+
+	tb_ring_completion_record_post(&record, 7, &frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &frame, completed,
+			frame.buffer_phy, 0, 8, 7, 0x00080007,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test, (u16)0x07, evidence.flags);
+	KUNIT_EXPECT_EQ(test,
+		(u32)(TB_RING_COMPLETION_HW_CRC |
+		      TB_RING_COMPLETION_HW_OVERRUN),
+		evidence.anomalies);
+}
+
+static void tb_test_ring_completion_generation_advances_on_repost(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 3, &frame, posted);
+	KUNIT_EXPECT_EQ(test, (u64)1, record.generation);
+	tb_ring_completion_record_post(&record, 3, &frame, posted);
+	KUNIT_EXPECT_EQ(test, (u64)2, record.generation);
+}
+
 static struct kunit_case tb_ring_quarantine_cases[] = {
 	KUNIT_CASE(tb_test_ring_quarantine_detaches_leaf_lifetime),
 	KUNIT_CASE(tb_test_ring_restart_rebases_retained_rx_producer),
@@ -3165,6 +3474,10 @@ static struct kunit_case tb_ring_quarantine_cases[] = {
 	KUNIT_CASE(tb_test_ring_restart_requires_both_indices_aligned),
 	KUNIT_CASE(tb_test_ring_restart_synchronizes_before_enable),
 	KUNIT_CASE(tb_test_ring_restart_rejects_invalid_retained_index),
+	KUNIT_CASE(tb_test_ring_completion_correlates_exact_owner),
+	KUNIT_CASE(tb_test_ring_completion_exposes_owner_and_dma_drift),
+	KUNIT_CASE(tb_test_ring_completion_decodes_rx_0x07_not_posted),
+	KUNIT_CASE(tb_test_ring_completion_generation_advances_on_repost),
 	{}
 };
 

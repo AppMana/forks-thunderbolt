@@ -183,10 +183,14 @@ struct tbframe_mock_client {
 	unsigned int	up_count;
 	unsigned int	down_count;
 	unsigned int	rx_count;
+	unsigned int	rx_bad_count;
 	unsigned int	tx_released_count;
 	struct tbframe_link_info last_info;
 	u16		last_rx_len;
 	u8		last_rx_pdf;
+	u16		last_rx_bad_len;
+	u8		last_rx_bad_pdf;
+	u8		last_rx_bad_first_byte;
 };
 
 static void tbframe_mock_client_event(struct tbframe_mock_client *c, u8 ev,
@@ -212,6 +216,17 @@ static void tbframe_mock_client_rx(void *ctx, struct tbframe_link *link,
 	c->last_rx_pdf = frame->pdf;
 	c->rx_count++;
 	tbframe_mock_client_event(c, TBFRAME_EV_RX, 0);
+}
+
+static void tbframe_mock_client_rx_bad(void *ctx, struct tbframe_link *link,
+				       struct tbframe_frame *frame)
+{
+	struct tbframe_mock_client *c = ctx;
+
+	c->last_rx_bad_len = frame->len;
+	c->last_rx_bad_pdf = frame->pdf;
+	c->last_rx_bad_first_byte = frame->len ? *(u8 *)frame->data : 0;
+	c->rx_bad_count++;
 }
 
 static void tbframe_mock_client_tx_released(void *ctx,
@@ -245,6 +260,7 @@ static void tbframe_mock_client_link_down(void *ctx,
 
 static const struct tbframe_client_ops tbframe_mock_client_ops = {
 	.rx		= tbframe_mock_client_rx,
+	.rx_bad		= tbframe_mock_client_rx_bad,
 	.tx_released	= tbframe_mock_client_tx_released,
 	.link_up	= tbframe_mock_client_link_up,
 	.link_down	= tbframe_mock_client_link_down,

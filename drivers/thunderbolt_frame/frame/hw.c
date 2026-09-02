@@ -309,10 +309,28 @@ static void tbframe_hw_rx_callback(struct tb_ring *ring,
 						    struct tbframe_frame_priv,
 						    rf);
 	bool bad = rf->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN);
+	struct tb_ring_completion_evidence evidence;
 	struct tb_ring_snapshot snapshot;
 
-	if (!canceled && bad && !tb_ring_snapshot(ring, &snapshot))
-		pr_warn_ratelimited("%s: RX descriptor error flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x ring_index=%#x sw_head=%u sw_tail=%u hw_prod=%u hw_cons=%u queued=%u in_flight=%u\n",
+	if (!canceled && bad &&
+	    !tb_ring_completion_evidence(ring, rf, &evidence))
+		pr_warn_ratelimited("%s: RX descriptor evidence slot=%u generation=%llu anomalies=%#x posted_attr=%#010x completed_attr=%#010x flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x posted_dma=%pad completed_dma=%pad frame_dma=%pad desc_time=%#x ring_index=%#x sw_head=%u sw_tail=%u prev_attr=%#010x next_attr=%#010x\n",
+				    f->link->name, evidence.slot,
+				    evidence.generation, evidence.anomalies,
+				    evidence.posted_attributes,
+				    evidence.completed_attributes,
+				    evidence.flags,
+				    !!(evidence.flags & RING_DESC_CRC_ERROR),
+				    !!(evidence.flags & RING_DESC_BUFFER_OVERRUN),
+				    evidence.length, evidence.sof,
+				    evidence.eof, &evidence.posted_phys,
+				    &evidence.completed_phys, &evidence.frame_phys,
+				    evidence.descriptor_time, evidence.index_raw,
+				    evidence.sw_head, evidence.sw_tail,
+				    evidence.prev_attributes,
+				    evidence.next_attributes);
+	else if (!canceled && bad && !tb_ring_snapshot(ring, &snapshot))
+		pr_warn_ratelimited("%s: RX descriptor error without exact evidence flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x ring_index=%#x sw_head=%u sw_tail=%u hw_prod=%u hw_cons=%u queued=%u in_flight=%u\n",
 				    f->link->name, rf->flags,
 				    !!(rf->flags & RING_DESC_CRC_ERROR),
 				    !!(rf->flags & RING_DESC_BUFFER_OVERRUN),

@@ -1157,6 +1157,54 @@ static void tbrxe_client_rx(void *ctx, struct tbframe_link *tblink,
 	rxe_rcv(skb);
 }
 
+static const char *
+tbrxe_bad_frame_icrc_name(enum tbrxe_bad_frame_icrc status)
+{
+	switch (status) {
+	case TBRXE_BAD_FRAME_TOO_SHORT:
+		return "too-short";
+	case TBRXE_BAD_FRAME_UNSUPPORTED_OPCODE:
+		return "unsupported-opcode";
+	case TBRXE_BAD_FRAME_ICRC_MATCH:
+		return "match";
+	case TBRXE_BAD_FRAME_ICRC_MISMATCH:
+		return "mismatch";
+	}
+	return "unknown";
+}
+
+/*
+ * Diagnostic-only bad-frame path. It never calls rxe_rcv(), looks up a QP or
+ * advances requester/responder state. The independent ICRC and BTH identity
+ * make the lower NHI descriptor evidence correlatable with RDMA retries.
+ */
+static void tbrxe_client_rx_bad(void *ctx, struct tbframe_link *tblink,
+				struct tbframe_frame *frame)
+{
+	struct tbrxe_bad_frame_diagnostic diagnostic;
+	struct tbrxe_link *link;
+	struct rxe_dev *rxe = NULL;
+	unsigned long flags;
+
+	tbrxe_bad_frame_diagnose(frame->data, frame->len, &diagnostic);
+
+	spin_lock_irqsave(&tbrxe.lock, flags);
+	link = tbrxe_find_record_locked(tblink);
+	if (link && ib_device_try_get(&link->rxe->ib_dev))
+		rxe = link->rxe;
+	spin_unlock_irqrestore(&tbrxe.lock, flags);
+	if (!rxe)
+		return;
+
+	dev_warn_ratelimited(&rxe->ib_dev.dev,
+		"rejected RX payload evidence len=%u pdf=%#x fingerprint=%#010x opcode=%#x qpn=%#x psn=%#x header_len=%u pad=%u software_icrc=%s\n",
+		frame->len, frame->pdf, diagnostic.fingerprint,
+		diagnostic.opcode, diagnostic.qpn, diagnostic.psn,
+		diagnostic.header_len, diagnostic.pad,
+		tbrxe_bad_frame_icrc_name(diagnostic.icrc));
+	ib_device_put(&rxe->ib_dev);
+}
+
 /* Reschedule every parked QP of one device (window reopened). */
 static void tbrxe_kick_parked_qps(struct rxe_dev *rxe)
 {
@@ -1370,6 +1418,7 @@ static void tbrxe_client_link_down(void *ctx, struct tbframe_link *tblink,
 
 static const struct tbframe_client_ops tbrxe_client_ops = {
 	.rx		= tbrxe_client_rx,
+	.rx_bad		= tbrxe_client_rx_bad,
 	.tx_released	= tbrxe_client_tx_released,
 	.link_up	= tbrxe_client_link_up,
 	.link_down	= tbrxe_client_link_down,
