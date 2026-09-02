@@ -7131,6 +7131,25 @@ static void tb_test_xdomain_control_recovery_is_bounded(struct kunit *test)
 }
 
 /*
+ * A sysfs/CM reader may hold tb->lock while synchronously waiting for an ICM
+ * reply.  Ring 0 RX must therefore not perform the source-XDomain lookup or a
+ * service callback inline: if it blocks on tb->lock, it is also the only worker
+ * capable of delivering the reply that releases tb->lock.  This is the exact
+ * three-party stall observed after a coordinated reload (lock owner, ring 0
+ * worker, and frame requester), expressed as a dispatch policy rather than a
+ * timing-dependent mutex test.
+ */
+static void tb_test_xdomain_service_dispatch_cannot_block_ring0(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_rx_dispatch_mode(TB_XDOMAIN_RX_DISCOVERY_REQUEST),
+		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_rx_dispatch_mode(TB_XDOMAIN_RX_SERVICE_PACKET),
+		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
+}
+
+/*
  * The placeholder predicate, against the identities actually read off the
  * fleet on 2026-08-25. Only an ALL-ones UUID is the absence of a peer: with no
  * powered router behind the link every config dword reads back all-ones, so
@@ -7587,8 +7606,8 @@ static void tb_test_xdomain_handler_dispatch_source_blind_registrant(struct kuni
 	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(handler), 0);
 
 	KUNIT_EXPECT_TRUE(test,
-		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
-					  &ctx->pkt, sizeof(ctx->pkt)));
+		tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt,
+						 sizeof(ctx->pkt)));
 
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->stock_calls), 1);
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->wrong_calls), 0);
@@ -7620,8 +7639,7 @@ static int tb_test_handler_dispatch_thread(void *arg)
 {
 	struct handler_test_ctx *ctx = arg;
 
-	tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ, &ctx->pkt,
-				  sizeof(ctx->pkt));
+	tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt, sizeof(ctx->pkt));
 	complete(&ctx->dispatch_done);
 	return 0;
 }
@@ -7702,8 +7720,8 @@ static void tb_test_xdomain_handler_unregister_waits_for_dispatch(struct kunit *
 	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(new_inst), 0);
 
 	KUNIT_EXPECT_TRUE(test,
-		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
-					  &ctx->pkt, sizeof(ctx->pkt)));
+		tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt,
+						 sizeof(ctx->pkt)));
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->xd_calls), 1);
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->blocking_calls), 1);
 
@@ -8562,6 +8580,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
 	KUNIT_CASE(tb_test_xdomain_one_way_control_failure_requests_recovery),
 	KUNIT_CASE(tb_test_xdomain_control_recovery_is_bounded),
+	KUNIT_CASE(tb_test_xdomain_service_dispatch_cannot_block_ring0),
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
 	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),

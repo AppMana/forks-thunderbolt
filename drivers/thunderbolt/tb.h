@@ -85,6 +85,8 @@ bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);
 bool tb_test_xdomain_unplugged_link_exit_touches_lane_hardware(void);
+bool tb_test_xdomain_dispatch_service(struct tb *tb, const void *buf,
+				      size_t size);
 unsigned int tb_test_xdomain_uuid_retry_delay_ms(unsigned int failures);
 #endif
 #include "ctl.h"

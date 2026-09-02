@@ -114,6 +114,37 @@ DKMS source tree (the legacy driver's byte-identical `proto/` copy is gone).
   soft RDMA-driver reload re-negotiates without a reboot (the patched side
   re-reads where an unpatched neighbour's gen-gate blocks it).
 
+### Ring-0 dispatch lock invariant
+
+Ring 0 is both the receive path for XDomain service packets and the completion
+path for synchronous ICM/configuration requests. A service packet must not do a
+blocking topology lookup or invoke a service callback directly from ring-0
+completion context.
+
+The failure cycle is:
+
+1. a management or sysfs operation holds the domain topology mutex and waits
+   synchronously for its controller response;
+2. ring 0 receives an unrelated service packet and blocks on that same mutex
+   while resolving its source route;
+3. the response from step 1 is queued behind the blocked ring worker, so the
+   mutex owner and ring worker wait for one another;
+4. frame-session requests then accumulate behind the stalled completion path,
+   eventually appearing as late unmatched replies after teardown.
+
+Discovery requests and non-discovery service packets are therefore copied and
+deferred before any topology mutex, XDomain mutex, or protocol-handler dispatch
+lock is acquired. Responses that already belong to a pending request continue
+to be matched in ring context; they do not enter service dispatch. Deferred
+service dispatch retains the domain for the work item's lifetime and preserves
+the existing handler-unregistration fence around callbacks.
+
+`tb_test_xdomain_service_dispatch_cannot_block_ring0` models the context
+boundary. Its RED state records service dispatch as inline; its GREEN state
+requires deferred dispatch. The existing ABI and handler-unregistration tests
+exercise the callback walk independently of scheduling so they continue to
+verify source-blind compatibility and unload fencing.
+
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note
 `project-tb-xdomain-renegotiation-bug`, and `scripts/tb-chain-reboot-cover.sh`
 (the reboot workaround this replaces).

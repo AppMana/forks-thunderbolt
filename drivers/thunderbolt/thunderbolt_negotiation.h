@@ -221,6 +221,33 @@ enum tb_xdomain_control_event {
 	TB_XDOMAIN_CONTROL_STOPPED,
 };
 
+/*
+ * Ring 0 completion processing is the only context that can retire a
+ * synchronous control request.  Taking tb->lock from that context is unsafe:
+ * sysfs and connection-manager paths legitimately hold tb->lock while waiting
+ * for a ring 0 response.  Model the dispatch decision explicitly so service
+ * protocol handling cannot silently regain an inline, blocking route lookup.
+ */
+enum tb_xdomain_rx_dispatch_class {
+	TB_XDOMAIN_RX_DISCOVERY_REQUEST,
+	TB_XDOMAIN_RX_DISCOVERY_RESPONSE,
+	TB_XDOMAIN_RX_SERVICE_PACKET,
+};
+
+enum tb_xdomain_rx_dispatch_mode {
+	TB_XDOMAIN_RX_DISPATCH_INLINE,
+	TB_XDOMAIN_RX_DISPATCH_DEFERRED,
+};
+
+static inline enum tb_xdomain_rx_dispatch_mode
+tb_xdomain_rx_dispatch_mode(enum tb_xdomain_rx_dispatch_class class)
+{
+	if (class == TB_XDOMAIN_RX_DISCOVERY_RESPONSE)
+		return TB_XDOMAIN_RX_DISPATCH_INLINE;
+
+	return TB_XDOMAIN_RX_DISPATCH_DEFERRED;
+}
+
 static inline enum tb_xdomain_control_state
 tb_xdomain_control_next(enum tb_xdomain_control_state state,
 			 enum tb_xdomain_control_event event)

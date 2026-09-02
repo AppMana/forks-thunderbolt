@@ -137,6 +137,13 @@ struct xdomain_request_work {
 	struct tb *tb;
 };
 
+struct xdomain_service_work {
+	struct work_struct work;
+	struct tb *tb;
+	size_t size;
+	u8 packet[];
+};
+
 struct xdomain_response_work {
 	struct work_struct work;
 	struct tb_ctl *ctl;
@@ -4420,33 +4427,14 @@ struct tb_xdomain *tb_xdomain_find_by_route(struct tb *tb, u64 route)
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_find_by_route);
 
-bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
-			       const void *buf, size_t size)
+static bool tb_xdomain_dispatch_service(struct tb *tb, const void *buf,
+					size_t size)
 {
 	const struct tb_protocol_handler *handler;
 	const struct tb_xdp_header *hdr = buf;
 	struct tb_xdomain *source_xd = NULL;
-	unsigned int length;
 	int ret = 0;
 	u64 route;
-
-	/* We expect the packet is at least size of the header */
-	length = hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK;
-	if (length != size / 4 - sizeof(hdr->xd_hdr) / 4)
-		return true;
-	if (length < sizeof(*hdr) / 4 - sizeof(hdr->xd_hdr) / 4)
-		return true;
-
-	/*
-	 * Handle XDomain discovery protocol packets directly here. For
-	 * other protocols (based on their UUID) we call registered
-	 * handlers in turn.
-	 */
-	if (uuid_equal(&hdr->uuid, &tb_xdp_uuid)) {
-		if (type == TB_CFG_PKG_XDOMAIN_REQ)
-			return tb_xdp_schedule_request(tb, hdr, size);
-		return false;
-	}
 
 	route = ((u64)hdr->xd_hdr.route_hi << 32 | hdr->xd_hdr.route_lo) &
 		~BIT_ULL(63);
@@ -4496,6 +4484,69 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 	tb_xdomain_put(source_xd);
 
 	return ret > 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_dispatch_service(struct tb *tb, const void *buf,
+				      size_t size)
+{
+	return tb_xdomain_dispatch_service(tb, buf, size);
+}
+#endif
+
+static void tb_xdomain_service_work(struct work_struct *work)
+{
+	struct xdomain_service_work *xw =
+		container_of(work, typeof(*xw), work);
+
+	tb_xdomain_dispatch_service(xw->tb, xw->packet, xw->size);
+	tb_domain_put(xw->tb);
+	kfree(xw);
+}
+
+static bool tb_xdomain_schedule_service(struct tb *tb, const void *buf,
+					size_t size)
+{
+	struct xdomain_service_work *xw;
+
+	xw = kmalloc(struct_size(xw, packet, size), GFP_KERNEL);
+	if (!xw)
+		return false;
+
+	INIT_WORK(&xw->work, tb_xdomain_service_work);
+	xw->tb = tb_domain_get(tb);
+	xw->size = size;
+	memcpy(xw->packet, buf, size);
+	schedule_work(&xw->work);
+	return true;
+}
+
+bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+			       const void *buf, size_t size)
+{
+	const struct tb_xdp_header *hdr = buf;
+	unsigned int length;
+
+	/* We expect the packet is at least size of the header */
+	length = hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK;
+	if (length != size / 4 - sizeof(hdr->xd_hdr) / 4)
+		return true;
+	if (length < sizeof(*hdr) / 4 - sizeof(hdr->xd_hdr) / 4)
+		return true;
+
+	/* Discovery requests and service callbacks may take tb->lock. */
+	if (uuid_equal(&hdr->uuid, &tb_xdp_uuid)) {
+		if (type == TB_CFG_PKG_XDOMAIN_REQ)
+			return tb_xdp_schedule_request(tb, hdr, size);
+		return false;
+	}
+
+	if (WARN_ON_ONCE(tb_xdomain_rx_dispatch_mode(
+			TB_XDOMAIN_RX_SERVICE_PACKET) !=
+			TB_XDOMAIN_RX_DISPATCH_DEFERRED))
+		return false;
+
+	return tb_xdomain_schedule_service(tb, buf, size);
 }
 
 static int update_xdomain(struct device *dev, void *data)
