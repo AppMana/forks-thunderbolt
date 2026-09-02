@@ -117,7 +117,16 @@ static void tbframe_datapath_dead_ring_rebuilds_hardware(struct kunit *test)
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 2u);
 }
 
-static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct kunit *test)
+/*
+ * A local TX-ring stall is real, but the driver has no in-band cure for it: the
+ * Windows reference driver never power-cycles a live host router to recover a
+ * stalled data path (only after an NVM image write or to leave safe mode), and
+ * every attempt on Maple Ridge was rejected while its unbind/rebind fallback
+ * stranded healthy sibling routes. So a stalled route stays route-local: the
+ * session keeps rebuilding and the failure is reported in the log, but the
+ * driver never asks the core to reset the controller.
+ */
+static void tbframe_datapath_tx_stall_stays_route_local(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
@@ -125,17 +134,11 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 	fx->mock.datapath_dead = true;
 	fx->mock.tx_consumer_stalled = true;
 
-	for (i = 0; i < TBFRAME_PROBE_RETRIES + 2; i++)
+	for (i = 0; i < 4 * (TBFRAME_PROBE_RETRIES + 4); i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 
-	for (i = 0; i < TBFRAME_PROBE_RETRIES + 4; i++)
-		tbframe_link_session_step(fx->link);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
-
-	for (i = 0; i < 2 * (TBFRAME_PROBE_RETRIES + 4); i++)
-		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs, 2u);
 }
 
 /*
@@ -713,7 +716,7 @@ static void tbframe_datapath_bad_frame_is_diagnostic_only(struct kunit *test)
 static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
-	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
+	KUNIT_CASE(tbframe_datapath_tx_stall_stays_route_local),
 	KUNIT_CASE(tbframe_datapath_e2e_failure_stays_route_local_with_moving_consumer),
 	KUNIT_CASE(tbframe_datapath_one_way_local_tx_failure_stays_route_local),
 	KUNIT_CASE(tbframe_datapath_one_way_peer_tx_failure_avoids_local_recovery),

@@ -707,28 +707,6 @@ static int tbframe_link_send_keepalive(struct tbframe_link *link, bool pre_up)
 	return ret;
 }
 
-static bool tbframe_link_sample_tx_path(struct tbframe_link *link,
-					struct tb_ring_snapshot *first,
-					struct tb_ring_snapshot *last)
-{
-	unsigned long flags;
-	bool have_previous;
-
-	if (!link->ops->tx_snapshot ||
-	    link->ops->tx_snapshot(link->hw, last))
-		return false;
-
-	spin_lock_irqsave(&link->lock, flags);
-	have_previous = link->data_path_sample_valid;
-	if (have_previous)
-		*first = link->data_path_sample;
-	link->data_path_sample = *last;
-	link->data_path_sample_valid = true;
-	spin_unlock_irqrestore(&link->lock, flags);
-
-	return have_previous;
-}
-
 /*
  * Prove the bulk data path before declaring the session UP.
  *
@@ -755,10 +733,9 @@ static bool tbframe_link_sample_tx_path(struct tbframe_link *link,
 static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 {
 	struct tbframe *tf = link->tf;
-	struct tb_ring_snapshot first, last;
 	unsigned long flags;
-	unsigned int attempts, failures;
-	bool sampled, proven, rx_proven, tx_proven;
+	unsigned int attempts;
+	bool proven, rx_proven, tx_proven;
 	bool stale_draining, stale_expired, warned;
 	u32 remote_caps;
 
@@ -789,7 +766,6 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 
 	/* Best effort: a full ring or a wedged TX just costs this attempt. */
 	tbframe_link_send_keepalive(link, true);
-	sampled = tbframe_link_sample_tx_path(link, &first, &last);
 
 	spin_lock_irqsave(&link->lock, flags);
 	proven = link->data_proven;
@@ -826,7 +802,7 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	 */
 	spin_lock_irqsave(&link->lock, flags);
 	link->probe_attempts = 0;
-	failures = ++link->probe_failures;
+	++link->probe_failures;
 	rx_proven = link->data_rx_proven;
 	tx_proven = link->data_tx_proven;
 	link->data_proof_unavailable_warned = false;
@@ -837,23 +813,15 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
 	/*
-	 * Receive proof plus a missing authenticated acknowledgement identifies
-	 * the local transmit direction.  Escalate that endpoint promptly.  With
-	 * no receive evidence the fault is ambiguous, so delay local recovery and
-	 * let a peer that can still receive identify its own transmitter first.
+	 * A stalled route stays route-local. The driver has no in-band cure for
+	 * a wedged host-router data engine: Intel's own Windows driver never
+	 * power-cycles a live host router to recover a stalled data path (it does
+	 * so only after an NVM image write, or to leave safe mode), Maple Ridge
+	 * rejected every runtime attempt, and the unbind/rebind fallback that
+	 * used to run here stranded healthy sibling routes. The session keeps
+	 * rebuilding this one route and the failure is reported below; genuinely
+	 * dead hardware needs a cold power cycle, which only an operator can do.
 	 */
-	if (failures >= 2 &&
-	    ((rx_proven && !tx_proven) ||
-	     failures >= TBFRAME_AMBIGUOUS_RECOVERY_FAILURES) && sampled &&
-	    tb_nhi_tx_stalled(&first, &last, true) &&
-	    link->ops->report_tx_stall) {
-		int ret;
-
-		ret = link->ops->report_tx_stall(link->hw, &first, &last, true);
-		if (!ret)
-			pr_warn("%s: local TX consumer remained stalled after session rebuilds (rx_proven=%u tx_proven=%u); requested bounded local controller recovery\n",
-				link->name, rx_proven, tx_proven);
-	}
 	/*
 	 * Report the counters, not just the verdict. rx_bad moving means the
 	 * wire carried frames and the signal did not survive -- a cable or
