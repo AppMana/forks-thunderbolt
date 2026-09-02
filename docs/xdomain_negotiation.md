@@ -157,6 +157,33 @@ handler-unregistration tests exercise the callback walk independently of
 scheduling so they continue to verify source-blind compatibility and unload
 fencing.
 
+### Control recovery needs overlapping evidence
+
+Announcement retries and inbound control reception are independent state
+machines.  A route-correlated inbound request proves that the peer was present
+when that request arrived; it does not prove that the peer is still present
+minutes later when a property announcement reaches saturated backoff.
+
+The first directional-control detector retained an inbound timestamp for five
+minutes.  During a coordinated reload, a peer could send one request and then
+unbind.  The surviving endpoint later combined that stale timestamp with an
+outbound timeout, declared a one-way controller failure, and reset its entire
+two-port domain.  That removed an unrelated healthy sibling and allowed the
+failure to cascade along a chain.
+
+Production now samples `request_started` immediately before each bounded
+outbound request.  Controller recovery is eligible only if a route-correlated
+inbound request was observed at or after that sample.  Old peer activity still
+keeps the announcement retrying, but cannot justify a destructive domain
+recovery.  The wrap-safe predicate lives in the shared negotiation header.
+
+This was modeled RED before changing production.  The new stale-inbound case
+was the only failure in the 199-test core suite: the old model incorrectly set
+`recovery_requested`.  The independent model now distinguishes historical
+inbound activity from activity overlapping the failing request; the shared
+production predicate is also checked at the boundary.  The core suite then
+passed 199/199 and the selected Thunderbolt suites passed 230/230.
+
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note
 `project-tb-xdomain-renegotiation-bug`, and `scripts/tb-chain-reboot-cover.sh`
 (the reboot workaround this replaces).

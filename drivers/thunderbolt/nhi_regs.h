@@ -463,7 +463,14 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 	case TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING:
 		if (event == TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED)
 			return TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING;
-		return TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED;
+		/*
+		 * device_release_driver() has already detached the NHI by the time
+		 * the runtime command result is known.  A rejected preflight or
+		 * mailbox command therefore cannot leave the state terminal here:
+		 * rebind once to restore the still-present PCI function, then require
+		 * the same route-specific data proof as a dispatched power cycle.
+		 */
+		return TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING;
 
 	case TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING:
 		if (event == TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED)

@@ -40,7 +40,6 @@
 #define XDOMAIN_UUID_BACKOFF_MAX_SHIFT		6
 #define XDOMAIN_QUARANTINE_RETRY_MS		1000
 #define XDOMAIN_QUARANTINE_PATH_RETRIES		3
-#define XDOMAIN_CONTROL_RX_EVIDENCE_MS		(5 * 60 * 1000)
 
 enum {
 	XDOMAIN_STATE_INIT,
@@ -1230,15 +1229,15 @@ tb_xdomain_control_event(struct tb_xdomain *xd,
 	mutex_unlock(&xd->lock);
 }
 
-static bool tb_xdomain_control_recovery_required(struct tb_xdomain *xd)
+static bool
+tb_xdomain_control_recovery_required(struct tb_xdomain *xd,
+				     unsigned long request_started)
 {
-	bool recent, required = false;
+	bool concurrent, required = false;
 
 	mutex_lock(&xd->lock);
-	recent = xd->control_rx_jiffies &&
-		time_before(jiffies, xd->control_rx_jiffies +
-			    msecs_to_jiffies(XDOMAIN_CONTROL_RX_EVIDENCE_MS));
-	if (recent && xd->control_health_state ==
+	concurrent = tb_xdomain_control_inbound_since(request_started, xd->control_rx_jiffies);
+	if (concurrent && xd->control_health_state ==
 		      TB_XDOMAIN_CONTROL_PEER_ACTIVE) {
 		xd->control_health_state = tb_xdomain_control_next(
 			xd->control_health_state,
@@ -2693,6 +2692,7 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 {
 	struct tb_xdomain *xd = container_of(work, typeof(*xd),
 					     properties_changed_work.work);
+	unsigned long request_started;
 	int ret;
 
 	dev_dbg(&xd->dev, "sending properties changed notification\n");
@@ -2714,6 +2714,7 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		return;
 	}
 
+	request_started = jiffies;
 	ret = tb_xdp_properties_changed_request(xd->tb->ctl, xd->route,
 				max(READ_ONCE(xd->properties_changed_retries), 0),
 				xd->local_uuid);
@@ -2767,7 +2768,7 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		 * the opposite direction have reached saturated backoff.
 		 */
 		if (failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT &&
-		    tb_xdomain_control_recovery_required(xd)) {
+		    tb_xdomain_control_recovery_required(xd, request_started)) {
 			int recovery_ret;
 
 			dev_err(&xd->dev,

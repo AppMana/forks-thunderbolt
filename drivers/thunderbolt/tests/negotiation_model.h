@@ -1309,6 +1309,7 @@ struct announce_state {
 	bool stopped;		/* TB_XDOMAIN_ANNOUNCE_STOPPED published */
 	bool peer_previously_proven; /* a response established this peer */
 	bool inbound_peer_control; /* peer still transmits on this route */
+	bool inbound_during_outbound_wait;
 	bool recovery_requested; /* controller recovery was escalated */
 	enum tb_xdomain_control_state control_state;
 };
@@ -1345,6 +1346,13 @@ static inline void announce_note_inbound_peer_control(struct announce_state *a)
 		a->control_state, TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
 }
 
+static inline void
+announce_note_concurrent_inbound_peer_control(struct announce_state *a)
+{
+	announce_note_inbound_peer_control(a);
+	a->inbound_during_outbound_wait = true;
+}
+
 /* One scheduled run of properties_changed_work. */
 static inline void announce_tick(struct announce_state *a, bool peer_present)
 {
@@ -1360,6 +1368,7 @@ static inline void announce_tick(struct announce_state *a, bool peer_present)
 		a->control_state = tb_xdomain_control_next(
 			a->control_state, TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED);
 		a->armed = false;	/* nothing left to announce */
+		a->inbound_during_outbound_wait = false;
 		return;
 	}
 
@@ -1378,6 +1387,7 @@ static inline void announce_tick(struct announce_state *a, bool peer_present)
 	if (a->failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
 		a->failures++;
 	if (a->peer_previously_proven && a->inbound_peer_control &&
+	    a->inbound_during_outbound_wait &&
 	    a->failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT) {
 		a->control_state = tb_xdomain_control_next(
 			a->control_state,
@@ -1390,6 +1400,7 @@ static inline void announce_tick(struct announce_state *a, bool peer_present)
 				TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
 		}
 	}
+	a->inbound_during_outbound_wait = false;
 	a->armed = true;		/* the announce never gives up */
 }
 

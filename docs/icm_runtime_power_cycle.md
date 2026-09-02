@@ -384,6 +384,37 @@ root-router config preflight without making the only recovery path impossible.
 The new preflight applies to runtime recovery, where the root router is still
 available and Linux is trying to repair a stale data plane.
 
+### Failed preflight must not strand the PCI function
+
+Fleet-wide hot reload exposed a recovery failure after otherwise successful
+service discovery.  Every affected peer completed HELLO and READY, but a
+directional data proof found a transmit path with no authenticated peer
+acknowledgement.  The frame service correctly asked the controller recovery
+machine for help.  The ICM upstream-proxy write then returned a firmware error,
+so the host-router power-cycle preflight correctly refused to dispatch the
+mailbox command.
+
+The destructive result came from a later state transition.  Recovery runs from
+`device_release_driver()`, so by the time preflight reports failure the domain
+and PCI driver have already been detached.  The old transition changed
+`POWER_CYCLE_PENDING` directly to `POWER_REQUIRED`.  The recovery worker only
+reattached a driver in `REPROBE_PENDING`, leaving the live PCI function
+permanently unbound.  On a two-link host this removed both neighbors, and their
+own data-proof recovery could repeat the failure outward as a cascade.
+
+A rejected runtime power-cycle now enters `REPROBE_PENDING`.  This is a bounded
+fallback, not a claim that firmware reset anything: the driver binds once,
+reconstructs the controller domain, and enters `VERIFYING`.  Only authenticated
+data on the exact failed route completes the episode.  Reprobe failure or a
+second failure of that route remains terminal and requests power removal.
+
+The state-machine KUnit was changed first and run against the unchanged
+production transition.  It produced one failure in the 198-test core suite:
+the observed state was `POWER_REQUIRED` while the expected state was
+`REPROBE_PENDING`.  After changing the shared transition used by production,
+all 198 core tests and all 229 tests selected by the Thunderbolt suite glob
+passed.
+
 ## Red-first KUnit model
 
 The production paths use injected operation tables so KUnit tests execute the

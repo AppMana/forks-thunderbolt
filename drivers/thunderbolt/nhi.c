@@ -2657,7 +2657,7 @@ release_domain:
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
 		nhi_runtime_recovery_set(pdev, runtime_state);
 		dev_info(dev,
-			 "controller reprobed after host-router power cycle; awaiting data-path proof\n");
+			 "controller reprobed after runtime recovery; awaiting data-path proof\n");
 	}
 	pci_set_drvdata(pdev, tb);
 
@@ -2697,9 +2697,9 @@ static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
 		nhi_runtime_recovery_set(pdev, runtime_state);
 		if (reset_ret)
-			dev_err(&pdev->dev,
-				"quiesced host-router power cycle failed (%d); a power-removal reset is required\n",
-				reset_ret);
+			dev_warn(&pdev->dev,
+				 "host-router power cycle failed (%d); falling back to one driver rebind and route-specific data proof\n",
+				 reset_ret);
 	}
 	nhi_shutdown(nhi);
 }

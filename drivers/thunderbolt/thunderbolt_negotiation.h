@@ -197,6 +197,23 @@ static inline bool tb_xdomain_announce_should_warn(unsigned int failures)
 	return failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
 }
 
+/**
+ * tb_xdomain_control_inbound_since() - did opposite-direction traffic overlap?
+ * @request_started: timestamp sampled immediately before the outbound request
+ * @inbound_seen: timestamp of the last route-correlated inbound request
+ *
+ * A peer packet from before the outbound failure only proves that the peer was
+ * present then.  Controller recovery needs independent evidence that the
+ * opposite direction remained live during the failing request.  The signed
+ * subtraction is the same wrap-safe ordering used by time_after_eq().
+ */
+static inline bool
+tb_xdomain_control_inbound_since(unsigned long request_started,
+				 unsigned long inbound_seen)
+{
+	return inbound_seen && (long)(inbound_seen - request_started) >= 0;
+}
+
 /*
  * Control-channel liveness is independent of discovery and announcement.
  * An absent peer may leave announcement retrying forever, but a route that was

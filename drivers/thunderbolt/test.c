@@ -5673,7 +5673,7 @@ static void tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence(struct kuni
 	KUNIT_EXPECT_FALSE(test, evidence);
 }
 
-static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *test)
+static void tb_test_nhi_runtime_recovery_failure_policy(struct kunit *test)
 {
 	enum tb_nhi_runtime_recovery_state state;
 
@@ -5685,7 +5685,7 @@ static void tb_test_nhi_runtime_recovery_failures_are_terminal(struct kunit *tes
 	state = TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING;
 	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_FAILED);
 	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
+			TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING);
 
 	state = TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING;
 	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_FAILED);
@@ -7083,11 +7083,11 @@ tb_test_xdomain_one_way_control_failure_requests_recovery(struct kunit *test)
 	unsigned int i;
 
 	announce_arm(&a);
-	announce_note_inbound_peer_control(&a);
-
 	/* Exhaust the fast attempts and reach the saturated backoff state. */
-	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++)
+	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++) {
+		announce_note_concurrent_inbound_peer_control(&a);
 		announce_tick(&a, /*peer_present=*/false);
+	}
 
 	KUNIT_EXPECT_TRUE(test, a.armed);
 	KUNIT_EXPECT_FALSE(test, a.delivered);
@@ -7128,6 +7128,28 @@ static void tb_test_xdomain_control_recovery_is_bounded(struct kunit *test)
 			TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED);
 	state = tb_xdomain_control_next(state, TB_XDOMAIN_CONTROL_STOPPED);
 	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_UNPROVEN);
+}
+
+static void
+tb_test_xdomain_stale_inbound_does_not_request_control_recovery(struct kunit *test)
+{
+	struct announce_state a = {
+		.peer_previously_proven = true,
+		.control_state = TB_XDOMAIN_CONTROL_QUIET,
+	};
+	unsigned int i;
+
+	announce_arm(&a);
+	/* The peer spoke before this sequence of outbound failures began. */
+	announce_note_inbound_peer_control(&a);
+	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++)
+		announce_tick(&a, /*peer_present=*/false);
+
+	KUNIT_EXPECT_FALSE(test, a.recovery_requested);
+	KUNIT_EXPECT_FALSE(test,
+			   tb_xdomain_control_inbound_since(200, 199));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_xdomain_control_inbound_since(200, 200));
 }
 
 /*
@@ -8590,6 +8612,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
 	KUNIT_CASE(tb_test_xdomain_one_way_control_failure_requests_recovery),
 	KUNIT_CASE(tb_test_xdomain_control_recovery_is_bounded),
+	KUNIT_CASE(tb_test_xdomain_stale_inbound_does_not_request_control_recovery),
 	KUNIT_CASE(tb_test_xdomain_request_and_response_dispatch_are_separate),
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
 	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
@@ -8632,7 +8655,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_sibling_route_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_failures_are_terminal),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_failure_policy),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
 	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),
 	KUNIT_CASE(tb_test_nhi_interrupt_modes_are_distinct),
