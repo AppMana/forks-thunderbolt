@@ -184,6 +184,29 @@ inbound activity from activity overlapping the failing request; the shared
 production predicate is also checked at the boundary.  The core suite then
 passed 199/199 and the selected Thunderbolt suites passed 230/230.
 
+### ICM responses precede path stability
+
+An ICM command response proves that firmware accepted the command, but it does
+not prove that the corresponding XDomain path context is already stable. A
+previously developed settle fix was absent from a later integration branch,
+leaving approve with no post-response delay and only 10--50 microseconds
+between the two disconnect stages. Under simultaneous peer negotiation, both
+control state machines could complete HELLO and READY while the resulting DMA
+paths delivered no frames.
+
+The production transition model now separates approve response, approve
+settle, active, disconnect stage-one response and settle, stage-two readiness,
+stage-two response and settle, and inactive. Each firmware response holds the
+global ICM request lock across a 2--2.5 millisecond settle. This prevents
+another command from observing an intermediate path context and prevents a
+consumer from treating response arrival as path activation.
+
+The focused KUnit was run RED against the direct-response behavior before the
+production request path changed. It observed `ACTIVATE` immediately after an
+approve response where `SETTLE` was required. After wiring the transition
+model into the real ICM request stream, the settle-order and crossed-stage
+tests both passed.
+
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note
 `project-tb-xdomain-renegotiation-bug`, and `scripts/tb-chain-reboot-cover.sh`
 (the reboot workaround this replaces).

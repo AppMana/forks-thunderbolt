@@ -5283,6 +5283,76 @@ static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, proof.root_config_ready);
 }
 
+static void
+tb_test_icm_xdomain_path_responses_settle_before_reuse(struct kunit *test)
+{
+	struct tb_icm_xdomain_path_transition next;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
+
+	state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_ACTIVATE);
+	KUNIT_ASSERT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_ACTIVE);
+
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE;
+	next = tb_icm_xdomain_path_next(next.state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_ASSERT_EQ(test, next.action,
+			TB_ICM_XDOMAIN_PATH_SEND_STAGE2);
+	KUNIT_ASSERT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY);
+
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	next = tb_icm_xdomain_path_next(next.state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_DEACTIVATE);
+	KUNIT_EXPECT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_INACTIVE);
+}
+
+static void tb_test_icm_xdomain_path_rejects_crossed_stages(struct kunit *test)
+{
+	struct tb_icm_xdomain_path_transition next;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
+
+	state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_ACTIVE);
+
+	state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING);
+
+	state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING);
+}
+
 /*
  * Readiness polling owns one physical request stream. Nesting the generic
  * four-request retry helper multiplies both the configured observation count
@@ -8636,6 +8706,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
 	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
 	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
+	KUNIT_CASE(tb_test_icm_xdomain_path_responses_settle_before_reuse),
+	KUNIT_CASE(tb_test_icm_xdomain_path_rejects_crossed_stages),
 	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
 	KUNIT_CASE(tb_test_cfg_response_matches_full_address),
 	KUNIT_CASE(tb_test_icm_root_recovery_is_separate_and_bounded),

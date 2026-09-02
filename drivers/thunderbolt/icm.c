@@ -74,6 +74,69 @@ static u32 icm_pcie_upstream_proxy_command(u32 index, bool write)
 
 #define ICM_TIMEOUT			5000	/* ms */
 #define ICM_RETRIES			3
+#define ICM_XDOMAIN_SETTLE_MIN_US	2000
+#define ICM_XDOMAIN_SETTLE_MAX_US	2500
+
+struct tb_icm_xdomain_path_transition
+tb_icm_xdomain_path_next(enum tb_icm_xdomain_path_state state,
+			 enum tb_icm_xdomain_path_event event)
+{
+	struct tb_icm_xdomain_path_transition next = {
+		.state = state,
+		.action = TB_ICM_XDOMAIN_PATH_REJECT,
+	};
+
+	switch (state) {
+	case TB_ICM_XDOMAIN_PATH_INACTIVE:
+		if (event == TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE) {
+			next.state = TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+			next.action = TB_ICM_XDOMAIN_PATH_ACTIVATE;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_ACTIVE:
+		if (event == TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE) {
+			next.state =
+				TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY;
+			next.action = TB_ICM_XDOMAIN_PATH_SEND_STAGE2;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY:
+		if (event == TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE) {
+			next.state =
+				TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+			next.action = TB_ICM_XDOMAIN_PATH_DEACTIVATE;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return next;
+}
 
 /*
  * How long __icm_driver_ready() waits for the root switch config space to
@@ -461,9 +524,12 @@ static bool icm_copy(struct tb_cfg_request *req, const struct ctl_pkg *pkg)
 	return hdr->packet_id == hdr->total_packets - 1;
 }
 
-static int icm_request(struct tb *tb, const void *request, size_t request_size,
-		       void *response, size_t response_size, size_t npackets,
-		       int retries, unsigned int timeout_msec)
+static int __icm_request(struct tb *tb, const void *request,
+			 size_t request_size, void *response,
+			 size_t response_size, size_t npackets, int retries,
+			 unsigned int timeout_msec,
+			 unsigned int settle_min_us,
+			 unsigned int settle_max_us)
 {
 	struct icm *icm = tb_priv(tb);
 
@@ -487,6 +553,14 @@ static int icm_request(struct tb *tb, const void *request, size_t request_size,
 
 		mutex_lock(&icm->request_lock);
 		res = tb_cfg_request_sync(tb->ctl, req, timeout_msec);
+		/*
+		 * Some firmware commands acknowledge before their path context is
+		 * externally stable. Keep the command stream serialized through the
+		 * caller-selected settle interval so another command cannot observe
+		 * or reuse the intermediate state.
+		 */
+		if (!res.err && settle_min_us)
+			usleep_range(settle_min_us, settle_max_us);
 		mutex_unlock(&icm->request_lock);
 
 		tb_cfg_request_put(req);
@@ -498,6 +572,28 @@ static int icm_request(struct tb *tb, const void *request, size_t request_size,
 	} while (retries--);
 
 	return -ETIMEDOUT;
+}
+
+static int icm_request(struct tb *tb, const void *request, size_t request_size,
+		       void *response, size_t response_size, size_t npackets,
+		       int retries, unsigned int timeout_msec)
+{
+	return __icm_request(tb, request, request_size, response, response_size,
+			     npackets, retries, timeout_msec, 0, 0);
+}
+
+static int
+icm_xdomain_request(struct tb *tb, const void *request, size_t request_size,
+		    void *response, size_t response_size,
+		    const struct tb_icm_xdomain_path_transition *transition)
+{
+	if (transition->action != TB_ICM_XDOMAIN_PATH_SETTLE)
+		return -EINVAL;
+
+	return __icm_request(tb, request, request_size, response, response_size,
+			     1, ICM_RETRIES, ICM_TIMEOUT,
+			     transition->settle_min_us,
+			     transition->settle_max_us);
 }
 
 /*
@@ -1984,8 +2080,11 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 					int transmit_path, int transmit_ring,
 					int receive_path, int receive_ring)
 {
+	struct tb_icm_xdomain_path_transition transition;
 	struct icm_tr_pkg_approve_xdomain_response reply;
 	struct icm_tr_pkg_approve_xdomain request;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
 	int ret;
 
 	memset(&request, 0, sizeof(request));
@@ -1998,13 +2097,22 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	request.receive_ring = receive_ring;
 	memcpy(&request.remote_uuid, xd->remote_uuid, sizeof(*xd->remote_uuid));
 
+	state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	transition = tb_icm_xdomain_path_next(state, event);
 	memset(&reply, 0, sizeof(reply));
-	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
-			  1, ICM_RETRIES, ICM_TIMEOUT);
+	ret = icm_xdomain_request(tb, &request, sizeof(request), &reply,
+				  sizeof(reply), &transition);
 	if (ret)
 		return ret;
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
+		return -EIO;
+
+	state = transition.state;
+	transition = tb_icm_xdomain_path_next(state,
+					      TB_ICM_XDOMAIN_PATH_SETTLED);
+	if (WARN_ON_ONCE(transition.action != TB_ICM_XDOMAIN_PATH_ACTIVATE))
 		return -EIO;
 
 	icm_xdomain_activated(xd, true);
@@ -2012,11 +2120,24 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 }
 
 static int icm_tr_xdomain_tear_down(struct tb *tb, struct tb_xdomain *xd,
-				    int stage)
+				    int stage,
+				    enum tb_icm_xdomain_path_state *state,
+				    enum tb_icm_xdomain_path_action *action)
 {
+	struct tb_icm_xdomain_path_transition transition;
 	struct icm_tr_pkg_disconnect_xdomain_response reply;
 	struct icm_tr_pkg_disconnect_xdomain request;
+	enum tb_icm_xdomain_path_event event;
 	int ret;
+
+	if (stage == 1)
+		event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE;
+	else if (stage == 2)
+		event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	else
+		return -EINVAL;
+
+	transition = tb_icm_xdomain_path_next(*state, event);
 
 	memset(&request, 0, sizeof(request));
 	request.hdr.code = ICM_DISCONNECT_XDOMAIN;
@@ -2026,14 +2147,22 @@ static int icm_tr_xdomain_tear_down(struct tb *tb, struct tb_xdomain *xd,
 	memcpy(&request.remote_uuid, xd->remote_uuid, sizeof(*xd->remote_uuid));
 
 	memset(&reply, 0, sizeof(reply));
-	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
-			  1, ICM_RETRIES, ICM_TIMEOUT);
+	ret = icm_xdomain_request(tb, &request, sizeof(request), &reply,
+				  sizeof(reply), &transition);
 	if (ret)
 		return ret;
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
 		return -EIO;
 
+	*state = transition.state;
+	transition = tb_icm_xdomain_path_next(*state,
+					      TB_ICM_XDOMAIN_PATH_SETTLED);
+	if (transition.action == TB_ICM_XDOMAIN_PATH_REJECT)
+		return -EIO;
+
+	*state = transition.state;
+	*action = transition.action;
 	return 0;
 }
 
@@ -2041,16 +2170,22 @@ static int icm_tr_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 					   int transmit_path, int transmit_ring,
 					   int receive_path, int receive_ring)
 {
+	enum tb_icm_xdomain_path_action action;
+	enum tb_icm_xdomain_path_state state;
 	int ret;
 
-	ret = icm_tr_xdomain_tear_down(tb, xd, 1);
+	state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+	ret = icm_tr_xdomain_tear_down(tb, xd, 1, &state, &action);
 	if (ret)
 		return ret;
+	if (WARN_ON_ONCE(action != TB_ICM_XDOMAIN_PATH_SEND_STAGE2))
+		return -EIO;
 
-	usleep_range(10, 50);
-	ret = icm_tr_xdomain_tear_down(tb, xd, 2);
+	ret = icm_tr_xdomain_tear_down(tb, xd, 2, &state, &action);
 	if (ret)
 		return ret;
+	if (WARN_ON_ONCE(action != TB_ICM_XDOMAIN_PATH_DEACTIVATE))
+		return -EIO;
 
 	icm_xdomain_activated(xd, false);
 	return 0;
