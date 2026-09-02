@@ -3466,7 +3466,9 @@ static int icm_root_power_cycle(struct tb *tb)
 	int port;
 
 	state = tb_icm_root_recovery_next(
-		state, icm->root_config_timed_out ?
+		state, icm->driver_ready_timed_out ?
+		TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT :
+		icm->root_config_timed_out ?
 		TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT :
 		TB_ICM_ROOT_RECOVERY_OTHER_FAILURE);
 	if (state != TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING)
@@ -3483,7 +3485,8 @@ static int icm_root_power_cycle(struct tb *tb)
 	 * probe, not the write response, remains the recovery proof.
 	 */
 	tb_warn(tb,
-		"root config did not answer after DriverReady; issuing one host-router power-cycle request on DMA port %d\n",
+		"startup control proof failed at %s; issuing one host-router power-cycle request on DMA port %d\n",
+		icm->driver_ready_timed_out ? "DriverReady" : "root config",
 		port);
 	res = dma_port_power_cycle_raw(tb->ctl, port);
 	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
@@ -3532,7 +3535,8 @@ static int icm_driver_ready(struct tb *tb)
 	ret = __icm_driver_ready(tb, &tb->security_level, &icm->proto_version,
 				 &tb->nboot_acl, &icm->rpm);
 	if (ret) {
-		if (icm->root_config_timed_out &&
+		if ((icm->driver_ready_timed_out ||
+		     icm->root_config_timed_out) &&
 		    tb_nhi_startup_recovery_allowed(tb->nhi) &&
 		    tb_nhi_recovery_supported(tb->nhi->pdev->vendor,
 					      tb->nhi->pdev->device))

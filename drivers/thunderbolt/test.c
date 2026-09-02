@@ -5424,6 +5424,10 @@ static void tb_test_icm_root_recovery_is_separate_and_bounded(struct kunit *test
 	next = tb_icm_root_recovery_next(
 		state, TB_ICM_ROOT_RECOVERY_OTHER_FAILURE);
 	KUNIT_EXPECT_EQ(test, next, TB_ICM_ROOT_RECOVERY_TERMINAL);
+	next = tb_icm_root_recovery_next(state,
+					 TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING);
 
 	state = tb_icm_root_recovery_next(
 		state, TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT);
