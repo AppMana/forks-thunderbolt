@@ -4541,9 +4541,15 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 		return false;
 	}
 
-	if (WARN_ON_ONCE(tb_xdomain_rx_dispatch_mode(
-			TB_XDOMAIN_RX_SERVICE_PACKET) !=
-			TB_XDOMAIN_RX_DISPATCH_DEFERRED))
+	/*
+	 * A service response belongs first to the request matcher in ctl.c.
+	 * Queuing handler dispatch reports the event consumed before that matcher
+	 * runs, which turns every valid reply into an apparent peer timeout.
+	 * Only inbound requests are unsolicited handler work and may be deferred.
+	 */
+	if (tb_xdomain_service_dispatch_mode(
+			type == TB_CFG_PKG_XDOMAIN_RESP) ==
+	    TB_XDOMAIN_RX_DISPATCH_INLINE)
 		return false;
 
 	return tb_xdomain_schedule_service(tb, buf, size);

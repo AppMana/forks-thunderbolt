@@ -7139,14 +7139,24 @@ static void tb_test_xdomain_control_recovery_is_bounded(struct kunit *test)
  * worker, and frame requester), expressed as a dispatch policy rather than a
  * timing-dependent mutex test.
  */
-static void tb_test_xdomain_service_dispatch_cannot_block_ring0(struct kunit *test)
+static void
+tb_test_xdomain_request_and_response_dispatch_are_separate(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test,
 		tb_xdomain_rx_dispatch_mode(TB_XDOMAIN_RX_DISCOVERY_REQUEST),
 		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
 	KUNIT_EXPECT_EQ(test,
-		tb_xdomain_rx_dispatch_mode(TB_XDOMAIN_RX_SERVICE_PACKET),
+		tb_xdomain_service_dispatch_mode(false),
 		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
+
+	/*
+	 * A response is owned by the already-armed peer waiter.  Reporting it
+	 * consumed merely because handler dispatch was queued loses the reply
+	 * before tb_cfg_request_find() can complete that waiter.
+	 */
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_service_dispatch_mode(true),
+		TB_XDOMAIN_RX_DISPATCH_INLINE);
 }
 
 /*
@@ -8580,7 +8590,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
 	KUNIT_CASE(tb_test_xdomain_one_way_control_failure_requests_recovery),
 	KUNIT_CASE(tb_test_xdomain_control_recovery_is_bounded),
-	KUNIT_CASE(tb_test_xdomain_service_dispatch_cannot_block_ring0),
+	KUNIT_CASE(tb_test_xdomain_request_and_response_dispatch_are_separate),
 	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
 	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),

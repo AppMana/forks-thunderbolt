@@ -231,7 +231,8 @@ enum tb_xdomain_control_event {
 enum tb_xdomain_rx_dispatch_class {
 	TB_XDOMAIN_RX_DISCOVERY_REQUEST,
 	TB_XDOMAIN_RX_DISCOVERY_RESPONSE,
-	TB_XDOMAIN_RX_SERVICE_PACKET,
+	TB_XDOMAIN_RX_SERVICE_REQUEST,
+	TB_XDOMAIN_RX_SERVICE_RESPONSE,
 };
 
 enum tb_xdomain_rx_dispatch_mode {
@@ -242,10 +243,24 @@ enum tb_xdomain_rx_dispatch_mode {
 static inline enum tb_xdomain_rx_dispatch_mode
 tb_xdomain_rx_dispatch_mode(enum tb_xdomain_rx_dispatch_class class)
 {
-	if (class == TB_XDOMAIN_RX_DISCOVERY_RESPONSE)
+	if (class == TB_XDOMAIN_RX_DISCOVERY_RESPONSE ||
+	    class == TB_XDOMAIN_RX_SERVICE_RESPONSE)
 		return TB_XDOMAIN_RX_DISPATCH_INLINE;
 
 	return TB_XDOMAIN_RX_DISPATCH_DEFERRED;
+}
+
+/*
+ * Keep the wire-type split in the same helper used by the receive path and its
+ * KUnit model.  Requests are unsolicited handler work; responses are owned by
+ * the synchronous request matcher that was armed before transmission.
+ */
+static inline enum tb_xdomain_rx_dispatch_mode
+tb_xdomain_service_dispatch_mode(bool response)
+{
+	return tb_xdomain_rx_dispatch_mode(response ?
+		TB_XDOMAIN_RX_SERVICE_RESPONSE :
+		TB_XDOMAIN_RX_SERVICE_REQUEST);
 }
 
 static inline enum tb_xdomain_control_state

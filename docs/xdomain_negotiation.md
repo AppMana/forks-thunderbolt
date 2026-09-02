@@ -132,18 +132,30 @@ The failure cycle is:
 4. frame-session requests then accumulate behind the stalled completion path,
    eventually appearing as late unmatched replies after teardown.
 
-Discovery requests and non-discovery service packets are therefore copied and
-deferred before any topology mutex, XDomain mutex, or protocol-handler dispatch
-lock is acquired. Responses that already belong to a pending request continue
-to be matched in ring context; they do not enter service dispatch. Deferred
-service dispatch retains the domain for the work item's lifetime and preserves
-the existing handler-unregistration fence around callbacks.
+Discovery requests and non-discovery service **requests** are therefore copied
+and deferred before any topology mutex, XDomain mutex, or protocol-handler
+dispatch lock is acquired. Service **responses** must instead remain
+unconsumed so `tb_cfg_request_find()` can deliver them to the already-armed
+peer-response waiter. Deferred service dispatch retains the domain for the work
+item's lifetime and preserves the existing handler-unregistration fence around
+callbacks.
 
-`tb_test_xdomain_service_dispatch_cannot_block_ring0` models the context
-boundary. Its RED state records service dispatch as inline; its GREEN state
-requires deferred dispatch. The existing ABI and handler-unregistration tests
-exercise the callback walk independently of scheduling so they continue to
-verify source-blind compatibility and unload fencing.
+This distinction is also the explanation for the superficially conflicting
+wire values observed during the failure. Packet type `0xc` is the controller's
+local completion for a transmitted command; packet type `0x7` is the remote
+host's end-to-end XDomain response. Both arrived. The first deferred-dispatch
+implementation incorrectly queued the `0x7` response as handler work and
+reported it consumed before the request matcher ran, converting every valid
+HELLO acknowledgement into an apparent timeout.
+
+`tb_test_xdomain_request_and_response_dispatch_are_separate` models the same
+request/response classifier used by the production receive path. Its RED run
+had 197 passing cases and one failure because a service response was deferred;
+its GREEN run has all 198 cases passing, requiring service requests to be
+deferred and service responses to remain matcher-owned. The existing ABI and
+handler-unregistration tests exercise the callback walk independently of
+scheduling so they continue to verify source-blind compatibility and unload
+fencing.
 
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note
 `project-tb-xdomain-renegotiation-bug`, and `scripts/tb-chain-reboot-cover.sh`
