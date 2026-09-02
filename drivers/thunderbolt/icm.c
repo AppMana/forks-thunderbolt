@@ -3181,8 +3181,9 @@ static int icm_firmware_init(struct tb *tb)
 			break;
 
 		case NHI_FW_CM_MODE:
-			/* Ask ICM to accept all Thunderbolt devices */
-			nhi_mailbox_cmd(nhi, NHI_MAILBOX_ALLOW_ALL_DEVS, 0);
+			if (tb_icm_uses_legacy_allow_all(nhi->pdev->device))
+				nhi_mailbox_cmd(nhi,
+						NHI_MAILBOX_ALLOW_ALL_DEVS, 0);
 			break;
 
 		default:

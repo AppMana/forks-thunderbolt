@@ -7890,6 +7890,20 @@ static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
  * and never attempts this reset after an ICM timeout, so every family must
  * fail closed unless a documented and independently tested sequence exists.
  */
+static void tb_test_icm_maple_skips_legacy_allow_all(struct kunit *test)
+{
+	u16 device;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	KUNIT_EXPECT_FALSE(test, tb_icm_uses_legacy_allow_all(device));
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	KUNIT_EXPECT_FALSE(test, tb_icm_uses_legacy_allow_all(device));
+
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	KUNIT_EXPECT_TRUE(test, tb_icm_uses_legacy_allow_all(device));
+}
+
 static void tb_test_icm_warm_restart_is_unsupported(struct kunit *test)
 {
 	KUNIT_EXPECT_FALSE(test,
@@ -8736,6 +8750,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_interrupt_setup_orders_global_policy),
 	KUNIT_CASE(tb_test_nhi_interrupt_setup_rejects_late_mode_change),
 	KUNIT_CASE(tb_test_nhi_tx_stall_requires_hardware_consumer_proof),
+	KUNIT_CASE(tb_test_icm_maple_skips_legacy_allow_all),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
 	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
