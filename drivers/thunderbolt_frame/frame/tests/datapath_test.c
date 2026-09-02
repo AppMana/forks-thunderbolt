@@ -401,27 +401,6 @@ static void tbframe_datapath_live_ring_declares_up(struct kunit *test)
 	KUNIT_EXPECT_GE(test, fx->mock.peer_keepalives, 1u);
 	/* One keepalive was enough; the proof must not be chatty. */
 	KUNIT_EXPECT_EQ(test, 1u, fx->mock.keepalives_sent);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_proven_reports);
-}
-
-static void tbframe_datapath_recovery_proof_requires_tx_and_rx(struct kunit *test)
-{
-	struct tbframe_mock_fixture *fx = dp_fx(test);
-	struct tbframe_frame_priv *f;
-	struct ring_frame *rf;
-
-	fx->mock.tx_consumer_stalled = true;
-	tbframe_link_session_step(fx->link);
-	KUNIT_ASSERT_TRUE(test, fx->link->data_proven);
-	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_proven_reports);
-
-	KUNIT_ASSERT_FALSE(test, list_empty(&fx->mock.tx_queue));
-	rf = list_first_entry(&fx->mock.tx_queue, struct ring_frame, list);
-	list_del_init(&rf->list);
-	fx->mock.tx_queued--;
-	f = container_of(rf, struct tbframe_frame_priv, rf);
-	tbframe_core_tx_complete(f, false);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_proven_reports);
 }
 
 /*
@@ -727,7 +706,6 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_persistent_mismatch_revalidates_changed_peer),
 	KUNIT_CASE(tbframe_datapath_unconfirmed_cookie_cannot_defer_recovery),
 	KUNIT_CASE(tbframe_datapath_live_ring_declares_up),
-	KUNIT_CASE(tbframe_datapath_recovery_proof_requires_tx_and_rx),
 	KUNIT_CASE(tbframe_datapath_unprovable_peer_stays_down),
 	KUNIT_CASE(tbframe_datapath_zero_length_cannot_prove),
 	KUNIT_CASE(tbframe_datapath_data_frame_cannot_prove_pre_up),

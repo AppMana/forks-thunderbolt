@@ -187,7 +187,6 @@ struct tbframe_hw_ops {
 	/* Transfer the exact unresolved path/ring/HopID tuple to core ownership. */
 	int	(*quarantine_paths)(void *hw, int local_hopid,
 				    int remote_hopid);
-	void	(*report_data_proven)(void *hw);
 	int	(*control_request)(void *hw, const void *req, size_t req_len,
 				   void *resp, size_t resp_len,
 				   unsigned int timeout_ms);
@@ -347,13 +346,11 @@ struct tbframe_link {
 	u64			data_rx_bad_cookie;
 	u64			data_rx_prior_cookie;
 	u64			data_tx_done;
-	u64			data_tx_done_mark;
 	u64			data_tx_submitted;
 	u64			data_tx_refused;
 	u64			data_tx_ring_err;
 	u64			data_tx_canceled;
 	bool			data_proven;
-	bool			controller_proof_reported;
 	bool			data_proof_unavailable_warned;
 	u64			data_generation;
 	unsigned int		probe_attempts;

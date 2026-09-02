@@ -429,13 +429,6 @@ static int tbframe_hw_tx_snapshot(void *data,
 	return tb_ring_snapshot(hw->tx_ring, snapshot);
 }
 
-static void tbframe_hw_report_data_proven(void *data)
-{
-	struct tbframe_hw *hw = data;
-
-	tb_nhi_runtime_data_path_proven(hw->xd->tb->nhi, hw->xd->route);
-}
-
 static int tbframe_hw_loop_control_request(struct tbframe_hw *hw,
 					   const void *req, size_t req_len,
 					   void *resp, size_t resp_len)
@@ -585,7 +578,6 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.disable_paths		= tbframe_hw_disable_paths,
 	.paths_active		= tbframe_hw_paths_active,
 	.tx_snapshot		= tbframe_hw_tx_snapshot,
-	.report_data_proven	= tbframe_hw_report_data_proven,
 	.control_request	= tbframe_hw_control_request,
 	.control_response	= tbframe_hw_control_response,
 	.reannounce		= tbframe_hw_reannounce,

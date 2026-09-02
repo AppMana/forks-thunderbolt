@@ -1165,8 +1165,6 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	link->silent_ticks = 0;
 	link->tx_silent_ticks = 0;
 	link->probe_attempts = 0;
-	link->data_tx_done_mark = link->data_tx_done;
-	link->controller_proof_reported = false;
 	link->data_path_sample_valid = false;
 	tb_xdomain_handshake_reset(&link->hs);
 	tbframe_hello_responder_reset(link);
@@ -2036,7 +2034,7 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 	struct tbframe_frame_priv *next = NULL;
 	LIST_HEAD(flush);
 	unsigned long flags;
-	bool controller_proven = false, release, was_posted;
+	bool release, was_posted;
 
 	atomic_inc(&link->hw_active);
 	spin_lock_irqsave(&link->lock, flags);
@@ -2050,12 +2048,6 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 		f->hw_posted = false;
 		if (!WARN_ON(!link->ring_posted))
 			link->ring_posted--;
-	}
-	if (!canceled && link->data_proven &&
-	    link->data_tx_done > link->data_tx_done_mark &&
-	    !link->controller_proof_reported) {
-		link->controller_proof_reported = true;
-		controller_proven = true;
 	}
 	release = tbframe_tx_return_locked(link, f) && !canceled;
 	if (link->tf->tx_ring_budget) {
@@ -2088,8 +2080,6 @@ void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled)
 		}
 	}
 	spin_unlock_irqrestore(&link->lock, flags);
-	if (controller_proven && link->ops->report_data_proven)
-		link->ops->report_data_proven(link->hw);
 
 	if (next && link->ops->ring_tx(link->hw, next)) {
 		spin_lock_irqsave(&link->lock, flags);
@@ -2135,7 +2125,7 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
 	u64 cookie = 0, expected_cookie = 0, local_cookie = 0, generation = 0;
-	bool controller_proven = false, current_generation, directional, proof, up;
+	bool current_generation, directional, proof, up;
 	bool cookie_mismatch = false;
 
 	if (canceled) {
@@ -2222,20 +2212,12 @@ void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 	} else {
 		link->data_rx_oversize++;
 	}
-	if (link->data_proven &&
-	    link->data_tx_done > link->data_tx_done_mark &&
-	    !link->controller_proof_reported) {
-		link->controller_proof_reported = true;
-		controller_proven = true;
-	}
 	up = current_generation && link->state == TBFRAME_STATE_UP;
 	spin_unlock_irqrestore(&link->lock, flags);
 	if (cookie_mismatch)
 		pr_warn_ratelimited("%s: data keepalive belongs to another peer lifetime: received_cookie=%016llx expected_cookie=%016llx local_cookie=%016llx generation=%llu\n",
 				    link->name, cookie, expected_cookie,
 				    local_cookie, generation);
-	if (controller_proven && link->ops->report_data_proven)
-		link->ops->report_data_proven(link->hw);
 
 	/*
 	 * Preserve one read-only client observation of a current-session bad

@@ -164,13 +164,10 @@ struct tb_domain_reset_result {
 
 struct tb_domain_remove_ops {
 	int (*stop)(struct tb *tb, void *data);
-	int (*runtime_power_cycle_preflight)(struct tb *tb, void *data);
 	void (*prepare_xdomains)(struct tb *tb, void *data,
 				 bool ownership_unresolved);
 	bool (*has_quarantined_rings)(struct tb *tb, void *data);
 	struct tb_domain_reset_result (*terminal_reset)(struct tb *tb, void *data);
-	struct tb_domain_reset_result (*runtime_power_cycle)(struct tb *tb,
-							     void *data);
 	void (*finalize)(struct tb *tb, void *data,
 			 enum tb_domain_reset_state reset_state,
 			 bool ownership_unresolved);
@@ -186,18 +183,15 @@ struct tb_domain_remove_ops {
 };
 
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
-int tb_test_domain_remove_sequence(struct tb *tb, bool runtime_reset,
+int tb_test_domain_remove_sequence(struct tb *tb,
 				   const struct tb_domain_remove_ops *ops,
 				   void *data);
-struct tb_domain_reset_result
-tb_test_domain_power_cycle_dispatch_result(int error, bool tx_consumed);
 int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd);
 struct tb_xdomain_quarantine_test_ops {
 	int (*disconnect)(void *data, struct tb_xdomain *xd,
 			  int transmit_path, int transmit_ring,
 			  int receive_path, int receive_ring);
 	void (*free_ring)(void *data, struct tb_ring *ring);
-	int (*request_recovery)(void *data, struct tb_xdomain *xd);
 	void *data;
 };
 
@@ -725,8 +719,6 @@ struct tb_path {
  * @quiesced_reset: Reset controller firmware after the control channel and
  *		    asynchronous work have been quiesced. Used for both failed
  *		    startup and runtime recovery. Optional.
- * @prepare_runtime_power_cycle: Perform controller-specific preparation before
- *				 a runtime host-router power-cycle command.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -771,7 +763,6 @@ struct tb_cm_ops {
 			      bool ownership_unresolved);
 	void (*deinit)(struct tb *tb);
 	int (*quiesced_reset)(struct tb *tb);
-	int (*prepare_runtime_power_cycle)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);
@@ -1052,7 +1043,7 @@ void tb_xdomain_quarantine_discard_domain(struct tb *tb);
 
 struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize);
 int tb_domain_add(struct tb *tb, bool reset);
-int tb_domain_remove(struct tb *tb, bool runtime_reset);
+int tb_domain_remove(struct tb *tb);
 /* Must be called with tb->lock NOT held; asserts it under lockdep. */
 void tb_domain_ctl_stop(struct tb *tb);
 int tb_domain_suspend_noirq(struct tb *tb);

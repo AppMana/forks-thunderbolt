@@ -71,7 +71,6 @@ struct tbframe_mock {
 	bool		rings_quarantined;
 	int		quarantine_local_hopid;
 	int		quarantine_remote_hopid;
-	unsigned int	data_proven_reports;
 	/*
 	 * One-shot: deliver a peer frame from inside quiesce_tx(), i.e. in
 	 * the teardown window after the session state has been reset but
@@ -568,13 +567,6 @@ static int tbframe_mock_quarantine_paths(void *data, int local_hopid,
 	return 0;
 }
 
-static void tbframe_mock_report_data_proven(void *data)
-{
-	struct tbframe_mock *m = data;
-
-	m->data_proven_reports++;
-}
-
 static int tbframe_mock_control_request(void *data, const void *req,
 					size_t req_len, void *resp,
 					size_t resp_len,
@@ -711,7 +703,6 @@ static const struct tbframe_hw_ops tbframe_mock_ops = {
 	.paths_active		= tbframe_mock_paths_active,
 	.tx_snapshot		= tbframe_mock_tx_snapshot,
 	.quarantine_paths	= tbframe_mock_quarantine_paths,
-	.report_data_proven	= tbframe_mock_report_data_proven,
 	.control_request	= tbframe_mock_control_request,
 	.control_response	= tbframe_mock_control_response,
 	.reannounce		= tbframe_mock_reannounce,

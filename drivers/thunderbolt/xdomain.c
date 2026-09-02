@@ -197,7 +197,6 @@ struct tb_xdomain_quarantine_ops {
 			  int transmit_path, int transmit_ring,
 			  int receive_path, int receive_ring);
 	void (*free_ring)(void *data, struct tb_ring *ring);
-	int (*request_recovery)(void *data, struct tb_xdomain *xd);
 	void *data;
 };
 
@@ -213,7 +212,6 @@ struct tb_xdomain_quarantine {
 	int receive_path;
 	int receive_ring;
 	unsigned int attempts;
-	bool recovery_pending;
 	bool stopping;
 	struct tb_xdomain_quarantine_ops ops;
 };
@@ -1233,27 +1231,6 @@ tb_xdomain_control_event(struct tb_xdomain *xd,
 	xd->control_health_state = tb_xdomain_control_next(
 		xd->control_health_state, event);
 	mutex_unlock(&xd->lock);
-}
-
-static bool
-tb_xdomain_control_recovery_required(struct tb_xdomain *xd,
-				     unsigned long request_started)
-{
-	bool concurrent, required = false;
-
-	mutex_lock(&xd->lock);
-	concurrent = tb_xdomain_control_inbound_since(request_started, xd->control_rx_jiffies);
-	if (concurrent && xd->control_health_state ==
-		      TB_XDOMAIN_CONTROL_PEER_ACTIVE) {
-		xd->control_health_state = tb_xdomain_control_next(
-			xd->control_health_state,
-			TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
-		required = xd->control_health_state ==
-			TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED;
-	}
-	mutex_unlock(&xd->lock);
-
-	return required;
 }
 
 /* Can be called from state_work */
@@ -2698,7 +2675,6 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 {
 	struct tb_xdomain *xd = container_of(work, typeof(*xd),
 					     properties_changed_work.work);
-	unsigned long request_started;
 	int ret;
 
 	dev_dbg(&xd->dev, "sending properties changed notification\n");
@@ -2720,7 +2696,6 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		return;
 	}
 
-	request_started = jiffies;
 	ret = tb_xdp_properties_changed_request(xd->tb->ctl, xd->route,
 				max(READ_ONCE(xd->properties_changed_retries), 0),
 				xd->local_uuid);
@@ -2767,27 +2742,6 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 		if (failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
 			WRITE_ONCE(xd->properties_changed_retries, failures + 1);
 
-		/*
-		 * Do not mistake an absent peer for failed hardware. Recovery is
-		 * eligible only after a previously correlated inbound service
-		 * request proves this peer is still active, while announcements in
-		 * the opposite direction have reached saturated backoff.
-		 */
-		if (failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT &&
-		    tb_xdomain_control_recovery_required(xd, request_started)) {
-			int recovery_ret;
-
-			dev_err(&xd->dev,
-				"one-way XDomain control failure persisted at saturated backoff; requesting controller recovery\n");
-			recovery_ret = tb_nhi_request_control_recovery(xd->tb->nhi,
-								xd->route);
-			if (recovery_ret && recovery_ret != -EALREADY)
-				dev_err(&xd->dev,
-					"failed to dispatch control-path recovery: %d\n",
-					recovery_ret);
-			tb_xdomain_control_event(
-				xd, TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
-		}
 		queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
 				   msecs_to_jiffies(tb_xdomain_announce_delay_ms(failures)));
 		return;
@@ -2797,7 +2751,6 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 	    TB_XDOMAIN_ANNOUNCE_STOPPED)
 		WRITE_ONCE(xd->properties_changed_retries, 0);
 	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED);
-	tb_nhi_runtime_control_path_proven(xd->tb->nhi, xd->route);
 }
 
 static ssize_t device_show(struct device *dev, struct device_attribute *attr,
@@ -3873,16 +3826,9 @@ static void tb_xdomain_quarantine_free_ring(void *data, struct tb_ring *ring)
 	tb_ring_free(ring);
 }
 
-static int
-tb_xdomain_quarantine_request_recovery(void *data, struct tb_xdomain *xd)
-{
-	return tb_nhi_request_quarantine_recovery(xd->tb->nhi, xd->route);
-}
-
 static const struct tb_xdomain_quarantine_ops xdomain_quarantine_real_ops = {
 	.disconnect = tb_xdomain_quarantine_disconnect,
 	.free_ring = tb_xdomain_quarantine_free_ring,
-	.request_recovery = tb_xdomain_quarantine_request_recovery,
 };
 
 static bool
@@ -3951,16 +3897,7 @@ static int
 tb_xdomain_quarantine_retry_record(struct tb_xdomain_quarantine *q,
 				   bool reschedule)
 {
-	int recovery_ret, ret;
-
-	if (q->recovery_pending) {
-		recovery_ret = q->ops.request_recovery(q->ops.data, q->xd);
-		if (recovery_ret && recovery_ret != -EALREADY && reschedule &&
-		    !READ_ONCE(q->stopping))
-			mod_delayed_work(q->xd->tb->wq, &q->retry_work,
-					 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
-		return recovery_ret == -EALREADY ? 0 : recovery_ret;
-	}
+	int ret;
 
 	ret = q->ops.disconnect(q->ops.data, q->xd,
 				q->transmit_path, q->transmit_ring,
@@ -3978,16 +3915,10 @@ tb_xdomain_quarantine_retry_record(struct tb_xdomain_quarantine *q,
 		return ret;
 	}
 
-	q->recovery_pending = true;
-	dev_err(&q->xd->dev,
-		"DMA tuple %d/%d -> %d/%d remained owned after %u retries; scheduling controller recovery\n",
+	dev_err_ratelimited(&q->xd->dev,
+		"DMA tuple %d/%d -> %d/%d remained owned after %u retries\n",
 		q->transmit_path, q->transmit_ring,
 		q->receive_path, q->receive_ring, q->attempts);
-	recovery_ret = q->ops.request_recovery(q->ops.data, q->xd);
-	if (recovery_ret && recovery_ret != -EALREADY && reschedule &&
-	    !READ_ONCE(q->stopping))
-		mod_delayed_work(q->xd->tb->wq, &q->retry_work,
-				 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
 	return ret;
 }
 
@@ -4204,8 +4135,6 @@ void tb_test_xdomain_quarantine_set_ops(const struct tb_xdomain_quarantine_test_
 	if (ops) {
 		xdomain_quarantine_test_ops.disconnect = ops->disconnect;
 		xdomain_quarantine_test_ops.free_ring = ops->free_ring;
-		xdomain_quarantine_test_ops.request_recovery =
-			ops->request_recovery;
 		xdomain_quarantine_test_ops.data = ops->data;
 		xdomain_quarantine_test_ops_set = true;
 	} else {

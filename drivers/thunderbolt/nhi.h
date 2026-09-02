@@ -140,46 +140,11 @@ int tb_ring_completion_evidence(struct tb_ring *ring,
 				struct ring_frame *frame,
 				struct tb_ring_completion_evidence *evidence);
 int tb_ring_process_completions(struct tb_ring *ring);
-int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
-				    const struct tb_ring_snapshot *first,
-				    const struct tb_ring_snapshot *last,
-				    bool control_healthy);
-int tb_nhi_request_quarantine_recovery(struct tb_nhi *nhi, u64 route);
-int tb_nhi_request_control_recovery(struct tb_nhi *nhi, u64 route);
 bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
-void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route);
-void tb_nhi_runtime_control_path_proven(struct tb_nhi *nhi, u64 route);
 bool tb_nhi_has_quarantined_rings(struct tb_nhi *nhi);
 void tb_nhi_finalize_quarantined_rings(struct tb_nhi *nhi,
 				       bool controller_reset_proven);
 void tb_nhi_abandon_quarantined_rings(struct tb_nhi *nhi);
-
-static inline bool
-tb_nhi_tx_stalled(const struct tb_ring_snapshot *first,
-		  const struct tb_ring_snapshot *last, bool control_healthy)
-{
-	if (!control_healthy || !first->running || !last->running ||
-	    !first->indices_valid || !last->indices_valid ||
-	    first->size != last->size || !last->in_flight)
-		return false;
-	if (!(first->options & BIT(31)) || !(last->options & BIT(31)))
-		return false;
-	if (last->hw_producer == last->hw_consumer)
-		return false;
-
-	return first->hw_consumer == last->hw_consumer;
-}
-
-static inline bool
-tb_nhi_runtime_recovery_evidence(const struct tb_ring_snapshot *first,
-				 const struct tb_ring_snapshot *last,
-				 bool control_healthy)
-{
-	if (!first || !last)
-		return false;
-
-	return tb_nhi_tx_stalled(first, last, control_healthy);
-}
 
 /**
  * struct tb_nhi_ops - NHI specific optional operations
@@ -276,12 +241,6 @@ static inline bool tb_nhi_arc_cio_recovery_supported(u16 vendor, u16 device)
 	(void)vendor;
 	(void)device;
 	return false;
-}
-
-static inline bool
-tb_nhi_runtime_recovery_supported(u16 vendor, u16 device)
-{
-	return tb_nhi_recovery_supported(vendor, device);
 }
 
 static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)

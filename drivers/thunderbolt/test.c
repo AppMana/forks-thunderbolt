@@ -2126,10 +2126,6 @@ tb_test_tunnel_terminal_release_requires_revocation_proof(struct kunit *test)
 			.pending = true,
 		},
 	};
-	enum tb_nhi_runtime_recovery_state recovery =
-		TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
-	enum tb_nhi_runtime_recovery_event event =
-		TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED;
 	struct tunnel_final_release_fixture fx;
 	int ret;
 
@@ -2146,15 +2142,10 @@ tb_test_tunnel_terminal_release_requires_revocation_proof(struct kunit *test)
 	/*
 	 * These are only local observations: callback/MMIO fencing and a later
 	 * disabled readback do not revoke the controller's ownership of traffic
-	 * that already made the disable time out.  The independent recovery
-	 * machine likewise says that quiescing merely makes a power cycle
-	 * pending; it is not POWER_CYCLE_SUCCEEDED proof.
+	 * that already made the disable time out.
 	 */
 	WRITE_ONCE(fx.nhi->going_away, true);
 	io.hop.pending = false;
-	recovery = tb_nhi_runtime_recovery_next(recovery, event);
-	KUNIT_ASSERT_EQ(test, recovery,
-			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING);
 
 	tb_tunnel_put(fx.tunnel);
 	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits,
@@ -2339,10 +2330,8 @@ tb_test_cm_reset_success_revokes_all_unresolved_dma_once(struct kunit *test)
 
 enum domain_remove_test_event {
 	DOMAIN_REMOVE_STOP,
-	DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 	DOMAIN_REMOVE_PREPARE_XDOMAINS,
 	DOMAIN_REMOVE_TERMINAL_RESET,
-	DOMAIN_REMOVE_RUNTIME_POWER_CYCLE,
 	DOMAIN_REMOVE_FINALIZE,
 	DOMAIN_REMOVE_FINALIZE_RINGS,
 	DOMAIN_REMOVE_ABANDON_RINGS,
@@ -2360,10 +2349,7 @@ struct domain_remove_test_context {
 	enum domain_remove_test_event events[13];
 	enum tb_domain_reset_state finalize_state;
 	enum tb_domain_reset_state terminal_reset_state;
-	enum tb_domain_reset_state runtime_reset_state;
 	int terminal_reset_error;
-	int runtime_preflight_error;
-	int runtime_reset_error;
 	int stop_ret;
 	bool has_quarantined_rings;
 	bool rings_finalized_proven;
@@ -2386,16 +2372,6 @@ static int domain_remove_test_stop(struct tb *tb, void *data)
 	return ctx->stop_ret;
 }
 
-static int
-domain_remove_test_runtime_power_cycle_preflight(struct tb *tb, void *data)
-{
-	struct domain_remove_test_context *ctx = data;
-
-	domain_remove_test_record(ctx,
-				  DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT);
-	return ctx->runtime_preflight_error;
-}
-
 static struct tb_domain_reset_result
 domain_remove_test_terminal_reset(struct tb *tb, void *data)
 {
@@ -2405,18 +2381,6 @@ domain_remove_test_terminal_reset(struct tb *tb, void *data)
 	return (struct tb_domain_reset_result) {
 		.state = ctx->terminal_reset_state,
 		.error = ctx->terminal_reset_error,
-	};
-}
-
-static struct tb_domain_reset_result
-domain_remove_test_runtime_power_cycle(struct tb *tb, void *data)
-{
-	struct domain_remove_test_context *ctx = data;
-
-	domain_remove_test_record(ctx, DOMAIN_REMOVE_RUNTIME_POWER_CYCLE);
-	return (struct tb_domain_reset_result) {
-		.state = ctx->runtime_reset_state,
-		.error = ctx->runtime_reset_error,
 	};
 }
 
@@ -2492,12 +2456,9 @@ static void domain_remove_test_unregister_xdomains(struct tb *tb, void *data)
 
 static const struct tb_domain_remove_ops domain_remove_test_ops = {
 	.stop = domain_remove_test_stop,
-	.runtime_power_cycle_preflight =
-		domain_remove_test_runtime_power_cycle_preflight,
 	.prepare_xdomains = domain_remove_test_prepare_xdomains,
 	.has_quarantined_rings = domain_remove_test_has_quarantined_rings,
 	.terminal_reset = domain_remove_test_terminal_reset,
-	.runtime_power_cycle = domain_remove_test_runtime_power_cycle,
 	.finalize = domain_remove_test_finalize,
 	.ctl_stop = domain_remove_test_ctl_stop,
 	.flush = domain_remove_test_flush,
@@ -2508,79 +2469,6 @@ static const struct tb_domain_remove_ops domain_remove_test_ops = {
 	.release = domain_remove_test_release,
 	.unregister_domain = domain_remove_test_unregister_domain,
 };
-
-/*
- * Root-router config access rejects an already invalidated switch. Runtime
- * preparation therefore belongs after callback quiesce but before topology is
- * marked unplugged; command dispatch still belongs after service teardown.
- */
-static void
-tb_test_domain_runtime_preflight_precedes_topology_invalidation(struct kunit *test)
-{
-	static const enum domain_remove_test_event expected[] = {
-		DOMAIN_REMOVE_STOP,
-		DOMAIN_REMOVE_DEINIT,
-		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
-		DOMAIN_REMOVE_PREPARE_XDOMAINS,
-		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
-		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE,
-		DOMAIN_REMOVE_FINALIZE,
-		DOMAIN_REMOVE_FINALIZE_RINGS,
-		DOMAIN_REMOVE_CTL_STOP,
-		DOMAIN_REMOVE_FLUSH,
-		DOMAIN_REMOVE_RELEASE,
-		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
-	};
-	struct cm_terminal_release_fixture release;
-	struct domain_remove_test_context ctx = {
-		.release = &release,
-		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
-	};
-	int i, ret;
-
-	tb_test_cm_terminal_release_fixture_init(test, &release);
-	ret = tb_test_domain_remove_sequence(release.tb, true,
-					     &domain_remove_test_ops, &ctx);
-
-	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
-	for (i = 0; i < min_t(int, ctx.nevents, ARRAY_SIZE(expected)); i++)
-		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
-}
-
-static void
-tb_test_domain_runtime_preflight_failure_stops_dispatch(struct kunit *test)
-{
-	static const enum domain_remove_test_event expected[] = {
-		DOMAIN_REMOVE_STOP,
-		DOMAIN_REMOVE_DEINIT,
-		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
-		DOMAIN_REMOVE_PREPARE_XDOMAINS,
-		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
-		DOMAIN_REMOVE_FINALIZE,
-		DOMAIN_REMOVE_FINALIZE_RINGS,
-		DOMAIN_REMOVE_CTL_STOP,
-		DOMAIN_REMOVE_FLUSH,
-		DOMAIN_REMOVE_RELEASE,
-		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
-	};
-	struct cm_terminal_release_fixture release;
-	struct domain_remove_test_context ctx = {
-		.release = &release,
-		.runtime_preflight_error = -ENODEV,
-		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
-	};
-	int i, ret;
-
-	tb_test_cm_terminal_release_fixture_init(test, &release);
-	ret = tb_test_domain_remove_sequence(release.tb, true,
-					     &domain_remove_test_ops, &ctx);
-
-	KUNIT_EXPECT_EQ(test, ret, -ENODEV);
-	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
-	for (i = 0; i < min_t(int, ctx.nevents, ARRAY_SIZE(expected)); i++)
-		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
-}
 
 static void
 tb_test_domain_remove_dispatch_is_not_revocation_proof(struct kunit *test)
@@ -2607,7 +2495,7 @@ tb_test_domain_remove_dispatch_is_not_revocation_proof(struct kunit *test)
 	int i, ret;
 
 	tb_test_cm_terminal_release_fixture_init(test, &release);
-	ret = tb_test_domain_remove_sequence(release.tb, false,
+	ret = tb_test_domain_remove_sequence(release.tb,
 					     &domain_remove_test_ops, &ctx);
 
 	KUNIT_EXPECT_EQ(test, ret, 0);
@@ -2642,7 +2530,6 @@ tb_test_domain_remove_quarantine_requires_proven_terminal_reset(struct kunit *te
 	static const enum domain_remove_test_event expected[] = {
 		DOMAIN_REMOVE_STOP,
 		DOMAIN_REMOVE_DEINIT,
-		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 		DOMAIN_REMOVE_PREPARE_XDOMAINS,
 		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
 		DOMAIN_REMOVE_TERMINAL_RESET,
@@ -2658,12 +2545,11 @@ tb_test_domain_remove_quarantine_requires_proven_terminal_reset(struct kunit *te
 		.release = &release,
 		.has_quarantined_rings = true,
 		.terminal_reset_state = TB_DOMAIN_RESET_PROVEN,
-		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
 	};
 	int i, ret;
 
 	tb_test_cm_terminal_release_fixture_init(test, &release);
-	ret = tb_test_domain_remove_sequence(release.tb, true,
+	ret = tb_test_domain_remove_sequence(release.tb,
 					     &domain_remove_test_ops, &ctx);
 
 	KUNIT_EXPECT_EQ(test, ret, 0);
@@ -2681,7 +2567,6 @@ tb_test_domain_remove_failed_reset_detaches_quarantined_rings(struct kunit *test
 	static const enum domain_remove_test_event expected[] = {
 		DOMAIN_REMOVE_STOP,
 		DOMAIN_REMOVE_DEINIT,
-		DOMAIN_REMOVE_RUNTIME_POWER_CYCLE_PREFLIGHT,
 		DOMAIN_REMOVE_PREPARE_XDOMAINS,
 		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
 		DOMAIN_REMOVE_TERMINAL_RESET,
@@ -2698,12 +2583,11 @@ tb_test_domain_remove_failed_reset_detaches_quarantined_rings(struct kunit *test
 		.release = &release,
 		.has_quarantined_rings = true,
 		.terminal_reset_error = -ETIMEDOUT,
-		.runtime_reset_state = TB_DOMAIN_RESET_DISPATCHED,
 	};
 	int i, ret;
 
 	tb_test_cm_terminal_release_fixture_init(test, &release);
-	ret = tb_test_domain_remove_sequence(release.tb, true,
+	ret = tb_test_domain_remove_sequence(release.tb,
 					     &domain_remove_test_ops, &ctx);
 
 	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
@@ -2741,7 +2625,7 @@ tb_test_domain_failed_reset_reaches_service_disconnect(struct kunit *test)
 	release.host->ports[1].xdomain = xd;
 	ctx.xd = xd;
 
-	ret = tb_test_domain_remove_sequence(release.tb, false,
+	ret = tb_test_domain_remove_sequence(release.tb,
 					     &domain_remove_test_ops, &ctx);
 
 	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
@@ -2758,29 +2642,6 @@ tb_test_domain_failed_reset_reaches_service_disconnect(struct kunit *test)
 			tb_tunnel_put_after_revoke(release.tunnels[i]);
 		}
 	}
-}
-
-static void
-tb_test_domain_power_cycle_completion_mapping(struct kunit *test)
-{
-	struct tb_domain_reset_result result;
-
-	result = tb_test_domain_power_cycle_dispatch_result(0, false);
-	KUNIT_EXPECT_EQ(test, result.error, 0);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
-
-	result = tb_test_domain_power_cycle_dispatch_result(-ETIMEDOUT, true);
-	KUNIT_EXPECT_EQ(test, result.error, 0);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_DISPATCHED);
-
-	result = tb_test_domain_power_cycle_dispatch_result(-ETIMEDOUT, false);
-	KUNIT_EXPECT_EQ(test, result.error, -ETIMEDOUT);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
-
-	/* A controller CFG_ERROR is not a Linux errno and must not escape as 1. */
-	result = tb_test_domain_power_cycle_dispatch_result(1, true);
-	KUNIT_EXPECT_EQ(test, result.error, -EIO);
-	KUNIT_EXPECT_EQ(test, result.state, TB_DOMAIN_RESET_NONE);
 }
 
 static void
@@ -2806,7 +2667,6 @@ struct xdomain_quarantine_test_context {
 	struct tb_tunnel *tunnel;
 	struct tb_nhi *nhi;
 	unsigned int freed_rings;
-	unsigned int recovery_requests;
 };
 
 struct xdomain_quarantine_test_fixture {
@@ -2860,15 +2720,6 @@ static void xdomain_quarantine_test_free_ring(void *data,
 		ring->nhi->rx_rings[ring->hop] = NULL;
 	spin_unlock_irq(&ring->nhi->lock);
 	ctx->freed_rings++;
-}
-
-static int
-xdomain_quarantine_test_request_recovery(void *data, struct tb_xdomain *xd)
-{
-	struct xdomain_quarantine_test_context *ctx = data;
-
-	ctx->recovery_requests++;
-	return 0;
 }
 
 static void xdomain_quarantine_test_reset_ops(void *data)
@@ -2967,7 +2818,6 @@ xdomain_quarantine_test_fixture_init(struct kunit *test,
 	fx->ctx.io.hop.pending = true;
 	ops.disconnect = xdomain_quarantine_test_disconnect;
 	ops.free_ring = xdomain_quarantine_test_free_ring;
-	ops.request_recovery = xdomain_quarantine_test_request_recovery;
 	ops.data = &fx->ctx;
 	tb_test_xdomain_quarantine_set_ops(&ops);
 	KUNIT_ASSERT_EQ(test,
@@ -3021,12 +2871,6 @@ domain_late_handoff_test_terminal_reset(struct tb *tb, void *data)
 	};
 }
 
-static struct tb_domain_reset_result
-domain_late_handoff_test_runtime_reset(struct tb *tb, void *data)
-{
-	return (struct tb_domain_reset_result) {};
-}
-
 static void domain_late_handoff_test_finalize(struct tb *tb, void *data,
 					      enum tb_domain_reset_state reset_state,
 					      bool ownership_unresolved)
@@ -3077,7 +2921,6 @@ static const struct tb_domain_remove_ops domain_late_handoff_test_ops = {
 	.prepare_xdomains = domain_late_handoff_test_prepare,
 	.has_quarantined_rings = domain_late_handoff_test_has_rings,
 	.terminal_reset = domain_late_handoff_test_terminal_reset,
-	.runtime_power_cycle = domain_late_handoff_test_runtime_reset,
 	.finalize = domain_late_handoff_test_finalize,
 	.ctl_stop = domain_late_handoff_test_noop,
 	.flush = domain_late_handoff_test_noop,
@@ -3105,7 +2948,7 @@ tb_test_domain_remove_collects_late_service_handoff(struct kunit *test)
 	xdomain_quarantine_test_fixture_init(test, &fx);
 	ctx.fx = &fx;
 
-	ret = tb_test_domain_remove_sequence(fx.tb, false,
+	ret = tb_test_domain_remove_sequence(fx.tb,
 					     &domain_late_handoff_test_ops, &ctx);
 
 	KUNIT_EXPECT_EQ(test, ret, 0);
@@ -3115,7 +2958,6 @@ tb_test_domain_remove_collects_late_service_handoff(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx.quarantine_count_at_release, 0U);
 	KUNIT_EXPECT_FALSE(test, ctx.rings_quarantined_at_release);
 	KUNIT_EXPECT_EQ(test, fx.ctx.freed_rings, 2U);
-	KUNIT_EXPECT_EQ(test, fx.ctx.recovery_requests, 0U);
 
 	/* RED cleanup: the old order leaves the newly queued retry behind. */
 	tb_xdomain_quarantine_discard_domain(fx.tb);
@@ -3162,7 +3004,6 @@ tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain(struct kunit *test)
 	ret = ida_alloc_range(&fx.xd->in_hopids, TB_PATH_MIN_HOPID + 1,
 			      TB_PATH_MIN_HOPID + 1, GFP_KERNEL);
 	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
-	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.recovery_requests);
 
 	WARN_ON(tb_tunnel_put(fx.tunnel));
 	destroy_workqueue(fx.tb->wq);
@@ -3185,7 +3026,6 @@ tb_test_xdomain_quarantine_retries_then_requires_proven_reset(struct kunit *test
 	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
 	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
 	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
-	KUNIT_EXPECT_EQ(test, 1u, fx.ctx.recovery_requests);
 	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.freed_rings);
 	KUNIT_EXPECT_EQ(test, -EUCLEAN, fx.xd->path_teardown_err);
 
@@ -5617,26 +5457,18 @@ static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *tes
 	KUNIT_EXPECT_TRUE(test, supported);
 	KUNIT_EXPECT_FALSE(test,
 		tb_nhi_arc_cio_recovery_supported(vendor, device));
-	KUNIT_EXPECT_TRUE(test,
-			  tb_nhi_runtime_recovery_supported(vendor, device));
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_TRUE(test, supported);
 	KUNIT_EXPECT_FALSE(test,
 		tb_nhi_arc_cio_recovery_supported(vendor, device));
-	KUNIT_EXPECT_TRUE(test,
-			  tb_nhi_runtime_recovery_supported(vendor, device));
 	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_FALSE(test, supported);
-	KUNIT_EXPECT_FALSE(test,
-			   tb_nhi_runtime_recovery_supported(vendor, device));
 	vendor = PCI_VENDOR_ID_AMD;
 	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
 	supported = tb_nhi_recovery_supported(vendor, device);
 	KUNIT_EXPECT_FALSE(test, supported);
-	KUNIT_EXPECT_FALSE(test,
-			   tb_nhi_runtime_recovery_supported(vendor, device));
 }
 
 static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *test)
@@ -5644,187 +5476,6 @@ static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *tes
 	unsigned int flags = tb_test_nhi_probe_recovery_wq_flags();
 
 	KUNIT_EXPECT_EQ(test, flags & WQ_MEM_RECLAIM, 0u);
-}
-
-/*
- * Runtime data-path recovery is independent from startup proof and probe
- * recovery. A controller can complete both of those and later lose its data
- * path while ring 0 remains healthy. Reusing the completed startup state
- * would make that failure unactionable.
- */
-static void tb_test_nhi_runtime_recovery_is_a_separate_machine(struct kunit *test)
-{
-	enum tb_nhi_recovery_state startup = TB_NHI_RECOVERY_COMPLETE;
-	enum tb_nhi_runtime_recovery_state runtime =
-		TB_NHI_RUNTIME_RECOVERY_IDLE;
-
-	runtime = tb_nhi_runtime_recovery_next(runtime, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
-
-	KUNIT_EXPECT_EQ(test, startup, TB_NHI_RECOVERY_COMPLETE);
-	KUNIT_EXPECT_EQ(test, runtime,
-			TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING);
-}
-
-static void tb_test_nhi_runtime_recovery_is_bounded(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state =
-		TB_NHI_RUNTIME_RECOVERY_IDLE;
-
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
-	KUNIT_ASSERT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED);
-	KUNIT_ASSERT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED);
-	KUNIT_ASSERT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED);
-	KUNIT_ASSERT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED);
-	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
-	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
-}
-
-static void tb_test_nhi_runtime_recovery_requires_data_proof(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state =
-		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
-
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN);
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
-}
-
-/* A healthy sibling route must not certify the route that requested recovery. */
-static void tb_test_nhi_runtime_recovery_rejects_sibling_route_proof(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state =
-		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
-	u64 failed_route = 1;
-	u64 proven_route = 3;
-	enum tb_nhi_runtime_recovery_event event =
-		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
-	bool matches;
-
-	matches = tb_nhi_runtime_proof_matches(state,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       failed_route,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       proven_route);
-	if (matches)
-		state = tb_nhi_runtime_recovery_next(state, event);
-
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-	proven_route = failed_route;
-	matches = tb_nhi_runtime_proof_matches(state,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       failed_route,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       proven_route);
-	if (matches)
-		state = tb_nhi_runtime_recovery_next(state, event);
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
-}
-
-/* Control and DMA proofs belong to distinct recovery state machines. */
-static void
-tb_test_nhi_runtime_recovery_rejects_cross_kind_proof(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state =
-		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
-	enum tb_nhi_runtime_recovery_event event =
-		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
-	u64 route = 1;
-	bool matches;
-
-	matches = tb_nhi_runtime_proof_matches(state,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       route,
-					       TB_NHI_RUNTIME_RECOVERY_CONTROL,
-					       route);
-	if (matches)
-		state = tb_nhi_runtime_recovery_next(state, event);
-
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-
-	matches = tb_nhi_runtime_proof_matches(state,
-					       TB_NHI_RUNTIME_RECOVERY_CONTROL,
-					       route,
-					       TB_NHI_RUNTIME_RECOVERY_DATA,
-					       route);
-	if (matches)
-		state = tb_nhi_runtime_recovery_next(state, event);
-
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-}
-
-static void
-tb_test_nhi_runtime_recovery_rejects_cross_kind_failure(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state =
-		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
-	enum tb_nhi_runtime_recovery_event event =
-		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
-	u64 route = 1;
-	bool matches;
-
-	matches = tb_nhi_runtime_failure_matches(state,
-						 TB_NHI_RUNTIME_RECOVERY_DATA,
-						 route,
-						 TB_NHI_RUNTIME_RECOVERY_CONTROL,
-						 route);
-	if (matches)
-		state = tb_nhi_runtime_recovery_next(state, event);
-
-	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
-}
-
-static void tb_test_nhi_runtime_recovery_requires_controller_stall(struct kunit *test)
-{
-	struct tb_ring_snapshot first = {
-		.size = 32,
-		.hw_producer = 4,
-		.hw_consumer = 2,
-		.options = BIT(31),
-		.running = true,
-		.indices_valid = true,
-	};
-	struct tb_ring_snapshot last = first;
-	bool evidence;
-
-	last.hw_producer = 6;
-	last.hw_consumer = 5;
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true);
-	KUNIT_EXPECT_FALSE(test, evidence);
-	last.hw_consumer = first.hw_consumer;
-	last.in_flight = 1;
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true);
-	KUNIT_EXPECT_TRUE(test, evidence);
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, false);
-	KUNIT_EXPECT_FALSE(test, evidence);
-}
-
-static void tb_test_nhi_runtime_recovery_failure_policy(struct kunit *test)
-{
-	enum tb_nhi_runtime_recovery_state state;
-
-	state = TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED);
-	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
-
-	state = TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_PENDING;
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_FAILED);
-	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING);
-
-	state = TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING;
-	state = tb_nhi_runtime_recovery_next(state, TB_NHI_RUNTIME_RECOVERY_REPROBE_FAILED);
-	KUNIT_EXPECT_EQ(test, state,
-			TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED);
 }
 
 static void tb_test_nhi_dma_misc_policy_selects_requested_mode(struct kunit *test)
@@ -5911,31 +5562,6 @@ static void tb_test_nhi_interrupt_setup_rejects_late_mode_change(struct kunit *t
 
 	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
 	KUNIT_EXPECT_EQ(test, phase, TB_NHI_IRQ_SETUP_INVALID);
-}
-
-static void tb_test_nhi_tx_stall_requires_hardware_consumer_proof(struct kunit *test)
-{
-	struct tb_ring_snapshot first = {
-		.size = 16,
-		.hw_producer = 4,
-		.hw_consumer = 0,
-		.in_flight = 4,
-		.options = RING_FLAG_ENABLE,
-		.running = true,
-		.indices_valid = true,
-	};
-	struct tb_ring_snapshot last = first;
-
-	last.hw_producer = 5;
-	last.in_flight = 5;
-	KUNIT_EXPECT_TRUE(test, tb_nhi_tx_stalled(&first, &last, true));
-
-	last.hw_consumer = 1;
-	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, true));
-	last.hw_consumer = 0;
-	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, false));
-	last.running = false;
-	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_stalled(&first, &last, true));
 }
 
 /*
@@ -8813,20 +8439,11 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
 	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
 	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_a_separate_machine),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_sibling_route_proof),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_cross_kind_proof),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_cross_kind_failure),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_controller_stall),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_failure_policy),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
 	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),
 	KUNIT_CASE(tb_test_nhi_interrupt_modes_are_distinct),
 	KUNIT_CASE(tb_test_nhi_interrupt_setup_orders_global_policy),
 	KUNIT_CASE(tb_test_nhi_interrupt_setup_rejects_late_mode_change),
-	KUNIT_CASE(tb_test_nhi_tx_stall_requires_hardware_consumer_proof),
 	KUNIT_CASE(tb_test_icm_maple_skips_legacy_allow_all),
 	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
 	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
@@ -8867,13 +8484,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_tunnel_revocation_survives_deferred_reference),
 	KUNIT_CASE(tb_test_cm_reset_failure_retains_all_unresolved_dma),
 	KUNIT_CASE(tb_test_cm_reset_success_revokes_all_unresolved_dma_once),
-	KUNIT_CASE(tb_test_domain_runtime_preflight_precedes_topology_invalidation),
-	KUNIT_CASE(tb_test_domain_runtime_preflight_failure_stops_dispatch),
 	KUNIT_CASE(tb_test_domain_remove_dispatch_is_not_revocation_proof),
 	KUNIT_CASE(tb_test_domain_remove_quarantine_requires_proven_terminal_reset),
 	KUNIT_CASE(tb_test_domain_remove_failed_reset_detaches_quarantined_rings),
 	KUNIT_CASE(tb_test_domain_failed_reset_reaches_service_disconnect),
-	KUNIT_CASE(tb_test_domain_power_cycle_completion_mapping),
 	KUNIT_CASE(tb_test_unplugged_xdomain_preserves_teardown_error),
 	KUNIT_CASE(tb_test_domain_remove_collects_late_service_handoff),
 	KUNIT_CASE(tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain),
