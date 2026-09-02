@@ -5716,7 +5716,7 @@ static void tb_test_nhi_runtime_recovery_rejects_sibling_route_proof(struct kuni
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
 }
 
-static void tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence(struct kunit *test)
+static void tb_test_nhi_runtime_recovery_requires_controller_stall(struct kunit *test)
 {
 	struct tb_ring_snapshot first = {
 		.size = 32,
@@ -5731,15 +5731,13 @@ static void tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence(struct kuni
 
 	last.hw_producer = 6;
 	last.hw_consumer = 5;
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true, false);
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true);
 	KUNIT_EXPECT_FALSE(test, evidence);
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true, true);
-	KUNIT_EXPECT_TRUE(test, evidence);
 	last.hw_consumer = first.hw_consumer;
 	last.in_flight = 1;
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true, false);
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, true);
 	KUNIT_EXPECT_TRUE(test, evidence);
-	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, false, true);
+	evidence = tb_nhi_runtime_recovery_evidence(&first, &last, false);
 	KUNIT_EXPECT_FALSE(test, evidence);
 }
 
@@ -8726,7 +8724,7 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_sibling_route_proof),
-	KUNIT_CASE(tb_test_nhi_runtime_recovery_accepts_end_to_end_evidence),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_controller_stall),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failure_policy),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
 	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),

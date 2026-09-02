@@ -845,13 +845,13 @@ static bool tbframe_link_prove_data_path(struct tbframe_link *link)
 	if (failures >= 2 &&
 	    ((rx_proven && !tx_proven) ||
 	     failures >= TBFRAME_AMBIGUOUS_RECOVERY_FAILURES) && sampled &&
-	    link->ops->report_data_path_failure) {
+	    tb_nhi_tx_stalled(&first, &last, true) &&
+	    link->ops->report_tx_stall) {
 		int ret;
 
-		ret = link->ops->report_data_path_failure(link->hw, &first,
-							  &last, true);
+		ret = link->ops->report_tx_stall(link->hw, &first, &last, true);
 		if (!ret)
-			pr_warn("%s: directional data proof failed after session rebuilds (rx_proven=%u tx_proven=%u); requested bounded local controller recovery\n",
+			pr_warn("%s: local TX consumer remained stalled after session rebuilds (rx_proven=%u tx_proven=%u); requested bounded local controller recovery\n",
 				link->name, rx_proven, tx_proven);
 	}
 	/*

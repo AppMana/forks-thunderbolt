@@ -184,10 +184,10 @@ struct tbframe_hw_ops {
 	/* level-triggered: 1 programmed, 0 gone, <0 unknown (not dead) */
 	int	(*paths_active)(void *hw, int local_hopid, int remote_hopid);
 	int	(*tx_snapshot)(void *hw, struct tb_ring_snapshot *snapshot);
-	int	(*report_data_path_failure)(void *hw,
-					    const struct tb_ring_snapshot *first,
-					    const struct tb_ring_snapshot *last,
-					    bool control_healthy);
+	int	(*report_tx_stall)(void *hw,
+				   const struct tb_ring_snapshot *first,
+				   const struct tb_ring_snapshot *last,
+				   bool control_healthy);
 	/* Transfer the exact unresolved path/ring/HopID tuple to core ownership. */
 	int	(*quarantine_paths)(void *hw, int local_hopid,
 				    int remote_hopid);

@@ -139,15 +139,11 @@ static void tbframe_datapath_escalates_only_after_rebuild_stays_stalled(struct k
 }
 
 /*
- * A moving local descriptor consumer does not prove that a frame escaped the
- * router egress.  The live failure consumes every keepalive descriptor while
- * the peer receives no frame from the negotiated lifetime; rebuilding the
- * same rings and hop entries then repeats forever.  After a complete local
- * rebuild has failed too, bounded controller recovery is the only remaining
- * in-driver recovery tier and must be requested even though the descriptor
- * consumer advanced.
+ * A moving local descriptor consumer rules out a local NHI TX-ring stall.
+ * Missing peer proof remains a real route failure, but it cannot identify the
+ * local controller as its cause and must not destroy healthy sibling routes.
  */
-static void tbframe_datapath_e2e_failure_escalates_with_moving_consumer(struct kunit *test)
+static void tbframe_datapath_e2e_failure_stays_route_local_with_moving_consumer(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
@@ -164,7 +160,7 @@ static void tbframe_datapath_e2e_failure_escalates_with_moving_consumer(struct k
 
 	for (i = 0; i < 2 * (TBFRAME_PROBE_RETRIES + 4); i++)
 		tbframe_link_session_step(fx->link);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_allocs,
 			TBFRAME_AMBIGUOUS_RECOVERY_FAILURES + 1u);
 	KUNIT_EXPECT_GE(test, fx->mock.in_hopid_releases,
@@ -172,12 +168,11 @@ static void tbframe_datapath_e2e_failure_escalates_with_moving_consumer(struct k
 }
 
 /*
- * A receive-only proof must not hide a failed local transmitter.  Descriptor
- * completion only proves that the local NHI consumed a buffer; the peer must
- * authenticate receipt before the session is published.  Once a full local
- * rebuild has failed, recovery belongs to this transmitter's controller.
+ * Receive-only proof identifies the failed direction, but descriptor progress
+ * still rules out a local TX-ring stall. Keep rebuilding the failed route
+ * without resetting the controller and its healthy sibling routes.
  */
-static void tbframe_datapath_one_way_local_tx_failure_recovers_local(struct kunit *test)
+static void tbframe_datapath_one_way_local_tx_failure_stays_route_local(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = dp_fx(test);
 	unsigned int i;
@@ -189,7 +184,7 @@ static void tbframe_datapath_one_way_local_tx_failure_recovers_local(struct kuni
 
 	KUNIT_EXPECT_GT(test, fx->link->data_rx, 0ull);
 	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
-	KUNIT_EXPECT_EQ(test, 1u, fx->mock.data_path_failure_reports);
+	KUNIT_EXPECT_EQ(test, 0u, fx->mock.data_path_failure_reports);
 }
 
 /*
@@ -689,8 +684,8 @@ static struct kunit_case tbframe_datapath_cases[] = {
 	KUNIT_CASE(tbframe_datapath_dead_ring_never_declares_up),
 	KUNIT_CASE(tbframe_datapath_dead_ring_rebuilds_hardware),
 	KUNIT_CASE(tbframe_datapath_escalates_only_after_rebuild_stays_stalled),
-	KUNIT_CASE(tbframe_datapath_e2e_failure_escalates_with_moving_consumer),
-	KUNIT_CASE(tbframe_datapath_one_way_local_tx_failure_recovers_local),
+	KUNIT_CASE(tbframe_datapath_e2e_failure_stays_route_local_with_moving_consumer),
+	KUNIT_CASE(tbframe_datapath_one_way_local_tx_failure_stays_route_local),
 	KUNIT_CASE(tbframe_datapath_one_way_peer_tx_failure_avoids_local_recovery),
 	KUNIT_CASE(tbframe_datapath_stale_backlog_drains_without_session_churn),
 	KUNIT_CASE(tbframe_datapath_forgotten_backlog_drains_without_session_churn),

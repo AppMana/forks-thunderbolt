@@ -385,8 +385,7 @@ unlock:
 int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 				    const struct tb_ring_snapshot *first,
 				    const struct tb_ring_snapshot *last,
-				    bool control_healthy,
-				    bool end_to_end_failed)
+				    bool control_healthy)
 {
 	struct pci_dev *pdev;
 
@@ -395,8 +394,7 @@ int tb_nhi_request_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	pdev = nhi->pdev;
 	if (!tb_nhi_runtime_recovery_supported(pdev->vendor, pdev->device))
 		return -EOPNOTSUPP;
-	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy,
-					      end_to_end_failed))
+	if (!tb_nhi_runtime_recovery_evidence(first, last, control_healthy))
 		return -EAGAIN;
 
 	return tb_nhi_queue_runtime_recovery(nhi, route, false);
