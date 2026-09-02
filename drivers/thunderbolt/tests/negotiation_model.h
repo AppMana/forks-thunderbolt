@@ -1605,7 +1605,12 @@ xdp_match_model_min_size(enum tb_xdp_type response_type)
 	case PROPERTIES_RESPONSE:
 		return sizeof(struct tb_xdp_properties_response);
 	case PROPERTIES_CHANGED_RESPONSE:
-		return sizeof(struct tb_xdp_properties_changed_response);
+		/*
+		 * A successful properties-changed acknowledgment is only the
+		 * common XDP envelope.  The error alternative carries one extra
+		 * dword, but that must not inflate the success packet on the wire.
+		 */
+		return sizeof(struct tb_xdp_header);
 	case LINK_STATE_STATUS_RESPONSE:
 		return sizeof(struct tb_xdp_link_state_status_response);
 	case LINK_STATE_CHANGE_RESPONSE:

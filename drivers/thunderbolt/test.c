@@ -5707,17 +5707,79 @@ static void tb_test_nhi_runtime_recovery_rejects_sibling_route_proof(struct kuni
 	u64 proven_route = 3;
 	enum tb_nhi_runtime_recovery_event event =
 		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
+	bool matches;
 
-	if (tb_nhi_runtime_recovery_proof_matches(state, failed_route,
-						  proven_route))
+	matches = tb_nhi_runtime_proof_matches(state,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       failed_route,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       proven_route);
+	if (matches)
 		state = tb_nhi_runtime_recovery_next(state, event);
 
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
 	proven_route = failed_route;
-	if (tb_nhi_runtime_recovery_proof_matches(state, failed_route,
-						  proven_route))
+	matches = tb_nhi_runtime_proof_matches(state,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       failed_route,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       proven_route);
+	if (matches)
 		state = tb_nhi_runtime_recovery_next(state, event);
 	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_COMPLETE);
+}
+
+/* Control and DMA proofs belong to distinct recovery state machines. */
+static void
+tb_test_nhi_runtime_recovery_rejects_cross_kind_proof(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
+	enum tb_nhi_runtime_recovery_event event =
+		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
+	u64 route = 1;
+	bool matches;
+
+	matches = tb_nhi_runtime_proof_matches(state,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       route,
+					       TB_NHI_RUNTIME_RECOVERY_CONTROL,
+					       route);
+	if (matches)
+		state = tb_nhi_runtime_recovery_next(state, event);
+
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
+
+	matches = tb_nhi_runtime_proof_matches(state,
+					       TB_NHI_RUNTIME_RECOVERY_CONTROL,
+					       route,
+					       TB_NHI_RUNTIME_RECOVERY_DATA,
+					       route);
+	if (matches)
+		state = tb_nhi_runtime_recovery_next(state, event);
+
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
+}
+
+static void
+tb_test_nhi_runtime_recovery_rejects_cross_kind_failure(struct kunit *test)
+{
+	enum tb_nhi_runtime_recovery_state state =
+		TB_NHI_RUNTIME_RECOVERY_VERIFYING;
+	enum tb_nhi_runtime_recovery_event event =
+		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
+	u64 route = 1;
+	bool matches;
+
+	matches = tb_nhi_runtime_failure_matches(state,
+						 TB_NHI_RUNTIME_RECOVERY_DATA,
+						 route,
+						 TB_NHI_RUNTIME_RECOVERY_CONTROL,
+						 route);
+	if (matches)
+		state = tb_nhi_runtime_recovery_next(state, event);
+
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RUNTIME_RECOVERY_VERIFYING);
 }
 
 static void tb_test_nhi_runtime_recovery_requires_controller_stall(struct kunit *test)
@@ -8050,6 +8112,19 @@ static void tb_test_xdomain_response_match_follows_protocol_model(struct kunit *
 	response.declared_size = response.size;
 	EXPECT_MATCH_MODEL();
 
+	/*
+	 * The successful properties-changed response contains exactly the
+	 * common XDP envelope.  Do not derive this wire size from the Linux
+	 * success/error union: its larger error arm is not present here.
+	 */
+	request.type = PROPERTIES_CHANGED_REQUEST;
+	request.response_capacity =
+		sizeof(struct tb_xdp_properties_changed_response);
+	response.type = PROPERTIES_CHANGED_RESPONSE;
+	response.size = sizeof(struct tb_xdp_header);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+
 #undef EXPECT_MATCH_MODEL
 }
 
@@ -8742,6 +8817,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_is_bounded),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_data_proof),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_sibling_route_proof),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_cross_kind_proof),
+	KUNIT_CASE(tb_test_nhi_runtime_recovery_rejects_cross_kind_failure),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_requires_controller_stall),
 	KUNIT_CASE(tb_test_nhi_runtime_recovery_failure_policy),
 	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),

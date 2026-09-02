@@ -338,7 +338,13 @@ static size_t tb_xdomain_response_min_size(enum tb_xdp_type response_type)
 	case PROPERTIES_RESPONSE:
 		return sizeof(struct tb_xdp_properties_response);
 	case PROPERTIES_CHANGED_RESPONSE:
-		return sizeof(struct tb_xdp_properties_changed_response);
+		/*
+		 * The successful response is exactly the common XDP envelope.
+		 * struct tb_xdp_properties_changed_response is a receive union
+		 * whose error arm carries one additional dword; using the union
+		 * size here rejects a canonical successful peer response.
+		 */
+		return sizeof(struct tb_xdp_header);
 	case LINK_STATE_STATUS_RESPONSE:
 		return sizeof(struct tb_xdp_link_state_status_response);
 	case LINK_STATE_CHANGE_RESPONSE:
@@ -983,10 +989,10 @@ static int tb_xdp_properties_changed_request(struct tb_ctl *ctl, u64 route,
 static int
 tb_xdp_properties_changed_response(struct tb_ctl *ctl, u64 route, u8 sequence)
 {
-	struct tb_xdp_properties_changed_response res;
+	struct tb_xdp_header res;
 
 	memset(&res, 0, sizeof(res));
-	tb_xdp_fill_header(&res.hdr, route, sequence,
+	tb_xdp_fill_header(&res, route, sequence,
 			   PROPERTIES_CHANGED_RESPONSE, sizeof(res));
 	return __tb_xdomain_response(ctl, &res, sizeof(res),
 				     TB_CFG_PKG_XDOMAIN_RESP);

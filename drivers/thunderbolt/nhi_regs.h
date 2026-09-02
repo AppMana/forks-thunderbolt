@@ -436,8 +436,14 @@ enum tb_nhi_runtime_recovery_state {
 	TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED,
 };
 
+enum tb_nhi_runtime_recovery_kind {
+	TB_NHI_RUNTIME_RECOVERY_DATA,
+	TB_NHI_RUNTIME_RECOVERY_CONTROL,
+};
+
 enum tb_nhi_runtime_recovery_event {
 	TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED,
+	TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_FAILED,
 	TB_NHI_RUNTIME_RECOVERY_QUIESCE_SUCCEEDED,
 	TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED,
 	TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED,
@@ -445,6 +451,7 @@ enum tb_nhi_runtime_recovery_event {
 	TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED,
 	TB_NHI_RUNTIME_RECOVERY_REPROBE_FAILED,
 	TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN,
+	TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_PROVEN,
 };
 
 static inline enum tb_nhi_runtime_recovery_state
@@ -453,7 +460,8 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 {
 	switch (state) {
 	case TB_NHI_RUNTIME_RECOVERY_IDLE:
-		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED)
+		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED ||
+		    event == TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_FAILED)
 			return TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
 		return state;
 
@@ -480,9 +488,11 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 		return TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED;
 
 	case TB_NHI_RUNTIME_RECOVERY_VERIFYING:
-		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN)
+		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN ||
+		    event == TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_PROVEN)
 			return TB_NHI_RUNTIME_RECOVERY_COMPLETE;
-		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED)
+		if (event == TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED ||
+		    event == TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_FAILED)
 			return TB_NHI_RUNTIME_RECOVERY_POWER_REQUIRED;
 		return state;
 
@@ -495,11 +505,27 @@ tb_nhi_runtime_recovery_next(enum tb_nhi_runtime_recovery_state state,
 }
 
 static inline bool
-tb_nhi_runtime_recovery_proof_matches(enum tb_nhi_runtime_recovery_state state,
-				      u64 failed_route, u64 proven_route)
+tb_nhi_runtime_proof_matches(enum tb_nhi_runtime_recovery_state state,
+			     enum tb_nhi_runtime_recovery_kind recovery_kind,
+			     u64 failed_route,
+			     enum tb_nhi_runtime_recovery_kind proof_kind,
+			     u64 proven_route)
 {
 	return state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
+	       recovery_kind == proof_kind &&
 	       failed_route == proven_route;
+}
+
+static inline bool
+tb_nhi_runtime_failure_matches(enum tb_nhi_runtime_recovery_state state,
+			       enum tb_nhi_runtime_recovery_kind recovery_kind,
+			       u64 recovering_route,
+			       enum tb_nhi_runtime_recovery_kind failure_kind,
+			       u64 failed_route)
+{
+	return state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
+	       recovery_kind == failure_kind &&
+	       recovering_route == failed_route;
 }
 
 /* Keep recovery policy independent from the ICM startup proof machine above. */

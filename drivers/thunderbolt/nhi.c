@@ -66,13 +66,15 @@ struct nhi_runtime_recovery_record {
 	u8 bus;
 	u8 devfn;
 	u64 route;
+	enum tb_nhi_runtime_recovery_kind kind;
 	enum tb_nhi_runtime_recovery_state state;
 };
 
 struct nhi_runtime_recovery_work {
 	struct work_struct work;
 	struct device *dev;
-	bool control_plane;
+	u64 route;
+	enum tb_nhi_runtime_recovery_kind kind;
 };
 
 static LIST_HEAD(nhi_probe_recoveries);
@@ -80,6 +82,12 @@ static DEFINE_MUTEX(nhi_probe_recoveries_lock);
 static struct workqueue_struct *nhi_probe_recovery_wq;
 static LIST_HEAD(nhi_runtime_recoveries);
 static DEFINE_MUTEX(nhi_runtime_recoveries_lock);
+
+static const char *
+nhi_runtime_recovery_kind_name(enum tb_nhi_runtime_recovery_kind kind)
+{
+	return kind == TB_NHI_RUNTIME_RECOVERY_CONTROL ? "control" : "data";
+}
 
 static unsigned int nhi_probe_recovery_wq_flags(void)
 {
@@ -192,7 +200,8 @@ nhi_runtime_recovery_matches(const struct nhi_runtime_recovery_record *r,
 }
 
 static enum tb_nhi_runtime_recovery_state
-nhi_runtime_recovery_get(struct pci_dev *pdev)
+nhi_runtime_recovery_get(struct pci_dev *pdev,
+			 enum tb_nhi_runtime_recovery_kind *kind, u64 *route)
 {
 	struct nhi_runtime_recovery_record *r;
 	enum tb_nhi_runtime_recovery_state state =
@@ -202,6 +211,10 @@ nhi_runtime_recovery_get(struct pci_dev *pdev)
 	list_for_each_entry(r, &nhi_runtime_recoveries, list) {
 		if (nhi_runtime_recovery_matches(r, pdev)) {
 			state = r->state;
+			if (kind)
+				*kind = r->kind;
+			if (route)
+				*route = r->route;
 			break;
 		}
 	}
@@ -214,8 +227,8 @@ static int
 nhi_runtime_recovery_set(struct pci_dev *pdev,
 			 enum tb_nhi_runtime_recovery_state state)
 {
-	struct nhi_runtime_recovery_record *r, *new = NULL;
-	int ret = -ENOMEM;
+	struct nhi_runtime_recovery_record *r;
+	int ret = -ENOENT;
 
 	mutex_lock(&nhi_runtime_recoveries_lock);
 	list_for_each_entry(r, &nhi_runtime_recoveries, list) {
@@ -225,16 +238,6 @@ nhi_runtime_recovery_set(struct pci_dev *pdev,
 			goto out;
 		}
 	}
-
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
-	if (!new)
-		goto out;
-	new->domain = pci_domain_nr(pdev->bus);
-	new->bus = pdev->bus->number;
-	new->devfn = pdev->devfn;
-	new->state = state;
-	list_add_tail(&new->list, &nhi_runtime_recoveries);
-	ret = 0;
 out:
 	mutex_unlock(&nhi_runtime_recoveries_lock);
 	return ret;
@@ -276,19 +279,21 @@ static void nhi_runtime_recovery_workfn(struct work_struct *work)
 	enum tb_nhi_runtime_recovery_event event;
 	int ret;
 
-	state = nhi_runtime_recovery_get(pdev);
+	state = nhi_runtime_recovery_get(pdev, NULL, NULL);
 	if (state != TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING)
 		goto out;
 
-	if (recovery->control_plane)
+	if (recovery->kind == TB_NHI_RUNTIME_RECOVERY_CONTROL)
 		dev_warn(recovery->dev,
-			 "proven one-way control-path failure; quiescing the domain for one host-router power cycle\n");
+			 "proven one-way control-path failure on route %llx; quiescing the domain for one host-router power cycle\n",
+			 recovery->route);
 	else
 		dev_warn(recovery->dev,
-			 "proven end-to-end data-path failure; quiescing the domain for one host-router power cycle\n");
+			 "proven end-to-end data-path failure on route %llx; quiescing the domain for one host-router power cycle\n",
+			 recovery->route);
 	device_release_driver(recovery->dev);
 
-	state = nhi_runtime_recovery_get(pdev);
+	state = nhi_runtime_recovery_get(pdev, NULL, NULL);
 	if (state != TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING) {
 		if (state == TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING) {
 			event = TB_NHI_RUNTIME_RECOVERY_QUIESCE_FAILED;
@@ -322,6 +327,8 @@ static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	enum tb_nhi_runtime_recovery_state state;
 	enum tb_nhi_runtime_recovery_event event;
 	struct pci_dev *pdev;
+	enum tb_nhi_runtime_recovery_kind kind = control_plane ?
+		TB_NHI_RUNTIME_RECOVERY_CONTROL : TB_NHI_RUNTIME_RECOVERY_DATA;
 	int ret = 0;
 
 	pdev = nhi->pdev;
@@ -338,9 +345,11 @@ static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	list_for_each_entry(record, &nhi_runtime_recoveries, list) {
 		if (!nhi_runtime_recovery_matches(record, pdev))
 			continue;
-		if (record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
-		    record->route == route) {
-			event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
+		if (tb_nhi_runtime_failure_matches(record->state, record->kind,
+						   record->route, kind, route)) {
+			event = kind == TB_NHI_RUNTIME_RECOVERY_CONTROL ?
+				TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_FAILED :
+				TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 			record->state = tb_nhi_runtime_recovery_next(record->state, event);
 			ret = -EHWPOISON;
 		} else {
@@ -353,8 +362,11 @@ static int tb_nhi_queue_runtime_recovery(struct tb_nhi *nhi, u64 route,
 	new_record->bus = pdev->bus->number;
 	new_record->devfn = pdev->devfn;
 	new_record->route = route;
+	new_record->kind = kind;
 	state = TB_NHI_RUNTIME_RECOVERY_IDLE;
-	event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
+	event = kind == TB_NHI_RUNTIME_RECOVERY_CONTROL ?
+		TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_FAILED :
+		TB_NHI_RUNTIME_RECOVERY_DATA_PATH_FAILED;
 	new_record->state = tb_nhi_runtime_recovery_next(state, event);
 	list_add_tail(&new_record->list, &nhi_runtime_recoveries);
 	new_record = NULL;
@@ -371,7 +383,8 @@ unlock:
 
 	INIT_WORK(&recovery->work, nhi_runtime_recovery_workfn);
 	recovery->dev = get_device(&pdev->dev);
-	recovery->control_plane = control_plane;
+	recovery->route = route;
+	recovery->kind = kind;
 	if (!queue_work(nhi_probe_recovery_wq, &recovery->work)) {
 		put_device(recovery->dev);
 		kfree(recovery);
@@ -439,11 +452,16 @@ int tb_nhi_request_control_recovery(struct tb_nhi *nhi, u64 route)
 	return tb_nhi_queue_runtime_recovery(nhi, route, true);
 }
 
-void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
+static void
+tb_nhi_runtime_path_proven(struct tb_nhi *nhi, u64 route,
+			   enum tb_nhi_runtime_recovery_kind proof_kind)
 {
 	struct nhi_runtime_recovery_record *record, *tmp;
 	enum tb_nhi_runtime_recovery_event event;
 	struct pci_dev *pdev;
+	enum tb_nhi_runtime_recovery_kind recovery_kind = proof_kind;
+	u64 recovery_route = route;
+	bool wrong_kind = false;
 	bool complete = false;
 
 	if (!nhi)
@@ -452,12 +470,21 @@ void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
 
 	mutex_lock(&nhi_runtime_recoveries_lock);
 	list_for_each_entry_safe(record, tmp, &nhi_runtime_recoveries, list) {
-		if (!nhi_runtime_recovery_matches(record, pdev) ||
-		    !tb_nhi_runtime_recovery_proof_matches(record->state,
-							  record->route,
-							  route))
+		if (!nhi_runtime_recovery_matches(record, pdev))
 			continue;
-		event = TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
+		recovery_kind = record->kind;
+		recovery_route = record->route;
+		if (!tb_nhi_runtime_proof_matches(record->state, record->kind,
+						  record->route, proof_kind,
+						  route)) {
+			wrong_kind =
+				record->state == TB_NHI_RUNTIME_RECOVERY_VERIFYING &&
+				record->route == route && record->kind != proof_kind;
+			break;
+		}
+		event = proof_kind == TB_NHI_RUNTIME_RECOVERY_CONTROL ?
+			TB_NHI_RUNTIME_RECOVERY_CONTROL_PATH_PROVEN :
+			TB_NHI_RUNTIME_RECOVERY_DATA_PATH_PROVEN;
 		record->state = tb_nhi_runtime_recovery_next(record->state, event);
 		if (record->state == TB_NHI_RUNTIME_RECOVERY_COMPLETE) {
 			list_del(&record->list);
@@ -469,14 +496,26 @@ void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
 	mutex_unlock(&nhi_runtime_recoveries_lock);
 	if (complete)
 		dev_info(&pdev->dev,
-			 "data traffic on route %llx proved the recovered controller operational\n",
-			 route);
+			 "%s traffic on route %llx proved the recovered controller operational\n",
+			 nhi_runtime_recovery_kind_name(proof_kind), route);
+	else if (wrong_kind)
+		dev_info_ratelimited(&pdev->dev,
+				     "ignoring %s-path proof on route %llx while %s-path recovery for route %llx awaits its own proof\n",
+				     nhi_runtime_recovery_kind_name(proof_kind),
+				     route,
+				     nhi_runtime_recovery_kind_name(recovery_kind),
+				     recovery_route);
+}
+
+void tb_nhi_runtime_data_path_proven(struct tb_nhi *nhi, u64 route)
+{
+	tb_nhi_runtime_path_proven(nhi, route, TB_NHI_RUNTIME_RECOVERY_DATA);
 }
 EXPORT_SYMBOL_GPL(tb_nhi_runtime_data_path_proven);
 
 void tb_nhi_runtime_control_path_proven(struct tb_nhi *nhi, u64 route)
 {
-	tb_nhi_runtime_data_path_proven(nhi, route);
+	tb_nhi_runtime_path_proven(nhi, route, TB_NHI_RUNTIME_RECOVERY_CONTROL);
 }
 
 static void nhi_probe_reprobe_work(struct work_struct *work)
@@ -2705,6 +2744,9 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct tb *tb;
 	enum tb_nhi_runtime_recovery_state runtime_state;
 	enum tb_nhi_runtime_recovery_event runtime_event;
+	enum tb_nhi_runtime_recovery_kind runtime_kind =
+		TB_NHI_RUNTIME_RECOVERY_DATA;
+	u64 runtime_route = 0;
 	int recovery_res;
 	int res;
 
@@ -2716,7 +2758,8 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return -ENOMEM;
 	recovery->pdev = pdev;
 	recovery->state = nhi_probe_recovery_get(pdev);
-	runtime_state = nhi_runtime_recovery_get(pdev);
+	runtime_state = nhi_runtime_recovery_get(pdev, &runtime_kind,
+						 &runtime_route);
 	res = devm_add_action_or_reset(dev, nhi_probe_recovery_release,
 				       recovery);
 	if (res)
@@ -2846,10 +2889,18 @@ release_domain:
 					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);
 	if (runtime_state == TB_NHI_RUNTIME_RECOVERY_REPROBE_PENDING) {
 		runtime_event = TB_NHI_RUNTIME_RECOVERY_REPROBE_SUCCEEDED;
-		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
-		nhi_runtime_recovery_set(pdev, runtime_state);
-		dev_info(dev,
-			 "controller reprobed after runtime recovery; awaiting data-path proof\n");
+		runtime_state = tb_nhi_runtime_recovery_next(runtime_state,
+							     runtime_event);
+		recovery_res = nhi_runtime_recovery_set(pdev, runtime_state);
+		if (recovery_res)
+			dev_err(dev,
+				"controller reprobed but runtime recovery identity was lost: %d\n",
+				recovery_res);
+		else
+			dev_info(dev,
+				 "controller reprobed after runtime recovery; awaiting %s-path proof on route %llx\n",
+				 nhi_runtime_recovery_kind_name(runtime_kind),
+				 runtime_route);
 	}
 	pci_set_drvdata(pdev, tb);
 
@@ -2869,14 +2920,18 @@ static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 	struct tb_nhi *nhi = tb->nhi;
 	enum tb_nhi_runtime_recovery_state runtime_state;
 	enum tb_nhi_runtime_recovery_event runtime_event;
+	enum tb_nhi_runtime_recovery_kind runtime_kind =
+		TB_NHI_RUNTIME_RECOVERY_DATA;
+	u64 runtime_route = 0;
 	bool runtime_reset;
-	int reset_ret;
+	int reset_ret, state_ret;
 
 	pm_runtime_get_sync(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_forbid(&pdev->dev);
 
-	runtime_state = nhi_runtime_recovery_get(pdev);
+	runtime_state = nhi_runtime_recovery_get(pdev, &runtime_kind,
+						 &runtime_route);
 	runtime_reset = allow_runtime_recovery &&
 		runtime_state == TB_NHI_RUNTIME_RECOVERY_QUIESCE_PENDING;
 	reset_ret = tb_domain_remove(tb, runtime_reset);
@@ -2887,11 +2942,18 @@ static void __nhi_remove(struct pci_dev *pdev, bool allow_runtime_recovery)
 			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_FAILED :
 			TB_NHI_RUNTIME_RECOVERY_POWER_CYCLE_SUCCEEDED;
 		runtime_state = tb_nhi_runtime_recovery_next(runtime_state, runtime_event);
-		nhi_runtime_recovery_set(pdev, runtime_state);
+		state_ret = nhi_runtime_recovery_set(pdev, runtime_state);
+		if (state_ret)
+			dev_err(&pdev->dev,
+				"runtime recovery lost its %s-path identity for route %llx during remove: %d\n",
+				nhi_runtime_recovery_kind_name(runtime_kind),
+				runtime_route, state_ret);
 		if (reset_ret)
 			dev_warn(&pdev->dev,
-				 "host-router power cycle failed (%d); falling back to one driver rebind and route-specific data proof\n",
-				 reset_ret);
+				 "host-router power cycle failed (%d); falling back to one driver rebind and route-specific %s-path proof on route %llx\n",
+				 reset_ret,
+				 nhi_runtime_recovery_kind_name(runtime_kind),
+				 runtime_route);
 	}
 	nhi_shutdown(nhi);
 }

@@ -207,6 +207,62 @@ approve response where `SETTLE` was required. After wiring the transition
 model into the real ICM request stream, the settle-order and crossed-stage
 tests both passed.
 
+### Properties-changed success responses are 32 bytes
+
+An XDP success packet and an XDP error packet are alternative wire layouts,
+not two fixed-size instances of the same C union. In particular, a successful
+`PROPERTIES_CHANGED_RESPONSE` is exactly `struct tb_xdp_header` (32 bytes),
+whereas the error alternative has an additional error dword (36 bytes).
+
+A strict response matcher incorrectly used
+`sizeof(struct tb_xdp_properties_changed_response)`, the size of the Linux
+success/error receive union, as the minimum valid success size. It therefore
+rejected a canonical 32-byte peer response even when its route, sequence,
+declared size, UUID and response type all matched. The sender made the inverse
+mistake and emitted the union size for successful responses. A trace presents
+this as a successful local command completion (`0xc`) followed promptly by a
+valid peer response (`0x7`) that Linux marks dropped; the later request timeout
+is a host-side matching error, not evidence that either packet was absent.
+
+Production now uses the common header size for both the success matcher and
+success sender. The independent XDP size model encoded the canonical 32-byte
+layout first; the focused RED run rejected that packet, and the GREEN run plus
+the complete suite accepts it. The other native XDP success/error unions were
+audited individually; their success arms are not smaller than their error
+arms, so this size inversion is specific to properties-changed.
+
+### Runtime control and data recovery require distinct proofs
+
+Controller recovery has one serialized executor because unbinding, resetting
+and reprobeing a PCI function cannot run concurrently. Its evidence remains
+two independent state machines:
+
+- A control-recovery episode begins only from overlapping one-way XDomain
+  evidence and completes only when route-correlated control traffic succeeds
+  after reprobe.
+- A data-recovery episode begins only from a stalled hardware consumer or an
+  unresolved DMA-path handoff and completes only after the frame service proves
+  both directions of the current DMA session and observes a real TX descriptor
+  completion.
+
+The original implementation persisted state and route across the driver
+rebind, but not the episode kind. Worse,
+`tb_nhi_runtime_control_path_proven()` called the data-proof entry point. An
+ordinary properties-changed exchange could therefore delete a verifying data
+episode before any DMA frame crossed. If the DMA path remained broken, its
+next verification failure created a new episode and unbound the controller
+again. Each individual episode was bounded, but the incorrect proof reopened
+the episode boundary and produced an unbounded unbind/reprobe loop.
+
+Runtime records now persist data/control kind with route and state. Proofs and
+post-recovery failures must match all three before they may complete or poison
+an episode. Cross-kind evidence is left for its own state machine and is logged
+with both kinds and routes, while probe/remove diagnostics identify the exact
+proof being awaited. KUnit modeled both contamination directions before the
+queue and proof implementations changed: control proof completing data
+recovery and control failure poisoning data recovery each failed RED, then
+remained `VERIFYING` after the fix.
+
 See also: `../../icm-firmware-re/` (ICM disassembly), the memory note
 `project-tb-xdomain-renegotiation-bug`, and `scripts/tb-chain-reboot-cover.sh`
 (the reboot workaround this replaces).
