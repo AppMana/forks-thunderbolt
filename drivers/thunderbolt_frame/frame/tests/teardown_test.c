@@ -117,6 +117,82 @@ static void tbframe_teardown_quiesces_then_byes_then_stops(struct kunit *test)
 }
 
 /*
+ * Data-path verification runs with the hardware session active but the
+ * publication state still INIT.  This is not an inactive session: both rings
+ * and both paths exist and proof keepalives have already been transmitted.
+ * A local verification failure must therefore fence the peer exactly like an
+ * established-session failure.  Otherwise the peer keeps feeding the ingress
+ * that this side is about to remove, which leaves the router egress wedged.
+ */
+static void
+tbframe_teardown_pre_up_verify_quiesces_peer_before_paths(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned long flags;
+	int quiesce, disable;
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_STATE_INIT,
+			(int)fx->link->state);
+	KUNIT_ASSERT_TRUE(test, fx->link->rings_up);
+	KUNIT_ASSERT_TRUE(test, fx->link->paths_enabled);
+	KUNIT_ASSERT_GT(test, fx->mock.keepalives_sent, 0u);
+
+	spin_lock_irqsave(&fx->link->lock, flags);
+	fx->link->needs_down = true;
+	fx->link->down_reason = TBFRAME_DOWN_VERIFY;
+	spin_unlock_irqrestore(&fx->link->lock, flags);
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, 1u, fx->mock.bye_count);
+	KUNIT_EXPECT_TRUE(test, fx->mock.bye_rings_started);
+	quiesce = tbframe_mock_hw_call_pos(&fx->mock,
+					  TBFRAME_HW_QUIESCE_TX, 0);
+	disable = tbframe_mock_hw_call_pos(&fx->mock,
+					  TBFRAME_HW_DISABLE_PATHS, 0);
+	KUNIT_ASSERT_GE(test, quiesce, 0);
+	KUNIT_ASSERT_GE(test, disable, 0);
+	KUNIT_EXPECT_LT(test, quiesce, (int)fx->mock.bye_hw_calls_at);
+	/* The next hardware event occupies the count captured at BYE time. */
+	KUNIT_EXPECT_LE(test, (int)fx->mock.bye_hw_calls_at, disable);
+}
+
+/*
+ * The responder side has the same independent hardware lifetime.  A BYE that
+ * arrives while data proof is pending must drive that live hardware session
+ * through LOGOUT; testing only the publication state loses the event and the
+ * requester waits until its bounded timeout before disabling beneath us.
+ */
+static void tbframe_teardown_inbound_bye_quiesces_pre_up_session(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.datapath_dead = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_STATE_INIT,
+			(int)fx->link->state);
+	KUNIT_ASSERT_TRUE(test, fx->link->rings_up);
+	KUNIT_ASSERT_TRUE(test, fx->link->paths_enabled);
+
+	fx->mock.have_response = false;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+	flush_workqueue(fx->tf.wq);
+
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_started);
+	KUNIT_EXPECT_FALSE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_EXPECT_TRUE(test, fx->mock.have_response);
+}
+
+/*
  * Inbound BYE downs the session (reason LOGOUT) and the ack is withheld
  * until the session has actually left UP -- the ack certifies "no more
  * frames from this side", so acking from a live session would be the same
@@ -594,6 +670,8 @@ static struct kunit_case tbframe_teardown_cases[] = {
 	KUNIT_CASE(tbframe_teardown_drains_paths_before_stopping_rings),
 	KUNIT_CASE(tbframe_teardown_session_reset_keeps_dma_storage),
 	KUNIT_CASE(tbframe_teardown_quiesces_then_byes_then_stops),
+	KUNIT_CASE(tbframe_teardown_pre_up_verify_quiesces_peer_before_paths),
+	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_pre_up_session),
 	KUNIT_CASE(tbframe_teardown_inbound_bye_quiesces_then_acks),
 	KUNIT_CASE(tbframe_teardown_bye_ack_requires_descriptor_fence),
 	KUNIT_CASE(tbframe_teardown_bye_fences_hardware),

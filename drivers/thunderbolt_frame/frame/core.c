@@ -1138,7 +1138,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	struct tbframe *tf = link->tf;
 	unsigned long flags;
 	bool was_up, terminal = false;
-	bool had_rings, rings_running, had_paths, had_hopid;
+	bool had_rings, rings_running, had_paths, had_hopid, active_session;
 	unsigned int drain_ms;
 	u16 remote_hopid;
 	u64 next_cookie = tbframe_new_session_cookie(link->local_cookie);
@@ -1162,6 +1162,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	had_rings = link->rings_allocated;
 	rings_running = link->rings_up;
 	had_paths = link->paths_owned;
+	active_session = rings_running && link->paths_enabled;
 	had_hopid = link->in_hopid_held;
 	/*
 	 * NOT link->remote_hopid: that field tracks the peer's latest HELLO
@@ -1287,7 +1288,7 @@ static int tbframe_link_down_session(struct tbframe_link *link,
 	 * stale session. Bounded-and-proceed is mandatory here: unlike an
 	 * rmmod, a shutdown cannot be refused.
 	 */
-	if (was_up && !tf->shutdown_mode &&
+	if ((was_up || active_session) && !tf->shutdown_mode &&
 	    (reason == TBFRAME_DOWN_CLOSED ||
 	     reason == TBFRAME_DOWN_VERIFY))
 		tbframe_link_bye(link);
@@ -1910,10 +1911,19 @@ int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
 		return 1;
 	}
 	case TBFRAME_WIRE_OP_BYE: {
-		bool quiesced;
+		bool active_session, quiesced;
 
 		spin_lock_irqsave(&link->lock, flags);
-		if (link->state == TBFRAME_STATE_UP && !link->needs_down) {
+		/*
+		 * Publication and hardware have separate lifetimes.  Data-path
+		 * verification deliberately runs in INIT with live rings and paths;
+		 * ignoring a BYE there lets the requester tear down while our TX can
+		 * still feed its disappearing ingress.  Treat either published UP or
+		 * an active hardware session as peer-owned teardown work.
+		 */
+		active_session = link->state == TBFRAME_STATE_UP ||
+			(link->rings_up && link->paths_enabled);
+		if (active_session && !link->needs_down) {
 			link->needs_down = true;
 			link->down_reason = TBFRAME_DOWN_LOGOUT;
 			tbframe_link_kick_locked(link, 0);
