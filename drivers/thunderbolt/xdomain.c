@@ -23,6 +23,7 @@
 
 #define XDOMAIN_SHORT_TIMEOUT			100	/* ms */
 #define XDOMAIN_DEFAULT_TIMEOUT			1000	/* ms */
+#define XDOMAIN_PROPERTIES_TIMEOUT		5000	/* ms */
 #define XDOMAIN_BONDING_TIMEOUT			10000	/* ms */
 #define XDOMAIN_RETRIES				10
 #define XDOMAIN_PACKET_RETRIES			10
@@ -435,6 +436,24 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 		if (min_size == SIZE_MAX || pkg->frame.size < min_size)
 			return false;
 
+		/*
+		 * The sequence field is only two bits and wraps while discovery
+		 * retries. A delayed properties response can therefore have the
+		 * same route and sequence as a later chunk request. Keep that stale
+		 * response from completing the active request; the chunk offset is
+		 * the remaining transaction identity.
+		 */
+		if (req_hdr->type == PROPERTIES_REQUEST &&
+		    res_hdr->type == PROPERTIES_RESPONSE) {
+			const struct tb_xdp_properties *properties_req =
+				(const struct tb_xdp_properties *)req_hdr;
+			const struct tb_xdp_properties_response *properties_res =
+				(const struct tb_xdp_properties_response *)res_hdr;
+
+			if (properties_res->offset != properties_req->offset)
+				return false;
+		}
+
 		return true;
 	}
 
@@ -750,6 +769,34 @@ bool tb_test_xdomain_properties_identity(bool source_matches,
 
 	return tb_xdp_properties_ids_ok(&res, &local, &remote);
 }
+
+bool tb_test_xdomain_properties_response_pkg_matches(u16 request_offset,
+						     u16 response_offset)
+{
+	struct tb_xdp_properties_response response = {};
+	struct tb_xdp_properties request = {};
+	struct tb_cfg_request req = {};
+	struct ctl_pkg pkg = {};
+
+	tb_xdp_fill_header(&request.hdr, 3, 0, PROPERTIES_REQUEST,
+			   sizeof(request));
+	tb_xdp_fill_header(&response.hdr, 3, 0, PROPERTIES_RESPONSE,
+			   sizeof(response));
+	request.offset = request_offset;
+	response.offset = response_offset;
+	req.request = &request;
+	req.response_size = sizeof(response);
+	pkg.buffer = &response;
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = sizeof(response);
+
+	return tb_xdomain_match(&req, &pkg);
+}
+
+unsigned int tb_test_xdomain_properties_timeout_ms(void)
+{
+	return XDOMAIN_PROPERTIES_TIMEOUT;
+}
 #endif
 
 static int tb_xdp_uuid_request(struct tb_ctl *ctl, u64 route, int retry,
@@ -840,7 +887,7 @@ static int tb_xdp_properties_request(struct tb_ctl *ctl, u64 route,
 		ret = __tb_xdomain_request(ctl, &req, sizeof(req),
 					   TB_CFG_PKG_XDOMAIN_REQ, res,
 					   total_size, TB_CFG_PKG_XDOMAIN_RESP,
-					   XDOMAIN_DEFAULT_TIMEOUT);
+					   XDOMAIN_PROPERTIES_TIMEOUT);
 		if (ret)
 			goto err;
 
@@ -3226,21 +3273,23 @@ bool tb_test_xdomain_response_pkg_matches(u64 req_route,
 					  size_t response_declared_size,
 					  bool same_protocol)
 {
-	struct tb_xdp_header req_hdr = {};
-	struct tb_xdp_header response_hdr = {};
+	struct tb_xdp_properties request = {};
+	struct tb_xdp_properties_response response = {};
+	struct tb_xdp_header *req_hdr = &request.hdr;
+	struct tb_xdp_header *response_hdr = &response.hdr;
 	struct tb_cfg_request req = {};
 	struct ctl_pkg pkg = {};
 
-	tb_xdp_fill_header(&req_hdr, req_route, req_sequence, req_type,
-			   sizeof(req_hdr));
-	tb_xdp_fill_header(&response_hdr, response_route, response_sequence,
+	tb_xdp_fill_header(req_hdr, req_route, req_sequence, req_type,
+			   sizeof(*req_hdr));
+	tb_xdp_fill_header(response_hdr, response_route, response_sequence,
 			   response_type, response_declared_size);
 	if (!same_protocol)
-		response_hdr.uuid.b[0] ^= 0xff;
+		response_hdr->uuid.b[0] ^= 0xff;
 
-	req.request = &req_hdr;
+	req.request = &request;
 	req.response_size = response_capacity;
-	pkg.buffer = &response_hdr;
+	pkg.buffer = &response;
 	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
 	pkg.frame.size = response_size;
 

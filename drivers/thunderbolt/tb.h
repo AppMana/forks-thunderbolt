@@ -68,6 +68,9 @@ bool tb_test_xdomain_announce_ready(bool needs_uuid, bool uuid_verified);
 bool tb_test_xdomain_uuid_globally_matchable(bool verified, bool equal);
 bool tb_test_xdomain_properties_identity(bool source_matches,
 					 bool destination_matches);
+bool tb_test_xdomain_properties_response_pkg_matches(u16 request_offset,
+						     u16 response_offset);
+unsigned int tb_test_xdomain_properties_timeout_ms(void);
 bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							bool services_published,
 							int link_status_ret,

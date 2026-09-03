@@ -6634,6 +6634,31 @@ static void tb_test_xdomain_properties_response_proves_both_identities(struct ku
 	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(false, false));
 }
 
+/*
+ * A Titan Ridge peer can deliver a valid properties response about four
+ * seconds after Maple Ridge submitted the request. The discovery waiter must
+ * still own that response; a one-second deadline turns the whole valid burst
+ * into unmatched traffic and leaves an empty XDomain behind.
+ */
+static void tb_test_xdomain_properties_wait_covers_delayed_peer(struct kunit *test)
+{
+	KUNIT_EXPECT_GT(test, tb_test_xdomain_properties_timeout_ms(), 4000u);
+}
+
+/*
+ * The two-bit XDP sequence wraps while discovery retries. A delayed response
+ * for an earlier properties chunk can therefore share route and sequence with
+ * the current request. Offset is the remaining transaction identity and must
+ * participate in matching, rather than failing the active request after copy.
+ */
+static void tb_test_xdomain_properties_reply_requires_current_offset(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  tb_test_xdomain_properties_response_pkg_matches(0, 0));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_test_xdomain_properties_response_pkg_matches(53, 0));
+}
+
 static void tb_test_xdomain_unverified_uuid_cannot_alias_route(struct kunit *test)
 {
 	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_uuid_globally_matchable(false, true));
@@ -8390,6 +8415,8 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_event_uuid_requires_peer_verification),
 	KUNIT_CASE(tb_test_xdomain_discovery_precedes_announcement),
 	KUNIT_CASE(tb_test_xdomain_properties_response_proves_both_identities),
+	KUNIT_CASE(tb_test_xdomain_properties_wait_covers_delayed_peer),
+	KUNIT_CASE(tb_test_xdomain_properties_reply_requires_current_offset),
 	KUNIT_CASE(tb_test_xdomain_unverified_uuid_cannot_alias_route),
 	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),
 	KUNIT_CASE(tb_test_xdomain_uuid_absence_backs_off),

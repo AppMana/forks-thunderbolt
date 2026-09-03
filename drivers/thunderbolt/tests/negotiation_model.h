@@ -1565,6 +1565,7 @@ struct xdp_match_model_request {
 	u8 sequence;
 	size_t response_capacity;
 	u32 protocol;
+	u16 properties_offset;
 };
 
 struct xdp_match_model_response {
@@ -1574,6 +1575,7 @@ struct xdp_match_model_response {
 	size_t size;
 	size_t declared_size;
 	u32 protocol;
+	u16 properties_offset;
 };
 
 static inline enum tb_xdp_type
@@ -1638,6 +1640,10 @@ xdp_match_model_matches(const struct xdp_match_model_request *request,
 	if (response->type != expected && response->type != ERROR_RESPONSE)
 		return false;
 	if (response->declared_size != response->size)
+		return false;
+	if (request->type == PROPERTIES_REQUEST &&
+	    response->type == PROPERTIES_RESPONSE &&
+	    response->properties_offset != request->properties_offset)
 		return false;
 	return response->size >= minimum &&
 	       response->size <= request->response_capacity;
