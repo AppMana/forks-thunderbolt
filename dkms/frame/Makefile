@@ -54,7 +54,8 @@ preflight:
 	    >/dev/null 2>&1 || { \
 		echo "error: ib_uverbs.ko not present for $(KVER); thunderbolt_frame_rxe" >&2; \
 		echo "       imports ib_core/ib_umem symbols that Ubuntu ships in" >&2; \
-		echo "       linux-modules-extra-$(KVER). Install it first." >&2; \
+		echo "       linux-modules-extra-$(KVER) (6.17) or linux-modules-$(KVER) (7.0)." >&2; \
+		echo "       Install it first." >&2; \
 		exit 1; }
 	$(TBFIX_HDR_GEN) "$(KDIR)" "$(TBV_THUNDERBOLT_H_DIR)"
 

@@ -208,7 +208,7 @@ deployment's orchestration layer, not to images.
 
 | Component | Forked? | Source | Bundled / installed how |
 |---|---|---|---|
-| Linux kernel (6.17 HWE) | no | Ubuntu | host package manager |
+| Linux kernel (6.17 or 7.0 HWE) | no | Ubuntu | host package manager |
 | `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (release assets). Core bumps are cold-boot-only |
 | `thunderbolt_frame.ko` (frame/session layer) | new | this repo (`drivers/thunderbolt_frame/frame`) | host: `thunderbolt-frame-dkms` deb (lockstep with the core: symvers + header shim); loaded via `modprobe thunderbolt_frame_rxe`, never autoloaded |
 | `thunderbolt_frame_rxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`drivers/thunderbolt_frame/rxe`) | same `thunderbolt-frame-dkms` deb, built lockstep in the same DKMS pass |
@@ -425,9 +425,10 @@ docker run --rm -v "$PWD:/work" -w /work ubuntu:24.04 \
 ```
 
 The container install check verifies the `.deb` metadata and `/usr/src`
-staging. It does not compile the module by default because this tbfix branch is
-for the fleet's 6.17 Thunderbolt tree, while stock Ubuntu 24.04 containers
-install 6.8 headers. To compile in a matching kernel-header environment:
+staging. It does not compile the module by default because this tbfix branch
+builds for the fleet's 6.17 and 7.0 HWE kernels, while stock Ubuntu 24.04
+containers install 6.8 headers. To compile in a matching kernel-header
+environment (`TBFIX_HEADERS_PKG=linux-headers-<abi>-generic` picks the line):
 
 ```bash
 TBFIX_VERIFY_DKMS_BUILD=1 tools/ci/distro-install.sh \

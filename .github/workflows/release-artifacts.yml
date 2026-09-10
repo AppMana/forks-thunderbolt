@@ -45,15 +45,6 @@ jobs:
           bash tools/ci/test-tbfix-package.sh dist/thunderbolt-tbfix-dkms_*.deb
           ls -la dist/
 
-      - name: Verify tbfix DKMS deb builds (noble HWE 6.17 headers)
-        run: |
-          docker run --rm \
-            -v "$PWD:/work" \
-            -w /work \
-            -e TBFIX_VERIFY_DKMS_BUILD=1 \
-            ubuntu:24.04 \
-            bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
-
       - name: Build thunderbolt-frame DKMS deb
         run: |
           docker run --rm \
@@ -64,17 +55,6 @@ jobs:
             bash tools/ci/distro-package-frame.sh ubuntu
           (cd dist && sha256sum -c thunderbolt-frame-dkms_*.deb.sha256)
           ls -la dist/
-
-      - name: Verify thunderbolt-frame DKMS deb builds (noble HWE 6.17 headers)
-        run: |
-          docker run --rm \
-            -v "$PWD:/work" \
-            -w /work \
-            -e TBFIX_VERIFY_DKMS_BUILD=1 \
-            ubuntu:24.04 \
-            bash tools/ci/distro-install-frame.sh \
-              'dist/thunderbolt-tbfix-dkms_*.deb' \
-              'dist/thunderbolt-frame-dkms_*.deb'
 
       - name: Build reproduction-tools deb
         run: |
@@ -122,10 +102,67 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # One header set per job: tools/ci/distro-install*.sh build against the
+  # newest /lib/modules/*/build present, so two sets in one container would
+  # only ever exercise the newer line.
+  verify:
+    name: verify dkms build (noble HWE ${{ matrix.line }})
+    if: ${{ github.actor == 'doctorpangloss' }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        line: ['6.17', '7.0']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download debs
+        uses: actions/download-artifact@v4
+        with:
+          name: thunderbolt-debs
+          path: dist
+
+      - name: Resolve newest noble HWE ${{ matrix.line }} headers
+        id: headers
+        env:
+          LINE: ${{ matrix.line }}
+        run: |
+          pattern="${LINE//./[.]}"
+          pkg="$(docker run --rm ubuntu:24.04 bash -c "
+            apt-get update -qq >/dev/null
+            apt-cache search --names-only '^linux-headers-${pattern}[.]0-[0-9]+-generic\$' |
+              awk '{print \$1}' | sort -V | tail -1")"
+          [ -n "$pkg" ] || { echo "error: no concrete noble HWE $LINE headers package" >&2; exit 1; }
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
+          echo "$pkg"
+
+      - name: Verify tbfix DKMS deb builds
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e TBFIX_VERIFY_DKMS_BUILD=1 \
+            -e TBFIX_HEADERS_PKG='${{ steps.headers.outputs.pkg }}' \
+            ubuntu:24.04 \
+            bash tools/ci/distro-install.sh 'dist/thunderbolt-tbfix-dkms_*.deb'
+
+      - name: Verify thunderbolt-frame DKMS deb builds
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e TBFIX_VERIFY_DKMS_BUILD=1 \
+            -e TBFIX_HEADERS_PKG='${{ steps.headers.outputs.pkg }}' \
+            ubuntu:24.04 \
+            bash tools/ci/distro-install-frame.sh \
+              'dist/thunderbolt-tbfix-dkms_*.deb' \
+              'dist/thunderbolt-frame-dkms_*.deb'
+
   release:
     name: Publish GitHub Release
     if: ${{ github.actor == 'doctorpangloss' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish) }}
-    needs: build
+    needs: [build, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write

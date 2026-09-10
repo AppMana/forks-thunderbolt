@@ -3,7 +3,7 @@
 # The package depends on the exact-version thunderbolt-tbfix-dkms, so that deb
 # is installed (and, when compiling, dkms-built) first. By default this
 # verifies package/source staging only. Set TBFIX_VERIFY_DKMS_BUILD=1 in an
-# environment with matching 6.17 kernel headers to compile all modules too.
+# environment with matching 6.17 or 7.0 kernel headers to compile all modules too.
 
 set -euo pipefail
 
@@ -43,23 +43,31 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 headers_pkg=linux-headers-amd64
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-    # Same 6.17-headers selection rationale as tools/ci/distro-install.sh.
-    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-6[.]17[.]0-[0-9]+-generic$' |
+    # Same headers selection rationale as tools/ci/distro-install.sh.
+    headers_pkg="${TBFIX_HEADERS_PKG:-$(apt-cache search --names-only '^linux-headers-(6[.]17|7[.]0)[.]0-[0-9]+-generic$' |
         awk '{print $1}' | sort -V | tail -1)}"
     [[ -n "$headers_pkg" ]] ||
-        { printf 'error: no concrete Ubuntu 6.17 headers package is available\n' >&2; exit 1; }
+        { printf 'error: no concrete Ubuntu 6.17 or 7.0 headers package is available\n' >&2; exit 1; }
 fi
-# modules-extra matches the frame dkms preflight: thunderbolt_frame_rxe
-# imports ib_core/ib_umem symbols that Ubuntu ships there, and the preflight
-# hard-fails when ib_uverbs.ko is absent for the target kernel (exactly what
-# a minimal container is). Mirror what a real host carries.
-modules_extra_pkg=""
+# The frame dkms preflight hard-fails when ib_uverbs.ko is absent for the
+# target kernel (thunderbolt_frame_rxe imports ib_core/ib_umem symbols), which
+# is exactly what a minimal container is. Mirror what a real host carries:
+# Ubuntu ships ib_uverbs in linux-modules-extra on the 6.17 line and in
+# linux-modules on 7.0, which has no -extra package.
+modules_pkg=""
 if grep -qi '^ID=ubuntu' /etc/os-release; then
-    modules_extra_pkg="${headers_pkg/linux-headers-/linux-modules-extra-}"
+    case "$headers_pkg" in
+        linux-headers-6.17.*) modules_pkg="${headers_pkg/linux-headers-/linux-modules-extra-}" ;;
+        linux-headers-7.0.*) modules_pkg="${headers_pkg/linux-headers-/linux-modules-}" ;;
+        *)
+            printf 'error: no modules package known for %s\n' "$headers_pkg" >&2
+            exit 1
+            ;;
+    esac
 fi
 apt-get install -y -qq --no-install-recommends \
 	build-essential ca-certificates dkms file kmod "$headers_pkg" make \
-	${modules_extra_pkg:+"$modules_extra_pkg"}
+	${modules_pkg:+"$modules_pkg"}
 
 # Stage both packages' /usr/src trees WITHOUT running the postinst dkms
 # autoinstall (the CI runner kernel has no matching headers; see
@@ -91,7 +99,7 @@ done
 
 if [[ "${TBFIX_VERIFY_DKMS_BUILD:-0}" != "1" ]]; then
 	printf '==> Package install/source verification OK\n'
-	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 6.17 headers\n'
+	printf '==> Skipping DKMS build; set TBFIX_VERIFY_DKMS_BUILD=1 with matching 6.17 or 7.0 headers\n'
 	exit 0
 fi
 
