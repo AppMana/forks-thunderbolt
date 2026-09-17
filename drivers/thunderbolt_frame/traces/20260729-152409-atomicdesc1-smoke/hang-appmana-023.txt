@@ -1,0 +1,211 @@
+## dmesg
+[ 3131.337490] tx stall route=0x1 rail=0x0 inflight=30 posted=408 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3131.592713] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3132.612501] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3133.634507] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3134.654515] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3135.675532] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3136.340631] tx stall route=0x1 rail=0x0 inflight=29 posted=412 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3136.697536] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3137.718513] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3138.741520] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3139.761524] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3140.783532] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3141.346544] tx stall route=0x1 rail=0x0 inflight=29 posted=417 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3141.806544] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3142.827804] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3143.849560] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3144.869549] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3145.941559] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3146.349758] tx stall route=0x1 rail=0x0 inflight=29 posted=422 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3146.961592] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3147.983572] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3149.005562] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3150.026650] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3151.053734] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3151.359777] tx stall route=0x1 rail=0x0 inflight=29 posted=427 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3152.074582] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3153.095593] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3154.115599] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3155.135594] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3156.157790] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3156.361701] tx stall route=0x1 rail=0x0 inflight=29 posted=432 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3157.180597] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3158.203608] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3159.226605] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3160.249609] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3161.271628] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3161.373710] tx stall route=0x1 rail=0x0 inflight=29 posted=437 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3162.294639] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3163.316643] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3164.336642] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3165.356636] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3166.378883] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3166.378888] tx stall route=0x1 rail=0x0 inflight=29 posted=442 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3167.401728] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3168.421658] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3169.444664] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3170.516651] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3171.385674] tx stall route=0x1 rail=0x0 inflight=30 posted=447 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3171.538680] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3172.558669] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3173.579892] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3174.602680] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3175.622688] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3176.390677] tx stall route=0x1 rail=0x0 inflight=30 posted=452 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3176.647680] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3177.667680] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3178.689686] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3179.710783] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3180.731693] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3181.397895] tx stall route=0x1 rail=0x0 inflight=29 posted=456 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3181.755783] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3182.776719] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3183.799711] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3184.821815] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3185.845727] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3186.408716] tx stall route=0x1 rail=0x0 inflight=29 posted=461 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3186.871718] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3187.897725] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3188.924740] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3189.949740] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3190.976739] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3191.438744] tx stall route=0x1 rail=0x0 inflight=29 posted=466 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3192.002746] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3193.026756] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3194.053759] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3195.076774] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3196.103776] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3196.461757] tx stall route=0x1 rail=0x0 inflight=29 posted=471 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3197.129781] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3198.154768] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3199.178769] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3200.204784] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3201.234775] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3201.491801] tx stall route=0x1 rail=0x0 inflight=29 posted=476 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3202.258865] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3203.284788] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3204.259795] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3205.283818] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3206.356799] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3206.511823] tx stall route=0x1 rail=0x0 inflight=29 posted=481 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3207.334817] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3208.361807] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3209.390817] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3210.420812] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3211.451817] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3211.554815] tx stall route=0x1 rail=0x0 inflight=29 posted=486 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3212.478835] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3213.507840] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3214.538834] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3215.565851] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3216.588842] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3216.588847] tx stall route=0x1 rail=0x0 inflight=29 posted=491 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3217.614848] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3218.643848] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3219.670852] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3220.693857] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3221.620858] tx stall route=0x1 rail=0x0 inflight=30 posted=496 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3221.672857] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3222.700874] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3223.723881] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3224.748870] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3225.778882] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3226.651892] tx stall route=0x1 rail=0x0 inflight=30 posted=501 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3226.805890] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3227.827892] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3228.849903] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3229.872903] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3230.895910] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3231.663909] tx stall route=0x1 rail=0x0 inflight=30 posted=506 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3231.918920] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3232.941114] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3233.961915] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3234.984116] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3236.005931] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3236.669997] tx stall route=0x1 rail=0x0 inflight=29 posted=510 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3237.077940] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3238.101016] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3239.121942] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3240.144142] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3241.163951] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3241.673981] tx stall route=0x1 rail=0x0 inflight=29 posted=515 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3242.185947] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3243.207958] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3244.231141] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3245.251966] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3246.272971] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3246.680974] tx stall route=0x1 rail=0x0 inflight=29 posted=520 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3247.293171] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3248.314165] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3249.335973] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3250.357987] tx ring stalled route=0x1 rail=0x0: released 1 frame(s) the ring never completed
+[ 3250.534215] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[ 3250.609142] thunderbolt_ibverbs: unregistered per-rail ib_device peer=2 rail=0
+[ 3250.633869] thunderbolt_ibverbs: peer 2 destroyed backend=native
+[ 3250.657894] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[ 3250.657927] thunderbolt_ibverbs: configfs: unregistered
+[ 3250.658044] thunderbolt_ibverbs: unloaded
+[ 3250.706820] thunderbolt-net 0-1.0 tb-ch7: failed to disable DMA paths
+[ 3250.749128] thunderbolt-net 0-3.0 tb-ch9: failed to disable DMA paths
+[ 3250.826391] thunderbolt 0-1: host disconnected
+[ 3250.826784] thunderbolt 0-3: host disconnected
+[ 3250.830426] ACPI: bus type thunderbolt unregistered
+[ 3250.884755] ACPI: bus type thunderbolt registered
+[ 3250.977864] using optional tb_ring_throttling() helper
+[ 3250.977923] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[ 3250.977924] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[ 3250.977926] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[ 3250.977927] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[ 3250.977932] thunderbolt_ibverbs: advertised 2 native services
+[ 3250.977950] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[ 3250.977989] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[ 3252.084098] thunderbolt 0-3: new host found, vendor=0x8086 device=0x1
+[ 3252.084103] thunderbolt 0-3: Intel Corp. appmana-022
+[ 3252.084352] thunderbolt_ibverbs: peer 1 created backend=native
+[ 3252.086879] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[ 3252.087192] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[ 3252.087195] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x3 link_speed=20Gb/s width=0x1 rail=0x21debfbf path_id=1
+[ 3252.087250] thunderbolt 0-3: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[ 3252.088253] thunderbolt 0-1: new host found, vendor=0x8086 device=0x1
+[ 3252.088256] thunderbolt 0-1: Intel Corp. appmana-025
+[ 3252.088553] thunderbolt_ibverbs: peer 2 created backend=native
+[ 3252.091110] thunderbolt-net 0-3.0 tb-ch9: renamed from thunderbolt0
+[ 3252.091526] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=2 rx_hop=2 out_hop=8
+[ 3252.091835] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=2 rx_hop=2
+[ 3252.091838] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[ 3252.091888] thunderbolt 0-1: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[ 3252.094203] thunderbolt-net 0-1.0 tb-ch7: renamed from thunderbolt1
+[ 3252.196180] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+[ 3252.196189] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=2 remote_rx=2 attempt=1
+[ 3252.212812] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3252.212818] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2
+[ 3252.237560] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[ 3252.238778] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer2/0 domain=0 guid=0200544258524253
+[ 3252.241971] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[ 3253.443519] thunderbolt_ibverbs: native HELLO_ACK received route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[ 3253.443532] thunderbolt_ibverbs: native HELLO negotiated route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3 attempt=2
+[ 3253.459839] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 3253.459842] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[ 3253.462187] thunderbolt_ibverbs: native READY sent route=0x3 rail=0x0
+[ 3253.463605] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer1/0 domain=0 guid=0200544257524253
+[ 3253.466457] thunderbolt 0000:06:00.0 tbr-appmana022: renamed from u4r0
+[ 3277.469106] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.539098] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.611104] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.683089] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.755096] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.827110] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.899108] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3277.971086] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=10626213 base=0x7e37cb1ff000 received=1003904 with_imm=0
+[ 3278.324096] tx stall route=0x1 rail=0x0 inflight=267 posted=267 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+  87910 I<   -                                kworker/u133:0-tbv_ibdev
+ 105391 I<   -                                kworker/u132:0-tbv_ibdev
+ 109243 I<   -                                kworker/u133:2-tbv_ibdev
+ 135842 I<   -                                kworker/u132:2-tbv_ibdev
+ 135843 I<   -                                kworker/u132:3-tbv_ibdev
+ 153469 I<   -                                kworker/u132:1-tbv_ibdev
+ 153915 I<   -                                kworker/u133:1-tbv_ibdev
+ 180834 I<   -                                kworker/R-tbv_ibdev

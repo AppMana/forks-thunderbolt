@@ -1,0 +1,25 @@
+### round=1 rc=0 elapsed=2s
+---------------------------------------------------------------------------------------
+                    RDMA_Write Bidirectional BW Test
+ Dual-port       : OFF		Device         : usb4_rdma15
+ Number of qps   : 1		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : OFF
+ TX depth        : 128
+ CQ Moderation   : 1
+ Mtu             : 4096[B]
+ Link type       : Ethernet
+ GID index       : 0
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x0900 PSN 0xd3bbe2 RKey 0x000002 VAddr 0x007dfae819f000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0900 PSN 0xb696fa RKey 0x000002 VAddr 0x007302c1169000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 262144     200              0.00               27.34  		   0.013035
+---------------------------------------------------------------------------------------

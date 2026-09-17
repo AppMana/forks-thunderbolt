@@ -1,0 +1,210 @@
+## dmesg
+[ 1758.763052] tx stall route=0x1 rail=0x0 inflight=1 posted=213177 completed=213176 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1763.883070] tx stall route=0x1 rail=0x0 inflight=1 posted=213182 completed=213181 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1771.051101] tx stall route=0x1 rail=0x0 inflight=1 posted=213189 completed=213188 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1776.171196] tx stall route=0x1 rail=0x0 inflight=1 posted=213194 completed=213193 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1784.363133] tx stall route=0x1 rail=0x0 inflight=1 posted=213202 completed=213201 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1789.483222] tx stall route=0x1 rail=0x0 inflight=1 posted=213207 completed=213206 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1795.627166] tx stall route=0x1 rail=0x0 inflight=1 posted=213213 completed=213212 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1800.747184] tx stall route=0x1 rail=0x0 inflight=1 posted=213218 completed=213217 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1805.867187] tx stall route=0x1 rail=0x0 inflight=1 posted=213223 completed=213222 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1810.987199] tx stall route=0x1 rail=0x0 inflight=1 posted=213228 completed=213227 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1816.107228] tx stall route=0x1 rail=0x0 inflight=1 posted=213233 completed=213232 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1821.227323] tx stall route=0x1 rail=0x0 inflight=1 posted=213238 completed=213237 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1826.347253] tx stall route=0x1 rail=0x0 inflight=1 posted=213243 completed=213242 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1831.467279] tx stall route=0x1 rail=0x0 inflight=1 posted=213248 completed=213247 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1842.731302] tx stall route=0x1 rail=0x0 inflight=1 posted=213259 completed=213258 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1847.852312] tx stall route=0x1 rail=0x0 inflight=1 posted=213264 completed=213263 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1852.972324] tx stall route=0x1 rail=0x0 inflight=1 posted=213269 completed=213268 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1858.091554] tx stall route=0x1 rail=0x0 inflight=1 posted=213274 completed=213273 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1863.212357] tx stall route=0x1 rail=0x0 inflight=1 posted=213279 completed=213278 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1871.403565] tx stall route=0x1 rail=0x0 inflight=1 posted=213287 completed=213286 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1876.523389] tx stall route=0x1 rail=0x0 inflight=1 posted=213292 completed=213291 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1881.643721] tx stall route=0x1 rail=0x0 inflight=1 posted=213297 completed=213296 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1886.763432] tx stall route=0x1 rail=0x0 inflight=1 posted=213302 completed=213301 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1891.884434] tx stall route=0x1 rail=0x0 inflight=1 posted=213307 completed=213306 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1902.124485] tx stall route=0x1 rail=0x0 inflight=1 posted=213317 completed=213316 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1907.243486] tx stall route=0x1 rail=0x0 inflight=1 posted=213322 completed=213321 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1913.387589] tx stall route=0x1 rail=0x0 inflight=1 posted=213328 completed=213327 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1920.555525] tx stall route=0x1 rail=0x0 inflight=1 posted=213335 completed=213334 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1925.675620] tx stall route=0x1 rail=0x0 inflight=1 posted=213340 completed=213339 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1930.796549] tx stall route=0x1 rail=0x0 inflight=1 posted=213345 completed=213344 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1935.915643] tx stall route=0x1 rail=0x0 inflight=1 posted=213350 completed=213349 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1941.035801] tx stall route=0x1 rail=0x0 inflight=1 posted=213355 completed=213354 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1951.275807] tx stall route=0x1 rail=0x0 inflight=1 posted=213365 completed=213364 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1960.491799] tx stall route=0x1 rail=0x0 inflight=1 posted=213374 completed=213373 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1965.611908] tx stall route=0x1 rail=0x0 inflight=1 posted=213379 completed=213378 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1970.731664] tx stall route=0x1 rail=0x0 inflight=1 posted=213384 completed=213383 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1985.067698] tx stall route=0x1 rail=0x0 inflight=1 posted=213398 completed=213397 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1990.187719] tx stall route=0x1 rail=0x0 inflight=1 posted=213403 completed=213402 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 1995.308032] tx stall route=0x1 rail=0x0 inflight=1 posted=213408 completed=213407 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2000.427757] tx stall route=0x1 rail=0x0 inflight=1 posted=213413 completed=213412 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2005.547945] tx stall route=0x1 rail=0x0 inflight=1 posted=213418 completed=213417 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2010.667963] tx stall route=0x1 rail=0x0 inflight=1 posted=213423 completed=213422 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2015.788777] tx stall route=0x1 rail=0x0 inflight=1 posted=213428 completed=213427 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2020.908793] tx stall route=0x1 rail=0x0 inflight=1 posted=213433 completed=213432 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2026.027968] tx stall route=0x1 rail=0x0 inflight=1 posted=213438 completed=213437 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2031.147837] tx stall route=0x1 rail=0x0 inflight=1 posted=213443 completed=213442 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2036.267856] tx stall route=0x1 rail=0x0 inflight=1 posted=213448 completed=213447 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2041.387950] tx stall route=0x1 rail=0x0 inflight=1 posted=213453 completed=213452 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2046.508058] tx stall route=0x1 rail=0x0 inflight=1 posted=213458 completed=213457 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2051.628882] tx stall route=0x1 rail=0x0 inflight=1 posted=213463 completed=213462 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2056.747996] tx stall route=0x1 rail=0x0 inflight=1 posted=213468 completed=213467 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2061.867955] tx stall route=0x1 rail=0x0 inflight=1 posted=213473 completed=213472 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2066.988017] tx stall route=0x1 rail=0x0 inflight=1 posted=213478 completed=213477 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2072.108074] tx stall route=0x1 rail=0x0 inflight=1 posted=213483 completed=213482 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2077.228119] tx stall route=0x1 rail=0x0 inflight=1 posted=213488 completed=213487 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2082.348354] tx stall route=0x1 rail=0x0 inflight=1 posted=213493 completed=213492 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2087.468219] tx stall route=0x1 rail=0x0 inflight=1 posted=213498 completed=213497 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2092.588334] tx stall route=0x1 rail=0x0 inflight=1 posted=213503 completed=213502 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2097.709301] tx stall route=0x1 rail=0x0 inflight=1 posted=213508 completed=213507 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2102.828456] tx stall route=0x1 rail=0x0 inflight=1 posted=213513 completed=213512 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2107.948411] tx stall route=0x1 rail=0x0 inflight=1 posted=213518 completed=213517 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2114.092458] tx stall route=0x1 rail=0x0 inflight=1 posted=213524 completed=213523 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2121.260612] tx stall route=0x1 rail=0x0 inflight=1 posted=213531 completed=213530 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2135.596665] tx stall route=0x1 rail=0x0 inflight=1 posted=213545 completed=213544 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2140.717699] tx stall route=0x1 rail=0x0 inflight=1 posted=213550 completed=213549 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2145.837746] tx stall route=0x1 rail=0x0 inflight=1 posted=213555 completed=213554 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2150.956795] tx stall route=0x1 rail=0x0 inflight=1 posted=213560 completed=213559 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2156.077054] tx stall route=0x1 rail=0x0 inflight=1 posted=213565 completed=213564 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2161.197240] tx stall route=0x1 rail=0x0 inflight=1 posted=213570 completed=213569 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2166.316959] tx stall route=0x1 rail=0x0 inflight=1 posted=213575 completed=213574 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2171.437160] tx stall route=0x1 rail=0x0 inflight=1 posted=213580 completed=213579 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2176.557032] tx stall route=0x1 rail=0x0 inflight=1 posted=213585 completed=213584 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2181.677261] tx stall route=0x1 rail=0x0 inflight=1 posted=213590 completed=213589 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2186.797119] tx stall route=0x1 rail=0x0 inflight=1 posted=213595 completed=213594 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2191.917235] tx stall route=0x1 rail=0x0 inflight=1 posted=213600 completed=213599 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2197.037201] tx stall route=0x1 rail=0x0 inflight=1 posted=213605 completed=213604 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2202.157327] tx stall route=0x1 rail=0x0 inflight=1 posted=213610 completed=213609 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2207.277275] tx stall route=0x1 rail=0x0 inflight=1 posted=213615 completed=213614 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2216.493559] tx stall route=0x1 rail=0x0 inflight=1 posted=213624 completed=213623 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2221.613599] tx stall route=0x1 rail=0x0 inflight=1 posted=213629 completed=213628 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2226.733449] tx stall route=0x1 rail=0x0 inflight=1 posted=213634 completed=213633 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2231.853482] tx stall route=0x1 rail=0x0 inflight=1 posted=213639 completed=213638 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2236.973761] tx stall route=0x1 rail=0x0 inflight=1 posted=213644 completed=213643 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2247.213607] tx stall route=0x1 rail=0x0 inflight=1 posted=213654 completed=213653 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2252.333654] tx stall route=0x1 rail=0x0 inflight=1 posted=213659 completed=213658 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2257.453699] tx stall route=0x1 rail=0x0 inflight=1 posted=213664 completed=213663 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2262.574092] tx stall route=0x1 rail=0x0 inflight=1 posted=213669 completed=213668 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2267.694759] tx stall route=0x1 rail=0x0 inflight=1 posted=213674 completed=213673 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2272.813817] tx stall route=0x1 rail=0x0 inflight=1 posted=213679 completed=213678 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2277.934856] tx stall route=0x1 rail=0x0 inflight=1 posted=213684 completed=213683 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2291.245950] tx stall route=0x1 rail=0x0 inflight=1 posted=213697 completed=213696 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2296.366277] tx stall route=0x1 rail=0x0 inflight=1 posted=213702 completed=213701 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2301.486029] tx stall route=0x1 rail=0x0 inflight=1 posted=213707 completed=213706 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2307.630082] tx stall route=0x1 rail=0x0 inflight=1 posted=213713 completed=213712 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2312.750101] tx stall route=0x1 rail=0x0 inflight=1 posted=213718 completed=213717 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2317.870138] tx stall route=0x1 rail=0x0 inflight=1 posted=213723 completed=213722 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2322.990377] tx stall route=0x1 rail=0x0 inflight=1 posted=213728 completed=213727 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2328.110222] tx stall route=0x1 rail=0x0 inflight=1 posted=213733 completed=213732 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2333.230254] tx stall route=0x1 rail=0x0 inflight=1 posted=213738 completed=213737 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2338.350308] tx stall route=0x1 rail=0x0 inflight=1 posted=213743 completed=213742 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2343.471331] tx stall route=0x1 rail=0x0 inflight=1 posted=213748 completed=213747 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2348.590445] tx stall route=0x1 rail=0x0 inflight=1 posted=213753 completed=213752 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2353.710491] tx stall route=0x1 rail=0x0 inflight=1 posted=213758 completed=213757 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2358.830658] tx stall route=0x1 rail=0x0 inflight=1 posted=213763 completed=213762 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2363.951470] tx stall route=0x1 rail=0x0 inflight=1 posted=213768 completed=213767 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2368.035014] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[ 2368.098650] thunderbolt_ibverbs: unregistered per-rail ib_device peer=3 rail=0
+[ 2368.123222] thunderbolt_ibverbs: peer 3 destroyed backend=native
+[ 2368.149193] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[ 2368.149235] thunderbolt_ibverbs: configfs: unregistered
+[ 2368.149346] thunderbolt_ibverbs: unloaded
+[ 2368.194711] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_alloc_out_hopid
+[ 2368.194715] thunderbolt_ibverbs: Unknown symbol tb_xdomain_alloc_out_hopid (err -22)
+[ 2368.194727] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_type
+[ 2368.194728] thunderbolt_ibverbs: Unknown symbol tb_xdomain_type (err -22)
+[ 2368.194768] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_start
+[ 2368.194769] thunderbolt_ibverbs: Unknown symbol tb_ring_start (err -22)
+[ 2368.194818] thunderbolt_ibverbs: disagrees about version of symbol __tb_ring_enqueue
+[ 2368.194819] thunderbolt_ibverbs: Unknown symbol __tb_ring_enqueue (err -22)
+[ 2368.194829] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_enable_paths
+[ 2368.194830] thunderbolt_ibverbs: Unknown symbol tb_xdomain_enable_paths (err -22)
+[ 2368.194878] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_free
+[ 2368.194878] thunderbolt_ibverbs: Unknown symbol tb_ring_free (err -22)
+[ 2368.194914] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_alloc_tx
+[ 2368.194915] thunderbolt_ibverbs: Unknown symbol tb_ring_alloc_tx (err -22)
+[ 2368.194953] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_release_out_hopid
+[ 2368.194955] thunderbolt_ibverbs: Unknown symbol tb_xdomain_release_out_hopid (err -22)
+[ 2368.195027] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_release_in_hopid
+[ 2368.195028] thunderbolt_ibverbs: Unknown symbol tb_xdomain_release_in_hopid (err -22)
+[ 2368.195047] thunderbolt_ibverbs: disagrees about version of symbol tb_unregister_protocol_handler
+[ 2368.195048] thunderbolt_ibverbs: Unknown symbol tb_unregister_protocol_handler (err -22)
+[ 2368.195184] thunderbolt_ibverbs: disagrees about version of symbol tb_register_service_driver
+[ 2368.195185] thunderbolt_ibverbs: Unknown symbol tb_register_service_driver (err -22)
+[ 2368.195212] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_alloc_in_hopid
+[ 2368.195213] thunderbolt_ibverbs: Unknown symbol tb_xdomain_alloc_in_hopid (err -22)
+[ 2368.195225] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_response
+[ 2368.195226] thunderbolt_ibverbs: Unknown symbol tb_xdomain_response (err -22)
+[ 2368.195364] thunderbolt_ibverbs: disagrees about version of symbol tb_register_protocol_handler
+[ 2368.195365] thunderbolt_ibverbs: Unknown symbol tb_register_protocol_handler (err -22)
+[ 2368.195419] thunderbolt_ibverbs: disagrees about version of symbol tb_unregister_service_driver
+[ 2368.195420] thunderbolt_ibverbs: Unknown symbol tb_unregister_service_driver (err -22)
+[ 2368.195459] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll_complete
+[ 2368.195460] thunderbolt_ibverbs: Unknown symbol tb_ring_poll_complete (err -22)
+[ 2368.195473] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_alloc_rx
+[ 2368.195474] thunderbolt_ibverbs: Unknown symbol tb_ring_alloc_rx (err -22)
+[ 2368.195505] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_stop
+[ 2368.195507] thunderbolt_ibverbs: Unknown symbol tb_ring_stop (err -22)
+[ 2368.195552] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_request
+[ 2368.195553] thunderbolt_ibverbs: Unknown symbol tb_xdomain_request (err -22)
+[ 2368.195584] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll
+[ 2368.195586] thunderbolt_ibverbs: Unknown symbol tb_ring_poll (err -22)
+[ 2368.195654] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_disable_paths
+[ 2368.195655] thunderbolt_ibverbs: Unknown symbol tb_xdomain_disable_paths (err -22)
+[ 2368.195716] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_lane_bonding_enable
+[ 2368.195717] thunderbolt_ibverbs: Unknown symbol tb_xdomain_lane_bonding_enable (err -22)
+[ 2558.568739] using optional tb_ring_throttling() helper
+[ 2558.568800] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[ 2558.568802] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[ 2558.568804] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[ 2558.568806] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[ 2558.568817] thunderbolt_ibverbs: advertised 2 native services
+[ 2558.568829] thunderbolt_ibverbs: peer 1 created backend=native
+[ 2558.571091] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[ 2558.571347] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[ 2558.571348] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x3 link_speed=20Gb/s width=0x1 rail=0x21debfbf path_id=1
+[ 2558.571380] thunderbolt 0-3: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[ 2558.571395] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[ 2558.571428] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[ 2559.730867] thunderbolt_ibverbs: peer 2 created backend=native
+[ 2559.733340] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=2 rx_hop=2 out_hop=8
+[ 2559.733633] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=2 rx_hop=2
+[ 2559.733636] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[ 2559.733716] thunderbolt 0-1: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[ 2559.840467] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+[ 2559.840486] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=2 remote_rx=2 attempt=1
+[ 2559.858051] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2559.858055] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2
+[ 2559.864800] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[ 2559.866313] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer2/0 domain=0 guid=0200544258524253
+[ 2559.869297] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[ 2559.898726] thunderbolt_ibverbs: native HELLO received route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[ 2559.898731] thunderbolt_ibverbs: native HELLO_ACK route=0x3 rail=0x0 tx_hop=1 rx_hop=1 out_hop=8
+[ 2559.952658] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 2559.952663] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[ 2559.955004] thunderbolt_ibverbs: native READY sent route=0x3 rail=0x0
+[ 2559.956388] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer1/0 domain=0 guid=0200544257524253
+[ 2559.959294] thunderbolt 0000:06:00.0 tbr-appmana022: renamed from u4r0
+[ 2596.820811] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x900 -> peer 2 route=0x1 rail=0x0
+[ 2596.820828] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x901 -> peer 2 route=0x1 rail=0x0
+[ 2596.820842] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x902 -> peer 2 route=0x1 rail=0x0
+[ 2596.820854] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x903 -> peer 2 route=0x1 rail=0x0
+[ 2597.013944] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.087954] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.160937] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.231941] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.303955] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.375949] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.447956] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.520933] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5742129 base=0x7cdbdfbff000 received=1003904 with_imm=0
+[ 2597.872935] tx stall route=0x1 rail=0x0 inflight=267 posted=267 completed=0 tx_hop=2 rx_hop=2 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+  72313 I<   -                                kworker/u132:1-tbv_ibdev
+  87910 I<   -                                kworker/u133:0-tbv_ibdev
+ 105391 I<   -                                kworker/u132:0-tbv_ibdev
+ 109243 I<   -                                kworker/u133:2-tbv_ibdev
+ 133531 I<   -                                kworker/R-tbv_ibdev
+ 135842 I<   -                                kworker/u132:2-tbv_ibdev
+ 135843 I<   -                                kworker/u132:3-tbv_ibdev

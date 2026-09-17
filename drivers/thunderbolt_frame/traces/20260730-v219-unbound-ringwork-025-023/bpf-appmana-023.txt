@@ -1,0 +1,7 @@
+Attaching 1 probe...
+
+
+@max_control_queue: 197
+@max_data_queue: 65535
+@max_schedule_entry_inflight: 32
+@schedule_calls: 45074

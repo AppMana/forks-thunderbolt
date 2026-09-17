@@ -1,0 +1,41 @@
+### node=appmana-023 tag=pre t=2026-08-03T14:46:07-07:00
+@@@HOST@@@
+hostname=appmana-023 boot_id=29f89503-761d-4392-85c9-74f0144e801a uptime=4088 kernel=6.17.0-40-generic loaded_version=none loaded_src=B804FE5B49960B2F6FC0803
+@@@PARAMS@@@
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[ 4075.385102] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.385104] tbrxe0: qp#18 rxe_completer: state = EXIT
+[ 4075.385105] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.385107] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.385108] tbrxe0: qp#18 rxe_completer: state = EXIT
+[ 4075.385826] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.385827] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.385829] tbrxe0: qp#18 rxe_completer: state = CHECK PSN
+[ 4075.385830] tbrxe0: qp#18 rxe_completer: state = CHECK ACK
+[ 4075.385831] tbrxe0: qp#18 rxe_completer: state = WRITE/SEND
+[ 4075.385833] tbrxe0: qp#18 rxe_completer: state = UPDATE COMP
+[ 4075.385834] tbrxe0: qp#18 rxe_completer: state = DONE
+[ 4075.385835] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.385837] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.385838] tbrxe0: qp#18 rxe_completer: state = EXIT
+[ 4075.386660] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.386662] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.386663] tbrxe0: qp#18 rxe_completer: state = CHECK PSN
+[ 4075.386665] tbrxe0: qp#18 rxe_completer: state = CHECK ACK
+[ 4075.386666] tbrxe0: qp#18 rxe_completer: state = WRITE/SEND
+[ 4075.386667] tbrxe0: qp#18 rxe_completer: state = COMP ACK
+[ 4075.386669] tbrxe0: qp#18 rxe_completer: state = UPDATE COMP
+[ 4075.386670] tbrxe0: qp#18 rxe_completer: state = DONE
+[ 4075.386672] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.386673] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.386675] tbrxe0: qp#18 rxe_completer: state = EXIT
+[ 4075.453869] tbrxe0: qp#18 retransmit_timer: retransmit timer fired
+[ 4075.453880] tbrxe0: qp#18 rxe_completer: state = GET ACK
+[ 4075.453884] tbrxe0: qp#18 rxe_completer: state = GET WQE
+[ 4075.453887] tbrxe0: qp#18 rxe_completer: state = EXIT
+### node=appmana-023 tag=hang-round1 t=2026-08-03T14:47:58-07:00
+ssh: connect to host appmana-023.i.appmana.com port 22: No route to host
+### node=appmana-023 tag=post t=2026-08-03T14:48:29-07:00
+ssh: connect to host appmana-023.i.appmana.com port 22: No route to host

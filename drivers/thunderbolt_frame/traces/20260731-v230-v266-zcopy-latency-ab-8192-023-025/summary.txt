@@ -1,0 +1,1 @@
+zcopy avg_mean_us=38.372 p99_mean_us=47.952 p999_mean_us=52.114 rounds=5\ncopied avg_mean_us=39.092 p99_mean_us=48.348 p999_mean_us=51.014 rounds=5\n

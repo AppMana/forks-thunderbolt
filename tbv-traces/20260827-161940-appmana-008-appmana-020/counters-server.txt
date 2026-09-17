@@ -1,0 +1,76 @@
+### node=appmana-008 tag=pre t=2026-08-27T16:19:42-07:00
+@@@HOST@@@
+hostname=appmana-008 boot_id=62f2fcd8-49cf-43e4-ae75-10d35aa1635e uptime=440 kernel=6.17.0-42-generic loaded_version=2.89 loaded_src=2A6EDCFDC13D37CC3D6799F
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[  206.413679] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  206.440376] thunderbolt_frame: tbframe0x1: READY confirmed
+[  216.613723] thunderbolt_frame: tbframe0x1: link down (4)
+[  216.614324] thunderbolt_frame: tbframe0x1: link destroyed
+[  239.972207] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[  241.035639] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  242.251020] thunderbolt_frame: tbframe0x1: READY confirmed
+[  256.866448] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=1 ring_posted=1 tx_sub=30 tx_done=29 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=6; refusing to declare the link up and rebuilding the session hardware
+[  257.292506] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  257.309792] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  257.336490] thunderbolt_frame: tbframe0x1: READY confirmed
+[  271.202807] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=2 ring_posted=1 tx_sub=60 tx_done=59 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=8; refusing to declare the link up and rebuilding the session hardware
+[  272.060888] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  272.078175] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  272.104874] thunderbolt_frame: tbframe0x1: READY confirmed
+[  285.924070] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=3 ring_posted=1 tx_sub=90 tx_done=89 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=10; refusing to declare the link up and rebuilding the session hardware
+[  287.612170] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  287.629458] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  287.656166] thunderbolt_frame: tbframe0x1: READY confirmed
+[  301.476279] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=4 ring_posted=1 tx_sub=120 tx_done=119 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=12; refusing to declare the link up and rebuilding the session hardware
+[  304.765374] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  304.782662] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  304.809363] thunderbolt_frame: tbframe0x1: READY confirmed
+[  318.627418] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=5 ring_posted=1 tx_sub=150 tx_done=149 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=14; refusing to declare the link up and rebuilding the session hardware
+[  325.117522] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  325.134811] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  325.161508] thunderbolt_frame: tbframe0x1: READY confirmed
+[  331.923474] thunderbolt_frame: tbframe0x1: link up
+[  331.925445] infiniband usb4_rdma1: added over tbframe0x1
+[  331.955668] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+### node=appmana-008 tag=post t=2026-08-27T16:19:54-07:00
+@@@HOST@@@
+hostname=appmana-008 boot_id=62f2fcd8-49cf-43e4-ae75-10d35aa1635e uptime=453 kernel=6.17.0-42-generic loaded_version=2.89 loaded_src=2A6EDCFDC13D37CC3D6799F
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[  206.413679] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  206.440376] thunderbolt_frame: tbframe0x1: READY confirmed
+[  216.613723] thunderbolt_frame: tbframe0x1: link down (4)
+[  216.614324] thunderbolt_frame: tbframe0x1: link destroyed
+[  239.972207] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[  241.035639] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  242.251020] thunderbolt_frame: tbframe0x1: READY confirmed
+[  256.866448] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=1 ring_posted=1 tx_sub=30 tx_done=29 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=6; refusing to declare the link up and rebuilding the session hardware
+[  257.292506] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  257.309792] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  257.336490] thunderbolt_frame: tbframe0x1: READY confirmed
+[  271.202807] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=2 ring_posted=1 tx_sub=60 tx_done=59 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=8; refusing to declare the link up and rebuilding the session hardware
+[  272.060888] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  272.078175] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  272.104874] thunderbolt_frame: tbframe0x1: READY confirmed
+[  285.924070] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=3 ring_posted=1 tx_sub=90 tx_done=89 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=10; refusing to declare the link up and rebuilding the session hardware
+[  287.612170] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  287.629458] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  287.656166] thunderbolt_frame: tbframe0x1: READY confirmed
+[  301.476279] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=4 ring_posted=1 tx_sub=120 tx_done=119 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=12; refusing to declare the link up and rebuilding the session hardware
+[  304.765374] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  304.782662] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  304.809363] thunderbolt_frame: tbframe0x1: READY confirmed
+[  318.627418] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=5 ring_posted=1 tx_sub=150 tx_done=149 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=14; refusing to declare the link up and rebuilding the session hardware
+[  325.117522] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[  325.134811] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[  325.161508] thunderbolt_frame: tbframe0x1: READY confirmed
+[  331.923474] thunderbolt_frame: tbframe0x1: link up
+[  331.925445] infiniband usb4_rdma1: added over tbframe0x1
+[  331.955668] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048

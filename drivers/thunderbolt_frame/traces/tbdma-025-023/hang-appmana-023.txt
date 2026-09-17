@@ -1,0 +1,209 @@
+## dmesg
+[    4.996812] thunderbolt_ibverbs: disagrees about version of symbol tb_register_service_driver
+[    4.996813] thunderbolt_ibverbs: Unknown symbol tb_register_service_driver (err -22)
+[    4.996836] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_alloc_in_hopid
+[    4.996837] thunderbolt_ibverbs: Unknown symbol tb_xdomain_alloc_in_hopid (err -22)
+[    4.996846] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_response
+[    4.996847] thunderbolt_ibverbs: Unknown symbol tb_xdomain_response (err -22)
+[    4.996967] thunderbolt_ibverbs: disagrees about version of symbol tb_register_protocol_handler
+[    4.996968] thunderbolt_ibverbs: Unknown symbol tb_register_protocol_handler (err -22)
+[    4.997019] thunderbolt_ibverbs: disagrees about version of symbol tb_unregister_service_driver
+[    4.997020] thunderbolt_ibverbs: Unknown symbol tb_unregister_service_driver (err -22)
+[    4.997056] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll_complete
+[    4.997057] thunderbolt_ibverbs: Unknown symbol tb_ring_poll_complete (err -22)
+[    4.997067] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_alloc_rx
+[    4.997068] thunderbolt_ibverbs: Unknown symbol tb_ring_alloc_rx (err -22)
+[    4.997085] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_stop
+[    4.997086] thunderbolt_ibverbs: Unknown symbol tb_ring_stop (err -22)
+[    4.997117] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_request
+[    4.997118] thunderbolt_ibverbs: Unknown symbol tb_xdomain_request (err -22)
+[    4.997145] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll
+[    4.997146] thunderbolt_ibverbs: Unknown symbol tb_ring_poll (err -22)
+[    4.997207] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_disable_paths
+[    4.997208] thunderbolt_ibverbs: Unknown symbol tb_xdomain_disable_paths (err -22)
+[    4.997262] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_lane_bonding_enable
+[    4.997263] thunderbolt_ibverbs: Unknown symbol tb_xdomain_lane_bonding_enable (err -22)
+[    5.013908] audit: type=1400 audit(1785348022.836:2): apparmor="STATUS" operation="profile_load" profile="unconfined" name="ch-checkns" pid=1328 comm="apparmor_parser"
+[    5.013914] audit: type=1400 audit(1785348022.836:3): apparmor="STATUS" operation="profile_load" profile="unconfined" name="kchmviewer" pid=1346 comm="apparmor_parser"
+[    5.013917] audit: type=1400 audit(1785348022.836:4): apparmor="STATUS" operation="profile_load" profile="unconfined" name="vscode" pid=1331 comm="apparmor_parser"
+[    5.013920] audit: type=1400 audit(1785348022.836:5): apparmor="STATUS" operation="profile_load" profile="unconfined" name="firefox" pid=1338 comm="apparmor_parser"
+[    5.013923] audit: type=1400 audit(1785348022.836:6): apparmor="STATUS" operation="profile_load" profile="unconfined" name="goldendict" pid=1344 comm="apparmor_parser"
+[    5.013925] audit: type=1400 audit(1785348022.836:7): apparmor="STATUS" operation="profile_load" profile="unconfined" name="github-desktop" pid=1342 comm="apparmor_parser"
+[    5.013927] audit: type=1400 audit(1785348022.836:8): apparmor="STATUS" operation="profile_load" profile="unconfined" name="chrome" pid=1330 comm="apparmor_parser"
+[    5.013930] audit: type=1400 audit(1785348022.836:9): apparmor="STATUS" operation="profile_load" profile="unconfined" name="evolution" pid=1337 comm="apparmor_parser"
+[    5.013932] audit: type=1400 audit(1785348022.837:10): apparmor="STATUS" operation="profile_load" profile="unconfined" name="Discord" pid=1321 comm="apparmor_parser"
+[    5.016280] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input7
+[    5.017681] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input8
+[    5.017745] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input9
+[    5.017800] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input10
+[    5.053713] MCE: In-kernel MCE decoding enabled.
+[    5.094901] cfg80211: Loading compiled-in X.509 certificates for regulatory database
+[    5.095015] Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+[    5.095100] Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+[    5.142720] systemd-coredump[1546]: Not enough arguments passed by the kernel (7, expected 8).
+[    6.056778] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+[    6.056787] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+[    6.090026] kauditd_printk_skb: 109 callbacks suppressed
+[    6.090029] audit: type=1400 audit(1785348023.913:119): apparmor="STATUS" operation="profile_replace" info="same as current profile, skipping" profile="unconfined" name="rsyslogd" pid=3379 comm="apparmor_parser"
+[    6.157136] loop0: detected capacity change from 0 to 8
+[    6.175355] amd_atl: AMD Address Translation Library initialized
+[    6.175356] intel_rapl_common: Found RAPL domain package
+[    6.175358] intel_rapl_common: Found RAPL domain core
+[    6.175548] NET: Registered PF_QIPCRTR protocol family
+[    6.176188] RPC: Registered named UNIX socket transport module.
+[    6.176190] RPC: Registered udp transport module.
+[    6.176191] RPC: Registered tcp transport module.
+[    6.176192] RPC: Registered tcp-with-tls transport module.
+[    6.176193] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    6.176240] [drm] amdgpu kernel modesetting enabled.
+[    6.176261] amdgpu: vga_switcheroo: detected switching method \_SB_.PCI0.GP17.VGA_.ATPX handle
+[    6.176409] amdgpu: ATPX version 1, functions 0x00000000
+[    6.187015] amdgpu: Virtual CRAT table created for CPU
+[    6.187029] amdgpu: Topology: Add CPU node
+[    6.187136] amdgpu 0000:78:00.0: enabling device (0006 -> 0007)
+[    6.187169] amdgpu 0000:78:00.0: amdgpu: initializing kernel modesetting (IP DISCOVERY 0x1002:0x164E 0x1043:0x8877 0xC1).
+[    6.187179] amdgpu 0000:78:00.0: amdgpu: register mmio base: 0xDE500000
+[    6.187181] amdgpu 0000:78:00.0: amdgpu: register mmio size: 524288
+[    6.188927] amdgpu 0000:78:00.0: amdgpu: detected ip block number 0 <nv_common>
+[    6.188929] amdgpu 0000:78:00.0: amdgpu: detected ip block number 1 <gmc_v10_0>
+[    6.188931] amdgpu 0000:78:00.0: amdgpu: detected ip block number 2 <navi10_ih>
+[    6.188933] amdgpu 0000:78:00.0: amdgpu: detected ip block number 3 <psp>
+[    6.188934] amdgpu 0000:78:00.0: amdgpu: detected ip block number 4 <smu>
+[    6.188935] amdgpu 0000:78:00.0: amdgpu: detected ip block number 5 <dm>
+[    6.188937] amdgpu 0000:78:00.0: amdgpu: detected ip block number 6 <gfx_v10_0>
+[    6.188939] amdgpu 0000:78:00.0: amdgpu: detected ip block number 7 <sdma_v5_2>
+[    6.188940] amdgpu 0000:78:00.0: amdgpu: detected ip block number 8 <vcn_v3_0>
+[    6.188942] amdgpu 0000:78:00.0: amdgpu: detected ip block number 9 <jpeg_v3_0>
+[    6.188949] amdgpu 0000:78:00.0: amdgpu: ACPI VFCT table present but broken (too short #2),skipping
+[    6.191939] amdgpu 0000:78:00.0: ROM [??? 0x00000000 flags 0x20000000]: can't assign; bogus alignment
+[    6.191942] amdgpu 0000:78:00.0: amdgpu: Unable to locate a BIOS ROM
+[    6.191946] amdgpu 0000:78:00.0: amdgpu: Fatal error during GPU init
+[    6.191950] amdgpu 0000:78:00.0: amdgpu: amdgpu: finishing device.
+[    6.191980] amdgpu 0000:78:00.0: probe with driver amdgpu failed with error -22
+[    6.206011] audit: type=1400 audit(1785348024.029:120): apparmor="STATUS" operation="profile_replace" info="same as current profile, skipping" profile="unconfined" name="/usr/lib/snapd/snap-confine" pid=3523 comm="apparmor_parser"
+[    6.221193] Loading iSCSI transport class v2.0-870.
+[    6.251681] netfs: FS-Cache loaded
+[    6.259111] CacheFiles: Loaded
+[    6.358654] netfs: Cache "mycache" added (type cachefiles)
+[    6.358658] CacheFiles: File cache on mycache registered
+[    6.954018] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_alloc_out_hopid
+[    6.954021] thunderbolt_ibverbs: Unknown symbol tb_xdomain_alloc_out_hopid (err -22)
+[    6.954029] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_type
+[    6.954030] thunderbolt_ibverbs: Unknown symbol tb_xdomain_type (err -22)
+[    6.954060] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_start
+[    6.954061] thunderbolt_ibverbs: Unknown symbol tb_ring_start (err -22)
+[    6.954101] thunderbolt_ibverbs: disagrees about version of symbol __tb_ring_enqueue
+[    6.954102] thunderbolt_ibverbs: Unknown symbol __tb_ring_enqueue (err -22)
+[    6.954110] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_enable_paths
+[    6.954110] thunderbolt_ibverbs: Unknown symbol tb_xdomain_enable_paths (err -22)
+[    6.954150] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_free
+[    6.954151] thunderbolt_ibverbs: Unknown symbol tb_ring_free (err -22)
+[    6.954180] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_alloc_tx
+[    6.954181] thunderbolt_ibverbs: Unknown symbol tb_ring_alloc_tx (err -22)
+[    6.954212] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_release_out_hopid
+[    6.954213] thunderbolt_ibverbs: Unknown symbol tb_xdomain_release_out_hopid (err -22)
+[    6.954273] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_release_in_hopid
+[    6.954273] thunderbolt_ibverbs: Unknown symbol tb_xdomain_release_in_hopid (err -22)
+[    6.954289] thunderbolt_ibverbs: disagrees about version of symbol tb_unregister_protocol_handler
+[    6.954290] thunderbolt_ibverbs: Unknown symbol tb_unregister_protocol_handler (err -22)
+[    6.954408] thunderbolt_ibverbs: disagrees about version of symbol tb_register_service_driver
+[    6.954409] thunderbolt_ibverbs: Unknown symbol tb_register_service_driver (err -22)
+[    6.954431] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_alloc_in_hopid
+[    6.954432] thunderbolt_ibverbs: Unknown symbol tb_xdomain_alloc_in_hopid (err -22)
+[    6.954441] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_response
+[    6.954442] thunderbolt_ibverbs: Unknown symbol tb_xdomain_response (err -22)
+[    6.954559] thunderbolt_ibverbs: disagrees about version of symbol tb_register_protocol_handler
+[    6.954560] thunderbolt_ibverbs: Unknown symbol tb_register_protocol_handler (err -22)
+[    6.954608] thunderbolt_ibverbs: disagrees about version of symbol tb_unregister_service_driver
+[    6.954609] thunderbolt_ibverbs: Unknown symbol tb_unregister_service_driver (err -22)
+[    6.954647] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll_complete
+[    6.954648] thunderbolt_ibverbs: Unknown symbol tb_ring_poll_complete (err -22)
+[    6.954658] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_alloc_rx
+[    6.954659] thunderbolt_ibverbs: Unknown symbol tb_ring_alloc_rx (err -22)
+[    6.954676] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_stop
+[    6.954677] thunderbolt_ibverbs: Unknown symbol tb_ring_stop (err -22)
+[    6.954716] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_request
+[    6.954717] thunderbolt_ibverbs: Unknown symbol tb_xdomain_request (err -22)
+[    6.954743] thunderbolt_ibverbs: disagrees about version of symbol tb_ring_poll
+[    6.954744] thunderbolt_ibverbs: Unknown symbol tb_ring_poll (err -22)
+[    6.954804] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_disable_paths
+[    6.954805] thunderbolt_ibverbs: Unknown symbol tb_xdomain_disable_paths (err -22)
+[    6.954858] thunderbolt_ibverbs: disagrees about version of symbol tb_xdomain_lane_bonding_enable
+[    6.954859] thunderbolt_ibverbs: Unknown symbol tb_xdomain_lane_bonding_enable (err -22)
+[   11.147140] igc 0000:6e:00.0 enp110s0: NIC Link is Up 2500 Mbps Full Duplex, Flow Control: RX
+[   15.347554] systemd-journald[639]: Time jumped backwards, rotating.
+[   22.301764] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
+[   22.302650] Bridge firewalling registered
+[   31.911316] audit: type=1400 audit(1785348048.825:121): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cri-containerd.apparmor.d" pid=5795 comm="apparmor_parser"
+[   36.120416] sp5100_tco: SP5100/SB800 TCO WatchDog Timer Driver
+[   36.120510] sp5100-tco sp5100-tco: Using 0xfeb00000 for watchdog MMIO address
+[   36.120609] sp5100-tco sp5100-tco: initialized. heartbeat=60 sec (nowayout=0)
+[   36.171665] systemd[1]: systemd 255.4-1ubuntu8.16 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[   36.171779] systemd[1]: Detected architecture x86-64.
+[   45.122280] evm: overlay not supported
+[   46.480713] wireguard: WireGuard 1.0.0 loaded. See www.wireguard.com for information.
+[   46.480716] wireguard: Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
+[   46.875769] iscsi: registered transport (tcp)
+[   72.385941] using optional tb_ring_throttling() helper
+[   72.386014] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[   72.386015] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[   72.386017] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[   72.386019] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[   72.386030] thunderbolt_ibverbs: advertised 2 native services
+[   72.386040] thunderbolt_ibverbs: peer 1 created backend=native
+[   72.388299] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=2 rx_hop=2 out_hop=9
+[   72.388559] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=2 rx_hop=2
+[   72.388560] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x3 link_speed=20Gb/s width=0x1 rail=0x21debfbf path_id=1
+[   72.388591] thunderbolt 0-3: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[   72.388601] thunderbolt_ibverbs: peer 2 created backend=native
+[   72.391280] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=3 rx_hop=3 out_hop=8
+[   72.391579] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=3 rx_hop=3
+[   72.391582] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[   72.391606] thunderbolt 0-1: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[   72.391624] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[   72.391645] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[   73.661941] thunderbolt_ibverbs: native HELLO received route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[   73.661947] thunderbolt_ibverbs: native HELLO_ACK route=0x3 rail=0x0 tx_hop=2 rx_hop=2 out_hop=9
+[   73.703595] thunderbolt_ibverbs: native HELLO received route=0x1 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[   73.703600] thunderbolt_ibverbs: native HELLO_ACK route=0x1 rail=0x0 tx_hop=3 rx_hop=3 out_hop=8
+[   73.741396] enabled tunnel route=0x3 rail=0x0 out_hop=9 remote_out_hop=8 tx_hop=2 rx_hop=2 tx_flags=0x2 rx_flags=0x2 e2e=0
+[   73.741402] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=9 remote_out_hop=8 tx_hop=2 rx_hop=2
+[   73.745057] thunderbolt_ibverbs: native READY sent route=0x3 rail=0x0
+[   73.746300] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer1/0 domain=0 guid=0200544257524253
+[   73.750154] thunderbolt 0000:06:00.0 tbr-appmana022: renamed from u4r0
+[   73.761285] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=3 rx_hop=3 tx_flags=0x2 rx_flags=0x2 e2e=0
+[   73.761289] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=3 rx_hop=3
+[   73.763665] thunderbolt_ibverbs: native READY sent route=0x1 rail=0x0
+[   73.764963] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer2/0 domain=0 guid=0200544258524253
+[   73.786052] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[   73.790775] iscsi: registered transport (iser)
+[   73.802669] RPC: Registered rdma transport module.
+[   73.802671] RPC: Registered rdma backchannel transport module.
+[  115.194140] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x900 -> peer 2 route=0x1 rail=0x0
+[  115.194153] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x901 -> peer 2 route=0x1 rail=0x0
+[  115.194162] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x902 -> peer 2 route=0x1 rail=0x0
+[  115.194171] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x903 -> peer 2 route=0x1 rail=0x0
+[  115.194179] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x904 -> peer 2 route=0x1 rail=0x0
+[  115.194188] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x905 -> peer 2 route=0x1 rail=0x0
+[  115.194196] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x906 -> peer 2 route=0x1 rail=0x0
+[  115.194205] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x907 -> peer 2 route=0x1 rail=0x0
+[  115.194213] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x908 -> peer 2 route=0x1 rail=0x0
+[  115.194221] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x909 -> peer 2 route=0x1 rail=0x0
+[  115.207270] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473496 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.207447] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473497 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.207599] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473498 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.207762] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473499 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.207921] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473500 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.208081] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473501 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.208240] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473502 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.208419] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473503 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.208590] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473504 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  115.208756] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=10473505 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+    281 I<   -                                kworker/u132:0-tbv_ibdev
+    282 I<   -                                kworker/u133:0-tbv_ibdev
+  17988 I<   -                                kworker/R-tbv_ibdev
+  17989 I<   -                                kworker/u132:1-tbv_ibdev
+  18065 I<   -                                kworker/u133:1-tbv_ibdev
+  20407 I<   -                                kworker/u133:2-tbv_ibdev

@@ -1,0 +1,39 @@
+### round=1 rc=1 elapsed=2s
+ Completion with error at client
+ Failed status 5: wr_id 0 syndrom 0x0
+scnt=512, ccnt=0
+ Failed to complete run_iter_bw function successfully
+---------------------------------------------------------------------------------------
+                    RDMA_Write Bidirectional BW Test
+ Dual-port       : OFF		Device         : usb4_rdma15
+ Number of qps   : 4		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : OFF
+ TX depth        : 128
+ CQ Moderation   : 1
+ Mtu             : 4096[B]
+ Link type       : Ethernet
+ GID index       : 0
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x0900 PSN 0x731da6 RKey 0x000002 VAddr 0x007ffa87744000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:192:99
+ local address: LID 0000 QPN 0x0901 PSN 0x762d98 RKey 0x000002 VAddr 0x007ffa87844000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:192:99
+ local address: LID 0000 QPN 0x0902 PSN 0xd97b02 RKey 0x000002 VAddr 0x007ffa87944000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:192:99
+ local address: LID 0000 QPN 0x0903 PSN 0x1bcb29 RKey 0x000002 VAddr 0x007ffa87a44000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:192:99
+ remote address: LID 0000 QPN 0x0904 PSN 0x6a74fc RKey 0x000003 VAddr 0x00747f6cf81000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0905 PSN 0x85a136 RKey 0x000003 VAddr 0x00747f6d081000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0906 PSN 0xf5a948 RKey 0x000003 VAddr 0x00747f6d181000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0907 PSN 0x3662f7 RKey 0x000003 VAddr 0x00747f6d281000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]

@@ -1,0 +1,37 @@
+### round=1 rc=0 elapsed=6s
+---------------------------------------------------------------------------------------
+                    RDMA_Write Bidirectional BW Test
+ Dual-port       : OFF		Device         : usb4_rdma5
+ Number of qps   : 4		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : OFF
+ TX depth        : 128
+ CQ Moderation   : 1
+ Mtu             : 4096[B]
+ Link type       : Ethernet
+ GID index       : 0
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x0983 PSN 0x8ad0ea RKey 0x000008 VAddr 0x007bb7ae8df000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+ local address: LID 0000 QPN 0x0984 PSN 0xc30cc3 RKey 0x000008 VAddr 0x007bb7ae91f000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+ local address: LID 0000 QPN 0x0985 PSN 0x42af1b RKey 0x000008 VAddr 0x007bb7ae95f000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+ local address: LID 0000 QPN 0x0986 PSN 0x4afc97 RKey 0x000008 VAddr 0x007bb7ae99f000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+ remote address: LID 0000 QPN 0x0983 PSN 0x9f8a35 RKey 0x000008 VAddr 0x007c7759fd7000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0984 PSN 0xbce07b RKey 0x000008 VAddr 0x007c775a017000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0985 PSN 0xef97a9 RKey 0x000008 VAddr 0x007c775a057000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+ remote address: LID 0000 QPN 0x0986 PSN 0x380844 RKey 0x000008 VAddr 0x007c775a097000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 262144     8000             7.08               7.08   		   0.003375
+---------------------------------------------------------------------------------------

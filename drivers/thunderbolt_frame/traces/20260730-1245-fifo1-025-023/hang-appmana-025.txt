@@ -1,0 +1,262 @@
+## dmesg
+[  543.900706] thunderbolt_ibverbs: native ACK matched after retry qpn=0x910 dest_qp=0x910 psn=5713763 ack_status=0 total_age_ms=9830 current_age_ms=20 retries=1 rnr_retries=0 reason=1
+[  543.903103] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831480 ack_status=0 total_age_ms=1554 current_age_ms=21 retries=1 rnr_retries=0 reason=1
+[  543.905572] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831481 ack_status=0 total_age_ms=1556 current_age_ms=46 retries=1 rnr_retries=0 reason=1
+[  543.907968] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831482 ack_status=0 total_age_ms=1559 current_age_ms=4 retries=0 rnr_retries=0 reason=1
+[  543.909146] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91b dest_qp=0x91b psn=3503055 ack_status=0 total_age_ms=9832 current_age_ms=50 retries=1 rnr_retries=0 reason=1
+[  543.910962] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831483 ack_status=0 total_age_ms=1562 current_age_ms=7 retries=0 rnr_retries=0 reason=1
+[  543.910965] thunderbolt_ibverbs: native ACK matched after retry qpn=0x902 dest_qp=0x902 psn=2735946 ack_status=0 total_age_ms=5895 current_age_ms=0 retries=0 rnr_retries=0 reason=1
+[  543.913779] thunderbolt_ibverbs: native ACK matched after retry qpn=0x904 dest_qp=0x904 psn=10176299 ack_status=0 total_age_ms=1460 current_age_ms=9 retries=0 rnr_retries=0 reason=1
+[  544.050905] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 67 times, consider switching to WQ_UNBOUND
+[  545.742115] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 131 times, consider switching to WQ_UNBOUND
+[  548.848065] tbv_native_send_ctx_post_frames: 5497 callbacks suppressed
+[  548.848068] thunderbolt_ibverbs: native retransmit qpn=0x905 dest_qp=0x905 psn=6331335 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.848076] thunderbolt_ibverbs: native retransmit qpn=0x916 dest_qp=0x916 psn=7284892 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.850064] thunderbolt_ibverbs: native retransmit qpn=0x917 dest_qp=0x917 psn=15132245 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.854061] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=10176380 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.860067] thunderbolt_ibverbs: native retransmit qpn=0x905 dest_qp=0x905 psn=6331335 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.862062] thunderbolt_ibverbs: native retransmit qpn=0x917 dest_qp=0x917 psn=15132245 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.865051] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=10176380 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.871053] thunderbolt_ibverbs: native retransmit qpn=0x91e dest_qp=0x91e psn=2176587 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=31 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.872068] thunderbolt_ibverbs: native retransmit qpn=0x916 dest_qp=0x916 psn=7284892 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=24 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.873403] thunderbolt_ibverbs: native retransmit qpn=0x905 dest_qp=0x905 psn=6331335 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[  548.904022] tbv_note_matched_send_ack: 1174 callbacks suppressed
+[  548.904024] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91e dest_qp=0x91e psn=2176587 ack_status=0 total_age_ms=14825 current_age_ms=29 retries=2 rnr_retries=0 reason=1
+[  549.000037] thunderbolt_ibverbs: native ACK matched after retry qpn=0x916 dest_qp=0x916 psn=7284892 ack_status=0 total_age_ms=14927 current_age_ms=12 retries=1 rnr_retries=0 reason=1
+[  549.028183] thunderbolt_ibverbs: native ACK matched after retry qpn=0x904 dest_qp=0x904 psn=10176380 ack_status=0 total_age_ms=6535 current_age_ms=10 retries=1 rnr_retries=0 reason=1
+[  549.073751] thunderbolt_ibverbs: native ACK matched after retry qpn=0x917 dest_qp=0x917 psn=15132245 ack_status=0 total_age_ms=14997 current_age_ms=17 retries=1 rnr_retries=0 reason=1
+[  549.090059] thunderbolt_ibverbs: native ACK matched after retry qpn=0x905 dest_qp=0x905 psn=6331335 ack_status=0 total_age_ms=6433 current_age_ms=182 retries=1 rnr_retries=0 reason=1
+[  549.122573] thunderbolt_ibverbs: native ACK matched after retry qpn=0x915 dest_qp=0x915 psn=11311383 ack_status=0 total_age_ms=15050 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[  549.205952] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456689 ack_status=0 total_age_ms=15137 current_age_ms=1 retries=1 rnr_retries=0 reason=1
+[  549.261941] thunderbolt_ibverbs: native ACK matched after retry qpn=0x910 dest_qp=0x910 psn=5713792 ack_status=0 total_age_ms=15191 current_age_ms=16 retries=1 rnr_retries=0 reason=1
+[  549.302391] thunderbolt_ibverbs: native ACK matched after retry qpn=0x915 dest_qp=0x915 psn=11311384 ack_status=0 total_age_ms=15230 current_age_ms=7 retries=1 rnr_retries=0 reason=1
+[  549.318798] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x90d psn=6448690 ack_status=0 total_age_ms=15249 current_age_ms=15 retries=1 rnr_retries=0 reason=1
+[  552.673163] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 259 times, consider switching to WQ_UNBOUND
+[  553.851193] tbv_native_send_ctx_post_frames: 1918 callbacks suppressed
+[  553.851195] thunderbolt_ibverbs: native retransmit qpn=0x91f dest_qp=0x91f psn=9181438 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.853209] thunderbolt_ibverbs: native retransmit qpn=0x91e dest_qp=0x91e psn=2176593 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.855197] thunderbolt_ibverbs: native retransmit qpn=0x91c dest_qp=0x91c psn=3900111 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.855199] thunderbolt_ibverbs: native retransmit qpn=0x91b dest_qp=0x91b psn=3503083 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.856201] thunderbolt_ibverbs: native retransmit qpn=0x916 dest_qp=0x916 psn=7284900 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.856211] thunderbolt_ibverbs: native retransmit qpn=0x91a dest_qp=0x91a psn=4047153 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.865196] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591619 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=24 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.867195] thunderbolt_ibverbs: native retransmit qpn=0x91c dest_qp=0x91c psn=3900111 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.872211] thunderbolt_ibverbs: native retransmit qpn=0x916 dest_qp=0x916 psn=7284900 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.872215] thunderbolt_ibverbs: native retransmit qpn=0x916 dest_qp=0x916 psn=7284901 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=25 tx_pending=0 acked_prefix=0 nak=0+0
+[  553.908690] tbv_note_matched_send_ack: 136 callbacks suppressed
+[  553.908693] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91f dest_qp=0x91f psn=9181438 ack_status=0 total_age_ms=19830 current_age_ms=10 retries=1 rnr_retries=0 reason=1
+[  553.955680] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91a dest_qp=0x91a psn=4047153 ack_status=0 total_age_ms=19878 current_age_ms=4 retries=1 rnr_retries=0 reason=1
+[  553.987991] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91e dest_qp=0x91e psn=2176593 ack_status=0 total_age_ms=19909 current_age_ms=18 retries=1 rnr_retries=0 reason=1
+[  554.022589] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91b dest_qp=0x91b psn=3503083 ack_status=0 total_age_ms=19945 current_age_ms=5 retries=1 rnr_retries=0 reason=1
+[  554.051617] thunderbolt_ibverbs: native ACK matched after retry qpn=0x916 dest_qp=0x916 psn=7284900 ack_status=0 total_age_ms=19979 current_age_ms=3 retries=1 rnr_retries=0 reason=1
+[  554.078337] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91c dest_qp=0x91c psn=3900111 ack_status=0 total_age_ms=20001 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[  554.101647] thunderbolt_ibverbs: native ACK matched after retry qpn=0x916 dest_qp=0x916 psn=7284901 ack_status=0 total_age_ms=20029 current_age_ms=2 retries=1 rnr_retries=0 reason=1
+[  554.120046] thunderbolt_ibverbs: native ACK matched after retry qpn=0x911 dest_qp=0x911 psn=14389340 ack_status=0 total_age_ms=20049 current_age_ms=12 retries=1 rnr_retries=0 reason=1
+[  554.196760] thunderbolt_ibverbs: native ACK matched after retry qpn=0x911 dest_qp=0x911 psn=14389341 ack_status=0 total_age_ms=20126 current_age_ms=19 retries=1 rnr_retries=0 reason=1
+[  554.234273] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91d dest_qp=0x91d psn=4230173 ack_status=0 total_age_ms=20156 current_age_ms=18 retries=1 rnr_retries=0 reason=1
+[  558.855340] tbv_native_send_ctx_post_frames: 1807 callbacks suppressed
+[  558.855342] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591630 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.855342] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456701 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.856351] thunderbolt_ibverbs: native retransmit qpn=0x907 dest_qp=0x907 psn=3753459 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.856353] thunderbolt_ibverbs: native retransmit qpn=0x903 dest_qp=0x903 psn=12831531 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.862345] thunderbolt_ibverbs: native retransmit qpn=0x913 dest_qp=0x913 psn=10509089 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.866357] thunderbolt_ibverbs: native retransmit qpn=0x917 dest_qp=0x917 psn=15132253 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=24 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.867339] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591630 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.867341] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456701 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.867342] thunderbolt_ibverbs: native retransmit qpn=0x907 dest_qp=0x907 psn=3753459 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.878343] thunderbolt_ibverbs: native retransmit qpn=0x907 dest_qp=0x907 psn=3753459 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  558.928087] tbv_note_matched_send_ack: 117 callbacks suppressed
+[  558.928090] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831531 ack_status=0 total_age_ms=16516 current_age_ms=24 retries=2 rnr_retries=0 reason=1
+[  558.987964] thunderbolt_ibverbs: native ACK matched after retry qpn=0x913 dest_qp=0x913 psn=10509089 ack_status=0 total_age_ms=24916 current_age_ms=11 retries=1 rnr_retries=0 reason=1
+[  559.001370] thunderbolt_ibverbs: native ACK matched after retry qpn=0x906 dest_qp=0x906 psn=3591630 ack_status=0 total_age_ms=16207 current_age_ms=8 retries=1 rnr_retries=0 reason=1
+[  559.031025] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456701 ack_status=0 total_age_ms=24962 current_age_ms=12 retries=1 rnr_retries=0 reason=1
+[  559.051462] thunderbolt_ibverbs: native ACK matched after retry qpn=0x907 dest_qp=0x907 psn=3753459 ack_status=0 total_age_ms=16003 current_age_ms=4 retries=1 rnr_retries=0 reason=1
+[  559.141435] thunderbolt_ibverbs: native ACK matched after retry qpn=0x901 dest_qp=0x901 psn=12028934 ack_status=0 total_age_ms=23422 current_age_ms=20 retries=1 rnr_retries=0 reason=3
+[  559.167235] thunderbolt_ibverbs: native ACK matched after retry qpn=0x901 dest_qp=0x901 psn=12028935 ack_status=0 total_age_ms=23398 current_age_ms=1 retries=1 rnr_retries=0 reason=1
+[  559.188636] thunderbolt_ibverbs: native ACK matched after retry qpn=0x910 dest_qp=0x910 psn=5713799 ack_status=0 total_age_ms=25118 current_age_ms=22 retries=1 rnr_retries=0 reason=1
+[  559.214994] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91f dest_qp=0x91f psn=9181442 ack_status=0 total_age_ms=25136 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[  559.243495] thunderbolt_ibverbs: native ACK matched after retry qpn=0x913 dest_qp=0x913 psn=10509090 ack_status=0 total_age_ms=25172 current_age_ms=13 retries=1 rnr_retries=0 reason=1
+[  563.864492] tbv_native_send_ctx_post_frames: 1770 callbacks suppressed
+[  563.864494] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653563 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.872482] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456704 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=27 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.873474] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564055 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=22 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.876471] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653560 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.876476] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653561 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.876479] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653562 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.876482] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653563 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.888468] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653563 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.896465] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564055 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.896469] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564056 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=19 tx_pending=0 acked_prefix=0 nak=0+0
+[  563.947359] tbv_note_matched_send_ack: 115 callbacks suppressed
+[  563.947362] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456704 ack_status=0 total_age_ms=29878 current_age_ms=4 retries=2 rnr_retries=0 reason=1
+[  564.005846] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=10653561 ack_status=0 total_age_ms=29938 current_age_ms=10 retries=2 rnr_retries=0 reason=1
+[  564.042263] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=10653562 ack_status=0 total_age_ms=29974 current_age_ms=24 retries=2 rnr_retries=0 reason=1
+[  564.069935] thunderbolt_ibverbs: native ACK matched after retry qpn=0x912 dest_qp=0x912 psn=12564055 ack_status=0 total_age_ms=29998 current_age_ms=33 retries=2 rnr_retries=0 reason=1
+[  564.131089] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=10653563 ack_status=0 total_age_ms=30063 current_age_ms=18 retries=2 rnr_retries=0 reason=1
+[  564.176826] thunderbolt_ibverbs: native ACK matched after retry qpn=0x912 dest_qp=0x912 psn=12564056 ack_status=0 total_age_ms=30105 current_age_ms=13 retries=2 rnr_retries=0 reason=1
+[  564.209480] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91c dest_qp=0x91c psn=3900120 ack_status=0 total_age_ms=30132 current_age_ms=28 retries=2 rnr_retries=0 reason=1
+[  564.259638] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456705 ack_status=0 total_age_ms=30191 current_age_ms=12 retries=2 rnr_retries=0 reason=1
+[  564.318701] thunderbolt_ibverbs: native ACK matched after retry qpn=0x902 dest_qp=0x902 psn=2735978 ack_status=0 total_age_ms=25196 current_age_ms=17 retries=2 rnr_retries=0 reason=1
+[  564.359713] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456706 ack_status=0 total_age_ms=30291 current_age_ms=21 retries=2 rnr_retries=0 reason=1
+[  568.865607] tbv_native_send_ctx_post_frames: 1718 callbacks suppressed
+[  568.865609] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=10653568 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=24 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.866603] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591637 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.870603] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x90d psn=6448701 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.872605] thunderbolt_ibverbs: native retransmit qpn=0x919 dest_qp=0x919 psn=2316004 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.872608] thunderbolt_ibverbs: native retransmit qpn=0x90e dest_qp=0x90e psn=6592785 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.877603] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591638 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.882605] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x90d psn=6448701 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.882608] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x90d psn=6448702 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=18 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.889595] thunderbolt_ibverbs: native retransmit qpn=0x906 dest_qp=0x906 psn=3591637 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.894593] thunderbolt_ibverbs: native retransmit qpn=0x90d dest_qp=0x90d psn=6448701 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  568.965131] tbv_note_matched_send_ack: 111 callbacks suppressed
+[  568.965133] thunderbolt_ibverbs: native ACK matched after retry qpn=0x906 dest_qp=0x906 psn=3591637 ack_status=0 total_age_ms=26153 current_age_ms=6 retries=1 rnr_retries=0 reason=1
+[  568.987759] thunderbolt_ibverbs: native ACK matched after retry qpn=0x906 dest_qp=0x906 psn=3591638 ack_status=0 total_age_ms=26170 current_age_ms=63 retries=2 rnr_retries=0 reason=1
+[  569.027155] thunderbolt_ibverbs: native ACK matched after retry qpn=0x919 dest_qp=0x919 psn=2316004 ack_status=0 total_age_ms=34950 current_age_ms=16 retries=1 rnr_retries=0 reason=1
+[  569.052902] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x90d psn=6448701 ack_status=0 total_age_ms=34983 current_age_ms=13 retries=1 rnr_retries=0 reason=1
+[  569.090697] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90d dest_qp=0x90d psn=6448702 ack_status=0 total_age_ms=35021 current_age_ms=4 retries=1 rnr_retries=0 reason=1
+[  569.117791] thunderbolt_ibverbs: native ACK matched after retry qpn=0x910 dest_qp=0x910 psn=5713803 ack_status=0 total_age_ms=35047 current_age_ms=1 retries=1 rnr_retries=0 reason=1
+[  569.155471] thunderbolt_ibverbs: native ACK matched after retry qpn=0x905 dest_qp=0x905 psn=6331358 ack_status=0 total_age_ms=26461 current_age_ms=20 retries=1 rnr_retries=0 reason=1
+[  569.171133] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=10653569 ack_status=0 total_age_ms=35103 current_age_ms=141 retries=1 rnr_retries=0 reason=1
+[  569.189508] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=5116755 ack_status=0 total_age_ms=35109 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[  569.218127] thunderbolt_ibverbs: native ACK matched after retry qpn=0x905 dest_qp=0x905 psn=6331359 ack_status=0 total_age_ms=26523 current_age_ms=17 retries=1 rnr_retries=0 reason=1
+[  573.463712] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 515 times, consider switching to WQ_UNBOUND
+[  573.869732] tbv_native_send_ctx_post_frames: 1744 callbacks suppressed
+[  573.869734] thunderbolt_ibverbs: native retransmit qpn=0x91d dest_qp=0x91d psn=4230185 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.873728] thunderbolt_ibverbs: native retransmit qpn=0x917 dest_qp=0x917 psn=15132269 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=23 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.873730] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564063 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.873734] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564064 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.880718] thunderbolt_ibverbs: native retransmit qpn=0x90c dest_qp=0x90c psn=4904716 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=24 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.881717] thunderbolt_ibverbs: native retransmit qpn=0x91d dest_qp=0x91d psn=4230185 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.884725] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564063 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.884728] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564064 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.890721] thunderbolt_ibverbs: native retransmit qpn=0x905 dest_qp=0x905 psn=6331363 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=14 tx_pending=0 acked_prefix=0 nak=0+0
+[  573.896716] thunderbolt_ibverbs: native retransmit qpn=0x912 dest_qp=0x912 psn=12564064 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  574.021919] tbv_note_matched_send_ack: 117 callbacks suppressed
+[  574.021921] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90c dest_qp=0x90c psn=4904716 ack_status=0 total_age_ms=39953 current_age_ms=23 retries=1 rnr_retries=0 reason=1
+[  574.070706] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91d dest_qp=0x91d psn=4230185 ack_status=0 total_age_ms=39991 current_age_ms=3 retries=2 rnr_retries=0 reason=1
+[  574.102103] thunderbolt_ibverbs: native ACK matched after retry qpn=0x912 dest_qp=0x912 psn=12564063 ack_status=0 total_age_ms=40030 current_age_ms=32 retries=2 rnr_retries=0 reason=1
+[  574.134776] thunderbolt_ibverbs: native ACK matched after retry qpn=0x912 dest_qp=0x912 psn=12564064 ack_status=0 total_age_ms=40063 current_age_ms=10 retries=2 rnr_retries=0 reason=1
+[  574.165624] thunderbolt_ibverbs: native ACK matched after retry qpn=0x905 dest_qp=0x905 psn=6331363 ack_status=0 total_age_ms=31469 current_age_ms=216 retries=1 rnr_retries=0 reason=1
+[  574.267912] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90c dest_qp=0x90c psn=4904717 ack_status=0 total_age_ms=40199 current_age_ms=28 retries=2 rnr_retries=0 reason=1
+[  574.283913] thunderbolt_ibverbs: native ACK matched after retry qpn=0x914 dest_qp=0x914 psn=55310 ack_status=0 total_age_ms=40212 current_age_ms=28 retries=2 rnr_retries=0 reason=1
+[  574.332627] thunderbolt_ibverbs: native ACK matched after retry qpn=0x916 dest_qp=0x916 psn=7284914 ack_status=0 total_age_ms=40259 current_age_ms=240 retries=1 rnr_retries=0 reason=1
+[  574.396912] thunderbolt_ibverbs: native ACK matched after retry qpn=0x91d dest_qp=0x91d psn=4230186 ack_status=0 total_age_ms=40318 current_age_ms=26 retries=2 rnr_retries=0 reason=1
+[  574.416530] thunderbolt_ibverbs: native ACK matched after retry qpn=0x903 dest_qp=0x903 psn=12831544 ack_status=0 total_age_ms=31974 current_age_ms=9 retries=2 rnr_retries=0 reason=1
+[  575.690813] tx queue timeout route=0x3 rail=0x0 failed=568 queued=64935 credits=729/768 stalls=8740
+[  575.705047] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.708321] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.713365] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.717473] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.721373] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.723320] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.725166] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.728838] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.728842] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.728876] tx queue timeout route=0x3 rail=0x0 failed=890 queued=64545 credits=749/768 stalls=8740
+[  575.728877] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=1852194 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  575.945059] thunderbolt_ibverbs: native RX active WRITE discarded qpn=0x91f expected_psn=1852194 psn=1852194 src_qp=0x91f received=178112 base=0x7db71249e000 with_imm=0
+[  576.116040] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90a src_qp=0x90a psn=15184597 base=0x7db711f5e000 received=60720 with_imm=0
+[  576.234202] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=13012328 base=0x7db711dde000 received=242880 with_imm=0
+[  576.306541] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=13012328 base=0x7db711dde000 received=242880 with_imm=0
+[  576.417791] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=13012329 base=0x7db711dde000 received=149776 with_imm=0
+[  576.486784] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=13012329 base=0x7db711dde000 received=149776 with_imm=0
+[  576.640311] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5454194 base=0x7db711cde000 received=12144 with_imm=0
+[  576.710872] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5454194 base=0x7db711cde000 received=12144 with_imm=0
+[  576.776570] tx queue timeout route=0x3 rail=0x0 failed=8114 queued=57395 credits=768/768 stalls=9196
+[  576.786044] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5454194 base=0x7db711cde000 received=12144 with_imm=0
+[  576.896304] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5454194 base=0x7db711cde000 received=12144 with_imm=0
+[  577.003212] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=5454194 base=0x7db711cde000 received=12144 with_imm=0
+[  577.799666] tx queue timeout route=0x3 rail=0x0 failed=1738 queued=63765 credits=752/768 stalls=9196
+[  578.824909] tx queue timeout route=0x3 rail=0x0 failed=408 queued=65065 credits=754/768 stalls=9196
+[  579.063966] tbv_native_send_ctx_post_frames: 1263 callbacks suppressed
+[  579.063969] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=21 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.075851] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.087851] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.098849] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.109862] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.124856] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.137862] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=12 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.149852] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=11 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.178841] thunderbolt_ibverbs: native retransmit qpn=0x90b dest_qp=0x90b psn=9456719 opcode=3 total=262144 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=28 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.195845] thunderbolt_ibverbs: native retransmit qpn=0x911 dest_qp=0x911 psn=14389361 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=16 tx_pending=0 acked_prefix=0 nak=0+0
+[  579.256404] tbv_note_matched_send_ack: 79 callbacks suppressed
+[  579.256406] thunderbolt_ibverbs: native ACK matched after retry qpn=0x911 dest_qp=0x911 psn=14389351 ack_status=0 total_age_ms=45185 current_age_ms=2427 retries=2 rnr_retries=0 reason=1
+[  579.483322] thunderbolt_ibverbs: native ACK matched after retry qpn=0x911 dest_qp=0x911 psn=14389352 ack_status=0 total_age_ms=45412 current_age_ms=2632 retries=2 rnr_retries=0 reason=1
+[  579.976994] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=10653580 ack_status=0 total_age_ms=45909 current_age_ms=3362 retries=1 rnr_retries=0 reason=1
+[  580.570644] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90b dest_qp=0x90b psn=9456719 ack_status=2 total_age_ms=46501 current_age_ms=1388 retries=2 rnr_retries=0 reason=1
+[  580.787588] thunderbolt_ibverbs: native RX active WRITE discarded qpn=0x90f expected_psn=11230152 psn=11230152 src_qp=0x90f received=68816 base=0x7db71209e000 with_imm=0
+[  580.817834] tbv_ibdev_rx_native_frame: 1008 callbacks suppressed
+[  580.817836] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=2 dest_qp=0x916 src_qp=0x916 psn=7284928 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.817839] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x911 src_qp=0x911 psn=14389353 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.817851] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=2 dest_qp=0x910 src_qp=0x910 psn=5713820 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.817853] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x90c src_qp=0x90c psn=4904721 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.817855] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=2 dest_qp=0x914 src_qp=0x914 psn=55330 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.817867] thunderbolt_ibverbs: native ACK matched after retry qpn=0x907 dest_qp=0x907 psn=3753489 ack_status=2 total_age_ms=37727 current_age_ms=1334 retries=1 rnr_retries=0 reason=1
+[  580.918928] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x90f src_qp=0x90f psn=485165 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.918943] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x90c src_qp=0x90c psn=4904721 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.918945] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=2 dest_qp=0x909 src_qp=0x909 psn=11765776 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.918947] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x90a src_qp=0x90a psn=10653581 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.918950] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x90c src_qp=0x90c psn=4904721 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  580.919245] thunderbolt_ibverbs: native ACK matched after retry qpn=0x901 dest_qp=0x901 psn=12028951 ack_status=2 total_age_ms=44353 current_age_ms=1469 retries=1 rnr_retries=0 reason=1
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+    281 I<   -                                kworker/u133:0-tbv_ibdev
+    742 I<   -                                kworker/R-tbv_ibdev
+    743 I<   -                                kworker/u132:1-tbv_ibdev
+   2201 I<   -                                kworker/u132:2-tbv_ibdev
+  18836 I<   -                                kworker/u133:2-tbv_ibdev
+  35893 I<   -                                kworker/u132:0-tbv_ibdev
+  35894 I<   -                                kworker/u132:3-tbv_ibdev
+  35895 I<   -                                kworker/u132:4-tbv_ibdev
+  35896 I<   -                                kworker/u132:5-tbv_ibdev
+  35897 I<   -                                kworker/u132:6-tbv_ibdev
+  35898 I<   -                                kworker/u132:7-tbv_ibdev
+  35899 I<   -                                kworker/u132:8-tbv_ibdev
+  35902 I<   -                                kworker/u132:9-tbv_ibdev
+  35903 I<   -                                kworker/u132:10-tbv_ibdev
+  35904 I<   -                                kworker/u132:11-tbv_ibdev
+  35905 I<   -                                kworker/u132:12-tbv_ibdev
+  35909 I<   -                                kworker/u132:13-tbv_ibdev
+  35910 I<   -                                kworker/u132:14-tbv_ibdev
+  35988 I<   -                                kworker/u132:15-tbv_ibdev
+  35989 I<   -                                kworker/u132:16-tbv_ibdev
+  35990 I<   -                                kworker/u132:17-tbv_ibdev
+  35991 I<   -                                kworker/u132:18-tbv_ibdev
+  35992 I<   -                                kworker/u132:19-tbv_ibdev
+  36123 I<   -                                kworker/u133:1-tbv_ibdev
+  36124 I<   -                                kworker/u133:3-tbv_ibdev
+  36375 I<   -                                kworker/u133:4-tbv_ibdev
+  36376 I<   -                                kworker/u133:5-tbv_ibdev
+  36377 I<   -                                kworker/u133:6-tbv_ibdev
+  36378 I<   -                                kworker/u133:7-tbv_ibdev
+  36379 I<   -                                kworker/u133:8-tbv_ibdev
+  36380 I<   -                                kworker/u133:9-tbv_ibdev
+  36381 I<   -                                kworker/u133:10-tbv_ibdev
+  37660 I<   -                                kworker/u132:20-tbv_ibdev
+  37661 I<   -                                kworker/u132:21-tbv_ibdev
+  37662 I<   -                                kworker/u132:22-tbv_ibdev
+  37663 I<   -                                kworker/u132:23-tbv_ibdev
+  37664 I<   -                                kworker/u132:24-tbv_ibdev
+  37665 I<   -                                kworker/u132:25-tbv_ibdev
+  37666 I<   -                                kworker/u132:26-tbv_ibdev
+  37667 I<   -                                kworker/u132:27-tbv_ibdev
+  37668 I<   -                                kworker/u132:28-tbv_ibdev
+  37669 I<   -                                kworker/u132:29-tbv_ibdev
+  37670 I<   -                                kworker/u132:30-tbv_ibdev
+  37673 I<   -                                kworker/u133:11-tbv_ibdev
+  37674 I<   -                                kworker/u133:12-tbv_ibdev
+  37675 I<   -                                kworker/u133:13-tbv_ibdev
+  37676 I<   -                                kworker/u133:14-tbv_ibdev
+  37677 I<   -                                kworker/u133:15-tbv_ibdev
+  37678 I<   -                                kworker/u133:16-tbv_ibdev
+  37679 I<   -                                kworker/u133:17-tbv_ibdev
+  37680 I<   -                                kworker/u133:18-tbv_ibdev
+  37681 I<   -                                kworker/u133:19-tbv_ibdev
+  37682 I<   -                                kworker/u133:20-tbv_ibdev
+  37683 I<   -                                kworker/u133:21-tbv_ibdev
+  37684 I<   -                                kworker/u133:22-tbv_ibdev
+  37685 I<   -                                kworker/u133:23-tbv_ibdev
+  37686 I<   -                                kworker/u133:24-tbv_ibdev
+  37687 I<   -                                kworker/u133:25-tbv_ibdev
+  37688 I<   -                                kworker/u133:26-tbv_ibdev

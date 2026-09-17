@@ -1,0 +1,26 @@
+
+************************************
+* Waiting for client to connect... *
+************************************
+---------------------------------------------------------------------------------------
+                    RDMA_Write Latency Test
+ Dual-port       : OFF		Device         : usb4_rdma5
+ Number of qps   : 1		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: OFF
+ ibv_wr* API     : OFF
+ Mtu             : 4096[B]
+ Link type       : Ethernet
+ GID index       : 0
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x09c2 PSN 0xbf4d35 RKey 0x00000a VAddr 0x0061e9654d6000
+ GID: 254:128:00:00:00:00:00:00:00:228:249:255:254:19:170:245
+ remote address: LID 0000 QPN 0x09c2 PSN 0x525d56 RKey 0x00000a VAddr 0x0059e7abd76000
+ GID: 254:128:00:00:00:00:00:00:00:92:220:255:254:67:96:233
+---------------------------------------------------------------------------------------
+ #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]    t_avg[usec]    t_stdev[usec]   99% percentile[usec]   99.9% percentile[usec] 
+ 8192    5000          36.70          74.27        38.51    	       38.89       	1.14   		43.90   		46.27  
+---------------------------------------------------------------------------------------

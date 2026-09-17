@@ -1,0 +1,239 @@
+## dmesg
+[    5.001059] asus_wmi: ASUS WMI generic driver loaded
+[    5.004574] mfd-aaeon 97845ED0-4E6D-11DE-8A39-0800200C9A66-1: Legacy driver mfd-aaeon cannot be instantiated multiple times
+[    5.004580] asus_wmi: failed to register LPS0 sleep handler in asus-wmi
+[    5.004680] asus_wmi: SFUN value: 0x1
+[    5.004683] asus-nb-wmi asus-nb-wmi: Detected ATK, not ASUSWMI, use DSTS
+[    5.011988] input: Asus WMI hotkeys as /devices/platform/asus-nb-wmi/input/input3
+[    5.043531] snd_hda_intel 0000:01:00.1: enabling device (0000 -> 0002)
+[    5.043629] snd_hda_intel 0000:01:00.1: Disabling MSI
+[    5.043636] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[    5.043756] snd_hda_intel 0000:78:00.1: enabling device (0000 -> 0002)
+[    5.043823] snd_hda_intel 0000:78:00.1: Handle vga_switcheroo audio client
+[    5.048940] spd5118 1-0051: DDR5 temperature sensor: vendor 0x06:0x32 revision 1.6
+[    5.049536] RAPL PMU: API unit is 2^-32 Joules, 2 fixed counters, 163840 ms ovfl timer
+[    5.049538] RAPL PMU: hw unit of domain package 2^-16 Joules
+[    5.049540] RAPL PMU: hw unit of domain core 2^-16 Joules
+[    5.055026] input: HD-Audio Generic HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input4
+[    5.055104] input: HD-Audio Generic HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input5
+[    5.055181] input: HD-Audio Generic HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input6
+[    5.131857] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input7
+[    5.131923] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input8
+[    5.131974] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input9
+[    5.132024] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input10
+[    5.134591] nvidia-nvlink: Nvlink Core is being initialized, major device number 509
+
+[    5.137436] nvidia 0000:01:00.0: enabling device (0002 -> 0003)
+[    5.137440] fbcon: Taking over console
+[    5.137639] nvidia 0000:01:00.0: vgaarb: VGA decodes changed: olddecodes=io+mem,decodes=none:owns=none
+[    5.178487] kvm_amd: TSC scaling supported
+[    5.178490] kvm_amd: Nested Virtualization enabled
+[    5.178492] kvm_amd: Nested Paging enabled
+[    5.178493] kvm_amd: LBR virtualization supported
+[    5.178521] kvm_amd: Virtual GIF supported
+[    5.178522] kvm_amd: Virtual NMI enabled
+[    5.181443] NVRM: loading NVIDIA UNIX Open Kernel Module for x86_64  610.43.02  Release Build  (dvs-builder@U22-I3-H05-01-2)  Tue May 19 11:24:27 UTC 2026
+[    5.190602] audit: type=1400 audit(1785456575.989:2): apparmor="STATUS" operation="profile_load" profile="unconfined" name=4D6F6E676F444220436F6D70617373 pid=1357 comm="apparmor_parser"
+[    5.190628] audit: type=1400 audit(1785456575.989:3): apparmor="STATUS" operation="profile_load" profile="unconfined" name="epiphany" pid=1373 comm="apparmor_parser"
+[    5.190665] audit: type=1400 audit(1785456575.989:4): apparmor="STATUS" operation="profile_load" profile="unconfined" name="QtWebEngineProcess" pid=1358 comm="apparmor_parser"
+[    5.190705] audit: type=1400 audit(1785456575.989:5): apparmor="STATUS" operation="profile_load" profile="unconfined" name="ch-checkns" pid=1365 comm="apparmor_parser"
+[    5.190748] audit: type=1400 audit(1785456575.989:6): apparmor="STATUS" operation="profile_load" profile="unconfined" name="element-desktop" pid=1371 comm="apparmor_parser"
+[    5.190909] audit: type=1400 audit(1785456575.989:7): apparmor="STATUS" operation="profile_load" profile="unconfined" name="devhelp" pid=1370 comm="apparmor_parser"
+[    5.190947] audit: type=1400 audit(1785456575.989:8): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cam" pid=1364 comm="apparmor_parser"
+[    5.190983] audit: type=1400 audit(1785456575.989:9): apparmor="STATUS" operation="profile_load" profile="unconfined" name="buildah" pid=1363 comm="apparmor_parser"
+[    5.191022] audit: type=1400 audit(1785456575.989:10): apparmor="STATUS" operation="profile_load" profile="unconfined" name="brave" pid=1362 comm="apparmor_parser"
+[    5.193817] nvidia-modeset: Loading NVIDIA UNIX Open Kernel Mode Setting Driver for x86_64  610.43.02  Release Build  (dvs-builder@U22-I3-H05-01-2)  Tue May 19 11:12:42 UTC 2026
+[    5.198278] [drm] [nvidia-drm] [GPU ID 0x00000100] Loading driver
+[    5.331575] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+[    5.367850] kauditd_printk_skb: 108 callbacks suppressed
+[    5.367853] audit: type=1400 audit(1785456576.166:119): apparmor="STATUS" operation="profile_replace" info="same as current profile, skipping" profile="unconfined" name="rsyslogd" pid=1604 comm="apparmor_parser"
+[    5.437337] loop0: detected capacity change from 0 to 8
+[    5.716196] audit: type=1400 audit(1785456576.514:120): apparmor="STATUS" operation="profile_replace" info="same as current profile, skipping" profile="unconfined" name="/usr/lib/snapd/snap-confine" pid=1738 comm="apparmor_parser"
+[    6.171419] thunderbolt_ibverbs: native HELLO received route=0x3 rail=0x0 remote_out=8 remote_tx=2 remote_rx=2
+[    6.171424] thunderbolt_ibverbs: native HELLO_ACK route=0x3 rail=0x0 tx_hop=1 rx_hop=1 out_hop=8
+[    6.195836] thunderbolt_ibverbs: native HELLO received route=0x1 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[    6.195839] thunderbolt_ibverbs: native HELLO_ACK route=0x1 rail=0x0 tx_hop=2 rx_hop=2 out_hop=8
+[    6.277965] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[    6.277970] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[    6.280321] thunderbolt_ibverbs: native READY sent route=0x3 rail=0x0
+[    6.280794] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer1/0 domain=0 guid=0200544257524253
+[    6.284940] thunderbolt 0000:06:00.0 tbr-appmana022: renamed from u4r0
+[    6.296227] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2 tx_flags=0x2 rx_flags=0x2 e2e=0
+[    6.296231] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=2 rx_hop=2
+[    6.298625] thunderbolt_ibverbs: native READY sent route=0x1 rail=0x0
+[    6.299113] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer2/0 domain=0 guid=0200544258524253
+[    6.311129] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[    6.438083] [drm] amdgpu kernel modesetting enabled.
+[    6.438103] amdgpu: vga_switcheroo: detected switching method \_SB_.PCI0.GP17.VGA_.ATPX handle
+[    6.438268] amdgpu: ATPX version 1, functions 0x00000000
+[    6.452736] amdgpu: Virtual CRAT table created for CPU
+[    6.452752] amdgpu: Topology: Add CPU node
+[    6.452890] amdgpu 0000:78:00.0: enabling device (0006 -> 0007)
+[    6.452948] amdgpu 0000:78:00.0: amdgpu: initializing kernel modesetting (IP DISCOVERY 0x1002:0x164E 0x1043:0x8877 0xC1).
+[    6.452964] amdgpu 0000:78:00.0: amdgpu: register mmio base: 0xDE500000
+[    6.452966] amdgpu 0000:78:00.0: amdgpu: register mmio size: 524288
+[    6.454770] amdgpu 0000:78:00.0: amdgpu: detected ip block number 0 <nv_common>
+[    6.454773] amdgpu 0000:78:00.0: amdgpu: detected ip block number 1 <gmc_v10_0>
+[    6.454776] amdgpu 0000:78:00.0: amdgpu: detected ip block number 2 <navi10_ih>
+[    6.454778] amdgpu 0000:78:00.0: amdgpu: detected ip block number 3 <psp>
+[    6.454781] amdgpu 0000:78:00.0: amdgpu: detected ip block number 4 <smu>
+[    6.454783] amdgpu 0000:78:00.0: amdgpu: detected ip block number 5 <dm>
+[    6.454785] amdgpu 0000:78:00.0: amdgpu: detected ip block number 6 <gfx_v10_0>
+[    6.454788] amdgpu 0000:78:00.0: amdgpu: detected ip block number 7 <sdma_v5_2>
+[    6.454790] amdgpu 0000:78:00.0: amdgpu: detected ip block number 8 <vcn_v3_0>
+[    6.454792] amdgpu 0000:78:00.0: amdgpu: detected ip block number 9 <jpeg_v3_0>
+[    6.454802] amdgpu 0000:78:00.0: amdgpu: ACPI VFCT table present but broken (too short #2),skipping
+[    6.456318] cfg80211: Loading compiled-in X.509 certificates for regulatory database
+[    6.456427] Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+[    6.456522] Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+[    6.460480] MCE: In-kernel MCE decoding enabled.
+[    6.460537] NET: Registered PF_QIPCRTR protocol family
+[    6.461015] amdgpu 0000:78:00.0: ROM [??? 0x00000000 flags 0x20000000]: can't assign; bogus alignment
+[    6.461018] amdgpu 0000:78:00.0: amdgpu: Unable to locate a BIOS ROM
+[    6.461024] amdgpu 0000:78:00.0: amdgpu: Fatal error during GPU init
+[    6.461029] amdgpu 0000:78:00.0: amdgpu: amdgpu: finishing device.
+[    6.461083] amdgpu 0000:78:00.0: probe with driver amdgpu failed with error -22
+[    6.466496] RPC: Registered named UNIX socket transport module.
+[    6.466498] RPC: Registered udp transport module.
+[    6.466499] RPC: Registered tcp transport module.
+[    6.466500] RPC: Registered tcp-with-tls transport module.
+[    6.466501] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    6.478882] Loading iSCSI transport class v2.0-870.
+[    6.482697] iscsi: registered transport (iser)
+[    6.496135] RPC: Registered rdma transport module.
+[    6.496137] RPC: Registered rdma backchannel transport module.
+[    6.522013] intel_rapl_common: Found RAPL domain package
+[    6.522015] intel_rapl_common: Found RAPL domain core
+[    6.522046] amd_atl: AMD Address Translation Library initialized
+[    6.578514] netfs: FS-Cache loaded
+[    6.584944] CacheFiles: Loaded
+[    6.637966] netfs: Cache "mycache" added (type cachefiles)
+[    6.637970] CacheFiles: File cache on mycache registered
+[    6.938921] [drm] Initialized nvidia-drm 0.0.0 for 0000:01:00.0 on minor 0
+[    6.940029] nvidia 0000:01:00.0: [drm] Cannot find any crtc or sizes
+[    6.954255] sp5100_tco: SP5100/SB800 TCO WatchDog Timer Driver
+[    6.954376] sp5100-tco sp5100-tco: Using 0xfeb00000 for watchdog MMIO address
+[    6.954488] sp5100-tco sp5100-tco: initialized. heartbeat=60 sec (nowayout=0)
+[    7.007679] systemd[1]: systemd 255.4-1ubuntu8.16 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[    7.007771] systemd[1]: Detected architecture x86-64.
+[    7.025182] systemd[1]: Using hardware watchdog 'SP5100 TCO timer', version 0, device /dev/watchdog0
+[    7.025190] systemd[1]: Watchdog running with a timeout of 2min.
+[   11.176828] igc 0000:6e:00.0 enp110s0: NIC Link is Up 2500 Mbps Full Duplex, Flow Control: RX
+[   18.158003] systemd-journald[648]: /var/log/journal/22ac1113f771479eba58cb36a041a98b/user-1000.journal: Journal file uses a different sequence number ID, rotating.
+[   22.477720] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
+[   22.478920] Bridge firewalling registered
+[   32.633427] audit: type=1400 audit(1785456603.380:121): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cri-containerd.apparmor.d" pid=4283 comm="apparmor_parser"
+[   44.466499] Key type cifs.spnego registered
+[   44.466514] Key type cifs.idmap registered
+[   44.467035] CIFS: No dialect specified on mount. Default has changed to a more secure dialect, SMB2.1 or later (e.g. SMB3.1.1), from CIFS (SMB1). To use the less secure SMB1 dialect to access old servers which do not support SMB3.1.1 (or even SMB3 or SMB2.1) specify vers=1.0 on mount.
+[   44.467038] CIFS: Attempting to mount //appmana-017-ds.i.appmana.com/appmana-cluster-03/pvc-b031caf7-5c74-408c-a330-5995fd942226
+[   45.040308] evm: overlay not supported
+[   46.487632] wireguard: WireGuard 1.0.0 loaded. See www.wireguard.com for information.
+[   46.487635] wireguard: Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
+[   55.330118] iscsi: registered transport (tcp)
+[   61.298657] workqueue: delayed_mntput hogged CPU for >10000us 4 times, consider switching to WQ_UNBOUND
+[   61.440444] first CRC-error frame: size=3584 sof=0 eof=3 flags=0xb rx_raw_pending=0 raw_op=0 raw_done=0 raw_remaining=0
+[   61.508679] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x901 src_qp=0x901 psn=7980037 base=0x7dc464b4f000 received=109296 with_imm=0
+[   61.576671] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x901 src_qp=0x901 psn=7980037 base=0x7dc464b4f000 received=109296 with_imm=0
+[   61.589790] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x902 src_qp=0x902 psn=11426712 base=0x7dc464b8f000 received=52624 with_imm=0
+[   61.602673] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547320 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.602679] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547321 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=61 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.605682] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547322 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=63 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.605687] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547323 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.605690] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547324 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.608675] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547327 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.616674] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547330 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=61 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.632697] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x903 src_qp=0x903 psn=16015934 base=0x7dc464bcf000 received=246928 with_imm=0
+[   61.645682] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x901 src_qp=0x901 psn=7980037 base=0x7dc464b4f000 received=109296 with_imm=0
+[   61.648677] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=3141954 base=0x7dc464c0f000 received=85008 with_imm=0
+[   61.658679] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547331 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=97 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.658840] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547343 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=85 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.658981] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=4547344 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=82 tx_pending=0 acked_prefix=0 nak=0+0
+[   61.659224] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x902 src_qp=0x902 psn=11426712 base=0x7dc464b8f000 received=52624 with_imm=0
+[   61.674699] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x905 src_qp=0x905 psn=914431 base=0x7dc464c4f000 received=190256 with_imm=0
+[   61.701693] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x903 src_qp=0x903 psn=16015934 base=0x7dc464bcf000 received=246928 with_imm=0
+[   61.716679] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x904 src_qp=0x904 psn=3141954 base=0x7dc464c0f000 received=85008 with_imm=0
+[   62.156704] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.160566] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.164321] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.167974] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.171514] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.174684] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.177684] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.180542] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.183320] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.186008] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91f src_qp=0x91f psn=9484027 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   62.581141] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016016 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581159] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016017 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581170] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016018 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581182] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016019 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581192] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016020 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581203] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016021 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581215] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016022 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581226] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016023 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581236] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016024 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   62.581247] thunderbolt_ibverbs: native RX reorder discarded qpn=0x903 expected_psn=16015935 psn=16016025 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.290557] tbv_qp_timeout_reap_rx: 61 callbacks suppressed
+[   67.290559] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90a src_qp=0x90a psn=8315232 base=0x7dc464d8f000 received=16192 with_imm=0
+[   67.905287] tbv_qp_flush_reorder: 122 callbacks suppressed
+[   67.905290] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852544 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905302] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852545 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905315] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852546 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905325] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852547 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905336] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852548 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905352] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852549 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905363] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852550 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905374] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852551 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905384] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852552 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.905394] thunderbolt_ibverbs: native RX reorder discarded qpn=0x907 expected_psn=1852455 psn=1852553 kind=1 complete=1 received=262144 frags=65/65 bytes=262144
+[   67.917277] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90a src_qp=0x90a psn=8315232 base=0x7dc464d8f000 received=16192 with_imm=0
+[   68.169115] tbv_ibdev_rx_native_frame: 55 callbacks suppressed
+[   68.169117] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x91b src_qp=0x91b psn=10442224 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169125] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458394 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169127] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169129] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169131] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169409] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169413] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169415] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169417] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.169419] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x917 src_qp=0x917 psn=13458395 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[   68.209552] thunderbolt_ibverbs: native RX active WRITE discarded qpn=0x915 expected_psn=12064182 psn=12064182 src_qp=0x915 received=4048 base=0x7dc46504f000 with_imm=0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+    281 I<   -                                kworker/u132:0-tbv_ibdev
+    282 I<   -                                kworker/u133:0-tbv_ibdev
+    739 I<   -                                kworker/R-tbv_ibdev
+    740 I<   -                                kworker/u132:1-tbv_ibdev
+    843 I<   -                                kworker/u133:1-tbv_ibdev
+   5233 I<   -                                kworker/u132:2-tbv_ibdev
+  26491 I<   -                                kworker/u132:3-tbv_ibdev
+  26536 I<   -                                kworker/u132:4-tbv_ibdev
+  26539 I<   -                                kworker/u132:5-tbv_ibdev
+  26592 I<   -                                kworker/u132:6-tbv_ibdev
+  26630 I<   -                                kworker/u133:2-tbv_ibdev
+  26735 I<   -                                kworker/u132:7-tbv_ibdev
+  26768 I<   -                                kworker/u132:8-tbv_ibdev
+  26965 I<   -                                kworker/u133:3-tbv_ibdev
+  26966 I<   -                                kworker/u132:9-tbv_ibdev
+  27010 I<   -                                kworker/u133:4-tbv_ibdev
+  27011 I<   -                                kworker/u132:10-tbv_ibdev
+  27012 I<   -                                kworker/u132:11-tbv_ibdev
+  27013 I<   -                                kworker/u132:12-tbv_ibdev
+  27026 I<   -                                kworker/u132:13-tbv_ibdev
+  27031 I<   -                                kworker/u132:14-tbv_ibdev
+  27033 I<   -                                kworker/u132:15-tbv_ibdev
+  27034 I<   -                                kworker/u132:16-tbv_ibdev
+  27035 I<   -                                kworker/u132:17-tbv_ibdev
+  27036 I<   -                                kworker/u133:5-tbv_ibdev
+  27037 I<   -                                kworker/u132:18-tbv_ibdev
+  27039 I<   -                                kworker/u132:19-tbv_ibdev
+  27040 I<   -                                kworker/u132:20-tbv_ibdev
+  27041 I<   -                                kworker/u132:21-tbv_ibdev
+  27042 I<   -                                kworker/u132:22-tbv_ibdev
+  27043 I<   -                                kworker/u132:23-tbv_ibdev
+  27045 I<   -                                kworker/u132:25-tbv_ibdev
+  27123 I<   -                                kworker/u133:7-tbv_ibdev
+  27152 I<   -                                kworker/u133:8-tbv_ibdev
+  27162 I<   -                                kworker/u133:9-tbv_ibdev
+  27358 I<   -                                kworker/u133:10-tbv_ibdev

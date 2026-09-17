@@ -1,0 +1,218 @@
+## dmesg
+[ 4087.719725] thunderbolt-net 0-3.0 tb-ch9: ThunderboltIP login timed out
+[ 4223.204934] CIFS: Attempting to mount //appmana-017-ds.i.appmana.com/appmana-cluster-03/pvc-b031caf7-5c74-408c-a330-5995fd942226
+[ 4318.337106] CIFS: Attempting to mount //appmana-017-ds.i.appmana.com/appmana-cluster-03/pvc-3d1b0ab5-b3b0-4826-9e1c-a45a8340bec4
+[ 4335.289256] scsi host12: iSCSI Initiator over TCP/IP
+[ 4335.290319] scsi 12:0:0:0: RAID              IET      Controller       0001 PQ: 0 ANSI: 5
+[ 4335.291131] scsi 12:0:0:0: Attached scsi generic sg0 type 12
+[ 4335.291319] scsi 12:0:0:1: Direct-Access     IET      VIRTUAL-DISK     0001 PQ: 0 ANSI: 5
+[ 4335.292157] sd 12:0:0:1: Attached scsi generic sg1 type 0
+[ 4335.292222] sd 12:0:0:1: Power-on or device reset occurred
+[ 4335.292304] sd 12:0:0:1: [sda] 629145600 512-byte logical blocks: (322 GB/300 GiB)
+[ 4335.292338] sd 12:0:0:1: [sda] Write Protect is off
+[ 4335.292341] sd 12:0:0:1: [sda] Mode Sense: 69 00 10 08
+[ 4335.292406] sd 12:0:0:1: [sda] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[ 4335.355258] sd 12:0:0:1: [sda] Attached SCSI disk
+[ 4343.480702] EXT4-fs (sda): mounted filesystem b9f9de69-ecd5-4b85-9ff7-ab8832b12975 r/w with ordered data mode. Quota mode: none.
+[ 4528.581878] scsi host13: iSCSI Initiator over TCP/IP
+[ 4528.583235] scsi 13:0:0:0: RAID              IET      Controller       0001 PQ: 0 ANSI: 5
+[ 4528.584040] scsi 13:0:0:0: Attached scsi generic sg2 type 12
+[ 4528.584255] scsi 13:0:0:1: Direct-Access     IET      VIRTUAL-DISK     0001 PQ: 0 ANSI: 5
+[ 4528.585145] sd 13:0:0:1: Attached scsi generic sg3 type 0
+[ 4528.585168] sd 13:0:0:1: Power-on or device reset occurred
+[ 4528.585250] sd 13:0:0:1: [sdb] 20971520 512-byte logical blocks: (10.7 GB/10.0 GiB)
+[ 4528.585280] sd 13:0:0:1: [sdb] Write Protect is off
+[ 4528.585282] sd 13:0:0:1: [sdb] Mode Sense: 69 00 10 08
+[ 4528.585339] sd 13:0:0:1: [sdb] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[ 4528.630450] sd 13:0:0:1: [sdb] Attached SCSI disk
+[ 4536.541229] EXT4-fs (sdb): mounted filesystem f54a6166-e1f6-42c4-a91b-5e760cd1e3e9 r/w with ordered data mode. Quota mode: none.
+[ 4759.622774] /proc/cgroups lists only v1 controllers, use cgroup.controllers of root cgroup for v2 info
+[ 4882.497512] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[ 4882.521020] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[ 5322.654864] thunderbolt_ibverbs: native HELLO route=0x3 rail=0x0 has no matching peer rail
+[ 5323.773517] thunderbolt_ibverbs: peer 3 created backend=native
+[ 5323.774224] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[ 5323.774441] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[ 5323.774443] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x3 link_speed=20Gb/s width=0x1 rail=0x21debfbf path_id=1
+[ 5323.774513] thunderbolt 0-3: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[ 5323.882523] thunderbolt_ibverbs: native HELLO_ACK received route=0x3 rail=0x0 remote_out=9 remote_tx=3 remote_rx=3
+[ 5323.882536] thunderbolt_ibverbs: native HELLO negotiated route=0x3 rail=0x0 remote_out=9 remote_tx=3 remote_rx=3 attempt=1
+[ 5323.899178] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=9 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 5323.899182] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=9 tx_hop=1 rx_hop=1
+[ 5323.920751] thunderbolt_ibverbs: native READY received route=0x3 rail=0x0
+[ 5323.922928] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer3/0 domain=0 guid=0200544259524253
+[ 5323.924711] thunderbolt 0000:06:00.0 tbr-appmana022: renamed from u4r0
+[ 5347.870831] thunderbolt_ibverbs: native HELLO received route=0x3 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[ 5347.870840] thunderbolt_ibverbs: native HELLO_ACK route=0x3 rail=0x0 tx_hop=1 rx_hop=1 out_hop=8
+[ 5347.888928] thunderbolt_ibverbs: native READY received route=0x3 rail=0x0
+[ 5347.893781] disabled tunnel for rehop route=0x3 rail=0x0 out_hop=8 tx_hop=1 rx_hop=1
+[ 5347.911851] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 5347.911856] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[ 5350.335150] thunderbolt_ibverbs: native READY received route=0x3 rail=0x0
+[ 7269.858729] spegel invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=-997
+[ 7269.858735] CPU: 24 UID: 0 PID: 1355659 Comm: spegel Kdump: loaded Tainted: G           OE       6.17.0-40-generic #40~24.04.1-Ubuntu PREEMPT(voluntary) 
+[ 7269.858738] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+[ 7269.858739] Hardware name: ASUS System Product Name/ROG STRIX X670E-I GAMING WIFI, BIOS 3842 03/11/2026
+[ 7269.858740] Call Trace:
+[ 7269.858741]  <TASK>
+[ 7269.858744]  dump_stack_lvl+0x76/0xa0
+[ 7269.858749]  dump_stack+0x10/0x20
+[ 7269.858750]  dump_header+0x48/0x210
+[ 7269.858753]  oom_kill_process+0x118/0x290
+[ 7269.858755]  out_of_memory+0x101/0x340
+[ 7269.858757]  mem_cgroup_out_of_memory+0x100/0x120
+[ 7269.858762]  try_charge_memcg+0x469/0x730
+[ 7269.858765]  charge_memcg+0x34/0x90
+[ 7269.858767]  __mem_cgroup_charge+0x2d/0xa0
+[ 7269.858769]  filemap_add_folio+0x46/0xf0
+[ 7269.858772]  __filemap_get_folio+0x1c4/0x340
+[ 7269.858774]  filemap_fault+0x10c/0xd50
+[ 7269.858776]  ? ___pte_offset_map+0x1c/0x180
+[ 7269.858780]  __do_fault+0x3a/0x190
+[ 7269.858783]  do_read_fault+0x12e/0x230
+[ 7269.858784]  do_fault+0x167/0x280
+[ 7269.858786]  handle_pte_fault+0x15e/0x200
+[ 7269.858788]  __handle_mm_fault+0x5ba/0x740
+[ 7269.858792]  handle_mm_fault+0x120/0x370
+[ 7269.858794]  do_user_addr_fault+0x1d2/0x8d0
+[ 7269.858798]  exc_page_fault+0x7f/0x1b0
+[ 7269.858801]  asm_exc_page_fault+0x27/0x30
+[ 7269.858803] RIP: 0033:0x475041
+[ 7269.858809] Code: 89 d7 48 89 da 48 89 c3 48 89 f8 48 89 4c 24 68 48 89 54 24 60 48 89 9c 24 b0 00 00 00 48 89 44 24 50 48 8b 8c 24 90 00 00 00 <8b> 19 48 8b 84 24 88 00 00 00 e8 70 fa ff ff 48 39 44 24 58 41 0f
+[ 7269.858810] RSP: 002b:00002bc7819cd1a8 EFLAGS: 00010206
+[ 7269.858811] RAX: 0000000000da15b2 RBX: 0000000001f34f49 RCX: 0000000002306fd0
+[ 7269.858812] RDX: 0000000000116ab7 RSI: 0000000000da1c36 RDI: 0000000000da15b2
+[ 7269.858813] RBP: 00002bc7819cd268 R08: 0000000000000001 R09: 0000000000000000
+[ 7269.858813] R10: 0000000000000000 R11: 0000000000000015 R12: 00002bc7815db3a0
+[ 7269.858814] R13: 00000000000000c0 R14: 00002bc7816d8b40 R15: 00002bc7815db450
+[ 7269.858817]  </TASK>
+[ 7269.858817] memory: usage 131072kB, limit 131072kB, failcnt 1858607
+[ 7269.858823] swap: usage 8kB, limit 9007199254740988kB, failcnt 0
+[ 7269.858824] Memory cgroup stats for /kubepods/burstable/pod64d2e5ce-1e47-49d4-a07b-1e6b9e9ee341:
+[ 7269.858902] anon 118173696
+[ 7269.858904] file 12640256
+[ 7269.858905] kernel 3346432
+[ 7269.858906] kernel_stack 638976
+[ 7269.858907] pagetables 475136
+[ 7269.858907] sec_pagetables 0
+[ 7269.858908] percpu 122536
+[ 7269.858909] sock 57344
+[ 7269.858910] vmalloc 16384
+[ 7269.858911] shmem 0
+[ 7269.858911] zswap 0
+[ 7269.858912] zswapped 0
+[ 7269.858913] file_mapped 81920
+[ 7269.858914] file_dirty 0
+[ 7269.858915] file_writeback 0
+[ 7269.858916] swapcached 0
+[ 7269.858916] anon_thp 0
+[ 7269.858917] file_thp 0
+[ 7269.858918] shmem_thp 0
+[ 7269.858919] inactive_anon 78356480
+[ 7269.858920] active_anon 39813120
+[ 7269.858920] inactive_file 9129984
+[ 7269.858921] active_file 2072576
+[ 7269.858922] unevictable 0
+[ 7269.858923] slab_reclaimable 1395824
+[ 7269.858924] slab_unreclaimable 686192
+[ 7269.858924] slab 2082016
+[ 7269.858925] workingset_refault_anon 0
+[ 7269.858926] workingset_refault_file 104541493
+[ 7269.858927] workingset_activate_anon 0
+[ 7269.858928] workingset_activate_file 19485061
+[ 7269.858929] workingset_restore_anon 0
+[ 7269.858929] workingset_restore_file 214189
+[ 7269.858930] workingset_nodereclaim 282
+[ 7269.858931] pgdemote_kswapd 0
+[ 7269.858932] pgdemote_direct 0
+[ 7269.858933] pgdemote_khugepaged 0
+[ 7269.858933] pgdemote_proactive 0
+[ 7269.858934] pgpromote_success 0
+[ 7269.858935] pgscan 404293596
+[ 7269.858936] pgsteal 104700097
+[ 7269.858937] pswpin 0
+[ 7269.858937] pswpout 2
+[ 7269.858938] pgscan_kswapd 0
+[ 7269.858939] pgscan_direct 404293596
+[ 7269.858940] pgscan_khugepaged 0
+[ 7269.858941] pgscan_proactive 0
+[ 7269.858941] pgsteal_kswapd 0
+[ 7269.858942] pgsteal_direct 104700097
+[ 7269.858943] pgsteal_khugepaged 0
+[ 7269.858944] pgsteal_proactive 0
+[ 7269.858945] pgfault 1374207
+[ 7269.858945] pgmajfault 415276
+[ 7269.858946] pgrefill 715938
+[ 7269.858947] pgactivate 583049
+[ 7269.858948] pgdeactivate 0
+[ 7269.858949] pglazyfree 0
+[ 7269.858949] pglazyfreed 0
+[ 7269.858951] swpin_zero 0
+[ 7269.858952] swpout_zero 0
+[ 7269.858953] zswpin 0
+[ 7269.858954] zswpout 0
+[ 7269.858955] zswpwb 0
+[ 7269.858956] thp_fault_alloc 0
+[ 7269.858957] thp_collapse_alloc 0
+[ 7269.858958] thp_swpout 0
+[ 7269.858959] thp_swpout_fallback 0
+[ 7269.858960] numa_pages_migrated 0
+[ 7269.858961] numa_pte_updates 0
+[ 7269.858961] numa_hint_faults 0
+[ 7269.858962] Tasks state (memory values in pages):
+[ 7269.858963] [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+[ 7269.858965] [  24826] 65535 24826       49        0        0        0         0    24576        0          -998 pause
+[ 7269.858968] [1355525]     0 1355525   359210    28155    28130       25         0   442368        0          -997 spegel
+[ 7269.858970] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=c60b65d9437c111762b892dc4cf3fb909193fc34a6016b75b477e1a44a86c1f6,mems_allowed=0,oom_memcg=/kubepods/burstable/pod64d2e5ce-1e47-49d4-a07b-1e6b9e9ee341,task_memcg=/kubepods/burstable/pod64d2e5ce-1e47-49d4-a07b-1e6b9e9ee341/c60b65d9437c111762b892dc4cf3fb909193fc34a6016b75b477e1a44a86c1f6,task=spegel,pid=1355525,uid=0
+[ 7269.859010] Memory cgroup out of memory: Killed process 1355525 (spegel) total-vm:1436840kB, anon-rss:112520kB, file-rss:100kB, shmem-rss:0kB, UID:0 pgtables:432kB oom_score_adj:-997
+[ 7269.859121] Tasks in /kubepods/burstable/pod64d2e5ce-1e47-49d4-a07b-1e6b9e9ee341/c60b65d9437c111762b892dc4cf3fb909193fc34a6016b75b477e1a44a86c1f6 are going to be killed due to memory.oom.group set
+[ 7269.859125] Memory cgroup out of memory: Killed process 1355572 (spegel) total-vm:1436840kB, anon-rss:112520kB, file-rss:100kB, shmem-rss:0kB, UID:0 pgtables:432kB oom_score_adj:-997
+[ 7406.547210] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7406.570289] disabled tunnel for rehop route=0x1 rail=0x0 out_hop=9 tx_hop=4 rx_hop=4
+[ 7406.570291] thunderbolt_ibverbs: recovering stalled native tunnel route=0x1 rail=0x0 through fresh HELLO/READY
+[ 7411.582254] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=-1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7412.499266] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 still unanswered after 5 attempts (-110); re-announcing services and retrying
+[ 7412.499285] thunderbolt_ibverbs: advertised 2 native services
+[ 7412.499286] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[ 7413.586309] thunderbolt 0-1: failed to send properties changed notification
+[ 7415.635297] thunderbolt 0-1: failed to send properties changed notification
+[ 7416.620314] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=-1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7417.682335] thunderbolt 0-1: failed to send properties changed notification
+[ 7418.579347] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 still unanswered after 5 attempts (-110); re-announcing services and retrying
+[ 7419.730373] thunderbolt 0-1: failed to send properties changed notification
+[ 7421.647369] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=-1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7421.779367] thunderbolt 0-1: failed to send properties changed notification
+[ 7423.826400] thunderbolt 0-1: failed to send properties changed notification
+[ 7424.658398] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 still unanswered after 5 attempts (-110); re-announcing services and retrying
+[ 7424.658417] thunderbolt_ibverbs: advertised 2 native services
+[ 7424.658418] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+[ 7425.874427] thunderbolt 0-1: failed to send properties changed notification
+[ 7426.680420] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=-1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7427.923454] thunderbolt 0-1: failed to send properties changed notification
+[ 7429.971484] thunderbolt 0-1: failed to send properties changed notification
+[ 7430.738476] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 still unanswered after 5 attempts (-110); re-announcing services and retrying
+[ 7431.710541] tx stall route=0x1 rail=0x0 inflight=32 posted=32 completed=0 tx_hop=4 rx_hop=4 out_hop=9 remote_out_hop=-1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 7432.019487] thunderbolt 0-1: failed to send properties changed notification
+[ 7434.067528] thunderbolt 0-1: failed to send properties changed notification
+[ 7435.563573] tx queue timeout route=0x1 rail=0x0 failed=33898 queued=31590 credits=736/768 stalls=0
+[ 7435.727583] tx ring stalled route=0x1 rail=0x0: released 32 frame(s) the ring never completed
+[ 7436.818553] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 still unanswered after 5 attempts (-110); re-announcing services and retrying
+[ 7436.818578] thunderbolt_ibverbs: advertised 2 native services
+[ 7436.818580] thunderbolt_ibverbs: re-announced native services (HELLO retries exhausted; prodding stale peers)
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+ 526762 I<   -                                kworker/u133:0-tbv_ibdev
+ 810955 D    -                                kworker/u128:1+thunderbolt0
+1116504 I<   -                                kworker/u132:0-tbv_ibdev
+1276388 I<   -                                kworker/u133:2-tbv_ibdev
+1416162 I<   -                                kworker/u132:2-tbv_ibdev
+1418373 I<   -                                kworker/R-tbv_ibdev
+1906522 D    -                                kworker/20:1+events
+1999515 I<   -                                kworker/u132:1-tbv_ibdev
+1999516 I<   -                                kworker/u132:3-tbv_ibdev
+1999517 I<   -                                kworker/u132:4-tbv_ibdev
+1999518 I<   -                                kworker/u132:5-tbv_ibdev
+1999519 I<   -                                kworker/u132:6-tbv_ibdev
+1999554 I<   -                                kworker/u132:7-tbv_ibdev
+1999556 I<   -                                kworker/u132:8-tbv_ibdev
+2000361 I<   -                                kworker/u132:9-tbv_ibdev

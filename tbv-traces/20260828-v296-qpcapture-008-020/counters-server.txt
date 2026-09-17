@@ -1,0 +1,158 @@
+### node=appmana-020 tag=pre t=2026-08-28T09:57:51-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=252021 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@QP@@@
+link usb4_rdma0/1 lqpn 1 type GSI state RTS sq-psn 0 comm [ib_core] 
+@@@STAT@@@
+link usb4_rdma0/1 sent_pkts 11884290 rcvd_pkts 11933364 duplicate_request 1342 out_of_seq_request 18 rcvd_rnr_err 0 send_rnr_err 0 rcvd_seq_err 3 ack_deferred 193749 retry_exceeded_err 0 retry_rnr_exceeded_err 0 completer_retry_err 159 send_err 0 link_downed 0 rdma_sends 0 rdma_recvs 0 
+@@@DMESG@@@
+[251873.508385] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=22 ring_posted=1 tx_sub=148 tx_done=147 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251873.536114] thunderbolt_frame: tbframe0x3: link down (3)
+[251873.740899] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251873.757479] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251874.789471] thunderbolt_frame: tbframe0x3: READY confirmed
+[251874.789473] thunderbolt_frame: tbframe0x3: link up
+[251905.764557] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=23 ring_posted=1 tx_sub=154 tx_done=153 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251905.792307] thunderbolt_frame: tbframe0x3: link down (3)
+[251905.996316] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251906.012906] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251907.044652] thunderbolt_frame: tbframe0x3: READY confirmed
+[251907.044654] thunderbolt_frame: tbframe0x3: link up
+[251938.019753] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=24 ring_posted=1 tx_sub=160 tx_done=159 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251938.047471] thunderbolt_frame: tbframe0x3: link down (3)
+[251938.252257] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251938.268845] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251939.300831] thunderbolt_frame: tbframe0x3: READY confirmed
+[251939.300833] thunderbolt_frame: tbframe0x3: link up
+[251970.276920] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=25 ring_posted=1 tx_sub=166 tx_done=165 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251970.304655] thunderbolt_frame: tbframe0x3: link down (3)
+[251970.509437] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251970.526022] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251971.557009] thunderbolt_frame: tbframe0x3: READY confirmed
+[251971.557011] thunderbolt_frame: tbframe0x3: link up
+[252002.533096] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=26 ring_posted=1 tx_sub=172 tx_done=171 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252002.560836] thunderbolt_frame: tbframe0x3: link down (3)
+[252002.765617] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252002.782174] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252003.813197] thunderbolt_frame: tbframe0x3: READY confirmed
+[252003.813199] thunderbolt_frame: tbframe0x3: link up
+### node=appmana-020 tag=hang-round4 t=2026-08-28T10:02:10-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=252281 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@QP@@@
+link usb4_rdma0/1 lqpn 337 rqpn 337 type RC state RTS rq-psn 15043894 sq-psn 8035366 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 338 rqpn 338 type RC state RTS rq-psn 11441064 sq-psn 4719375 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 339 rqpn 339 type RC state RTS rq-psn 13817234 sq-psn 12278583 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 340 rqpn 340 type RC state RTS rq-psn 15220793 sq-psn 10547779 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 341 rqpn 341 type RC state RTS rq-psn 1559064 sq-psn 6227857 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 342 rqpn 342 type RC state RTS rq-psn 15628122 sq-psn 9692841 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 343 rqpn 343 type RC state RTS rq-psn 2684017 sq-psn 16244702 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 344 rqpn 344 type RC state RTS rq-psn 8543190 sq-psn 2495497 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 345 rqpn 345 type RC state RTS rq-psn 10337666 sq-psn 6195715 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 346 rqpn 346 type RC state RTS rq-psn 9338780 sq-psn 14091602 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 347 rqpn 347 type RC state RTS rq-psn 12007632 sq-psn 16260740 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 348 rqpn 348 type RC state RTS rq-psn 9197283 sq-psn 16011198 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 349 rqpn 349 type RC state RTS rq-psn 10576979 sq-psn 15247452 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 350 rqpn 350 type RC state RTS rq-psn 2996420 sq-psn 8082274 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 351 rqpn 351 type RC state RTS rq-psn 2805234 sq-psn 4065902 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 352 rqpn 352 type RC state RTS rq-psn 2519438 sq-psn 7671184 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 353 rqpn 353 type RC state RTS rq-psn 15986251 sq-psn 14981724 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 354 rqpn 354 type RC state RTS rq-psn 16708969 sq-psn 4524911 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 355 rqpn 355 type RC state RTS rq-psn 4036688 sq-psn 14471189 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 356 rqpn 356 type RC state RTS rq-psn 9939133 sq-psn 10678887 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 357 rqpn 357 type RC state RTS rq-psn 11961754 sq-psn 14815794 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 358 rqpn 358 type RC state RTS rq-psn 2342945 sq-psn 9805840 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 359 rqpn 359 type RC state RTS rq-psn 8088398 sq-psn 397502 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 360 rqpn 360 type RC state RTS rq-psn 13398693 sq-psn 11574392 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 361 rqpn 361 type RC state RTS rq-psn 5489922 sq-psn 1749667 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 362 rqpn 362 type RC state RTS rq-psn 12937061 sq-psn 15517628 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 363 rqpn 363 type RC state RTS rq-psn 15801675 sq-psn 64951 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 364 rqpn 364 type RC state RTS rq-psn 13857404 sq-psn 2971383 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 365 rqpn 365 type RC state RTS rq-psn 2238123 sq-psn 10255827 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 366 rqpn 366 type RC state RTS rq-psn 16754065 sq-psn 12264656 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 367 rqpn 367 type RC state RTS rq-psn 14702739 sq-psn 10857775 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 368 rqpn 368 type RC state RTS rq-psn 7107910 sq-psn 12326633 path-mig-state MIGRATED pdn 11 pid 1626333 comm ib_write_bw 
+link usb4_rdma0/1 lqpn 1 type GSI state RTS sq-psn 0 comm [ib_core] 
+@@@STAT@@@
+link usb4_rdma0/1 sent_pkts 18708842 rcvd_pkts 18747398 duplicate_request 2049 out_of_seq_request 21 rcvd_rnr_err 0 send_rnr_err 0 rcvd_seq_err 3 ack_deferred 310680 retry_exceeded_err 0 retry_rnr_exceeded_err 0 completer_retry_err 311 send_err 0 link_downed 0 rdma_sends 0 rdma_recvs 0 
+@@@DMESG@@@
+[252132.069811] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=30 ring_posted=1 tx_sub=201 tx_done=200 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252132.097564] thunderbolt_frame: tbframe0x3: link down (3)
+[252132.302556] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252132.320165] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252132.322493] thunderbolt_frame: tbframe0x3: READY confirmed
+[252133.861822] thunderbolt_frame: tbframe0x3: link up
+[252164.837998] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=31 ring_posted=1 tx_sub=212 tx_done=211 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252164.865745] thunderbolt_frame: tbframe0x3: link down (3)
+[252165.070852] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252165.088355] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252165.090680] thunderbolt_frame: tbframe0x3: READY confirmed
+[252166.630006] thunderbolt_frame: tbframe0x3: link up
+[252197.606185] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=32 ring_posted=1 tx_sub=223 tx_done=222 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252197.633937] thunderbolt_frame: tbframe0x3: link down (3)
+[252197.838917] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252197.856527] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252197.858849] thunderbolt_frame: tbframe0x3: READY confirmed
+[252199.398181] thunderbolt_frame: tbframe0x3: link up
+[252230.374375] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=33 ring_posted=1 tx_sub=234 tx_done=233 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252230.402111] thunderbolt_frame: tbframe0x3: link down (3)
+[252230.606215] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252230.623720] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252230.626047] thunderbolt_frame: tbframe0x3: READY confirmed
+[252232.166365] thunderbolt_frame: tbframe0x3: link up
+[252263.142555] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=34 ring_posted=1 tx_sub=245 tx_done=244 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252263.170289] thunderbolt_frame: tbframe0x3: link down (3)
+[252263.374079] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252263.390658] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252264.423669] thunderbolt_frame: tbframe0x3: READY confirmed
+[252264.423672] thunderbolt_frame: tbframe0x3: link up
+### node=appmana-020 tag=post t=2026-08-28T10:02:16-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=252287 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@QP@@@
+link usb4_rdma0/1 lqpn 1 type GSI state RTS sq-psn 0 comm [ib_core] 
+@@@STAT@@@
+link usb4_rdma0/1 sent_pkts 18708842 rcvd_pkts 18747398 duplicate_request 2049 out_of_seq_request 21 rcvd_rnr_err 0 send_rnr_err 0 rcvd_seq_err 3 ack_deferred 310680 retry_exceeded_err 0 retry_rnr_exceeded_err 0 completer_retry_err 311 send_err 0 link_downed 0 rdma_sends 0 rdma_recvs 0 
+@@@DMESG@@@
+[252132.069811] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=30 ring_posted=1 tx_sub=201 tx_done=200 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252132.097564] thunderbolt_frame: tbframe0x3: link down (3)
+[252132.302556] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252132.320165] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252132.322493] thunderbolt_frame: tbframe0x3: READY confirmed
+[252133.861822] thunderbolt_frame: tbframe0x3: link up
+[252164.837998] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=31 ring_posted=1 tx_sub=212 tx_done=211 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252164.865745] thunderbolt_frame: tbframe0x3: link down (3)
+[252165.070852] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252165.088355] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252165.090680] thunderbolt_frame: tbframe0x3: READY confirmed
+[252166.630006] thunderbolt_frame: tbframe0x3: link up
+[252197.606185] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=32 ring_posted=1 tx_sub=223 tx_done=222 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252197.633937] thunderbolt_frame: tbframe0x3: link down (3)
+[252197.838917] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252197.856527] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252197.858849] thunderbolt_frame: tbframe0x3: READY confirmed
+[252199.398181] thunderbolt_frame: tbframe0x3: link up
+[252230.374375] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=33 ring_posted=1 tx_sub=234 tx_done=233 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252230.402111] thunderbolt_frame: tbframe0x3: link down (3)
+[252230.606215] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252230.623720] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252230.626047] thunderbolt_frame: tbframe0x3: READY confirmed
+[252232.166365] thunderbolt_frame: tbframe0x3: link up
+[252263.142555] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=34 ring_posted=1 tx_sub=245 tx_done=244 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252263.170289] thunderbolt_frame: tbframe0x3: link down (3)
+[252263.374079] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252263.390658] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252264.423669] thunderbolt_frame: tbframe0x3: READY confirmed
+[252264.423672] thunderbolt_frame: tbframe0x3: link up

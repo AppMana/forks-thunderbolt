@@ -1,0 +1,245 @@
+## dmesg
+[57430.341307] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57430.406180] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57430.634130] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57430.798507] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57430.847299] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57430.918862] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57434.127918] thunderbolt_ibverbs: native RX reorder discarded qpn=0x916 expected_psn=16019048 psn=16019076 kind=1 complete=0 received=8096 frags=2/260 bytes=8096
+[57434.218504] tbv_native_send_ctx_post_frames: 80 callbacks suppressed
+[57434.218506] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=91 tx_pending=0 acked_prefix=0 nak=0+0
+[57434.859019] tbv_ibdev_rx_native_frame: 25 callbacks suppressed
+[57434.859022] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x916 src_qp=0x916 psn=11466780 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57435.121545] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=84 tx_pending=0 acked_prefix=0 nak=0+0
+[57435.637207] tx queue timeout route=0x1 rail=0x0 failed=23077 queued=248820 credits=458/768 stalls=18708
+[57435.647405] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x916 src_qp=0x916 psn=11466780 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57435.721518] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=101 tx_pending=0 acked_prefix=0 nak=0+0
+[57436.076803] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57436.526581] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57436.859627] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x916 src_qp=0x916 psn=11466780 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57436.958740] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57437.058738] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57437.133670] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x916 src_qp=0x916 psn=11466780 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57437.355275] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x916 src_qp=0x916 psn=16019076 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57437.367472] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=2 dest_qp=0x916 src_qp=0x916 psn=11466795 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57438.046445] tx queue timeout route=0x1 rail=0x0 failed=5433 queued=219700 credits=431/768 stalls=18708
+[57438.089556] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=3 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=91 tx_pending=0 acked_prefix=0 nak=0+0
+[57438.980089] tx queue timeout route=0x1 rail=0x0 failed=4394 queued=199680 credits=404/768 stalls=18708
+[57439.066584] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=4 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=129 tx_pending=0 acked_prefix=0 nak=0+0
+[57441.217615] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=5 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=98 tx_pending=0 acked_prefix=0 nak=0+0
+[57441.585610] thunderbolt_ibverbs: native retransmit qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 total=1048576 retries=6 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=133 tx_pending=0 acked_prefix=0 nak=0+0
+[57441.689615] thunderbolt_ibverbs: native retransmit qpn=0x909 dest_qp=0x909 psn=4332280 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=130 tx_pending=0 acked_prefix=0 nak=0+0
+[57441.905632] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57441.975571] tx queue timeout route=0x1 rail=0x0 failed=3853 queued=95420 credits=319/768 stalls=18708
+[57441.986618] thunderbolt_ibverbs: native retransmit qpn=0x909 dest_qp=0x909 psn=4332280 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=99 tx_pending=0 acked_prefix=0 nak=0+0
+[57442.061809] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.098621] thunderbolt_ibverbs: native WR retry exhausted (-> IBV_WC_RETRY_EXC_ERR): qpn=0x904 dest_qp=0x904 psn=5687075 opcode=3 retries=7 rail=0x0 route=0x1 (frames may be arriving at peer whose ACKs are misrouted; check dest node's data_rx_op_* vs our data_rx_ack, and third nodes for unknown-QPN warns)
+[57442.221828] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.303501] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=6596019 psn=6596048 kind=1 complete=0 received=80960 frags=20/260 bytes=80960
+[57442.384077] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.467625] thunderbolt_ibverbs: native retransmit qpn=0x909 dest_qp=0x909 psn=4332280 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=105 tx_pending=0 acked_prefix=0 nak=0+0
+[57442.557602] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.577626] thunderbolt_ibverbs: native retransmit qpn=0x908 dest_qp=0x908 psn=2883881 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=118 tx_pending=0 acked_prefix=0 nak=0+0
+[57442.618626] thunderbolt_ibverbs: native retransmit qpn=0x909 dest_qp=0x909 psn=4332280 opcode=3 total=1048576 retries=3 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=78 tx_pending=0 acked_prefix=0 nak=0+0
+[57442.718373] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.825924] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x904 src_qp=0x904 psn=5687026 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57442.955827] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57443.246135] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x904 src_qp=0x904 psn=5687026 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57443.371093] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=12 dest_qp=0x912 src_qp=0x912 psn=13531556 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.003132] tbv_ibdev_rx_native_frame: 18 callbacks suppressed
+[57447.003135] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.139051] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.272336] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.401845] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.800211] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.873708] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90a src_qp=0x90a psn=10400605 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57447.985458] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x911 src_qp=0x911 psn=3539250 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57448.097651] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x911 src_qp=0x911 psn=3539250 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57448.212002] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x911 src_qp=0x911 psn=3539250 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57448.295365] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x911 src_qp=0x911 psn=3539250 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[57547.396456] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[57547.396799] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[57547.396850] thunderbolt_ibverbs: configfs: unregistered
+[57547.396897] thunderbolt_ibverbs: unloaded
+[57547.773047] using optional tb_ring_throttling() helper
+[57547.773108] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[57547.773109] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[57547.773111] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[57547.773113] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[57547.773123] thunderbolt_ibverbs: advertised 1 native service
+[57547.773134] thunderbolt_ibverbs: peer 1 created backend=native
+[57547.773804] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[57547.774011] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[57547.774013] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[57547.774055] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[57547.774096] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[57547.876992] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[57547.877007] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[57547.893590] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[57547.893594] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[57547.899878] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[57547.901084] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[57547.904289] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[57567.087851] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[57567.088171] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[57567.088215] thunderbolt_ibverbs: configfs: unregistered
+[57567.088259] thunderbolt_ibverbs: unloaded
+[57567.485679] using optional tb_ring_throttling() helper
+[57567.485739] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[57567.485741] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[57567.485742] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[57567.485744] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[57567.485754] thunderbolt_ibverbs: advertised 1 native service
+[57567.485766] thunderbolt_ibverbs: peer 1 created backend=native
+[57567.486416] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[57567.486636] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[57567.486639] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[57567.486680] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[57567.486702] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[57567.587773] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[57567.587820] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[57567.604132] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[57567.604137] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[57567.612146] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[57567.613672] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[57567.616393] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[57587.070060] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[57587.070404] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[57587.070461] thunderbolt_ibverbs: configfs: unregistered
+[57587.070495] thunderbolt_ibverbs: unloaded
+[57587.432440] using optional tb_ring_throttling() helper
+[57587.432500] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[57587.432502] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[57587.432503] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[57587.432505] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[57587.432514] thunderbolt_ibverbs: advertised 1 native service
+[57587.432525] thunderbolt_ibverbs: peer 1 created backend=native
+[57587.433205] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[57587.433410] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[57587.433412] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[57587.433454] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[57587.433477] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[57589.828646] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[57589.828661] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[57589.845264] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[57589.845269] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[57589.847602] thunderbolt_ibverbs: native READY sent route=0x1 rail=0x0
+[57589.848873] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[57589.852064] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[57607.828213] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[57607.828657] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[57607.828714] thunderbolt_ibverbs: configfs: unregistered
+[57607.828750] thunderbolt_ibverbs: unloaded
+[57608.188912] using optional tb_ring_throttling() helper
+[57608.188972] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[57608.188974] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[57608.188975] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[57608.188977] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[57608.188987] thunderbolt_ibverbs: advertised 1 native service
+[57608.188997] thunderbolt_ibverbs: peer 1 created backend=native
+[57608.189661] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[57608.189866] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[57608.189868] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[57608.189909] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[57608.189937] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[57608.292397] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[57608.292421] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[57608.308419] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[57608.308424] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[57609.354740] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[57609.355956] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[57609.359274] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[57634.488781] thunderbolt_ibverbs: unregistered per-rail ib_device peer=1 rail=0
+[57634.489276] thunderbolt_ibverbs: peer 1 destroyed backend=native
+[57634.489339] thunderbolt_ibverbs: configfs: unregistered
+[57634.489392] thunderbolt_ibverbs: unloaded
+[57634.840057] using optional tb_ring_throttling() helper
+[57634.840114] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[57634.840115] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[57634.840117] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[57634.840119] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[57634.840128] thunderbolt_ibverbs: advertised 1 native service
+[57634.840138] thunderbolt_ibverbs: peer 1 created backend=native
+[57634.840782] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[57634.840980] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[57634.840981] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[57634.841024] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[57634.841048] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[57636.165030] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[57636.165047] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[57636.181359] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[57636.181364] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[57636.183684] thunderbolt_ibverbs: native READY sent route=0x1 rail=0x0
+[57636.184951] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[57636.188038] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[57645.284754] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289139 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=93 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.284877] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289140 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=91 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.284987] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x900 src_qp=0x900 psn=12478966 base=0x777da4bdf000 received=1032192 with_imm=0
+[57645.294419] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289139 ack_status=0 total_age_ms=107 current_age_ms=4 retries=1 rnr_retries=0 reason=1
+[57645.294516] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289140 ack_status=0 total_age_ms=107 current_age_ms=7 retries=1 rnr_retries=0 reason=1
+[57645.338906] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289146 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=30 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.360560] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289146 ack_status=0 total_age_ms=172 current_age_ms=18 retries=0 rnr_retries=0 reason=3
+[57645.360571] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289147 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=41 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.367527] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289147 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=4 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.403293] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289147 ack_status=0 total_age_ms=215 current_age_ms=32 retries=0 rnr_retries=0 reason=3
+[57645.417007] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289155 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.449853] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289155 ack_status=0 total_age_ms=262 current_age_ms=29 retries=0 rnr_retries=0 reason=3
+[57645.449864] thunderbolt_ibverbs: native retransmit qpn=0x900 dest_qp=0x900 psn=13289159 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=3 age_ms=32 tx_pending=0 acked_prefix=0 nak=0+0
+[57645.456232] thunderbolt_ibverbs: native ACK matched after retry qpn=0x900 dest_qp=0x900 psn=13289159 ack_status=2 total_age_ms=267 current_age_ms=3 retries=0 rnr_retries=0 reason=3
+[57647.020757] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171051 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[57647.021029] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171052 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=60 tx_pending=0 acked_prefix=0 nak=0+0
+[57647.083769] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171053 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=61 tx_pending=0 acked_prefix=0 nak=0+0
+[57651.157818] tbv_native_send_ctx_post_frames: 6 callbacks suppressed
+[57651.157820] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171051 opcode=3 total=1048576 retries=3 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=102 tx_pending=0 acked_prefix=0 nak=0+0
+[57652.195836] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171054 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=107 tx_pending=0 acked_prefix=0 nak=0+0
+[57653.031848] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171051 opcode=3 total=1048576 retries=4 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=68 tx_pending=0 acked_prefix=0 nak=0+0
+[57653.883861] thunderbolt_ibverbs: native retransmit qpn=0x901 dest_qp=0x901 psn=3171054 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=99 tx_pending=0 acked_prefix=0 nak=0+0
+[57654.136433] thunderbolt_ibverbs: native ACK matched after retry qpn=0x901 dest_qp=0x901 psn=3171051 ack_status=0 total_age_ms=8940 current_age_ms=1098 retries=5 rnr_retries=0 reason=1
+[57657.236114] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=1592867 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=62 tx_pending=0 acked_prefix=0 nak=0+0
+[57657.605909] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=1592868 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=63 tx_pending=0 acked_prefix=0 nak=0+0
+[57657.893913] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=1592867 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=133 tx_pending=0 acked_prefix=0 nak=0+0
+[57657.964914] thunderbolt_ibverbs: native retransmit qpn=0x902 dest_qp=0x902 psn=1592868 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=74 tx_pending=0 acked_prefix=0 nak=0+0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+2385390 D    -                                kworker/u128:2+thunderbolt0
+2754767 I<   -                                kworker/u133:0-tbv_ibdev
+2800143 I<   -                                kworker/u132:0-tbv_ibdev
+2809606 I<   -                                kworker/u132:3-tbv_ibdev
+2841266 I<   -                                kworker/u132:1-tbv_ibdev
+2841267 I<   -                                kworker/u132:2-tbv_ibdev
+2841268 I<   -                                kworker/u132:4-tbv_ibdev
+2841269 I<   -                                kworker/u132:5-tbv_ibdev
+2841270 I<   -                                kworker/u132:6-tbv_ibdev
+2841305 I<   -                                kworker/u132:7-tbv_ibdev
+2841958 I<   -                                kworker/u132:8-tbv_ibdev
+2841959 I<   -                                kworker/u132:9-tbv_ibdev
+2841960 I<   -                                kworker/u132:10-tbv_ibdev
+2842070 I<   -                                kworker/u132:11-tbv_ibdev
+2842194 I<   -                                kworker/u132:12-tbv_ibdev
+2842195 I<   -                                kworker/u132:13-tbv_ibdev
+2842196 I<   -                                kworker/u132:14-tbv_ibdev
+2842197 I<   -                                kworker/u132:15-tbv_ibdev
+2842198 I<   -                                kworker/u132:16-tbv_ibdev
+2842199 I<   -                                kworker/u132:17-tbv_ibdev
+2842200 I<   -                                kworker/u132:18-tbv_ibdev
+2842201 I<   -                                kworker/u132:19-tbv_ibdev
+2842202 I<   -                                kworker/u132:20-tbv_ibdev
+2842203 I<   -                                kworker/u132:21-tbv_ibdev
+2842204 I<   -                                kworker/u132:22-tbv_ibdev
+2842205 I<   -                                kworker/u132:23-tbv_ibdev
+2842206 I<   -                                kworker/u132:24-tbv_ibdev
+2842207 I<   -                                kworker/u132:25-tbv_ibdev
+2842208 I<   -                                kworker/u132:26-tbv_ibdev
+2842209 I<   -                                kworker/u132:27-tbv_ibdev
+2842210 I<   -                                kworker/u132:28-tbv_ibdev
+2842211 I<   -                                kworker/u132:29-tbv_ibdev
+2842254 I<   -                                kworker/u132:31-tbv_ibdev
+2842256 I<   -                                kworker/u133:3-tbv_ibdev
+2842266 I<   -                                kworker/u133:5-tbv_ibdev
+2842267 I<   -                                kworker/u133:6-tbv_ibdev
+2842302 I<   -                                kworker/u133:8-tbv_ibdev
+2842351 I<   -                                kworker/u133:9-tbv_ibdev
+2842352 I<   -                                kworker/u133:10-tbv_ibdev
+2842361 I<   -                                kworker/u133:11-tbv_ibdev
+2842380 I<   -                                kworker/u133:12-tbv_ibdev
+2867054 I<   -                                kworker/R-tbv_ibdev

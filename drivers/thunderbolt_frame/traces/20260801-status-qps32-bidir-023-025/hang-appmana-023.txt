@@ -1,0 +1,211 @@
+## dmesg
+[ 5715.535044] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[ 5715.535052] thunderbolt_ibverbs: advertised 1 native service
+[ 5715.535078] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[ 5715.535100] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[ 5716.833709] thunderbolt_ibverbs: native HELLO route=0x1 rail=0x0 has no matching peer rail
+[ 5717.420159] thunderbolt 0-1: new host found, vendor=0x8086 device=0x1
+[ 5717.420164] thunderbolt 0-1: Intel Corp. appmana-025
+[ 5717.420432] thunderbolt_ibverbs: peer 1 created backend=native
+[ 5717.421153] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[ 5717.421361] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[ 5717.421363] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[ 5717.426954] thunderbolt-net 0-1.0 tb-ch7: renamed from thunderbolt0
+[ 5717.522533] thunderbolt_ibverbs: native HELLO_ACK received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[ 5717.522545] thunderbolt_ibverbs: native HELLO negotiated route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1 attempt=1
+[ 5717.538836] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[ 5717.538841] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[ 5717.860790] thunderbolt_ibverbs: native READY received route=0x1 rail=0x0
+[ 5717.861924] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[ 5717.866651] thunderbolt 0000:06:00.0 tbr-appmana025: renamed from u4r0
+[ 5738.923598] thunderbolt 0-3: failed read XDomain properties from 385a8780-0066-302d-ffff-ffffffffffff
+[56553.531157] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185256 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=121 tx_pending=0 acked_prefix=0 nak=0+0
+[56553.544822] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185257 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=122 tx_pending=0 acked_prefix=0 nak=0+0
+[56553.675154] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185258 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=73 tx_pending=0 acked_prefix=0 nak=0+0
+[56553.699333] thunderbolt_ibverbs: native ACK matched after retry qpn=0x960 dest_qp=0x960 psn=13185256 ack_status=0 total_age_ms=788 current_age_ms=155 retries=1 rnr_retries=0 reason=1
+[56555.167178] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185257 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=112 tx_pending=0 acked_prefix=0 nak=0+0
+[56556.820183] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185258 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=68 tx_pending=0 acked_prefix=0 nak=0+0
+[56557.856197] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185257 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=75 tx_pending=0 acked_prefix=0 nak=0+0
+[56558.230312] thunderbolt_ibverbs: native ACK matched after retry qpn=0x960 dest_qp=0x960 psn=13185257 ack_status=0 total_age_ms=5319 current_age_ms=369 retries=3 rnr_retries=0 reason=1
+[56558.336201] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185258 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=69 tx_pending=0 acked_prefix=0 nak=0+0
+[56558.424202] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185259 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=137 tx_pending=0 acked_prefix=0 nak=0+0
+[56559.237215] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185260 opcode=3 total=1048576 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=86 tx_pending=0 acked_prefix=0 nak=0+0
+[56559.595306] du invoked oom-killer: gfp_mask=0x8c40(GFP_NOFS|__GFP_NOFAIL), order=0, oom_score_adj=999
+[56559.595313] CPU: 16 UID: 0 PID: 2809480 Comm: du Kdump: loaded Tainted: G           OE       6.17.0-40-generic #40~24.04.1-Ubuntu PREEMPT(voluntary) 
+[56559.595317] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+[56559.595318] Hardware name: ASUS System Product Name/ROG STRIX X670E-I GAMING WIFI, BIOS 3842 03/11/2026
+[56559.595320] Call Trace:
+[56559.595322]  <TASK>
+[56559.595325]  dump_stack_lvl+0x76/0xa0
+[56559.595329]  dump_stack+0x10/0x20
+[56559.595330]  dump_header+0x48/0x210
+[56559.595333]  oom_kill_process+0x118/0x290
+[56559.595335]  out_of_memory+0x101/0x340
+[56559.595337]  mem_cgroup_out_of_memory+0x100/0x120
+[56559.595341]  try_charge_memcg+0x469/0x730
+[56559.595344]  charge_memcg+0x34/0x90
+[56559.595346]  __mem_cgroup_charge+0x2d/0xa0
+[56559.595348]  filemap_add_folio+0x46/0xf0
+[56559.595353]  attach_eb_folio_to_filemap+0x76/0x3d0 [btrfs]
+[56559.595386]  alloc_extent_buffer+0x224/0x700 [btrfs]
+[56559.595408]  btrfs_find_create_tree_block+0xe/0x20 [btrfs]
+[56559.595432]  btrfs_readahead_tree_block+0x51/0xd0 [btrfs]
+[56559.595454]  btrfs_readahead_node_child+0xb3/0xd0 [btrfs]
+[56559.595473]  reada_for_search+0x12d/0x290 [btrfs]
+[56559.595497]  read_block_for_search+0x291/0x390 [btrfs]
+[56559.595517]  btrfs_search_slot+0x397/0x1070 [btrfs]
+[56559.595537]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595540]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595541]  ? kmem_cache_alloc_noprof+0x120/0x3c0
+[56559.595544]  btrfs_lookup_file_extent+0x46/0x70 [btrfs]
+[56559.595565]  btrfs_get_extent+0x11f/0x6f0 [btrfs]
+[56559.595590]  btrfs_do_readpage+0x1d7/0x7f0 [btrfs]
+[56559.595610]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595611]  ? xas_load+0x17/0x100
+[56559.595613]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595616]  btrfs_readahead+0xe1/0x1a0 [btrfs]
+[56559.595635]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595637]  ? __pfx_end_bbio_data_read+0x10/0x10 [btrfs]
+[56559.595658]  read_pages+0x81/0x240
+[56559.595661]  ? free_frozen_pages+0x10/0x20
+[56559.595662]  ? __folio_put+0xa1/0x110
+[56559.595664]  page_cache_ra_unbounded+0x184/0x230
+[56559.595667]  page_cache_ra_order+0x377/0x3b0
+[56559.595668]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595670]  ? xas_load+0x17/0x100
+[56559.595671]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595673]  ? filemap_get_entry+0xff/0x1d0
+[56559.595675]  do_sync_mmap_readahead+0x1b9/0x540
+[56559.595678]  filemap_fault+0x42f/0xd50
+[56559.595680]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595681]  ? srso_alias_return_thunk+0x5/0xfbef5
+[56559.595682]  ? cp_new_stat+0x141/0x180
+[56559.595685]  __do_fault+0x3a/0x190
+[56559.595688]  do_read_fault+0x12e/0x230
+[56559.595689]  do_fault+0x167/0x280
+[56559.595691]  handle_pte_fault+0x15e/0x200
+[56559.595693]  __handle_mm_fault+0x5ba/0x740
+[56559.595697]  handle_mm_fault+0x120/0x370
+[56559.595699]  do_user_addr_fault+0x1d2/0x8d0
+[56559.595703]  exc_page_fault+0x7f/0x1b0
+[56559.595706]  asm_exc_page_fault+0x27/0x30
+[56559.595707] RIP: 0033:0x78c631c5c780
+[56559.595711] Code: Unable to access opcode bytes at 0x78c631c5c756.
+[56559.595711] RSP: 002b:00007ffd29dd6b08 EFLAGS: 00010202
+[56559.595712] RAX: 0000000000000006 RBX: 00005d49fff22c70 RCX: 0000000000000006
+[56559.595713] RDX: 0000000000000000 RSI: 0000000000000007 RDI: 0000000000000007
+[56559.595714] RBP: 0000000000000006 R08: 0000000000002ed0 R09: 000078c631d42b20
+[56559.595715] R10: 0000000000001000 R11: 0000000000000246 R12: 00005d49fff39c00
+[56559.595715] R13: 00005d49fff22c70 R14: 0000000000000358 R15: 0000000000000000
+[56559.595718]  </TASK>
+[56559.595719] memory: usage 262144kB, limit 262144kB, failcnt 77781
+[56559.595728] swap: usage 8kB, limit 9007199254740988kB, failcnt 0
+[56559.595729] Memory cgroup stats for /kubepods/burstable/pod04e3b311-3970-47a4-af34-624ff7fd7a9e:
+[56559.595772] anon 21729280
+[56559.595774] file 696320
+[56559.595775] kernel 245796864
+[56559.595776] kernel_stack 65536
+[56559.595776] pagetables 225280
+[56559.595777] sec_pagetables 0
+[56559.595778] percpu 123080
+[56559.595779] sock 0
+[56559.595780] vmalloc 16384
+[56559.595780] shmem 0
+[56559.595781] zswap 0
+[56559.595782] zswapped 0
+[56559.595783] file_mapped 16384
+[56559.595784] file_dirty 0
+[56559.595784] file_writeback 0
+[56559.595785] swapcached 0
+[56559.595786] anon_thp 0
+[56559.595787] file_thp 0
+[56559.595788] shmem_thp 0
+[56559.595789] inactive_anon 1306624
+[56559.595789] active_anon 20422656
+[56559.595790] inactive_file 0
+[56559.595791] active_file 299008
+[56559.595792] unevictable 0
+[56559.595793] slab_reclaimable 258662704
+[56559.595793] slab_unreclaimable 361752
+[56559.595794] slab 259024456
+[56559.595795] workingset_refault_anon 1
+[56559.595796] workingset_refault_file 5873975
+[56559.595797] workingset_activate_anon 1
+[56559.595798] workingset_activate_file 74894
+[56559.595798] workingset_restore_anon 1
+[56559.595799] workingset_restore_file 931235
+[56559.595800] workingset_nodereclaim 0
+[56559.595801] pgdemote_kswapd 0
+[56559.595802] pgdemote_direct 0
+[56559.595802] pgdemote_khugepaged 0
+[56559.595803] pgdemote_proactive 0
+[56559.595804] pgpromote_success 0
+[56559.595805] pgscan 6037436
+[56559.595806] pgsteal 5924366
+[56559.595806] pswpin 1
+[56559.595807] pswpout 2
+[56559.595808] pgscan_kswapd 0
+[56559.595809] pgscan_direct 6037436
+[56559.595810] pgscan_khugepaged 0
+[56559.595810] pgscan_proactive 0
+[56559.595811] pgsteal_kswapd 0
+[56559.595812] pgsteal_direct 5924366
+[56559.595813] pgsteal_khugepaged 0
+[56559.595814] pgsteal_proactive 0
+[56559.595814] pgfault 623408
+[56559.595815] pgmajfault 6201
+[56559.595816] pgrefill 24640865
+[56559.595817] pgactivate 50854
+[56559.595818] pgdeactivate 0
+[56559.595818] pglazyfree 0
+[56559.595819] pglazyfreed 0
+[56559.595820] swpin_zero 0
+[56559.595821] swpout_zero 0
+[56559.595821] zswpin 0
+[56559.595822] zswpout 0
+[56559.595823] zswpwb 0
+[56559.595824] thp_fault_alloc 0
+[56559.595825] thp_collapse_alloc 0
+[56559.595825] thp_swpout 0
+[56559.595826] thp_swpout_fallback 0
+[56559.595827] numa_pages_migrated 0
+[56559.595828] numa_pte_updates 0
+[56559.595829] numa_hint_faults 0
+[56559.595829] Tasks state (memory values in pages):
+[56559.595830] [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+[56559.595832] [  12526]     0 12526       49        0        0        0         0    24576        0          -998 pause
+[56559.595835] [  12734]     0 12734    46044     4239     4239        0         0   131072        0           999 python
+[56559.595837] [2809480]     0 2809480     1511      746      640      106         0    57344        0           999 du
+[56559.595839] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=1fabd9c73f0959654c9ebd84e84a4d7b06ec41f58f10f53a0c48aa5b3c96d31e,mems_allowed=0,oom_memcg=/kubepods/burstable/pod04e3b311-3970-47a4-af34-624ff7fd7a9e,task_memcg=/kubepods/burstable/pod04e3b311-3970-47a4-af34-624ff7fd7a9e/1fabd9c73f0959654c9ebd84e84a4d7b06ec41f58f10f53a0c48aa5b3c96d31e,task=python,pid=12734,uid=0
+[56559.595852] Memory cgroup out of memory: Killed process 12734 (python) total-vm:184176kB, anon-rss:16956kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:128kB oom_score_adj:999
+[56559.595930] Tasks in /kubepods/burstable/pod04e3b311-3970-47a4-af34-624ff7fd7a9e/1fabd9c73f0959654c9ebd84e84a4d7b06ec41f58f10f53a0c48aa5b3c96d31e are going to be killed due to memory.oom.group set
+[56559.595933] Memory cgroup out of memory: Killed process 2809480 (du) total-vm:6044kB, anon-rss:2560kB, file-rss:424kB, shmem-rss:0kB, UID:0 pgtables:56kB oom_score_adj:999
+[56560.063225] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185259 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=106 tx_pending=0 acked_prefix=0 nak=0+0
+[56560.652989] thunderbolt_ibverbs: native ACK matched after retry qpn=0x960 dest_qp=0x960 psn=13185258 ack_status=0 total_age_ms=7741 current_age_ms=2304 retries=3 rnr_retries=0 reason=1
+[56560.754223] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185260 opcode=3 total=1048576 retries=1 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=122 tx_pending=0 acked_prefix=0 nak=0+0
+[56561.823233] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185260 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=92 tx_pending=0 acked_prefix=0 nak=0+0
+[56562.239236] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185259 opcode=3 total=1048576 retries=2 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=120 tx_pending=0 acked_prefix=0 nak=0+0
+[56562.652246] thunderbolt_ibverbs: native retransmit qpn=0x960 dest_qp=0x960 psn=13185260 opcode=3 total=1048576 retries=3 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=138 tx_pending=0 acked_prefix=0 nak=0+0
+[56562.827408] thunderbolt_ibverbs: native ACK matched after retry qpn=0x960 dest_qp=0x960 psn=13185259 ack_status=0 total_age_ms=9916 current_age_ms=584 retries=3 rnr_retries=0 reason=1
+[56563.123095] thunderbolt_ibverbs: native ACK matched after retry qpn=0x960 dest_qp=0x960 psn=13185260 ack_status=0 total_age_ms=10211 current_age_ms=465 retries=4 rnr_retries=0 reason=1
+[56563.404508] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404732] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404738] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404739] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404741] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404742] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404744] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404745] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404747] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.404749] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x960 src_qp=0x960 psn=13835114 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[56563.418493] thunderbolt_ibverbs: native RX active WRITE discarded qpn=0x960 expected_psn=13835114 psn=13835114 src_qp=0x960 received=503808 base=0x7674e6b02000 with_imm=0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+ 408750 I<   -                                kworker/R-tbv_ibdev
+2686802 I<   -                                kworker/u132:1-tbv_ibdev
+2754767 I<   -                                kworker/u133:0-tbv_ibdev
+2779560 I<   -                                kworker/u133:1-tbv_ibdev
+2783485 I<   -                                kworker/u132:2-tbv_ibdev
+2800143 I<   -                                kworker/u132:0-tbv_ibdev
+2806441 I<   -                                kworker/u133:2-tbv_ibdev
+2809606 I<   -                                kworker/u132:3-tbv_ibdev

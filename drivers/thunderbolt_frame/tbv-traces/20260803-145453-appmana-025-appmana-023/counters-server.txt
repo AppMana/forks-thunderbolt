@@ -1,0 +1,74 @@
+### node=appmana-025 tag=pre t=2026-08-03T14:54:54-07:00
+@@@HOST@@@
+hostname=appmana-025 boot_id=dce03650-bac2-4dd6-af70-a77db4fdc9eb uptime=389 kernel=6.17.0-40-generic loaded_version=none loaded_src=76700F7E6CA1B4CCA653263
+@@@PARAMS@@@
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[  382.986977] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[  382.986979] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[  382.986980] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[  382.986981] tbrxe0: qp#18 rxe_receiver: state = DONE
+[  382.986983] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[  382.986984] tbrxe0: qp#18 rxe_receiver: state = CHK_PSN
+[  382.986985] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_SEQ
+[  382.986986] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_VALID
+[  382.986987] tbrxe0: qp#18 rxe_receiver: state = CHK_RESOURCE
+[  382.986988] tbrxe0: qp#18 rxe_receiver: state = CHK_LENGTH
+[  382.986990] tbrxe0: qp#18 rxe_receiver: state = CHK_RKEY
+[  382.986991] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[  382.986992] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[  382.986993] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[  382.986995] tbrxe0: qp#18 rxe_receiver: state = DONE
+[  382.986996] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[  382.986997] tbrxe0: qp#18 rxe_receiver: state = CHK_PSN
+[  382.986998] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_SEQ
+[  382.986999] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_VALID
+[  382.987000] tbrxe0: qp#18 rxe_receiver: state = CHK_RESOURCE
+[  382.987002] tbrxe0: qp#18 rxe_receiver: state = CHK_LENGTH
+[  382.987003] tbrxe0: qp#18 rxe_receiver: state = CHK_RKEY
+[  382.987004] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[  382.987005] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[  382.987008] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[  382.987009] tbrxe0: qp#18 rxe_receiver: state = DONE
+[  382.987010] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[  382.987011] tbrxe0: qp#18 rxe_receiver: state = EXIT
+[  382.987013] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[  382.987014] tbrxe0: qp#18 rxe_receiver: state = EXIT
+### node=appmana-025 tag=post t=2026-08-03T14:57:50-07:00
+@@@HOST@@@
+hostname=appmana-025 boot_id=dce03650-bac2-4dd6-af70-a77db4fdc9eb uptime=566 kernel=6.17.0-40-generic loaded_version=none loaded_src=76700F7E6CA1B4CCA653263
+@@@PARAMS@@@
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[  563.685954] tbrxe0: qp#89 rxe_completer: state = EXIT
+[  563.686769] tbrxe0: qp#89 rxe_completer: state = GET ACK
+[  563.686771] tbrxe0: qp#89 rxe_completer: state = GET WQE
+[  563.686772] tbrxe0: qp#89 rxe_completer: state = CHECK PSN
+[  563.686774] tbrxe0: qp#89 rxe_completer: state = CHECK ACK
+[  563.686775] tbrxe0: qp#89 rxe_completer: state = WRITE/SEND
+[  563.686776] tbrxe0: qp#89 rxe_completer: state = UPDATE COMP
+[  563.686778] tbrxe0: qp#89 rxe_completer: state = DONE
+[  563.686779] tbrxe0: qp#89 rxe_completer: state = GET ACK
+[  563.686781] tbrxe0: qp#89 rxe_completer: state = GET WQE
+[  563.686782] tbrxe0: qp#89 rxe_completer: state = EXIT
+[  563.687496] tbrxe0: qp#89 rxe_completer: state = GET ACK
+[  563.687498] tbrxe0: qp#89 rxe_completer: state = GET WQE
+[  563.687499] tbrxe0: qp#89 rxe_completer: state = CHECK PSN
+[  563.687500] tbrxe0: qp#89 rxe_completer: state = CHECK ACK
+[  563.687502] tbrxe0: qp#89 rxe_completer: state = WRITE/SEND
+[  563.687503] tbrxe0: qp#89 rxe_completer: state = COMP ACK
+[  563.687505] tbrxe0: qp#89 rxe_completer: state = UPDATE COMP
+[  563.687506] tbrxe0: qp#89 rxe_completer: state = DONE
+[  563.687508] tbrxe0: qp#89 rxe_completer: state = GET ACK
+[  563.687509] tbrxe0: qp#89 rxe_completer: state = GET WQE
+[  563.687510] tbrxe0: qp#89 rxe_completer: state = EXIT
+[  563.695359] tbrxe0: qp#108 retransmit_timer: retransmit timer fired
+[  563.695366] tbrxe0: qp#108 rxe_completer: state = GET ACK
+[  563.695368] tbrxe0: qp#108 rxe_completer: state = GET WQE
+[  563.695369] tbrxe0: qp#108 rxe_completer: state = EXIT
+[  563.759357] tbrxe0: qp#89 retransmit_timer: retransmit timer fired
+[  563.759373] tbrxe0: qp#89 rxe_completer: state = GET ACK
+[  563.759377] tbrxe0: qp#89 rxe_completer: state = GET WQE
+[  563.759379] tbrxe0: qp#89 rxe_completer: state = EXIT

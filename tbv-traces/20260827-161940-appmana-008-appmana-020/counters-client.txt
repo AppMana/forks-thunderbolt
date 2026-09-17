@@ -1,0 +1,76 @@
+### node=appmana-020 tag=pre t=2026-08-27T16:19:42-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=188533 kernel=6.17.0-42-generic loaded_version=2.89 loaded_src=2A6EDCFDC13D37CC3D6799F
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[188333.889803] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188334.772151] thunderbolt_frame: tbframe0x1: READY confirmed
+[188336.487965] thunderbolt_frame: tbframe0x1: link up
+[188336.490016] infiniband usb4_rdma1: added over tbframe0x1
+[188336.573838] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana008 peer appmana-008 local_eui64=004e72fffe92d0cd
+[188351.050119] thunderbolt_frame: tbframe0x1: link down (2)
+[188351.052414] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188351.069012] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188352.338140] thunderbolt_frame: tbframe0x1: READY confirmed
+[188352.338144] thunderbolt_frame: tbframe0x1: link up
+[188365.818492] thunderbolt_frame: tbframe0x1: link down (2)
+[188365.820791] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188365.837397] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188367.057264] thunderbolt_frame: tbframe0x1: READY confirmed
+[188367.057268] thunderbolt_frame: tbframe0x1: link up
+[188381.369945] thunderbolt_frame: tbframe0x1: link down (2)
+[188381.372060] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188381.388661] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188382.609371] thunderbolt_frame: tbframe0x1: READY confirmed
+[188382.609374] thunderbolt_frame: tbframe0x1: link up
+[188398.522950] thunderbolt_frame: tbframe0x1: link down (2)
+[188398.525252] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188398.541838] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188399.762513] thunderbolt_frame: tbframe0x1: READY confirmed
+[188399.762518] thunderbolt_frame: tbframe0x1: link up
+[188418.875088] thunderbolt_frame: tbframe0x1: link down (2)
+[188418.877381] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188418.893972] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188420.114659] thunderbolt_frame: tbframe0x1: READY confirmed
+[188420.114664] thunderbolt_frame: tbframe0x1: link up
+### node=appmana-020 tag=post t=2026-08-27T16:19:55-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=188545 kernel=6.17.0-42-generic loaded_version=2.89 loaded_src=2A6EDCFDC13D37CC3D6799F
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[188333.889803] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188334.772151] thunderbolt_frame: tbframe0x1: READY confirmed
+[188336.487965] thunderbolt_frame: tbframe0x1: link up
+[188336.490016] infiniband usb4_rdma1: added over tbframe0x1
+[188336.573838] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana008 peer appmana-008 local_eui64=004e72fffe92d0cd
+[188351.050119] thunderbolt_frame: tbframe0x1: link down (2)
+[188351.052414] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188351.069012] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188352.338140] thunderbolt_frame: tbframe0x1: READY confirmed
+[188352.338144] thunderbolt_frame: tbframe0x1: link up
+[188365.818492] thunderbolt_frame: tbframe0x1: link down (2)
+[188365.820791] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188365.837397] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188367.057264] thunderbolt_frame: tbframe0x1: READY confirmed
+[188367.057268] thunderbolt_frame: tbframe0x1: link up
+[188381.369945] thunderbolt_frame: tbframe0x1: link down (2)
+[188381.372060] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188381.388661] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188382.609371] thunderbolt_frame: tbframe0x1: READY confirmed
+[188382.609374] thunderbolt_frame: tbframe0x1: link up
+[188398.522950] thunderbolt_frame: tbframe0x1: link down (2)
+[188398.525252] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188398.541838] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188399.762513] thunderbolt_frame: tbframe0x1: READY confirmed
+[188399.762518] thunderbolt_frame: tbframe0x1: link up
+[188418.875088] thunderbolt_frame: tbframe0x1: link down (2)
+[188418.877381] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[188418.893972] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[188420.114659] thunderbolt_frame: tbframe0x1: READY confirmed
+[188420.114664] thunderbolt_frame: tbframe0x1: link up

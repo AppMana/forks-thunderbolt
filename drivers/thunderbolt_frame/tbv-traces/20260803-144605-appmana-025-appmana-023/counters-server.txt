@@ -1,0 +1,41 @@
+### node=appmana-025 tag=pre t=2026-08-03T14:46:06-07:00
+@@@HOST@@@
+hostname=appmana-025 boot_id=cffa5bda-c74d-4fe3-8449-5f2232d3d1e1 uptime=4071 kernel=6.17.0-40-generic loaded_version=none loaded_src=B804FE5B49960B2F6FC0803
+@@@PARAMS@@@
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[ 4058.527753] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[ 4058.527755] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[ 4058.527757] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[ 4058.527760] tbrxe0: qp#18 rxe_receiver: state = DONE
+[ 4058.527762] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[ 4058.527764] tbrxe0: qp#18 rxe_receiver: state = CHK_PSN
+[ 4058.527766] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_SEQ
+[ 4058.527768] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_VALID
+[ 4058.527770] tbrxe0: qp#18 rxe_receiver: state = CHK_RESOURCE
+[ 4058.527772] tbrxe0: qp#18 rxe_receiver: state = CHK_LENGTH
+[ 4058.527774] tbrxe0: qp#18 rxe_receiver: state = CHK_RKEY
+[ 4058.527776] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[ 4058.527778] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[ 4058.527780] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[ 4058.527782] tbrxe0: qp#18 rxe_receiver: state = DONE
+[ 4058.527785] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[ 4058.527787] tbrxe0: qp#18 rxe_receiver: state = CHK_PSN
+[ 4058.527789] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_SEQ
+[ 4058.527791] tbrxe0: qp#18 rxe_receiver: state = CHK_OP_VALID
+[ 4058.527793] tbrxe0: qp#18 rxe_receiver: state = CHK_RESOURCE
+[ 4058.527795] tbrxe0: qp#18 rxe_receiver: state = CHK_LENGTH
+[ 4058.527797] tbrxe0: qp#18 rxe_receiver: state = CHK_RKEY
+[ 4058.527799] tbrxe0: qp#18 rxe_receiver: state = EXECUTE
+[ 4058.527801] tbrxe0: qp#18 rxe_receiver: state = ACKNOWLEDGE
+[ 4058.527809] tbrxe0: qp#18 rxe_receiver: state = CLEANUP
+[ 4058.527811] tbrxe0: qp#18 rxe_receiver: state = DONE
+[ 4058.527813] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[ 4058.527815] tbrxe0: qp#18 rxe_receiver: state = EXIT
+[ 4058.527817] tbrxe0: qp#18 rxe_receiver: state = GET_REQ
+[ 4058.527819] tbrxe0: qp#18 rxe_receiver: state = EXIT
+### node=appmana-025 tag=hang-round1 t=2026-08-03T14:47:55-07:00
+ssh: connect to host appmana-025.i.appmana.com port 22: No route to host
+### node=appmana-025 tag=post t=2026-08-03T14:48:26-07:00
+ssh: connect to host appmana-025.i.appmana.com port 22: No route to host

@@ -1,0 +1,4 @@
+started=2026-08-27T16:19:42-07:00
+server=appmana-008 target=administrator@appmana-008 device=usb4_rdma1 expected_netdev=tbr-appmana020 bootstrap=10.2.0.50
+client=appmana-020 target=administrator@appmana-020 device=usb4_rdma1 expected_netdev=tbr-appmana008
+size=1048576 iters=1000 tx_depth=32 qps=1 rounds=1 round_timeout=45

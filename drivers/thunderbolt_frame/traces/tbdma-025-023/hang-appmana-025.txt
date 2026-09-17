@@ -1,0 +1,208 @@
+## dmesg
+[    4.688305] systemd[1]: Finished modprobe@drm.service - Load Kernel Module drm.
+[    4.688512] systemd[1]: modprobe@efi_pstore.service: Deactivated successfully.
+[    4.688616] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel Module efi_pstore.
+[    4.688848] systemd[1]: modprobe@fuse.service: Deactivated successfully.
+[    4.688943] systemd[1]: Finished modprobe@fuse.service - Load Kernel Module fuse.
+[    4.689124] systemd[1]: modprobe@loop.service: Deactivated successfully.
+[    4.689215] systemd[1]: Finished modprobe@loop.service - Load Kernel Module loop.
+[    4.689394] systemd[1]: modprobe@nvme_fabrics.service: Deactivated successfully.
+[    4.689491] systemd[1]: Finished modprobe@nvme_fabrics.service - Load Kernel Module nvme_fabrics.
+[    4.690253] systemd[1]: Mounting sys-fs-fuse-connections.mount - FUSE Control File System...
+[    4.690868] systemd[1]: Mounting sys-kernel-config.mount - Kernel Configuration File System...
+[    4.690966] systemd[1]: systemd-repart.service - Repartition Root Disk was skipped because no trigger condition checks were met.
+[    4.691043] BTRFS info (device nvme0n1p2 state M): use zstd compression, level 3
+[    4.691816] systemd[1]: Starting systemd-tmpfiles-setup-dev-early.service - Create Static Device Nodes in /dev gracefully...
+[    4.692466] systemd[1]: Finished systemd-remount-fs.service - Remount Root and Kernel File Systems.
+[    4.693143] systemd[1]: Activating swap swapfile.swap - /swapfile...
+[    4.693896] systemd[1]: Starting multipathd.service - Device-Mapper Multipath Device Controller...
+[    4.694120] systemd[1]: systemd-hwdb-update.service - Rebuild Hardware Database was skipped because of an unmet condition check (ConditionNeedsUpdate=/etc).
+[    4.694148] systemd[1]: systemd-pstore.service - Platform Persistent Storage Archival was skipped because of an unmet condition check (ConditionDirectoryNotEmpty=/sys/fs/pstore).
+[    4.694735] systemd[1]: Starting systemd-random-seed.service - Load/Save OS Random Seed...
+[    4.694775] systemd[1]: systemd-tpm2-setup.service - TPM2 SRK Setup was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+[    4.695195] systemd[1]: Mounted sys-fs-fuse-connections.mount - FUSE Control File System.
+[    4.695283] systemd[1]: Mounted sys-kernel-config.mount - Kernel Configuration File System.
+[    4.698596] nct6775: Found NCT6796D-S/NCT6799D-R or compatible chip at 0x2e:0x290
+[    4.700642] systemd[1]: Finished systemd-tmpfiles-setup-dev-early.service - Create Static Device Nodes in /dev gracefully.
+[    4.700785] systemd[1]: systemd-sysusers.service - Create System Users was skipped because no trigger condition checks were met.
+[    4.700819] Adding 63911932k swap on /swapfile.  Priority:-2 extents:126 across:1309200384k SS
+[    4.701381] systemd[1]: Starting systemd-tmpfiles-setup-dev.service - Create Static Device Nodes in /dev...
+[    4.701431] systemd[1]: Activated swap swapfile.swap - /swapfile.
+[    4.701536] systemd[1]: Reached target swap.target - Swaps.
+[    4.711154] systemd[1]: Finished keyboard-setup.service - Set the console keyboard layout.
+[    4.722557] systemd[1]: Finished lvm2-monitor.service - Monitoring of LVM2 mirrors, snapshots etc. using dmeventd or progress polling.
+[    4.734571] systemd[1]: Finished systemd-tmpfiles-setup-dev.service - Create Static Device Nodes in /dev.
+[    4.735418] systemd[1]: Starting systemd-udevd.service - Rule-based Manager for Device Events and Files...
+[    4.742485] systemd[1]: Finished systemd-random-seed.service - Load/Save OS Random Seed.
+[    4.745040] nvme nvme0: using unchecked data buffer
+[    4.745740] systemd[1]: Started multipathd.service - Device-Mapper Multipath Device Controller.
+[    4.753934] systemd[1]: Started systemd-journald.service - Journal Service.
+[    4.760605] systemd-journald[642]: Received client request to flush runtime journal.
+[    4.771890] systemd-journald[642]: /var/log/journal/8a05b1a0afa14a529efeb49f88a0ed22/system.journal: Journal file uses a different sequence number ID, rotating.
+[    4.771899] systemd-journald[642]: Rotating system journal.
+[    4.776353] rdma_rxe: loaded
+[    4.782801] using optional tb_ring_throttling() helper
+[    4.782856] thunderbolt_ibverbs: configfs: registered /sys/kernel/config/thunderbolt_ibverbs
+[    4.782860] thunderbolt_ibverbs: backend native-linux rc=1 uc=1 tbnet_identity=0
+[    4.782864] thunderbolt_ibverbs: core ready profile=linux_perf rc=1 uc=1
+[    4.782868] thunderbolt_ibverbs: native control using source-aware XDomain handler
+[    4.782880] thunderbolt_ibverbs: advertised 2 native services
+[    4.782894] thunderbolt_ibverbs: peer 1 created backend=native
+[    4.785093] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=1 rx_hop=1 out_hop=8
+[    4.785393] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=1 rx_hop=1
+[    4.785399] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x1 link_speed=20Gb/s width=0x1 rail=0x7cd61f4b path_id=1
+[    4.785431] thunderbolt 0-1: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[    4.785449] thunderbolt_ibverbs: Thunderbolt service binding enabled
+[    4.785460] thunderbolt_ibverbs: loaded compat=auto profile=linux_perf resolved_profile=linux_perf tbnet=allow tbnet_identity=off tbnet_identity_minimal_e2e=0 tbnet_identity_minimal_apple_only=1 lanes=auto link_owner=rdma native_control=source_aware native_data=1 apple_data=0 native_fragment_striping=0 native_home_rail_qp=0 native_data_e2e=0
+[    4.826541] coredump: 740(systemd-sysctl): Unsafe core_pattern used with fs.suid_dumpable=2: pipe handler or fully qualified core dump path required. Set kernel.core_pattern before fs.suid_dumpable.
+[    4.867104] thunderbolt-net 0-1.0 tb-ch6: renamed from thunderbolt0
+[    4.891935] ccp 0000:78:00.2: enabling device (0000 -> 0002)
+[    4.898271] ccp 0000:78:00.2: tee enabled
+[    4.898555] ccp 0000:78:00.2: psp enabled
+[    4.922354] piix4_smbus 0000:00:14.0: SMBus Host Controller at 0xb00, revision 0
+[    4.922357] piix4_smbus 0000:00:14.0: Using register 0x02 for SMBus port selection
+[    4.925737] i2c i2c-1: Successfully instantiated SPD at 0x51
+[    4.930313] piix4_smbus 0000:00:14.0: Auxiliary SMBus Host Controller at 0xb20
+[    4.932814] asus_wmi: ASUS WMI generic driver loaded
+[    4.937522] asus_wmi: failed to register LPS0 sleep handler in asus-wmi
+[    4.937634] asus_wmi: SFUN value: 0x1
+[    4.937637] eeepc-wmi eeepc-wmi: Detected ATK, not ASUSWMI, use DSTS
+[    4.938152] mfd-aaeon 97845ED0-4E6D-11DE-8A39-0800200C9A66-1: Legacy driver mfd-aaeon cannot be instantiated multiple times
+[    4.940514] input: Eee PC WMI hotkeys as /devices/platform/eeepc-wmi/input/input3
+[    4.940716] snd_hda_intel 0000:01:00.1: enabling device (0000 -> 0002)
+[    4.940878] snd_hda_intel 0000:01:00.1: Disabling MSI
+[    4.940886] snd_hda_intel 0000:01:00.1: Handle vga_switcheroo audio client
+[    4.941066] snd_hda_intel 0000:78:00.1: enabling device (0000 -> 0002)
+[    4.941231] snd_hda_intel 0000:78:00.1: Handle vga_switcheroo audio client
+[    4.946773] spd5118 1-0051: DDR5 temperature sensor: vendor 0x00:0xb3 revision 2.2
+[    4.947342] RAPL PMU: API unit is 2^-32 Joules, 2 fixed counters, 163840 ms ovfl timer
+[    4.947345] RAPL PMU: hw unit of domain package 2^-16 Joules
+[    4.947346] RAPL PMU: hw unit of domain core 2^-16 Joules
+[    4.949068] input: HD-Audio Generic HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input4
+[    4.949141] input: HD-Audio Generic HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input5
+[    4.949237] input: HD-Audio Generic HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:08.1/0000:78:00.1/sound/card1/input6
+[    4.961065] input: HDA NVidia HDMI/DP,pcm=3 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input7
+[    4.961122] input: HDA NVidia HDMI/DP,pcm=7 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input8
+[    4.962732] input: HDA NVidia HDMI/DP,pcm=8 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input9
+[    4.962783] input: HDA NVidia HDMI/DP,pcm=9 as /devices/pci0000:00/0000:00:01.1/0000:01:00.1/sound/card0/input10
+[    4.992874] kvm_amd: TSC scaling supported
+[    4.992877] kvm_amd: Nested Virtualization enabled
+[    4.992878] kvm_amd: Nested Paging enabled
+[    4.992880] kvm_amd: LBR virtualization supported
+[    4.992892] kvm_amd: Virtual GIF supported
+[    4.992893] kvm_amd: Virtual NMI enabled
+[    6.041327] MCE: In-kernel MCE decoding enabled.
+[    6.042239] [drm] amdgpu kernel modesetting enabled.
+[    6.042257] amdgpu: vga_switcheroo: detected switching method \_SB_.PCI0.GP17.VGA_.ATPX handle
+[    6.042418] amdgpu: ATPX version 1, functions 0x00000000
+[    6.052882] amdgpu: Virtual CRAT table created for CPU
+[    6.052901] amdgpu: Topology: Add CPU node
+[    6.053019] amdgpu 0000:78:00.0: enabling device (0006 -> 0007)
+[    6.053057] amdgpu 0000:78:00.0: amdgpu: initializing kernel modesetting (IP DISCOVERY 0x1002:0x164E 0x1043:0x8877 0xC1).
+[    6.053067] amdgpu 0000:78:00.0: amdgpu: register mmio base: 0xDE500000
+[    6.053068] amdgpu 0000:78:00.0: amdgpu: register mmio size: 524288
+[    6.054684] amdgpu 0000:78:00.0: amdgpu: detected ip block number 0 <nv_common>
+[    6.054687] amdgpu 0000:78:00.0: amdgpu: detected ip block number 1 <gmc_v10_0>
+[    6.054689] amdgpu 0000:78:00.0: amdgpu: detected ip block number 2 <navi10_ih>
+[    6.054690] amdgpu 0000:78:00.0: amdgpu: detected ip block number 3 <psp>
+[    6.054692] amdgpu 0000:78:00.0: amdgpu: detected ip block number 4 <smu>
+[    6.054693] amdgpu 0000:78:00.0: amdgpu: detected ip block number 5 <dm>
+[    6.054694] amdgpu 0000:78:00.0: amdgpu: detected ip block number 6 <gfx_v10_0>
+[    6.054696] amdgpu 0000:78:00.0: amdgpu: detected ip block number 7 <sdma_v5_2>
+[    6.054697] amdgpu 0000:78:00.0: amdgpu: detected ip block number 8 <vcn_v3_0>
+[    6.054698] amdgpu 0000:78:00.0: amdgpu: detected ip block number 9 <jpeg_v3_0>
+[    6.054706] amdgpu 0000:78:00.0: amdgpu: ACPI VFCT table present but broken (too short #2),skipping
+[    6.057575] amdgpu 0000:78:00.0: ROM [??? 0x00000000 flags 0x20000000]: can't assign; bogus alignment
+[    6.057578] amdgpu 0000:78:00.0: amdgpu: Unable to locate a BIOS ROM
+[    6.057582] amdgpu 0000:78:00.0: amdgpu: Fatal error during GPU init
+[    6.057586] amdgpu 0000:78:00.0: amdgpu: amdgpu: finishing device.
+[    6.057612] amdgpu 0000:78:00.0: probe with driver amdgpu failed with error -22
+[    6.084014] audit: type=1400 audit(1785348023.907:2): apparmor="STATUS" operation="profile_load" profile="unconfined" name="flatpak" pid=1373 comm="apparmor_parser"
+[    6.084046] audit: type=1400 audit(1785348023.907:3): apparmor="STATUS" operation="profile_load" profile="unconfined" name="geary" pid=1375 comm="apparmor_parser"
+[    6.084082] audit: type=1400 audit(1785348023.907:4): apparmor="STATUS" operation="profile_load" profile="unconfined" name="foliate" pid=1374 comm="apparmor_parser"
+[    6.084120] audit: type=1400 audit(1785348023.907:5): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cam" pid=1360 comm="apparmor_parser"
+[    6.084279] audit: type=1400 audit(1785348023.907:6): apparmor="STATUS" operation="profile_load" profile="unconfined" name="buildah" pid=1359 comm="apparmor_parser"
+[    6.084282] audit: type=1400 audit(1785348023.907:7): apparmor="STATUS" operation="profile_load" profile="unconfined" name="element-desktop" pid=1369 comm="apparmor_parser"
+[    6.084284] audit: type=1400 audit(1785348023.907:8): apparmor="STATUS" operation="profile_load" profile="unconfined" name="devhelp" pid=1367 comm="apparmor_parser"
+[    6.084285] audit: type=1400 audit(1785348023.907:9): apparmor="STATUS" operation="profile_load" profile="unconfined" name="1password" pid=1352 comm="apparmor_parser"
+[    6.084287] audit: type=1400 audit(1785348023.907:10): apparmor="STATUS" operation="profile_load" profile="unconfined" name="evolution" pid=1371 comm="apparmor_parser"
+[    6.084292] audit: type=1400 audit(1785348023.907:11): apparmor="STATUS" operation="profile_load" profile="unconfined" name=4D6F6E676F444220436F6D70617373 pid=1354 comm="apparmor_parser"
+[    6.095162] amd_atl: AMD Address Translation Library initialized
+[    6.095509] intel_rapl_common: Found RAPL domain package
+[    6.095512] intel_rapl_common: Found RAPL domain core
+[    6.120696] RPC: Registered named UNIX socket transport module.
+[    6.120698] RPC: Registered udp transport module.
+[    6.120699] RPC: Registered tcp transport module.
+[    6.120700] RPC: Registered tcp-with-tls transport module.
+[    6.120701] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    6.137578] cfg80211: Loading compiled-in X.509 certificates for regulatory database
+[    6.137685] Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+[    6.137772] Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+[    6.182589] Loading iSCSI transport class v2.0-870.
+[    6.873876] thunderbolt_ibverbs: native HELLO received route=0x1 rail=0x0 remote_out=8 remote_tx=1 remote_rx=1
+[    6.873881] thunderbolt_ibverbs: native HELLO_ACK route=0x1 rail=0x0 tx_hop=1 rx_hop=1 out_hop=8
+[    7.160728] enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1 tx_flags=0x2 rx_flags=0x2 e2e=0
+[    7.160733] thunderbolt_ibverbs: enabled tunnel route=0x1 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=1 rx_hop=1
+[    7.163466] thunderbolt_ibverbs: native READY sent route=0x1 rail=0x0
+[    7.163896] thunderbolt_ibverbs: registered native ib_device usb4_rdma5 rail=peer1/0 domain=0 guid=0200544257524253
+[    7.167447] thunderbolt 0000:06:00.0 tbr-appmana009: renamed from u4r0
+[    7.209792] iscsi: registered transport (iser)
+[    7.220821] RPC: Registered rdma transport module.
+[    7.220823] RPC: Registered rdma backchannel transport module.
+[    8.116106] PEFILE: Unsigned PE binary
+[    8.194608] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+[    8.194608] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+[    8.279704] NET: Registered PF_QIPCRTR protocol family
+[    8.282584] netfs: FS-Cache loaded
+[    8.287731] CacheFiles: Loaded
+[    8.291917] loop0: detected capacity change from 0 to 8
+[    8.398484] netfs: Cache "mycache" added (type cachefiles)
+[    8.398487] CacheFiles: File cache on mycache registered
+[    9.290992] sp5100_tco: SP5100/SB800 TCO WatchDog Timer Driver
+[    9.291080] sp5100-tco sp5100-tco: Using 0xfeb00000 for watchdog MMIO address
+[    9.291155] sp5100-tco sp5100-tco: initialized. heartbeat=60 sec (nowayout=0)
+[    9.345044] systemd[1]: systemd 255.4-1ubuntu8.16 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[    9.345140] systemd[1]: Detected architecture x86-64.
+[   11.073155] igc 0000:6e:00.0 enp110s0: NIC Link is Up 2500 Mbps Full Duplex, Flow Control: RX
+[   24.091030] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
+[   24.091835] Bridge firewalling registered
+[   30.252187] kauditd_printk_skb: 109 callbacks suppressed
+[   30.252190] audit: type=1400 audit(1785348048.075:121): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cri-containerd.apparmor.d" pid=6398 comm="apparmor_parser"
+[   31.208480] systemd-journald[642]: /var/log/journal/8a05b1a0afa14a529efeb49f88a0ed22/user-1000.journal: Journal file uses a different sequence number ID, rotating.
+[   45.195946] evm: overlay not supported
+[   46.546814] wireguard: WireGuard 1.0.0 loaded. See www.wireguard.com for information.
+[   46.546817] wireguard: Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
+[   48.070311] iscsi: registered transport (tcp)
+[   71.525925] thunderbolt_ibverbs: native HELLO route=0x3 rail=0x0 has no matching peer rail
+[   72.627912] thunderbolt_ibverbs: peer 2 created backend=native
+[   72.630307] thunderbolt_ibverbs: allocated rings service id=1 native_lane=0 tx_hop=3 rx_hop=3 out_hop=8
+[   72.630566] thunderbolt_ibverbs: started rings service id=1 native_lane=0 tx_hop=3 rx_hop=3
+[   72.630568] thunderbolt_ibverbs: bound native service id=1 key=tbverbs native_lane=0 route=0x3 link_speed=20Gb/s width=0x1 rail=0x21debfbf path_id=1
+[   72.630626] thunderbolt 0-3: skip native lane 1: link width 0x1 exposes 1 lane(s)
+[   72.737231] thunderbolt_ibverbs: native HELLO_ACK received route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3
+[   72.737239] thunderbolt_ibverbs: native HELLO negotiated route=0x3 rail=0x0 remote_out=8 remote_tx=3 remote_rx=3 attempt=1
+[   72.753610] enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=3 rx_hop=3 tx_flags=0x2 rx_flags=0x2 e2e=0
+[   72.753614] thunderbolt_ibverbs: enabled tunnel route=0x3 rail=0x0 out_hop=8 remote_out_hop=8 tx_hop=3 rx_hop=3
+[   72.796778] thunderbolt_ibverbs: native READY received route=0x3 rail=0x0
+[   72.797957] thunderbolt_ibverbs: registered native ib_device usb4_rdma15 rail=peer2/0 domain=0 guid=0200544258524253
+[   72.801070] thunderbolt 0000:06:00.0 tbr-appmana023: renamed from u4r0
+[  114.866880] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867061] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867063] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867065] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867067] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867068] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867070] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867071] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867073] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.867075] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x901 src_qp=0x901 psn=15242282 rx_route=0x3 (likely misrouted by peer; check sender's ACK/control routing)
+[  114.869011] first CRC-error frame: size=1792 sof=0 eof=3 flags=0xb rx_raw_pending=0 raw_op=0 raw_done=0 raw_remaining=0
+[  114.886370] thunderbolt_ibverbs: native RX active WRITE discarded qpn=0x901 expected_psn=15242282 psn=15242282 src_qp=0x901 received=20240 base=0x746160218000 with_imm=0
+[  115.248238] tx stall route=0x3 rail=0x0 inflight=509 posted=509 completed=0 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+    281 I<   -                                kworker/u132:0-tbv_ibdev
+    282 I<   -                                kworker/u133:0-tbv_ibdev
+    735 I<   -                                kworker/R-tbv_ibdev
+    738 I<   -                                kworker/u132:1-tbv_ibdev
+   3123 I<   -                                kworker/u133:1-tbv_ibdev

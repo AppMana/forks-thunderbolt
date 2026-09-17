@@ -1,0 +1,204 @@
+## dmesg
+[61771.213609] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61771.243943] thunderbolt_frame: tbframe0x1: READY confirmed
+[61785.052351] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=2 ring_posted=1 tx_sub=60 tx_done=59 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=9; refusing to declare the link up and rebuilding the session hardware
+[61785.908417] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[61785.925715] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61785.955689] thunderbolt_frame: tbframe0x1: READY confirmed
+[61799.772455] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=3 ring_posted=1 tx_sub=90 tx_done=89 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=11; refusing to declare the link up and rebuilding the session hardware
+[61801.460532] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[61801.477832] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61801.506826] thunderbolt_frame: tbframe0x1: READY confirmed
+[61815.323575] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=4 ring_posted=1 tx_sub=120 tx_done=119 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=13; refusing to declare the link up and rebuilding the session hardware
+[61818.612651] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[61818.629948] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61818.658749] thunderbolt_frame: tbframe0x1: READY confirmed
+[61832.476700] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=5 ring_posted=1 tx_sub=150 tx_done=149 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=15; refusing to declare the link up and rebuilding the session hardware
+[61836.672684] netconsole: network logging has already stopped
+[61836.672690] netconsole: network logging has already stopped
+[61836.673970] netconsole: network logging has already stopped
+[61836.673974] netconsole: network logging has already stopped
+[61836.675222] netconsole: network logging has already stopped
+[61836.675226] netconsole: network logging has already stopped
+[61839.349802] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[61839.367101] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61839.396671] thunderbolt_frame: tbframe0x1: READY confirmed
+[61853.211855] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=6 ring_posted=1 tx_sub=180 tx_done=179 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=17; refusing to declare the link up and rebuilding the session hardware
+[61866.486024] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[61866.503318] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61866.532605] thunderbolt_frame: tbframe0x1: READY confirmed
+[61880.349053] thunderbolt_frame: tbframe0x1: DATA PATH DEAD: paths enabled local_hopid=8 remote_hopid=8 and the control plane is healthy, but no authenticated keepalive crossed the data ring in 30 probes over 15000 ms; generation=7 ring_posted=1 tx_sub=210 tx_done=209 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=19; refusing to declare the link up and rebuilding the session hardware
+[61898.891545] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[61898.893886] thunderbolt_frame: tbframe0x1: READY confirmed
+[61905.468231] thunderbolt_frame: tbframe0x1: link up
+[61905.470362] infiniband usb4_rdma1: added over tbframe0x1
+[61905.543232] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[62136.679406] netconsole: network logging has already stopped
+[62136.679412] netconsole: network logging has already stopped
+[62136.680877] netconsole: network logging has already stopped
+[62136.680882] netconsole: network logging has already stopped
+[62136.682250] netconsole: network logging has already stopped
+[62136.682254] netconsole: network logging has already stopped
+[62436.686300] netconsole: network logging has already stopped
+[62436.686308] netconsole: network logging has already stopped
+[62436.687597] netconsole: network logging has already stopped
+[62436.687602] netconsole: network logging has already stopped
+[62436.688863] netconsole: network logging has already stopped
+[62436.688867] netconsole: network logging has already stopped
+[62575.162308] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[62575.162314] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=969 tx_canceled=0 rx_total=1240 rx_matched=724 rx_unmatched=9 rx_xdomain_tx_status=334 rx_dropped=0
+[62575.162318] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=9 sw_tail=9 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00090009 hw_prod=9 hw_cons=9 indices_valid=1 full=0 options=0xc0000000
+[62575.162321] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62575.190108] thunderbolt_frame: tbframe0x3: link down (4)
+[62575.190113] infiniband usb4_rdma0: unpublishing (link down 4)
+[62576.249323] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[62576.249329] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=975 tx_canceled=0 rx_total=1249 rx_matched=727 rx_unmatched=9 rx_xdomain_tx_status=338 rx_dropped=0
+[62576.249332] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=5 sw_tail=5 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00050005 hw_prod=5 hw_cons=5 indices_valid=1 full=0 options=0xc0000000
+[62576.249336] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62576.698805] thunderbolt 0-1: unregistering service 'tbframe': absent from the peer's property block
+[62577.274325] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[62577.274332] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=979 tx_canceled=0 rx_total=1254 rx_matched=730 rx_unmatched=9 rx_xdomain_tx_status=340 rx_dropped=0
+[62577.274335] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=9 sw_tail=9 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00090009 hw_prod=9 hw_cons=9 indices_valid=1 full=0 options=0xc0000000
+[62577.274338] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62578.298343] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[62578.298350] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=980 tx_canceled=0 rx_total=1255 rx_matched=730 rx_unmatched=9 rx_xdomain_tx_status=341 rx_dropped=0
+[62578.298353] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=0 sw_tail=0 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00000000 hw_prod=0 hw_cons=0 indices_valid=1 full=0 options=0xc0000000
+[62578.298357] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62579.322340] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[62579.322346] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=981 tx_canceled=0 rx_total=1256 rx_matched=730 rx_unmatched=9 rx_xdomain_tx_status=342 rx_dropped=0
+[62579.322349] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=1 sw_tail=1 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00010001 hw_prod=1 hw_cons=1 indices_valid=1 full=0 options=0xc0000000
+[62579.322353] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62579.322356] thunderbolt_frame: tbframe0x1: BYE unacknowledged; proceeding with teardown
+[62579.349478] thunderbolt_frame: tbframe0x1: link down (4)
+[62579.349482] infiniband usb4_rdma1: unpublishing (link down 4)
+[62579.350397] thunderbolt_frame: tbframe0x1: link destroyed
+[62579.432376] thunderbolt_frame_rxe: unloaded
+[62579.459297] thunderbolt_frame: tbframe0x3: link destroyed
+[62579.463620] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000003
+[62580.526832] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000003
+[62622.989528] thunderbolt_frame: tbframe0x3: link created local_hopid=8
+[62622.989534] thunderbolt_frame: bound service id=0 route=0x3 link_speed=20Gb/s width=0x1
+[62622.989617] thunderbolt_frame: advertised tbframe service
+[62622.989618] thunderbolt_frame: initialized ring_entries=2048 e2e=0 keepalive=1 data_proof=1
+[62622.993311] thunderbolt_frame_rxe: loaded
+[62623.994692] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[62623.994699] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=991 tx_canceled=0 rx_total=1275 rx_matched=736 rx_unmatched=11 rx_xdomain_tx_status=350 rx_dropped=0
+[62623.994703] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=1 sw_tail=1 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00010001 hw_prod=1 hw_cons=1 indices_valid=1 full=0 options=0xc0000000
+[62623.994708] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62624.150948] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000001
+[62624.444367] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[62624.444373] thunderbolt_frame: bound service id=0 route=0x1 link_speed=20Gb/s width=0x1
+[62624.444573] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[62624.461223] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.017694] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[62625.017701] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1004 tx_canceled=0 rx_total=1298 rx_matched=742 rx_unmatched=12 rx_xdomain_tx_status=360 rx_dropped=0
+[62625.017704] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=4 sw_tail=4 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00040004 hw_prod=4 hw_cons=4 indices_valid=1 full=0 options=0xc0000000
+[62625.017708] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62625.034376] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.191530] thunderbolt_frame: tbframe0x1: READY confirmed
+[62626.042707] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[62626.042714] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1007 tx_canceled=0 rx_total=1301 rx_matched=744 rx_unmatched=12 rx_xdomain_tx_status=361 rx_dropped=0
+[62626.042718] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=7 sw_tail=7 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00070007 hw_prod=7 hw_cons=7 indices_valid=1 full=0 options=0xc0000000
+[62626.042721] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[62626.251776] thunderbolt_frame: tbframe0x3: READY confirmed
+[62626.251781] thunderbolt_frame: tbframe0x3: link up
+[62626.254195] infiniband usb4_rdma0: added over tbframe0x3
+[62626.317476] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[62631.946742] thunderbolt_frame: tbframe0x1: link up
+[62631.948842] infiniband usb4_rdma1: added over tbframe0x1
+[62632.003846] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[62736.693060] netconsole: network logging has already stopped
+[62736.693066] netconsole: network logging has already stopped
+[62736.694387] netconsole: network logging has already stopped
+[62736.694391] netconsole: network logging has already stopped
+[62736.697739] netconsole: network logging has already stopped
+[62736.697744] netconsole: network logging has already stopped
+[63036.700881] netconsole: network logging has already stopped
+[63036.700888] netconsole: network logging has already stopped
+[63036.702438] netconsole: network logging has already stopped
+[63036.702443] netconsole: network logging has already stopped
+[63036.703856] netconsole: network logging has already stopped
+[63036.703860] netconsole: network logging has already stopped
+[63133.437074] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[63133.437082] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1011 tx_canceled=0 rx_total=1306 rx_matched=745 rx_unmatched=12 rx_xdomain_tx_status=364 rx_dropped=0
+[63133.437085] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=1 sw_tail=1 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00010001 hw_prod=1 hw_cons=1 indices_valid=1 full=0 options=0xc0000000
+[63133.437089] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63133.464852] thunderbolt_frame: tbframe0x3: link down (4)
+[63133.464857] infiniband usb4_rdma0: unpublishing (link down 4)
+[63134.525065] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[63134.525072] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1015 tx_canceled=0 rx_total=1311 rx_matched=748 rx_unmatched=12 rx_xdomain_tx_status=366 rx_dropped=0
+[63134.525075] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=5 sw_tail=5 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00050005 hw_prod=5 hw_cons=5 indices_valid=1 full=0 options=0xc0000000
+[63134.525078] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63135.549085] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[63135.549092] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1016 tx_canceled=0 rx_total=1312 rx_matched=748 rx_unmatched=12 rx_xdomain_tx_status=367 rx_dropped=0
+[63135.549095] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=6 sw_tail=6 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00060006 hw_prod=6 hw_cons=6 indices_valid=1 full=0 options=0xc0000000
+[63135.549099] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63136.572087] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[63136.572093] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1019 tx_canceled=0 rx_total=1317 rx_matched=748 rx_unmatched=12 rx_xdomain_tx_status=370 rx_dropped=0
+[63136.572096] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=9 sw_tail=9 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00090009 hw_prod=9 hw_cons=9 indices_valid=1 full=0 options=0xc0000000
+[63136.572100] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63137.546721] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000003
+[63137.596089] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x1 req_dw0=0x00000000 size=76
+[63137.596094] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1020 tx_canceled=0 rx_total=1319 rx_matched=748 rx_unmatched=13 rx_xdomain_tx_status=371 rx_dropped=0
+[63137.596098] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=0 sw_tail=0 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00000000 hw_prod=0 hw_cons=0 indices_valid=1 full=0 options=0xc0000000
+[63137.596101] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63137.596104] thunderbolt_frame: tbframe0x1: BYE unacknowledged; proceeding with teardown
+[63137.623195] thunderbolt_frame: tbframe0x1: link down (4)
+[63137.623200] infiniband usb4_rdma1: unpublishing (link down 4)
+[63137.706098] thunderbolt_frame_rxe: unloaded
+[63137.725890] thunderbolt 0-1: unregistering service 'tbframe': absent from the peer's property block
+[63137.726706] thunderbolt_frame: tbframe0x1: link destroyed
+[63137.741751] thunderbolt_frame: tbframe0x3: link destroyed
+[63138.609922] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000003
+[63147.792091] thunderbolt_frame: tbframe0x3: link created local_hopid=8
+[63147.792098] thunderbolt_frame: bound service id=0 route=0x3 link_speed=20Gb/s width=0x1
+[63147.792177] thunderbolt_frame: advertised tbframe service
+[63147.792179] thunderbolt_frame: initialized ring_entries=2048 e2e=0 keepalive=1 data_proof=1
+[63147.795711] thunderbolt_frame_rxe: loaded
+[63148.796139] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[63148.796146] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1033 tx_canceled=0 rx_total=1341 rx_matched=757 rx_unmatched=14 rx_xdomain_tx_status=380 rx_dropped=0
+[63148.796149] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=3 sw_tail=3 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00030003 hw_prod=3 hw_cons=3 indices_valid=1 full=0 options=0xc0000000
+[63148.796152] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63149.017539] thunderbolt 0000:06:00.0: RX: unmatched reply eof=0x6 size=76 dw0=0x80000000 dw1=0x00000001
+[63149.374771] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[63149.374778] thunderbolt_frame: bound service id=0 route=0x1 link_speed=20Gb/s width=0x1
+[63149.374972] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[63149.391593] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63149.820147] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[63149.820151] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1046 tx_canceled=0 rx_total=1364 rx_matched=763 rx_unmatched=15 rx_xdomain_tx_status=390 rx_dropped=0
+[63149.820155] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=6 sw_tail=6 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00060006 hw_prod=6 hw_cons=6 indices_valid=1 full=0 options=0xc0000000
+[63149.820158] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63149.836805] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63150.058163] thunderbolt_frame: tbframe0x1: READY confirmed
+[63150.845139] thunderbolt 0000:06:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[63150.845144] thunderbolt 0000:06:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1049 tx_canceled=0 rx_total=1367 rx_matched=765 rx_unmatched=15 rx_xdomain_tx_status=391 rx_dropped=0
+[63150.845148] thunderbolt 0000:06:00.0: ring0 TX snapshot: running=1 size=10 sw_head=9 sw_tail=9 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00090009 hw_prod=9 hw_cons=9 indices_valid=1 full=0 options=0xc0000000
+[63150.845151] thunderbolt 0000:06:00.0: peer response timed out after local XDomain transmit acceptance
+[63151.054198] thunderbolt_frame: tbframe0x3: READY confirmed
+[63151.054201] thunderbolt_frame: tbframe0x3: link up
+[63151.056351] infiniband usb4_rdma0: added over tbframe0x3
+[63151.116990] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[63156.812155] thunderbolt_frame: tbframe0x1: link up
+[63156.814186] infiniband usb4_rdma1: added over tbframe0x1
+[63156.875443] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[63336.707168] netconsole: network logging has already stopped
+[63336.707174] netconsole: network logging has already stopped
+[63336.708723] netconsole: network logging has already stopped
+[63336.708728] netconsole: network logging has already stopped
+[63336.710224] netconsole: network logging has already stopped
+[63336.710229] netconsole: network logging has already stopped
+[63636.713843] netconsole: network logging has already stopped
+[63636.713850] netconsole: network logging has already stopped
+[63636.715306] netconsole: network logging has already stopped
+[63636.715311] netconsole: network logging has already stopped
+[63636.716664] netconsole: network logging has already stopped
+[63636.716669] netconsole: network logging has already stopped
+[63936.720711] netconsole: network logging has already stopped
+[63936.720718] netconsole: network logging has already stopped
+[63936.722729] netconsole: network logging has already stopped
+[63936.722735] netconsole: network logging has already stopped
+[63936.724525] netconsole: network logging has already stopped
+[63936.724531] netconsole: network logging has already stopped
+## blocked processes
+    PID STAT WCHAN                            COMMAND
+3688560 R    -                                ib_write_bw

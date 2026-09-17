@@ -1,0 +1,210 @@
+## dmesg
+[422977.005598] tx stall route=0x3 rail=0x0 inflight=1 posted=10876 completed=10875 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422980.845649] tx stall route=0x1 rail=0x0 inflight=1 posted=7324 completed=7323 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422982.125686] tx stall route=0x3 rail=0x0 inflight=1 posted=10881 completed=10880 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422985.965705] tx stall route=0x1 rail=0x0 inflight=1 posted=7329 completed=7328 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422987.246724] tx stall route=0x3 rail=0x0 inflight=1 posted=10886 completed=10885 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422991.085772] tx stall route=0x1 rail=0x0 inflight=1 posted=7334 completed=7333 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422992.365773] tx stall route=0x3 rail=0x0 inflight=1 posted=10891 completed=10890 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422997.229828] tx stall route=0x1 rail=0x0 inflight=1 posted=7340 completed=7339 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[422998.509841] tbv_path_tx_poll_work: 1 callbacks suppressed
+[422998.509844] tx stall route=0x3 rail=0x0 inflight=1 posted=10897 completed=10896 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423002.350878] tx stall route=0x1 rail=0x0 inflight=1 posted=7345 completed=7344 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423003.629903] tx stall route=0x3 rail=0x0 inflight=1 posted=10902 completed=10901 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423007.469955] tx stall route=0x1 rail=0x0 inflight=1 posted=7350 completed=7349 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423008.749958] tx stall route=0x3 rail=0x0 inflight=1 posted=10907 completed=10906 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423012.590002] tx stall route=0x1 rail=0x0 inflight=1 posted=7355 completed=7354 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423013.870008] tx stall route=0x3 rail=0x0 inflight=1 posted=10912 completed=10911 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423017.710058] tx stall route=0x1 rail=0x0 inflight=1 posted=7360 completed=7359 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423018.990248] tx stall route=0x3 rail=0x0 inflight=1 posted=10917 completed=10916 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423022.830100] tx stall route=0x1 rail=0x0 inflight=1 posted=7365 completed=7364 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423024.110219] tx stall route=0x3 rail=0x0 inflight=1 posted=10922 completed=10921 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423029.230183] tx stall route=0x3 rail=0x0 inflight=1 posted=10927 completed=10926 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423033.070412] tx stall route=0x1 rail=0x0 inflight=1 posted=7375 completed=7374 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423034.350230] tx stall route=0x3 rail=0x0 inflight=1 posted=10932 completed=10931 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423038.190280] tx stall route=0x1 rail=0x0 inflight=1 posted=7380 completed=7379 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423039.470298] tx stall route=0x3 rail=0x0 inflight=1 posted=10937 completed=10936 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423043.310433] tx stall route=0x1 rail=0x0 inflight=1 posted=7385 completed=7384 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423044.590342] tx stall route=0x3 rail=0x0 inflight=1 posted=10942 completed=10941 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423048.430396] tx stall route=0x1 rail=0x0 inflight=1 posted=7390 completed=7389 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423049.710404] tx stall route=0x3 rail=0x0 inflight=1 posted=10947 completed=10946 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423053.550447] tx stall route=0x1 rail=0x0 inflight=1 posted=7395 completed=7394 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423054.830447] tx stall route=0x3 rail=0x0 inflight=1 posted=10952 completed=10951 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423058.670504] tx stall route=0x1 rail=0x0 inflight=1 posted=7400 completed=7399 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423059.950519] tx stall route=0x3 rail=0x0 inflight=1 posted=10957 completed=10956 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423063.790556] tx stall route=0x1 rail=0x0 inflight=1 posted=7405 completed=7404 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423065.070571] tx stall route=0x3 rail=0x0 inflight=1 posted=10962 completed=10961 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423068.911604] tx stall route=0x1 rail=0x0 inflight=1 posted=7410 completed=7409 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423070.190626] tx stall route=0x3 rail=0x0 inflight=1 posted=10967 completed=10966 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423074.030880] tx stall route=0x1 rail=0x0 inflight=1 posted=7415 completed=7414 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423075.310683] tx stall route=0x3 rail=0x0 inflight=1 posted=10972 completed=10971 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423079.150723] tx stall route=0x1 rail=0x0 inflight=1 posted=7420 completed=7419 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423080.430733] tx stall route=0x3 rail=0x0 inflight=1 posted=10977 completed=10976 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423085.550791] tx stall route=0x3 rail=0x0 inflight=1 posted=10982 completed=10981 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423087.343815] tx stall route=0x1 rail=0x0 inflight=1 posted=7428 completed=7427 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423090.670842] tx stall route=0x3 rail=0x0 inflight=1 posted=10987 completed=10986 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423092.462885] tx stall route=0x1 rail=0x0 inflight=1 posted=7433 completed=7432 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423095.790895] tx stall route=0x3 rail=0x0 inflight=1 posted=10992 completed=10991 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423097.583120] tx stall route=0x1 rail=0x0 inflight=1 posted=7438 completed=7437 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423100.910960] tx stall route=0x3 rail=0x0 inflight=1 posted=10997 completed=10996 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423102.702975] tx stall route=0x1 rail=0x0 inflight=1 posted=7443 completed=7442 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423106.031017] tx stall route=0x3 rail=0x0 inflight=1 posted=11002 completed=11001 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423107.823021] tx stall route=0x1 rail=0x0 inflight=1 posted=7448 completed=7447 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423111.151063] tx stall route=0x3 rail=0x0 inflight=1 posted=11007 completed=11006 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423112.943086] tx stall route=0x1 rail=0x0 inflight=1 posted=7453 completed=7452 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423116.271132] tx stall route=0x3 rail=0x0 inflight=1 posted=11012 completed=11011 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423118.063170] tx stall route=0x1 rail=0x0 inflight=1 posted=7458 completed=7457 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423121.391277] tx stall route=0x3 rail=0x0 inflight=1 posted=11017 completed=11016 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423123.183210] tx stall route=0x1 rail=0x0 inflight=1 posted=7463 completed=7462 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423126.511253] tx stall route=0x3 rail=0x0 inflight=1 posted=11022 completed=11021 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423128.304245] tx stall route=0x1 rail=0x0 inflight=1 posted=7468 completed=7467 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423131.631297] tx stall route=0x3 rail=0x0 inflight=1 posted=11027 completed=11026 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423132.921599] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90a -> peer 2 route=0x1 rail=0x0
+[423132.921615] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90b -> peer 2 route=0x1 rail=0x0
+[423132.921628] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90c -> peer 2 route=0x1 rail=0x0
+[423132.921640] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90d -> peer 2 route=0x1 rail=0x0
+[423132.921651] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90e -> peer 2 route=0x1 rail=0x0
+[423132.921663] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x90f -> peer 2 route=0x1 rail=0x0
+[423132.921674] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x910 -> peer 2 route=0x1 rail=0x0
+[423132.921685] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x911 -> peer 2 route=0x1 rail=0x0
+[423132.921696] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x912 -> peer 2 route=0x1 rail=0x0
+[423132.921707] thunderbolt_ibverbs: native QP dgid-rebind qpn=0x913 -> peer 2 route=0x1 rail=0x0
+[423132.936313] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337499 ack_status=0 total_age_ms=11 current_age_ms=10 retries=0 rnr_retries=0 reason=1
+[423132.936313] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337500 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.936396] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337501 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=10 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.937068] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337500 ack_status=0 total_age_ms=11 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[423132.937825] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337501 ack_status=0 total_age_ms=12 current_age_ms=1 retries=1 rnr_retries=0 reason=1
+[423132.948290] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337505 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=14 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.948401] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337506 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.948449] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337505 ack_status=0 total_age_ms=23 current_age_ms=0 retries=1 rnr_retries=0 reason=1
+[423132.949229] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337507 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.949290] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337508 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.949358] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337509 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.949432] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337510 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.949491] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337511 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.949551] thunderbolt_ibverbs: native retransmit qpn=0x90a dest_qp=0x90a psn=337512 opcode=3 total=262144 retries=0 max_retries=7 rnr_retries=0 max_rnr_retries=255 reason=1 age_ms=13 tx_pending=0 acked_prefix=0 nak=0+0
+[423132.950866] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337506 ack_status=0 total_age_ms=25 current_age_ms=2 retries=1 rnr_retries=0 reason=1
+[423132.951241] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337507 ack_status=0 total_age_ms=24 current_age_ms=1 retries=1 rnr_retries=0 reason=1
+[423132.951584] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337508 ack_status=0 total_age_ms=25 current_age_ms=2 retries=1 rnr_retries=0 reason=1
+[423132.951897] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337509 ack_status=0 total_age_ms=25 current_age_ms=2 retries=1 rnr_retries=0 reason=1
+[423132.952246] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337510 ack_status=0 total_age_ms=25 current_age_ms=2 retries=1 rnr_retries=0 reason=1
+[423132.953026] thunderbolt_ibverbs: native ACK matched after retry qpn=0x90a dest_qp=0x90a psn=337511 ack_status=0 total_age_ms=26 current_age_ms=3 retries=1 rnr_retries=0 reason=1
+[423132.969749] first CRC-error frame: size=3072 sof=0 eof=3 flags=0xb rx_raw_pending=0 raw_op=0 raw_done=0 raw_remaining=0
+[423133.165324] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 4 times, consider switching to WQ_UNBOUND
+[423133.191261] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 5 times, consider switching to WQ_UNBOUND
+[423133.234617] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 7 times, consider switching to WQ_UNBOUND
+[423133.327758] workqueue: ring_work [thunderbolt] hogged CPU for >10000us 11 times, consider switching to WQ_UNBOUND
+[423133.512301] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90a src_qp=0x90a psn=13361432 base=0x7ebdad31e000 received=24288 with_imm=0
+[423133.632313] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90b src_qp=0x90b psn=2563304 base=0x7ebdad35e000 received=226688 with_imm=0
+[423133.632568] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632572] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632738] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632743] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632745] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632747] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632749] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632750] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632752] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.632754] thunderbolt_ibverbs: native RX frame for unknown QPN: opcode=3 dest_qp=0x90d src_qp=0x90d psn=2504827 rx_route=0x1 (likely misrouted by peer; check sender's ACK/control routing)
+[423133.656316] thunderbolt_ibverbs: native RDMA_WRITE active timeout qpn=0x90c src_qp=0x90c psn=8542499 base=0x7ebdad39e000 received=259072 with_imm=0
+[423133.659919] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504797 kind=1 complete=0 received=67840 frags=17/65 bytes=67840
+[423133.659926] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504798 kind=1 complete=0 received=145728 frags=36/65 bytes=145728
+[423133.659932] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504799 kind=1 complete=0 received=80960 frags=20/65 bytes=80960
+[423133.659940] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504800 kind=1 complete=0 received=164992 frags=41/65 bytes=164992
+[423133.659946] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504801 kind=1 complete=0 received=250000 frags=62/65 bytes=250000
+[423133.659956] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504802 kind=1 complete=0 received=233808 frags=58/65 bytes=233808
+[423133.659965] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504803 kind=1 complete=0 received=213568 frags=53/65 bytes=213568
+[423133.659977] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504804 kind=1 complete=0 received=201424 frags=50/65 bytes=201424
+[423133.659985] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504805 kind=1 complete=0 received=250000 frags=62/65 bytes=250000
+[423133.659994] thunderbolt_ibverbs: native RX reorder discarded qpn=0x90d expected_psn=2504796 psn=2504806 kind=1 complete=0 received=241904 frags=60/65 bytes=241904
+[423133.936305] tx stall route=0x1 rail=0x0 inflight=462 posted=62513 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423136.751335] tx stall route=0x3 rail=0x0 inflight=1 posted=11032 completed=11031 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423138.927380] thunderbolt_ibverbs: QP 2315 destroy timed out with 3 refs; leaving it closing for retry
+[423138.948359] tx stall route=0x1 rail=0x0 inflight=467 posted=62518 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423141.872408] tx stall route=0x3 rail=0x0 inflight=1 posted=11037 completed=11036 tx_hop=1 rx_hop=1 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423143.969421] tx stall route=0x1 rail=0x0 inflight=472 posted=62523 completed=62051 tx_hop=3 rx_hop=3 out_hop=8 remote_out_hop=8 tx_flags=0x2 rx_flags=0x2 e2e=0
+[423144.048414] thunderbolt_ibverbs: QP 2315 destroy timed out with 3 refs; leaving it closing for retry
+[423144.048452] ------------[ cut here ]------------
+[423144.048453] WARNING: CPU: 1 PID: 3218725 at drivers/infiniband/core/rdma_core.c:946 uverbs_destroy_ufile_hw+0xeb/0x100 [ib_uverbs]
+[423144.048463] Modules linked in: thunderbolt_ibverbs(OE) sp5100_tco cmac nls_utf8 cifs cifs_arc4 nls_ucs2_utils cifs_md4 rpcsec_gss_krb5 auth_rpcgss nfsv4 nvidia_uvm(OE) tls iscsi_tcp libiscsi_tcp nfs lockd grace nvme_tcp ipt_rpfilter xt_multiport ip6t_rpfilter xt_set ip_set_hash_net ip_set_hash_ip ip_set veth wireguard curve25519_x86_64 libcurve25519_generic ip6t_REJECT nf_reject_ipv6 nf_conntrack_netlink xt_recent xt_statistic xt_nat xt_MASQUERADE xt_mark xt_nfacct ipt_REJECT nf_reject_ipv4 xt_addrtype xt_tcpudp nft_chain_nat nf_nat nfnetlink_acct xt_conntrack xt_comment nft_compat br_netfilter bridge stp llc nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 overlay nf_tables cachefiles netfs rpcrdma rdma_ucm ib_iser libiscsi scsi_transport_iscsi rdma_cm iw_cm amd_atl intel_rapl_msr ib_cm qrtr intel_rapl_common dummy cfg80211 amdgpu edac_mce_amd nvidia_drm(OE) nvidia_modeset(OE) sunrpc snd_hda_codec_atihdmi snd_hda_codec_nvhdmi kvm_amd binfmt_misc snd_hda_codec_hdmi snd_hda_intel amdxcp drm_panel_backlight_quirks
+[423144.048527]  snd_hda_codec nls_iso8859_1 kvm gpu_sched snd_hda_core mfd_aaeon drm_buddy asus_nb_wmi drm_exec asus_wmi snd_intel_dspcfg drm_suballoc_helper irqbypass snd_intel_sdw_acpi nvidia(OE) sparse_keymap spd5118 snd_hwdep rapl drm_display_helper intel_wmi_thunderbolt platform_profile wmi_bmof snd_pcm cec i2c_piix4 rc_core snd_timer i2c_smbus ccp i2c_algo_bit drm_ttm_helper k10temp snd ttm soundcore gpio_amdpt mac_hid sch_fq_codel rdma_rxe(OE) ib_uverbs ip6_udp_tunnel udp_tunnel ib_core nct6775 nct6775_core hwmon_vid dm_multipath msr nvme_fabrics efi_pstore nfnetlink dmi_sysfs ip_tables x_tables autofs4 btrfs blake2b_generic raid10 raid456 async_raid6_recov async_memcpy async_pq async_xor async_tx xor raid6_pq raid1 raid0 linear hid_generic thunderbolt_net(OE) usbhid nvme hid thunderbolt(OE) polyval_clmulni nvme_core ghash_clmulni_intel ahci nvme_keyring igc libahci nvme_auth video wmi aesni_intel [last unloaded: thunderbolt_ibverbs(OE)]
+[423144.048595] CPU: 1 UID: 1000 PID: 3218725 Comm: ib_write_bw Kdump: loaded Tainted: G           OE       6.17.0-40-generic #40~24.04.1-Ubuntu PREEMPT(voluntary) 
+[423144.048599] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+[423144.048600] Hardware name: ASUS System Product Name/ROG STRIX X670E-I GAMING WIFI, BIOS 3842 03/11/2026
+[423144.048601] RIP: 0010:uverbs_destroy_ufile_hw+0xeb/0x100 [ib_uverbs]
+[423144.048606] Code: f6 31 ff e9 52 c1 97 fb 48 89 df e8 3f 56 ff ff 49 8b 87 10 01 00 00 48 85 c0 74 90 4c 89 ef ff d0 0f 1f 00 eb 86 0f 0b eb af <0f> 0b be 04 00 00 00 48 89 df e8 b6 f4 ff ff e9 60 ff ff ff 90 90
+[423144.048608] RSP: 0018:ffffd161b92b79f8 EFLAGS: 00010202
+[423144.048610] RAX: ffff8ed5c19b1160 RBX: ffff8ed756734400 RCX: 0000000000000000
+[423144.048611] RDX: 0000000000000000 RSI: 0000000000000000 RDI: 0000000000000000
+[423144.048613] RBP: ffffd161b92b7a20 R08: 0000000000000000 R09: 0000000000000000
+[423144.048614] R10: 0000000000000000 R11: 0000000000000000 R12: 0000000000000001
+[423144.048615] R13: ffff8ed756734480 R14: ffff8ed756734450 R15: ffff8ed73980bbc0
+[423144.048616] FS:  0000000000000000(0000) GS:ffff8ee51e8e2000(0000) knlGS:0000000000000000
+[423144.048617] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[423144.048619] CR2: 00000a8b85475000 CR3: 00000001a6ae9000 CR4: 0000000000f50ef0
+[423144.048620] PKRU: 55555554
+[423144.048621] Call Trace:
+[423144.048623]  <TASK>
+[423144.048626]  ib_uverbs_close+0x1b/0xc0 [ib_uverbs]
+[423144.048631]  __fput+0xea/0x2d0
+[423144.048636]  ____fput+0x15/0x20
+[423144.048638]  task_work_run+0x5d/0xa0
+[423144.048642]  do_exit+0x210/0x4a0
+[423144.048646]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048650]  do_group_exit+0x34/0x90
+[423144.048652]  __x64_sys_exit_group+0x18/0x20
+[423144.048655]  x64_sys_call+0x2678/0x2680
+[423144.048658]  do_syscall_64+0x80/0xa20
+[423144.048662]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048664]  ? ksys_write+0xce/0xf0
+[423144.048666]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048668]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048670]  ? arch_exit_to_user_mode_prepare.isra.0+0xd/0xe0
+[423144.048672]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048674]  ? do_syscall_64+0xb6/0xa20
+[423144.048676]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048678]  ? filemap_map_pages+0x4eb/0x630
+[423144.048682]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048684]  ? anon_pipe_write+0x2ae/0x5f0
+[423144.048689]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048691]  ? do_read_fault+0x10d/0x230
+[423144.048694]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048695]  ? do_fault+0x167/0x280
+[423144.048698]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048699]  ? handle_pte_fault+0x15e/0x200
+[423144.048702]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048704]  ? __handle_mm_fault+0x5ba/0x740
+[423144.048707]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048709]  ? count_memcg_events+0xf0/0x1e0
+[423144.048712]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048714]  ? handle_mm_fault+0x237/0x370
+[423144.048717]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048719]  ? do_user_addr_fault+0x1d2/0x8d0
+[423144.048721]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048723]  ? arch_exit_to_user_mode_prepare.isra.0+0xd/0x100
+[423144.048726]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048728]  ? irqentry_exit_to_user_mode+0x2d/0x1d0
+[423144.048730]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048732]  ? irqentry_exit+0x43/0x50
+[423144.048734]  ? srso_alias_return_thunk+0x5/0xfbef5
+[423144.048736]  ? exc_page_fault+0x90/0x1b0
+[423144.048739]  entry_SYSCALL_64_after_hwframe+0x76/0x7e
+[423144.048740] RIP: 0033:0x7ebdadcee21d
+[423144.048742] Code: Unable to access opcode bytes at 0x7ebdadcee1f3.
+[423144.048743] RSP: 002b:00007ffe8cadd488 EFLAGS: 00000202 ORIG_RAX: 00000000000000e7
+[423144.048745] RAX: ffffffffffffffda RBX: 00007ebdade04fa8 RCX: 00007ebdadcee21d
+[423144.048746] RDX: 00000000000000e7 RSI: ffffffffffffff78 RDI: 0000000000000001
+[423144.048748] RBP: 00007ffe8cadd4e0 R08: 00007ffe8cadd430 R09: 0000000000000000
+[423144.048749] R10: 00006530d52ba3e0 R11: 0000000000000202 R12: 0000000000000001
+[423144.048750] R13: 0000000000000000 R14: 0000000000000001 R15: 00007ebdade04fc0
+[423144.048755]  </TASK>
+[423144.048756] ---[ end trace 0000000000000000 ]---
+## blocked tasks
+    PID STAT WCHAN                            COMMAND
+2349690 I<   -                                kworker/R-tbv_ibdev
+2617294 I<   -                                kworker/u133:2-tbv_ibdev
+3148394 I<   -                                kworker/u132:5-tbv_ibdev
+3172174 I<   -                                kworker/u133:1-tbv_ibdev
+3172600 I<   -                                kworker/u132:1-tbv_ibdev
+3200269 I<   -                                kworker/u132:0-tbv_ibdev
+3207105 I<   -                                kworker/u133:0-tbv_ibdev

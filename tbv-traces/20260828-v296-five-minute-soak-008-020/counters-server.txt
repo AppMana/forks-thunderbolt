@@ -1,0 +1,114 @@
+### node=appmana-020 tag=pre t=2026-08-28T09:48:09-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=251440 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[251289.110905] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251290.353357] thunderbolt_frame: tbframe0x3: READY confirmed
+[251290.353362] thunderbolt_frame: tbframe0x3: link up
+[251306.243080] thunderbolt_frame: tbframe0x3: link down (2)
+[251306.245401] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251306.261969] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251307.505397] thunderbolt_frame: tbframe0x3: READY confirmed
+[251307.505401] thunderbolt_frame: tbframe0x3: link up
+[251327.043772] thunderbolt_frame: tbframe0x3: link down (2)
+[251327.046096] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251327.062651] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251328.306505] thunderbolt_frame: tbframe0x3: READY confirmed
+[251328.306509] thunderbolt_frame: tbframe0x3: link up
+[251354.179333] thunderbolt_frame: tbframe0x3: link down (2)
+[251354.181652] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251354.198227] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251355.442642] thunderbolt_frame: tbframe0x3: READY confirmed
+[251355.442647] thunderbolt_frame: tbframe0x3: link up
+[251386.080746] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=7 ring_posted=1 tx_sub=23 tx_done=22 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251386.108494] thunderbolt_frame: tbframe0x3: link down (3)
+[251386.314510] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251386.331093] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251387.362833] thunderbolt_frame: tbframe0x3: READY confirmed
+[251387.362836] thunderbolt_frame: tbframe0x3: link up
+[251418.336917] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=8 ring_posted=1 tx_sub=29 tx_done=28 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251418.364644] thunderbolt_frame: tbframe0x3: link down (3)
+[251418.570445] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251418.587027] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251419.618012] thunderbolt_frame: tbframe0x3: READY confirmed
+[251419.618015] thunderbolt_frame: tbframe0x3: link up
+### node=appmana-020 tag=hang-round4 t=2026-08-28T09:52:27-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=251698 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[251547.362583] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=12 ring_posted=1 tx_sub=53 tx_done=52 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251547.390325] thunderbolt_frame: tbframe0x3: link down (3)
+[251547.594103] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251547.610681] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251548.642676] thunderbolt_frame: tbframe0x3: READY confirmed
+[251548.642678] thunderbolt_frame: tbframe0x3: link up
+[251579.618772] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=13 ring_posted=1 tx_sub=59 tx_done=58 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251579.646525] thunderbolt_frame: tbframe0x3: link down (3)
+[251579.850616] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251579.867796] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251579.870113] thunderbolt_frame: tbframe0x3: READY confirmed
+[251581.409774] thunderbolt_frame: tbframe0x3: link up
+[251612.385949] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=14 ring_posted=1 tx_sub=70 tx_done=69 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251612.413712] thunderbolt_frame: tbframe0x3: link down (3)
+[251612.619796] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251612.637301] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251612.639629] thunderbolt_frame: tbframe0x3: READY confirmed
+[251614.177953] thunderbolt_frame: tbframe0x3: link up
+[251645.155131] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=15 ring_posted=1 tx_sub=81 tx_done=80 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251645.182868] thunderbolt_frame: tbframe0x3: link down (3)
+[251645.387956] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251645.405456] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251645.407786] thunderbolt_frame: tbframe0x3: READY confirmed
+[251646.946129] thunderbolt_frame: tbframe0x3: link up
+[251677.922306] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=16 ring_posted=1 tx_sub=92 tx_done=91 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251677.950039] thunderbolt_frame: tbframe0x3: link down (3)
+[251678.156017] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251678.173619] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251678.175959] thunderbolt_frame: tbframe0x3: READY confirmed
+[251679.715309] thunderbolt_frame: tbframe0x3: link up
+### node=appmana-020 tag=post t=2026-08-28T09:52:31-07:00
+@@@HOST@@@
+hostname=appmana-020 boot_id=a73128e4-b221-419c-9c97-f4d04b45bd8b uptime=251702 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[251547.362583] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=12 ring_posted=1 tx_sub=53 tx_done=52 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251547.390325] thunderbolt_frame: tbframe0x3: link down (3)
+[251547.594103] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251547.610681] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251548.642676] thunderbolt_frame: tbframe0x3: READY confirmed
+[251548.642678] thunderbolt_frame: tbframe0x3: link up
+[251579.618772] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=13 ring_posted=1 tx_sub=59 tx_done=58 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251579.646525] thunderbolt_frame: tbframe0x3: link down (3)
+[251579.850616] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251579.867796] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251579.870113] thunderbolt_frame: tbframe0x3: READY confirmed
+[251581.409774] thunderbolt_frame: tbframe0x3: link up
+[251612.385949] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=14 ring_posted=1 tx_sub=70 tx_done=69 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251612.413712] thunderbolt_frame: tbframe0x3: link down (3)
+[251612.619796] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251612.637301] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251612.639629] thunderbolt_frame: tbframe0x3: READY confirmed
+[251614.177953] thunderbolt_frame: tbframe0x3: link up
+[251645.155131] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=15 ring_posted=1 tx_sub=81 tx_done=80 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251645.182868] thunderbolt_frame: tbframe0x3: link down (3)
+[251645.387956] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251645.405456] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251645.407786] thunderbolt_frame: tbframe0x3: READY confirmed
+[251646.946129] thunderbolt_frame: tbframe0x3: link up
+[251677.922306] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=16 ring_posted=1 tx_sub=92 tx_done=91 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251677.950039] thunderbolt_frame: tbframe0x3: link down (3)
+[251678.156017] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251678.173619] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251678.175959] thunderbolt_frame: tbframe0x3: READY confirmed
+[251679.715309] thunderbolt_frame: tbframe0x3: link up

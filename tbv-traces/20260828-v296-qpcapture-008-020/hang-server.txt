@@ -1,0 +1,204 @@
+## dmesg
+[251678.173619] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251678.175959] thunderbolt_frame: tbframe0x3: READY confirmed
+[251679.715309] thunderbolt_frame: tbframe0x3: link up
+[251679.715320] infiniband usb4_rdma1: set active
+[251710.691474] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=17 ring_posted=1 tx_sub=103 tx_done=102 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251710.719223] thunderbolt_frame: tbframe0x3: link down (3)
+[251710.719230] infiniband usb4_rdma1: set down
+[251710.923211] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251710.940826] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251710.943155] thunderbolt_frame: tbframe0x3: READY confirmed
+[251712.483485] thunderbolt_frame: tbframe0x3: link up
+[251712.483496] infiniband usb4_rdma1: set active
+[251741.531533] netconsole: network logging has already stopped
+[251741.531540] netconsole: network logging has already stopped
+[251741.533705] netconsole: network logging has already stopped
+[251741.533712] netconsole: network logging has already stopped
+[251741.535850] netconsole: network logging has already stopped
+[251741.535855] netconsole: network logging has already stopped
+[251743.459657] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=18 ring_posted=1 tx_sub=114 tx_done=113 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251743.487398] thunderbolt_frame: tbframe0x3: link down (3)
+[251743.487404] infiniband usb4_rdma1: set down
+[251743.691385] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251743.708994] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251743.711328] thunderbolt_frame: tbframe0x3: READY confirmed
+[251745.251654] thunderbolt_frame: tbframe0x3: link up
+[251745.251663] infiniband usb4_rdma1: set active
+[251776.226860] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=19 ring_posted=1 tx_sub=125 tx_done=124 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251776.254573] thunderbolt_frame: tbframe0x3: link down (3)
+[251776.254579] infiniband usb4_rdma1: set down
+[251776.460351] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251776.476928] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251776.480378] thunderbolt_frame: tbframe0x3: READY confirmed
+[251778.018843] thunderbolt_frame: tbframe0x3: link up
+[251778.018854] infiniband usb4_rdma1: set active
+[251808.995012] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=20 ring_posted=1 tx_sub=136 tx_done=135 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251809.023090] thunderbolt_frame: tbframe0x3: link down (3)
+[251809.023096] infiniband usb4_rdma1: set down
+[251809.227531] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251809.244081] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251810.275029] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251810.275035] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1374 tx_canceled=0 rx_total=1821 rx_matched=1001 rx_unmatched=10 rx_xdomain_tx_status=558 rx_dropped=0
+[251810.275039] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=4 sw_tail=4 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00040004 hw_prod=4 hw_cons=4 indices_valid=1 full=0 options=0xc0000000
+[251810.275042] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251810.276112] thunderbolt_frame: tbframe0x3: READY confirmed
+[251810.276115] thunderbolt_frame: tbframe0x3: link up
+[251810.276120] infiniband usb4_rdma1: set active
+[251841.251199] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=21 ring_posted=1 tx_sub=142 tx_done=141 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251841.278926] thunderbolt_frame: tbframe0x3: link down (3)
+[251841.278932] infiniband usb4_rdma1: set down
+[251841.483953] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251841.500524] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251842.532206] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251842.532212] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1382 tx_canceled=0 rx_total=1833 rx_matched=1007 rx_unmatched=10 rx_xdomain_tx_status=563 rx_dropped=0
+[251842.532215] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=2 sw_tail=2 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00020002 hw_prod=2 hw_cons=2 indices_valid=1 full=0 options=0xc0000000
+[251842.532218] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251842.533290] thunderbolt_frame: tbframe0x3: READY confirmed
+[251842.533293] thunderbolt_frame: tbframe0x3: link up
+[251842.533298] infiniband usb4_rdma1: set active
+[251873.508385] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=22 ring_posted=1 tx_sub=148 tx_done=147 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251873.536114] thunderbolt_frame: tbframe0x3: link down (3)
+[251873.536122] infiniband usb4_rdma1: set down
+[251873.740899] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251873.757479] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251874.788385] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251874.788392] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1390 tx_canceled=0 rx_total=1845 rx_matched=1013 rx_unmatched=10 rx_xdomain_tx_status=568 rx_dropped=0
+[251874.788396] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=0 sw_tail=0 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00000000 hw_prod=0 hw_cons=0 indices_valid=1 full=0 options=0xc0000000
+[251874.788399] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251874.789471] thunderbolt_frame: tbframe0x3: READY confirmed
+[251874.789473] thunderbolt_frame: tbframe0x3: link up
+[251874.789480] infiniband usb4_rdma1: set active
+[251905.764557] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=23 ring_posted=1 tx_sub=154 tx_done=153 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251905.792307] thunderbolt_frame: tbframe0x3: link down (3)
+[251905.792314] infiniband usb4_rdma1: set down
+[251905.996316] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251906.012906] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251907.043555] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251907.043563] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1398 tx_canceled=0 rx_total=1857 rx_matched=1019 rx_unmatched=10 rx_xdomain_tx_status=573 rx_dropped=0
+[251907.043567] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=8 sw_tail=8 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00080008 hw_prod=8 hw_cons=8 indices_valid=1 full=0 options=0xc0000000
+[251907.043570] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251907.044652] thunderbolt_frame: tbframe0x3: READY confirmed
+[251907.044654] thunderbolt_frame: tbframe0x3: link up
+[251907.044660] infiniband usb4_rdma1: set active
+[251938.019753] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=24 ring_posted=1 tx_sub=160 tx_done=159 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251938.047471] thunderbolt_frame: tbframe0x3: link down (3)
+[251938.047478] infiniband usb4_rdma1: set down
+[251938.252257] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251938.268845] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251939.299745] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251939.299751] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1406 tx_canceled=0 rx_total=1869 rx_matched=1025 rx_unmatched=10 rx_xdomain_tx_status=578 rx_dropped=0
+[251939.299754] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=6 sw_tail=6 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00060006 hw_prod=6 hw_cons=6 indices_valid=1 full=0 options=0xc0000000
+[251939.299758] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251939.300831] thunderbolt_frame: tbframe0x3: READY confirmed
+[251939.300833] thunderbolt_frame: tbframe0x3: link up
+[251939.300839] infiniband usb4_rdma1: set active
+[251970.276920] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=25 ring_posted=1 tx_sub=166 tx_done=165 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[251970.304655] thunderbolt_frame: tbframe0x3: link down (3)
+[251970.304662] infiniband usb4_rdma1: set down
+[251970.509437] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[251970.526022] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[251971.555922] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[251971.555930] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1414 tx_canceled=0 rx_total=1881 rx_matched=1031 rx_unmatched=10 rx_xdomain_tx_status=583 rx_dropped=0
+[251971.555933] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=4 sw_tail=4 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00040004 hw_prod=4 hw_cons=4 indices_valid=1 full=0 options=0xc0000000
+[251971.555937] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[251971.557009] thunderbolt_frame: tbframe0x3: READY confirmed
+[251971.557011] thunderbolt_frame: tbframe0x3: link up
+[251971.557017] infiniband usb4_rdma1: set active
+[252002.533096] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=26 ring_posted=1 tx_sub=172 tx_done=171 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252002.560836] thunderbolt_frame: tbframe0x3: link down (3)
+[252002.560842] infiniband usb4_rdma1: set down
+[252002.765617] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252002.782174] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252003.812102] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[252003.812110] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1422 tx_canceled=0 rx_total=1893 rx_matched=1037 rx_unmatched=10 rx_xdomain_tx_status=588 rx_dropped=0
+[252003.812114] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=2 sw_tail=2 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00020002 hw_prod=2 hw_cons=2 indices_valid=1 full=0 options=0xc0000000
+[252003.812117] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[252003.813197] thunderbolt_frame: tbframe0x3: READY confirmed
+[252003.813199] thunderbolt_frame: tbframe0x3: link up
+[252003.813206] infiniband usb4_rdma1: set active
+[252034.789259] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=27 ring_posted=1 tx_sub=178 tx_done=177 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252034.818669] thunderbolt_frame: tbframe0x3: link down (3)
+[252034.818676] infiniband usb4_rdma1: set down
+[252035.021788] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252035.038379] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252036.069278] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[252036.069284] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1430 tx_canceled=0 rx_total=1905 rx_matched=1043 rx_unmatched=10 rx_xdomain_tx_status=593 rx_dropped=0
+[252036.069287] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=0 sw_tail=0 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00000000 hw_prod=0 hw_cons=0 indices_valid=1 full=0 options=0xc0000000
+[252036.069290] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[252036.070357] thunderbolt_frame: tbframe0x3: READY confirmed
+[252036.070359] thunderbolt_frame: tbframe0x3: link up
+[252036.070365] infiniband usb4_rdma1: set active
+[252041.540090] netconsole: network logging has already stopped
+[252041.540097] netconsole: network logging has already stopped
+[252041.542619] netconsole: network logging has already stopped
+[252041.542624] netconsole: network logging has already stopped
+[252041.544673] netconsole: network logging has already stopped
+[252041.544679] netconsole: network logging has already stopped
+[252067.044464] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=28 ring_posted=1 tx_sub=184 tx_done=183 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252067.072191] thunderbolt_frame: tbframe0x3: link down (3)
+[252067.072199] infiniband usb4_rdma1: set down
+[252067.276967] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252067.293558] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252068.324461] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[252068.324467] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1438 tx_canceled=0 rx_total=1917 rx_matched=1049 rx_unmatched=10 rx_xdomain_tx_status=598 rx_dropped=0
+[252068.324471] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=8 sw_tail=8 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00080008 hw_prod=8 hw_cons=8 indices_valid=1 full=0 options=0xc0000000
+[252068.324474] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[252068.325544] thunderbolt_frame: tbframe0x3: READY confirmed
+[252068.325546] thunderbolt_frame: tbframe0x3: link up
+[252068.325552] infiniband usb4_rdma1: set active
+[252099.301630] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=29 ring_posted=1 tx_sub=190 tx_done=189 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252099.329378] thunderbolt_frame: tbframe0x3: link down (3)
+[252099.329386] infiniband usb4_rdma1: set down
+[252099.533490] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252099.550989] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252099.553314] thunderbolt_frame: tbframe0x3: READY confirmed
+[252101.092633] thunderbolt_frame: tbframe0x3: link up
+[252101.092646] infiniband usb4_rdma1: set active
+[252132.069811] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=30 ring_posted=1 tx_sub=201 tx_done=200 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252132.097564] thunderbolt_frame: tbframe0x3: link down (3)
+[252132.097570] infiniband usb4_rdma1: set down
+[252132.302556] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252132.320165] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252132.322493] thunderbolt_frame: tbframe0x3: READY confirmed
+[252133.861822] thunderbolt_frame: tbframe0x3: link up
+[252133.861832] infiniband usb4_rdma1: set active
+[252164.837998] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=31 ring_posted=1 tx_sub=212 tx_done=211 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252164.865745] thunderbolt_frame: tbframe0x3: link down (3)
+[252164.865753] infiniband usb4_rdma1: set down
+[252165.070852] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252165.088355] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252165.090680] thunderbolt_frame: tbframe0x3: READY confirmed
+[252166.630006] thunderbolt_frame: tbframe0x3: link up
+[252166.630016] infiniband usb4_rdma1: set active
+[252197.606185] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=32 ring_posted=1 tx_sub=223 tx_done=222 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252197.633937] thunderbolt_frame: tbframe0x3: link down (3)
+[252197.633945] infiniband usb4_rdma1: set down
+[252197.838917] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252197.856527] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252197.858849] thunderbolt_frame: tbframe0x3: READY confirmed
+[252199.398181] thunderbolt_frame: tbframe0x3: link up
+[252199.398192] infiniband usb4_rdma1: set active
+[252230.374375] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=33 ring_posted=1 tx_sub=234 tx_done=233 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252230.402111] thunderbolt_frame: tbframe0x3: link down (3)
+[252230.402118] infiniband usb4_rdma1: set down
+[252230.606215] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252230.623720] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252230.626047] thunderbolt_frame: tbframe0x3: READY confirmed
+[252232.166365] thunderbolt_frame: tbframe0x3: link up
+[252232.166375] infiniband usb4_rdma1: set active
+[252263.142555] thunderbolt_frame: tbframe0x3: DATA PATH DEAD: hop entries still read back enabled, but nothing has been received on the data ring for 3 verify intervals (15000 ms) while keepalives were being sent; generation=34 ring_posted=1 tx_sub=245 tx_done=244 tx_canceled=0 tx_ringerr=0 rx_bad=0 rx_oversize=0 rx_stale=0 rx_bad_cookie=0; tearing the session down
+[252263.170289] thunderbolt_frame: tbframe0x3: link down (3)
+[252263.170297] infiniband usb4_rdma1: set down
+[252263.374079] thunderbolt_frame: tbframe0x3: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[252263.390658] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[252264.422571] thunderbolt 0000:07:00.0: request timed out: send eof=0x6 want eof=0x7 route=0x3 req_dw0=0x00000000 size=76
+[252264.422578] thunderbolt 0000:07:00.0: request timed out after 1000 ms; tx_state=2 local_state=2 peer_state=4 ring0 tx_done=1491 tx_canceled=0 rx_total=1989 rx_matched=1085 rx_unmatched=10 rx_xdomain_tx_status=623 rx_dropped=0
+[252264.422582] thunderbolt 0000:07:00.0: ring0 TX snapshot: running=1 size=10 sw_head=1 sw_tail=1 queued=0 in_flight=0 tail_attr=0x00000000 tail_complete=0 index=0x00010001 hw_prod=1 hw_cons=1 indices_valid=1 full=0 options=0xc0000000
+[252264.422586] thunderbolt 0000:07:00.0: peer response timed out after local XDomain transmit acceptance
+[252264.423669] thunderbolt_frame: tbframe0x3: READY confirmed
+[252264.423672] thunderbolt_frame: tbframe0x3: link up
+[252264.423679] infiniband usb4_rdma1: set active
+## blocked processes
+    PID STAT WCHAN                            COMMAND
+1626333 S    wait_woken                       ib_write_bw

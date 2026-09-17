@@ -1,0 +1,114 @@
+### node=appmana-008 tag=pre t=2026-08-28T09:48:09-07:00
+@@@HOST@@@
+hostname=appmana-008 boot_id=62f2fcd8-49cf-43e4-ae75-10d35aa1635e uptime=63348 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[62624.461223] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.034376] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.191530] thunderbolt_frame: tbframe0x1: READY confirmed
+[62626.251776] thunderbolt_frame: tbframe0x3: READY confirmed
+[62626.251781] thunderbolt_frame: tbframe0x3: link up
+[62626.254195] infiniband usb4_rdma0: added over tbframe0x3
+[62626.317476] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[62631.946742] thunderbolt_frame: tbframe0x1: link up
+[62631.948842] infiniband usb4_rdma1: added over tbframe0x1
+[62632.003846] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[63133.464852] thunderbolt_frame: tbframe0x3: link down (4)
+[63137.596104] thunderbolt_frame: tbframe0x1: BYE unacknowledged; proceeding with teardown
+[63137.623195] thunderbolt_frame: tbframe0x1: link down (4)
+[63137.725890] thunderbolt 0-1: unregistering service 'tbframe': absent from the peer's property block
+[63137.726706] thunderbolt_frame: tbframe0x1: link destroyed
+[63137.741751] thunderbolt_frame: tbframe0x3: link destroyed
+[63147.792091] thunderbolt_frame: tbframe0x3: link created local_hopid=8
+[63147.792177] thunderbolt_frame: advertised tbframe service
+[63149.374771] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[63149.374972] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[63149.391593] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63149.836805] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63150.058163] thunderbolt_frame: tbframe0x1: READY confirmed
+[63151.054198] thunderbolt_frame: tbframe0x3: READY confirmed
+[63151.054201] thunderbolt_frame: tbframe0x3: link up
+[63151.056351] infiniband usb4_rdma0: added over tbframe0x3
+[63151.116990] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[63156.812155] thunderbolt_frame: tbframe0x1: link up
+[63156.814186] infiniband usb4_rdma1: added over tbframe0x1
+[63156.875443] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+### node=appmana-008 tag=hang-round4 t=2026-08-28T09:52:28-07:00
+@@@HOST@@@
+hostname=appmana-008 boot_id=62f2fcd8-49cf-43e4-ae75-10d35aa1635e uptime=63606 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[62624.461223] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.034376] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.191530] thunderbolt_frame: tbframe0x1: READY confirmed
+[62626.251776] thunderbolt_frame: tbframe0x3: READY confirmed
+[62626.251781] thunderbolt_frame: tbframe0x3: link up
+[62626.254195] infiniband usb4_rdma0: added over tbframe0x3
+[62626.317476] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[62631.946742] thunderbolt_frame: tbframe0x1: link up
+[62631.948842] infiniband usb4_rdma1: added over tbframe0x1
+[62632.003846] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[63133.464852] thunderbolt_frame: tbframe0x3: link down (4)
+[63137.596104] thunderbolt_frame: tbframe0x1: BYE unacknowledged; proceeding with teardown
+[63137.623195] thunderbolt_frame: tbframe0x1: link down (4)
+[63137.725890] thunderbolt 0-1: unregistering service 'tbframe': absent from the peer's property block
+[63137.726706] thunderbolt_frame: tbframe0x1: link destroyed
+[63137.741751] thunderbolt_frame: tbframe0x3: link destroyed
+[63147.792091] thunderbolt_frame: tbframe0x3: link created local_hopid=8
+[63147.792177] thunderbolt_frame: advertised tbframe service
+[63149.374771] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[63149.374972] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[63149.391593] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63149.836805] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63150.058163] thunderbolt_frame: tbframe0x1: READY confirmed
+[63151.054198] thunderbolt_frame: tbframe0x3: READY confirmed
+[63151.054201] thunderbolt_frame: tbframe0x3: link up
+[63151.056351] infiniband usb4_rdma0: added over tbframe0x3
+[63151.116990] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[63156.812155] thunderbolt_frame: tbframe0x1: link up
+[63156.814186] infiniband usb4_rdma1: added over tbframe0x1
+[63156.875443] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+### node=appmana-008 tag=post t=2026-08-28T09:52:31-07:00
+@@@HOST@@@
+hostname=appmana-008 boot_id=62f2fcd8-49cf-43e4-ae75-10d35aa1635e uptime=63610 kernel=6.17.0-42-generic loaded_version=2.96 loaded_src=678E01FCEA74CEE4C5ACBB7
+@@@PARAMS@@@
+retransmit_base_ms=10
+@@@SUMMARY@@@
+@@@PEERS@@@
+@@@DMESG@@@
+[62624.461223] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.034376] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[62625.191530] thunderbolt_frame: tbframe0x1: READY confirmed
+[62626.251776] thunderbolt_frame: tbframe0x3: READY confirmed
+[62626.251781] thunderbolt_frame: tbframe0x3: link up
+[62626.254195] infiniband usb4_rdma0: added over tbframe0x3
+[62626.317476] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[62631.946742] thunderbolt_frame: tbframe0x1: link up
+[62631.948842] infiniband usb4_rdma1: added over tbframe0x1
+[62632.003846] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048
+[63133.464852] thunderbolt_frame: tbframe0x3: link down (4)
+[63137.596104] thunderbolt_frame: tbframe0x1: BYE unacknowledged; proceeding with teardown
+[63137.623195] thunderbolt_frame: tbframe0x1: link down (4)
+[63137.725890] thunderbolt 0-1: unregistering service 'tbframe': absent from the peer's property block
+[63137.726706] thunderbolt_frame: tbframe0x1: link destroyed
+[63137.741751] thunderbolt_frame: tbframe0x3: link destroyed
+[63147.792091] thunderbolt_frame: tbframe0x3: link created local_hopid=8
+[63147.792177] thunderbolt_frame: advertised tbframe service
+[63149.374771] thunderbolt_frame: tbframe0x1: link created local_hopid=8
+[63149.374972] thunderbolt_frame: tbframe0x1: HELLO negotiated remote_hopid=8 rx_entries=2048 caps=0x2
+[63149.391593] thunderbolt_frame: tbframe0x1: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63149.836805] thunderbolt_frame: tbframe0x3: paths enabled local_hopid=8 remote_hopid=8 window=1984 e2e=0
+[63150.058163] thunderbolt_frame: tbframe0x1: READY confirmed
+[63151.054198] thunderbolt_frame: tbframe0x3: READY confirmed
+[63151.054201] thunderbolt_frame: tbframe0x3: link up
+[63151.056351] infiniband usb4_rdma0: added over tbframe0x3
+[63151.116990] infiniband usb4_rdma0: published for link tbframe0x3 netdev tbr-appmana019 peer appmana-019 local_eui64=009af9fffe5231fb
+[63156.812155] thunderbolt_frame: tbframe0x1: link up
+[63156.814186] infiniband usb4_rdma1: added over tbframe0x1
+[63156.875443] infiniband usb4_rdma1: published for link tbframe0x1 netdev tbr-appmana020 peer appmana-020 local_eui64=009af9fffe521048

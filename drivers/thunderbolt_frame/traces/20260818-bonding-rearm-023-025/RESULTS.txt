@@ -1,0 +1,61 @@
+Lane-bonding re-arm campaign (M3), 2026-08-18/19, appmana-023 <-> appmana-025
+Stack under test: tbfix 2.39 core (78a7bbd re-arm + b042f53 route-checked error
+match), tbframe/tbrxe rebuilt in lockstep, both nodes cold-booted onto it.
+
+== What landed (KUnit red-first, full sweep 271+16 green)
+1. 78a7bbd: bounded bonding re-arm from ENUMERATED (5 attempts, 10s<<n spacing,
+   never touches lane adapters on failure, lane 1 kept armed while budget
+   remains) + passive high side (an ENUMERATED capable unbonded peer accepts a
+   late XDP link-state-change and re-enters BONDING_UUID_HIGH, so windows need
+   not overlap) + late-success tb_reannounce_property_dirs so DMA paths would
+   be reborn with bonded credits. struct tb_xdomain grows
+   bonding_rearm_attempts (appended; header shim updated).
+2. b042f53: tb_xdomain_match accepted ANY TB_CFG_PKG_ERROR for any pending XDP
+   request. With a dead sibling-port peer (022 on 023, 009 on 025) erroring
+   continuously, cross-route errors completed live-peer requests in ~2 ms.
+   Now route-checked. This also removed the failure mode that previously
+   condemned/replaced stale XDomains as a side effect - see finding 3.
+
+== Observed on hardware
+- Re-arm executes exactly as designed: attempts 2..5 logged on both nodes,
+  10s/20s/40s/80s/160s spacing, quiet exhaustion, lane adapters untouched,
+  x1 sessions unharmed throughout.
+- DECISIVE FINDING (packet trace, tools tb_tx/tb_rx tracepoints, 023 t=334.158):
+  the XDP LINK_STATE_STATUS_REQUEST (type 15) to 025 is answered in 1.7 ms by a
+  well-formed XDOMAIN_RESP ERROR_RESPONSE (type 7) error=3 ERROR_NOT_SUPPORTED,
+  route and protocol UUID correct - while 025's kernel handler NEVER logs
+  receiving the request (properties/UUID requests on the same route are received
+  and answered by software normally, before and after). The responder is the
+  RESIDENT ICM FIRMWARE on the peer's Maple Ridge NHI: it intercepts the
+  link-state XDP types it does not know and NAKs them before the OS sees them.
+  => Negotiated (XDP) lane bonding CANNOT work on this fleet's firmware-CM
+  Maple Ridge parts regardless of driver version or scheduling. This supersedes
+  the boot-skew explanation as the primary cause of fleet-wide x1 (boot skew and
+  the cross-route error bug were real but secondary).
+- The ffff-tailed UUIDs (xxxx-...-ffff-ffffffffffff) are the GENUINE host router
+  UUIDs on these boards, not corruption.
+- rx_lanes/tx_lanes remain 1/1 on both ends of the 023<->025 cable: bonding not
+  achieved. Uni-bw/qps32 re-measurement therefore not applicable (x2 never
+  trained); the M1/M2 x1 numbers stand.
+
+== Follow-up (designed, not implemented tonight)
+The only viable x2 path is symmetric DIRECT bonding (both ends arm lane 1 +
+bonding bit themselves; legacy 09c1f9b proved this trains 40 Gb/s on identical
+hardware). The fork's DIRECT_BONDING_* states exist but are neutered
+(peer_confirmed=false at the call site, b5f07da). Requirements for a safe
+re-enable:
+  - peer confirmation from the peer's advertised "tbframe" property dir
+    (only fork nodes advertise it; visible in remote_properties);
+  - sequencing that respects the recorded hazard "never change width after
+    service publication" (config-space timeouts + asymmetric disconnect on
+    023/025 under thunderbolt-net): bond in the pre-service window or quiesce
+    the tbframe session (BYE) around the width change, then re-announce;
+  - keep the b5f07da abort rule (never touch adapters on failure).
+
+== Incidental finding
+tbframe session re-establishment after a peer reboot depends on the peer's
+property re-read cycle; a session torn down by service-remove (reason CLOSED)
+on a SURVIVING XDomain is only re-created when the peer's properties (with the
+tbframe dir) are re-read after the local tbframe re-announces. Observed delays
+of 1-3 min on tonight's reboots; the HELLO-unanswered retry loop plus
+re-announce eventually converges.

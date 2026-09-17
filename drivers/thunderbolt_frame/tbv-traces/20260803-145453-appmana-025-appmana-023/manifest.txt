@@ -1,0 +1,4 @@
+started=2026-08-03T14:54:54-07:00
+server=appmana-025 target=administrator@appmana-025.i.appmana.com device=tbrxe0 expected_netdev=tbr-appmana023 bootstrap=10.2.0.67
+client=appmana-023 target=administrator@appmana-023.i.appmana.com device=tbrxe0 expected_netdev=tbr-appmana025
+size=1048576 iters=200 tx_depth=128 qps=32 rounds=3 round_timeout=90

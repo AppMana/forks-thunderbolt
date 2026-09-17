@@ -1,0 +1,6 @@
+round=1 client_rc=0 server_rc=0
+ 262144     6400             576.63             443.64 		   0.001775
+round=2 client_rc=0 server_rc=0
+ 262144     6400             562.57             434.50 		   0.001738
+round=3 client_rc=0 server_rc=0
+ 262144     6400             574.67             438.84 		   0.001755
