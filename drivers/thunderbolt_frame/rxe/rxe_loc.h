@@ -47,9 +47,28 @@ struct rxe_mmap_info {
 	void			*obj;
 
 	struct mminfo info;
+
+	/*
+	 * Revocation (rxe_disassociate_ucontext). uc_node links the info into
+	 * its ucontext's list and is guarded by the file-global rxe_mmap_lock,
+	 * which outlives the device. revoked is set once, under that lock, when
+	 * the ucontext is disassociated; from then on the info no longer points
+	 * at a live ucontext or rxe_dev and its user mappings fault onto
+	 * dead_page. inode is the uverbs char device the ring was mapped
+	 * through, pinned so its i_mmap tree can be zapped.
+	 */
+	struct list_head	uc_node;
+	struct list_head	revoke_node;
+	bool			revoked;
+	struct inode		*inode;
+	struct page		*dead_page;
 };
 
 void rxe_mmap_release(struct kref *ref);
+
+void rxe_mmap_info_publish(struct rxe_dev *rxe, struct rxe_mmap_info *ip);
+
+void rxe_disassociate_ucontext(struct ib_ucontext *ibuc);
 
 struct rxe_mmap_info *rxe_create_mmap_info(struct rxe_dev *dev, u32 size,
 					   struct ib_udata *udata, void *obj);

@@ -37,6 +37,8 @@ static inline int psn_compare(u32 psn_a, u32 psn_b)
 struct rxe_ucontext {
 	struct ib_ucontext ibuc;
 	struct rxe_pool_elem	elem;
+	/* rxe_mmap_info.uc_node, under rxe_mmap_lock (rxe_mmap.c) */
+	struct list_head	mmaps;
 };
 
 struct rxe_pd {

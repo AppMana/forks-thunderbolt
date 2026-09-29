@@ -59,6 +59,7 @@ thunderbolt_frame_rxe-$(CONFIG_KUNIT) += tests/tbrxe_lifecycle_test.o
 thunderbolt_frame_rxe-$(CONFIG_KUNIT) += tests/tbrxe_mtu_test.o
 thunderbolt_frame_rxe-$(CONFIG_KUNIT) += tests/tbrxe_retransmit_test.o
 thunderbolt_frame_rxe-$(CONFIG_KUNIT) += tests/tbrxe_rate_test.o
+thunderbolt_frame_rxe-$(CONFIG_KUNIT) += tests/tbrxe_uverbs_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 

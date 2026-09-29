@@ -685,17 +685,21 @@ static struct net_device *tbrxe_ndev_create(const struct tbframe_link_info *info
  * Start tearing down one link's device. The caller has already taken the
  * record off tbrxe.links, so no upcall can find it again.
  *
- * ASYNCHRONOUS ON PURPOSE. tbrxe has no .disassociate_ucontext (its user
- * mappings are untracked remap_vmalloc_range() mappings, rxe_mmap.c, which
- * uverbs_user_mmap_disassociate() cannot zap -- same as upstream rxe and
- * siw), so ib_uverbs_remove_one() takes the wait_clients path
- * (drivers/infiniband/core/uverbs_main.c:1254-1284) and a synchronous
- * ib_unregister_device() blocks with no timeout until every userspace
- * process closes its verbs FD. This runs from a tbframe upcall (its
- * workqueue) and from module exit, neither of which may block on userspace,
- * so use the queued form -- the same choice rxe (rxe_net.c:589) and siw
- * (siw_main.c:391) make in their netdev-loss callbacks. It also removes the
- * publish_lock -> rtnl nesting the synchronous form had.
+ * ASYNCHRONOUS ON PURPOSE. This runs from a tbframe upcall (its workqueue)
+ * and from module exit, so it uses the queued form -- the same choice rxe
+ * (rxe_net.c:589) and siw (siw_main.c:391) make in their netdev-loss
+ * callbacks. It also removes the publish_lock -> rtnl nesting the
+ * synchronous form had.
+ *
+ * The queued worker itself must not wait on userspace either. Without
+ * .disassociate_ucontext, ib_uverbs_remove_one() takes the wait_clients
+ * path (drivers/infiniband/core/uverbs_main.c:1254-1284) and parks the
+ * ib-unreg-wq worker in D state until every process closes its verbs FD,
+ * so a peer rebooting under an RDMA job wedged (or, with hung_task_panic,
+ * panicked) both of its neighbours.
+ * rxe_disassociate_ucontext() (rxe_mmap.c) revokes the queue mappings
+ * instead, so unregistration completes while the process still holds the
+ * file; it sees -EIO and idle rings. tests/tbrxe_uverbs_test.c.
  *
  * The corollary (ib_unregister_device_queued kernel-doc, device.c:1663-1687)
  * is that module exit MUST fence with ib_unregister_driver(); see

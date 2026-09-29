@@ -206,6 +206,7 @@ static int rxe_alloc_ucontext(struct ib_ucontext *ibuc, struct ib_udata *udata)
 	struct rxe_ucontext *uc = to_ruc(ibuc);
 	int err;
 
+	INIT_LIST_HEAD(&uc->mmaps);
 	err = rxe_add_to_pool(&rxe->uc_pool, uc);
 	if (err)
 		rxe_err_dev(rxe, "unable to create uc\n");
@@ -217,6 +218,13 @@ static void rxe_dealloc_ucontext(struct ib_ucontext *ibuc)
 {
 	struct rxe_ucontext *uc = to_ruc(ibuc);
 	int err;
+
+	/* Normally empty here: a closed ufile has no VMAs left (they pin the
+	 * file) and disassociate already emptied the list on device removal.
+	 * Detach anything left so no mmap info outlives its ucontext still
+	 * pointing at it.
+	 */
+	rxe_disassociate_ucontext(ibuc);
 
 	err = rxe_cleanup(uc);
 	if (err)
@@ -1463,6 +1471,7 @@ static const struct ib_device_ops rxe_dev_ops = {
 	.destroy_srq = rxe_destroy_srq,
 	.detach_mcast = rxe_detach_mcast,
 	.device_group = &rxe_attr_group,
+	.disassociate_ucontext = rxe_disassociate_ucontext,
 	.enable_driver = rxe_enable_driver,
 	.get_dma_mr = rxe_get_dma_mr,
 	.get_hw_stats = rxe_ib_get_hw_stats,
