@@ -41,8 +41,7 @@ drivers/thunderbolt_frame/      the RDMA engine family, userspace providers,
   rxe/                          thunderbolt_frame_rxe.ko: rxe-derived IB engine
                                 over the frame service
   userspace/tbrxe/              libtbrxe provider source (rdma-core patch 0005)
-  userspace/usb4_rdma/          libusb4_rdma provider source (patches 0001-0003)
-  packaging/                    usb4-rdma-provider deb/rpm/arch + udev tooling
+  packaging/                    usb4-rdma-provider deb/rpm/arch + host udev tooling
   docs/frame-rxe-wire-spec.md   normative wire/contract spec for the engine
 dkms/                           DKMS scaffolding for thunderbolt-tbfix-dkms
   frame/                        DKMS scaffolding for thunderbolt-frame-dkms
@@ -87,15 +86,10 @@ are intentionally unchanged, so renamed and pre-rename peers interoperate.
 | | `thunderbolt_frame` + `thunderbolt_frame_rxe` |
 |---|---|
 | Kernel modules | `thunderbolt_frame.ko` + `thunderbolt_frame_rxe.ko` (`thunderbolt-frame-dkms`, tbfix version stream) |
-| Verbs ABI | stock rxe uverbs ABI under a private driver id |
-| Userspace provider | `libtbrxe` (rdma-core patch 0005) |
-| Provider package | `usb4-rdma-provider >= 0.2.70` |
+| Verbs ABI | stock rxe uverbs ABI under private driver id `0x55534234` (`"USB4"`) |
+| Userspace provider | `libtbrxe-rdmav<PABI>.so` (rdma-core patch 0005) |
+| Host package | `usb4-rdma-provider >= 0.2.73` (host udev rules + `libtbrxe-rdmav34.so`) |
 | Wire protocol | wire v3 per `docs/frame-rxe-wire-spec.md` |
-
-**Status (2026-08-19).** The engine has passed a real two-rank
-pipeline-parallel training gate over NCCL `NET/IB` on `usb4_rdma0`
-(60/60 steps, loss decreasing, clean counters; evidence in
-`drivers/thunderbolt_frame/traces/20260819-m4-diffusionpipe-023-025/`).
 
 ### The engine's driver id and the provider requirement
 
@@ -104,14 +98,10 @@ pipeline-parallel training gate over NCCL `NET/IB` on `usb4_rdma0`
 (commit `7815b8f`: with the stock id, `rmmod rdma_rxe` swept live engine
 devices off the node). rdma-core matches providers by driver id and stamps
 the compiled-in id into every uverbs ioctl header, so **stock `librxe`
-cannot bind an engine device**; a `usb4-rdma-provider` deb >= 0.2.70 is
-required in every userspace that touches the device — hosts *and*
-containers. The deb ships both provider families
-(`libusb4_rdma-rdmav<PABI>.so`, `libtbrxe-rdmav<PABI>.so`), both
-`/etc/libibverbs.d/*.driver` files, and the udev rail tooling (stable
-`tbr-<peer>` naming + deterministic per-link ULA /64 assignment via
-`tbv-rdma-addr`). The engine and the provider deb must roll together. See
-`drivers/thunderbolt_frame/packaging/rdma-core-patches/README.md`.
+cannot bind an engine device**. Instead, `libtbrxe-rdmav<PABI>.so` compiles the
+stock `rdma-core` `providers/rxe/rxe.c` source bound exclusively to driver id
+`0x55534234` alongside `/etc/libibverbs.d/tbrxe.driver`.
+On the host, `usb4-rdma-provider` (`>= 0.2.73`) installs `libtbrxe-rdmav34.so`, `tbrxe.driver`, and the host udev rail tooling (stable `u4r*` / `tbr-<peer>` naming + deterministic per-link ULA `/64` assignment via `tbv-rdma-addr`). See `drivers/thunderbolt_frame/packaging/rdma-core-patches/README.md`.
 
 ### Build coupling and the deploy procedure
 
@@ -170,130 +160,15 @@ silicon-wedge class — and verify the link bidirectionally
   are never silently lost while the link is UP; loss windows are bracketed
   by link_down/link_up.
 
-### Measured performance (two-node Maple Ridge x1 test pair, 2026-08-18/19)
-
-- `ib_send_lat` 64 B: ~15 us typical (best of campaign 12.89 us; legacy
-  Strix record 8.3 us).
-- `ib_write_bw` 1 MiB: 17.3 Gb/s unidirectional single-QP; 23.6-23.8 Gb/s
-  aggregate bidirectional at 32 QPs.
-- NCCL (2-rank, Ring/Simple): all_reduce busbw 1.71-1.77 GB/s, all_gather
-  1.63-1.71 GB/s at large sizes; no degraded iterations after the backoff
-  work.
-- The bandwidth ceiling is **frame rate**, not bytes: the NHI moves ~0.5M
-  frames/s per direction (~540k measured) regardless of QP count or CPU;
-  bytes-per-frame (the MTU-4096 deviation) is the lever.
-
-Evidence: `drivers/thunderbolt_frame/traces/20260818-*/RESULTS.txt` and
-`20260819-m4-diffusionpipe-023-025/RESULTS.txt`.
-
-### Lane bonding verdict (2026-08-19)
-
-**Negotiated (XDP) lane bonding cannot work on Maple Ridge hosts.** The
-resident ICM firmware intercepts the link-state XDP requests and NAKs them
-(`ERROR_NOT_SUPPORTED`) before the peer OS ever sees them — measured by
-packet trace; driver version and scheduling are irrelevant
-(`traces/20260818-bonding-rearm-023-025/RESULTS.txt`). The bounded re-arm
-(tbfix 2.38, `78a7bbd`) and route-checked XDP error matching (`b042f53`)
-are correct and stay, but x2 requires **direct bonding** (both ends
-arm lane 1 + bonding bit themselves), which is designed but not yet
-enabled. Strix-class integrated hosts bond natively — the committed
-`bench/results/strix-2p-noiommu-2x40g/` results are 2 lanes @ 20 Gb/s per
-cable (40 Gb/s aggregate) without any of this.
-
-### Component inventory for a working vLLM deployment (example)
-
-Every lib/component in the path, whether it is forked, and how it reaches a
-node or container. Environment policy (the NCCL env below) belongs to the
-deployment's orchestration layer, not to images.
-
-| Component | Forked? | Source | Bundled / installed how |
-|---|---|---|---|
-| Linux kernel (6.17 or 7.0 HWE) | no | Ubuntu | host package manager |
-| `thunderbolt` core + `thunderbolt_net` (tbfix) | **yes** | this repo (`drivers/thunderbolt`, `drivers/net/thunderbolt`) | host: `thunderbolt-tbfix-dkms` deb (release assets). Core bumps are cold-boot-only |
-| `thunderbolt_frame.ko` (frame/session layer) | new | this repo (`drivers/thunderbolt_frame/frame`) | host: `thunderbolt-frame-dkms` deb (lockstep with the core: symvers + header shim); loaded via `modprobe thunderbolt_frame_rxe`, never autoloaded |
-| `thunderbolt_frame_rxe.ko` (IB engine) | fork of in-tree `rxe` | this repo (`drivers/thunderbolt_frame/rxe`) | same `thunderbolt-frame-dkms` deb, built lockstep in the same DKMS pass |
-| `rdma_rxe` (ethernet soft-RoCE fallback device) | ~stock (one fail-fast patch) | kernel / this repo | module in the tbfix deb; device created via `rdma link add ... type rxe` |
-| rdma-core / `libibverbs` | no | distro (noble = v50, PABI 34) | host + container, stock |
-| `usb4-rdma-provider` deb (`libusb4_rdma` + `libtbrxe` + `.driver` files + udev ULA addressing) | patches, not a fork (`packaging/rdma-core-patches/`) | this repo | host: deb >= 0.2.70. container: same deb baked in, or injected from the host at runtime (PABI must match the container's rdma-core) |
-| NCCL | **yes** | rail-routing fork (2.30.7 base) | baked into the image; required for correct multi-HCA rail selection |
-| NCCL net plugin | n/a — disabled | — | `NCCL_NET_PLUGIN=none` via deployment env (external plugins crash on PCI-less HCAs and bypass the fork's routing) |
-| NCCL env | policy | deployment | injected by the orchestration layer; see the env list below |
-| vLLM | **yes** | serving fork | the serving image |
-| perftest / nccl-tests | no | upstream | validation tooling only |
-
-### Consuming the stack from NCCL
-
-Use the rail-routing NCCL fork (2.30.7 base): it advertises all device GIDs
-in the listen handle and selects the `usb4_rdma` rail that shares a /64 with
-the peer, with `rxe_lan` as the ordered fallback. Stock NCCL cannot do this
-on multi-HCA hosts (each rail reaches a different neighbor; a wrong pick is
-unroutable, not just slow).
-
-Environment to set (per process/deployment):
-
-```sh
-NCCL_IB_DISABLE=0
-NCCL_IB_HCA=usb4_rdma,rxe_lan     # ordered preference; ==usb4_rdma0 pins exactly
-NCCL_IB_ADDR_FAMILY=AF_INET6      # rail GIDs are IPv6 ULAs
-NCCL_IB_SUBNET_AWARE_ROUTING='prefer_hca[usb4_rdma\d*,rxe_lan\d*]'
-NCCL_ALGO=Ring                    # linear topologies: adjacent rails only;
-NCCL_PROTO=Simple                 # tree graphs create unreachable edges
-NCCL_NET_PLUGIN=none              # see below
-NCCL_SOCKET_IFNAME=<bootstrap-if> # TCP bootstrap; data rides the rails
-NCCL_NET_GDR_LEVEL=0
-NCCL_IB_MERGE_NICS=0
-NCCL_NET_MERGE_LEVEL=LOC
-```
-
-`NCCL_NET_PLUGIN=none` is mandatory wherever an external NCCL net plugin is
-installed (e.g. HPC-X in NGC images): the plugin loads in preference to
-NCCL's builtin IB transport, derives topology from each device's PCI path
-and segfaults on these PCI-less HCAs (`nccl_p2p_ib_pci_path`) — and even a
-non-crashing plugin would bypass the fork's rail routing entirely.
-
-Containers additionally need the matching `usb4-rdma-provider` (>= 0.2.70;
-see `drivers/thunderbolt_frame/docs/provider_version_matching.md`),
-`/dev/infiniband`, `IPC_LOCK`/unlimited memlock, and adequate `/dev/shm`.
-
 ## `thunderbolt_net` coexistence
 
 The frame engine and `thunderbolt_net` register different XDomain services
 (`"tbframe"` vs `"network"`) on separate NHI rings and hopids, so both can
-be loaded at once. The legacy driver's `link_owner` runtime switch was
-removed with the legacy driver itself.
-
-### Why `thunderbolt_net` used to be a zombie
-
-Before **tbfix 2.13 / tbv 0.2.36**, `thunderbolt_net` on a chain node looked
-healthy — netdev `up`, `carrier=1`, correct IPs, routes resolving — and passed
-**zero packets**. That was *not* a resource conflict with the RDMA engine:
-the two use separate NHI rings and separate XDomain hopids, and both hop
-entries are programmed. Reading the hop entries back off the routers showed
-the real mechanism: tbnet's inbound lane-adapter entries were
-**deactivated** (`enable=0`) while the RDMA driver's entries on the same
-adapters were `enable=1` and carrying traffic.
-
-tbnet got stuck that way because its ThunderboltIP session is **one-shot**:
-`login_work` and `connected_work` both early-return once carrier is on, so once
-both ends latch "login complete" nothing ever re-LOGINs — and this fleet
-demonstrably loses the hotplug edges upstream relies on to tear the session down
-(a neighbour rebooting can produce *no* thunderbolt event on the surviving node).
-The RDMA engine's negotiation survives the identical events because it is
-level-triggered.
-
-The fix (in `thunderbolt_net`, using the stock spec LOGIN — the negotiation is
-not reimplemented) is a **level-triggered session verify**: while carrier is on,
-re-check that the DMA tunnel behind the session is still alive
-(`tb_xdomain_paths_active()` reads every hop entry back from the routers), and
-if it died, tear the session down and re-run a normal LOGIN.
-
-```sh
-# how often to re-check the tunnel behind an established session (ms); 0 disables
-cat /sys/module/thunderbolt_net/parameters/session_verify_ms   # default 5000
-```
-
-A healthy link logs nothing; recovery logs
-`ThunderboltIP session lost its DMA tunnel; tearing down and re-logging in`.
+be loaded at once. While carrier is on, `thunderbolt_net` periodically
+verifies that the DMA tunnel behind an established session is still active
+(`tb_xdomain_paths_active()`, controlled by `session_verify_ms`, default
+`5000` ms) and re-runs LOGIN if a neighbor hotplug/reset deactivated its
+router hop entries.
 
 ## Install on Ubuntu
 
@@ -493,34 +368,6 @@ Do not submit the fleet branch upstream. For upstream work, create a
 fresh topic branch from `upstream/master` and apply only the minimal
 subsystem-specific change. Thunderbolt networking changes touch netdev;
 storage hotplug changes should not.
-
-## Operational caveats
-
-- **An ICM wedge is cleared only by removing power.** Symptom: `thunderbolt
-  0000:xx:00.0: failed to send driver ready to ICM`, `probe ... error -110`,
-  and no `usb4_rdma*` device. Measured 2026-07-09 on Maple Ridge: warm reboot,
-  PCI secondary-bus reset, D3cold via runtime PM (no `_PR3` on these boards),
-  and the WMI `force_power` toggle **all fail**. `systemctl poweroff` to S5
-  followed by power-on clears it every time. Arm Wake-on-LAN first
-  (`ethtool -s <if> wol g`) or the node needs a physical power button press —
-  some boards ignore WoL from S5 regardless.
-- **Never reload the engine modules under active RDMA traffic.** Reloading
-  `thunderbolt_frame_rxe`/`thunderbolt_frame` while uverbs users are live
-  is the silicon-wedge class; quiesce first. When rebooting, `rmmod` the
-  modules *before* the reboot (a warm reboot with active NHI rings leaves
-  the ICM mid-transaction) — see
-  `appmana-management/.../scripts/tb-chain-reboot-cover.sh`, which drains,
-  unloads, reboots a pairwise non-adjacent set, and verifies negotiation.
-- **A rail's peers only re-negotiate after its neighbour also rolls.** After
-  rebooting one half of the chain, `data-ready-rails=0` on those nodes is
-  expected until their neighbours reboot too; do not chase it.
-- **Hardware E2E flow control is NOT a throughput win.** The `c5ec614` commit
-  message reports ~28 Gb/s duplex with E2E vs ~3 Gb/s on software credits; that
-  came from a synthetic bandwidth sweep and does not reproduce on real NCCL
-  message shapes, where the two are about the same. E2E remains off by default
-  (`thunderbolt_frame` `e2e=0`): it buys nothing measurable and carries the Maple Ridge
-  ring-teardown lockup and AMD TX-completion wedge history. Do not re-derive a
-  policy change from that commit message alone.
 
 ## Why patches not a submodule
 
