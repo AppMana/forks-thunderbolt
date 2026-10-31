@@ -106,6 +106,7 @@ enum icm_pkg_code {
 	ICM_APPROVE_DEVICE = 0x4,
 	ICM_CHALLENGE_DEVICE = 0x5,
 	ICM_ADD_DEVICE_KEY = 0x6,
+	ICM_XDOMAIN_PACKET = 0x8,
 	ICM_GET_ROUTE = 0xa,
 	ICM_APPROVE_XDOMAIN = 0x10,
 	ICM_DISCONNECT_XDOMAIN = 0x11,
@@ -136,6 +137,14 @@ struct icm_pkg_header {
 #define ICM_FLAGS_DUAL_LANE		BIT(5)
 #define ICM_FLAGS_SPEED_GEN3		BIT(7)
 #define ICM_FLAGS_WRITE			BIT(7)
+
+/* Local completion returned by the connection manager for an XDomain PDF. */
+struct icm_tr_pkg_xdomain_packet_response {
+	struct icm_pkg_header hdr;
+	u32 route_hi;
+	u32 route_lo;
+	u32 data[4];
+};
 
 struct icm_pkg_driver_ready {
 	struct icm_pkg_header hdr;

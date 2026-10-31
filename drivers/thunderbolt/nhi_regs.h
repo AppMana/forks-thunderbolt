@@ -9,6 +9,7 @@
 #ifndef NHI_REGS_H_
 #define NHI_REGS_H_
 
+#include <linux/errno.h>
 #include <linux/types.h>
 
 enum ring_flags {
@@ -124,6 +125,86 @@ struct ring_desc {
 #define REG_DMA_MISC_INT_AUTO_CLEAR     BIT(2)
 #define REG_DMA_MISC_DISABLE_AUTO_CLEAR	BIT(17)
 
+enum tb_nhi_irq_mode {
+	TB_NHI_IRQ_AUTO_STATUS_CLEAR,
+	TB_NHI_IRQ_CLEAR_ON_READ,
+	TB_NHI_IRQ_EXPLICIT_W1C,
+	TB_NHI_IRQ_INVALID,
+};
+
+static inline enum tb_nhi_irq_mode tb_nhi_dma_misc_interrupt_mode(u32 value)
+{
+	bool auto_clear = value & REG_DMA_MISC_INT_AUTO_CLEAR;
+	bool disable_clear_on_read = value & REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+
+	if (auto_clear && disable_clear_on_read)
+		return TB_NHI_IRQ_INVALID;
+	if (auto_clear)
+		return TB_NHI_IRQ_AUTO_STATUS_CLEAR;
+	if (disable_clear_on_read)
+		return TB_NHI_IRQ_EXPLICIT_W1C;
+
+	return TB_NHI_IRQ_CLEAR_ON_READ;
+}
+
+static inline u32
+tb_nhi_dma_misc_interrupt_policy(u32 value, enum tb_nhi_irq_mode mode)
+{
+	value &= ~(REG_DMA_MISC_INT_AUTO_CLEAR |
+		   REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	if (mode == TB_NHI_IRQ_AUTO_STATUS_CLEAR)
+		return value | REG_DMA_MISC_INT_AUTO_CLEAR;
+	if (mode == TB_NHI_IRQ_EXPLICIT_W1C)
+		return value | REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+
+	return value;
+}
+
+enum tb_nhi_irq_setup_phase {
+	TB_NHI_IRQ_SETUP_RESET,
+	TB_NHI_IRQ_SETUP_MASKED,
+	TB_NHI_IRQ_SETUP_STATUS_DRAINED,
+	TB_NHI_IRQ_SETUP_MODE_SET,
+	TB_NHI_IRQ_SETUP_READY,
+	TB_NHI_IRQ_SETUP_INVALID,
+};
+
+enum tb_nhi_irq_setup_event {
+	TB_NHI_IRQ_SETUP_MASK_ALL,
+	TB_NHI_IRQ_SETUP_DRAIN_STATUS,
+	TB_NHI_IRQ_SETUP_SET_MODE,
+	TB_NHI_IRQ_SETUP_FLUSH_MODE,
+};
+
+static inline enum tb_nhi_irq_setup_phase
+tb_nhi_irq_setup_next(enum tb_nhi_irq_setup_phase phase,
+		      enum tb_nhi_irq_setup_event event)
+{
+	switch (phase) {
+	case TB_NHI_IRQ_SETUP_RESET:
+		if (event == TB_NHI_IRQ_SETUP_MASK_ALL)
+			return TB_NHI_IRQ_SETUP_MASKED;
+		break;
+	case TB_NHI_IRQ_SETUP_MASKED:
+		if (event == TB_NHI_IRQ_SETUP_DRAIN_STATUS)
+			return TB_NHI_IRQ_SETUP_STATUS_DRAINED;
+		break;
+	case TB_NHI_IRQ_SETUP_STATUS_DRAINED:
+		if (event == TB_NHI_IRQ_SETUP_SET_MODE)
+			return TB_NHI_IRQ_SETUP_MODE_SET;
+		break;
+	case TB_NHI_IRQ_SETUP_MODE_SET:
+		if (event == TB_NHI_IRQ_SETUP_FLUSH_MODE)
+			return TB_NHI_IRQ_SETUP_READY;
+		break;
+	case TB_NHI_IRQ_SETUP_READY:
+	case TB_NHI_IRQ_SETUP_INVALID:
+		break;
+	}
+
+	return TB_NHI_IRQ_SETUP_INVALID;
+}
+
 #define REG_RESET			0x39898
 #define REG_RESET_HRR			BIT(0)
 
@@ -145,6 +226,32 @@ struct ring_desc {
 #define REG_FW_STS_ICM_EN_INVERT	BIT(1)
 #define REG_FW_STS_ICM_EN		BIT(0)
 
+#define PCIE2CIO_CMD			0x30
+#define PCIE2CIO_CMD_TIMEOUT		BIT(31)
+#define PCIE2CIO_CMD_START		BIT(30)
+#define PCIE2CIO_CMD_WRITE		BIT(21)
+#define PCIE2CIO_CMD_CS_MASK		GENMASK(20, 19)
+#define PCIE2CIO_CMD_CS_SHIFT		19
+#define PCIE2CIO_CMD_PORT_MASK		GENMASK(18, 13)
+#define PCIE2CIO_CMD_PORT_SHIFT		13
+
+enum tb_pcie2cio_completion_state {
+	TB_PCIE2CIO_COMPLETION_BUSY,
+	TB_PCIE2CIO_COMPLETION_COMPLETE,
+	TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT,
+};
+
+static inline enum tb_pcie2cio_completion_state
+tb_pcie2cio_completion_state(u32 cmd)
+{
+	if (cmd & PCIE2CIO_CMD_START)
+		return TB_PCIE2CIO_COMPLETION_BUSY;
+	if (cmd & PCIE2CIO_CMD_TIMEOUT)
+		return TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT;
+
+	return TB_PCIE2CIO_COMPLETION_COMPLETE;
+}
+
 /*
  * Is the ICM firmware running, judged from a raw REG_FW_STS read? Single
  * source for icm_firmware_running() and the KUnit model.
@@ -159,6 +266,203 @@ static inline bool tb_icm_fw_sts_running(u32 fw_sts)
 {
 	return fw_sts != (u32)~0U && (fw_sts & REG_FW_STS_ICM_EN);
 }
+
+/*
+ * Is a firmware-CM probe failure the wedged-ICM signature? DRIVER_READY
+ * failed (@driver_ready_err) while REG_FW_STS still advertises ICM_EN:
+ * the status bit is latched but the command that failed is not a complete
+ * liveness probe. This is a diagnosis, not permission to replace the
+ * firmware connection manager: a partial failure may still own other ring-0
+ * traffic. Single source for icm_driver_ready() and the KUnit model
+ * (tb_test_icm_partial_wedge_refuses_software_takeover).
+ */
+static inline bool tb_icm_wedged(int driver_ready_err, u32 fw_sts)
+{
+	return driver_ready_err && tb_icm_fw_sts_running(fw_sts);
+}
+
+enum tb_icm_startup_proof_event {
+	TB_ICM_PROOF_DRIVER_READY,
+	TB_ICM_PROOF_ROOT_CONFIG,
+};
+
+struct tb_icm_startup_proof {
+	bool firmware_ready;
+	bool mailbox_ready;
+	bool driver_ready;
+	bool root_config_ready;
+};
+
+/*
+ * Keep the controller's status claims separate from end-to-end control-path
+ * proofs. A set firmware-ready bit or the expected mailbox mode says nothing
+ * about whether DriverReady completes or router config traffic is live.
+ */
+static inline struct tb_icm_startup_proof
+tb_icm_startup_proof_begin(u32 fw_sts, bool mailbox_ready)
+{
+	return (struct tb_icm_startup_proof) {
+		.firmware_ready = fw_sts != (u32)~0U &&
+				  (fw_sts & REG_FW_STS_NVM_AUTH_DONE),
+		.mailbox_ready = mailbox_ready,
+	};
+}
+
+static inline void
+tb_icm_startup_proof_advance(struct tb_icm_startup_proof *proof,
+			     enum tb_icm_startup_proof_event event)
+{
+	switch (event) {
+	case TB_ICM_PROOF_DRIVER_READY:
+		proof->driver_ready = true;
+		break;
+	case TB_ICM_PROOF_ROOT_CONFIG:
+		if (proof->driver_ready)
+			proof->root_config_ready = true;
+		break;
+	}
+}
+
+#define TB_ICM_ROOT_CONFIG_TIMEOUT_MS	100U
+#define TB_ICM_ROOT_CONFIG_INTERVAL_MS	50U
+
+static inline unsigned int
+tb_icm_root_config_request_count(unsigned int passes)
+{
+	return passes;
+}
+
+static inline unsigned int
+tb_icm_root_config_request_budget(unsigned int passes)
+{
+	return tb_icm_root_config_request_count(passes);
+}
+
+static inline u64 tb_icm_root_config_budget_ms(unsigned int passes)
+{
+	return (u64)tb_icm_root_config_request_count(passes) *
+		(TB_ICM_ROOT_CONFIG_TIMEOUT_MS +
+		 TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+}
+
+enum tb_icm_root_recovery_state {
+	TB_ICM_ROOT_RECOVERY_IDLE,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING,
+	TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED,
+	TB_ICM_ROOT_RECOVERY_TERMINAL,
+};
+
+enum tb_icm_root_recovery_event {
+	TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT,
+	TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT,
+	TB_ICM_ROOT_RECOVERY_OTHER_FAILURE,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED,
+	TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED,
+};
+
+static inline enum tb_icm_root_recovery_event
+tb_icm_root_recovery_command_event(int err, bool tx_consumed)
+{
+	if (!err || (err == -ETIMEDOUT && tx_consumed))
+		return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED;
+
+	return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED;
+}
+
+static inline enum tb_icm_root_recovery_state
+tb_icm_root_recovery_next(enum tb_icm_root_recovery_state state,
+			  enum tb_icm_root_recovery_event event)
+{
+	switch (state) {
+	case TB_ICM_ROOT_RECOVERY_IDLE:
+		if (event == TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT ||
+		    event == TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT)
+			return TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING;
+		return TB_ICM_ROOT_RECOVERY_TERMINAL;
+	case TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING:
+		if (event == TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED)
+			return TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED;
+		return TB_ICM_ROOT_RECOVERY_TERMINAL;
+	case TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED:
+	case TB_ICM_ROOT_RECOVERY_TERMINAL:
+		return state;
+	}
+
+	return TB_ICM_ROOT_RECOVERY_TERMINAL;
+}
+
+enum tb_nhi_recovery_state {
+	TB_NHI_RECOVERY_IDLE,
+	TB_NHI_RECOVERY_REPROBE_PENDING,
+	TB_NHI_RECOVERY_RETRYING,
+	TB_NHI_RECOVERY_COMPLETE,
+	TB_NHI_RECOVERY_EXHAUSTED,
+};
+
+enum tb_nhi_recovery_event {
+	TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT,
+	TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT,
+	TB_NHI_RECOVERY_OTHER_FAILURE,
+	TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED,
+	TB_NHI_RECOVERY_ROOT_POWER_CYCLE_FAILED,
+	TB_NHI_RECOVERY_REPROBE_DISPATCHED,
+	TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED,
+	TB_NHI_RECOVERY_PROBE_SUCCEEDED,
+};
+
+enum tb_nhi_recovery_action {
+	TB_NHI_RECOVERY_ACTION_NONE,
+	TB_NHI_RECOVERY_ACTION_REPROBE,
+};
+
+static inline bool
+tb_nhi_startup_recovery_may_dispatch(enum tb_nhi_recovery_state state)
+{
+	return state == TB_NHI_RECOVERY_IDLE;
+}
+
+static inline enum tb_nhi_recovery_action
+tb_nhi_recovery_action(enum tb_nhi_recovery_state state)
+{
+	switch (state) {
+	case TB_NHI_RECOVERY_REPROBE_PENDING:
+		return TB_NHI_RECOVERY_ACTION_REPROBE;
+	default:
+		return TB_NHI_RECOVERY_ACTION_NONE;
+	}
+}
+
+/* Keep recovery policy independent from the ICM startup proof machine above. */
+static inline enum tb_nhi_recovery_state
+tb_nhi_recovery_next(enum tb_nhi_recovery_state state,
+		     enum tb_nhi_recovery_event event)
+{
+	switch (state) {
+	case TB_NHI_RECOVERY_IDLE:
+		if (event == TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED)
+			return TB_NHI_RECOVERY_REPROBE_PENDING;
+		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
+			return TB_NHI_RECOVERY_COMPLETE;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_REPROBE_PENDING:
+		if (event == TB_NHI_RECOVERY_REPROBE_DISPATCHED)
+			return TB_NHI_RECOVERY_RETRYING;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_RETRYING:
+		if (event == TB_NHI_RECOVERY_PROBE_SUCCEEDED)
+			return TB_NHI_RECOVERY_COMPLETE;
+		return TB_NHI_RECOVERY_EXHAUSTED;
+
+	case TB_NHI_RECOVERY_COMPLETE:
+	case TB_NHI_RECOVERY_EXHAUSTED:
+		return state;
+	}
+
+	return TB_NHI_RECOVERY_EXHAUSTED;
+}
+
 
 /*
  * Must nhi_select_cm() hand the domain straight to the software connection

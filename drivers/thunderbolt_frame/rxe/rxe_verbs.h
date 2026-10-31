@@ -37,6 +37,8 @@ static inline int psn_compare(u32 psn_a, u32 psn_b)
 struct rxe_ucontext {
 	struct ib_ucontext ibuc;
 	struct rxe_pool_elem	elem;
+	/* rxe_mmap_info.uc_node, under rxe_mmap_lock (rxe_mmap.c) */
+	struct list_head	mmaps;
 };
 
 struct rxe_pd {
@@ -261,6 +263,7 @@ struct rxe_qp {
 	struct rxe_pool_elem	elem;
 	struct ib_qp_attr	attr;
 	unsigned int		valid;
+	bool			cleanup_prepared;
 	unsigned int		mtu;
 	bool			is_user;
 
@@ -292,13 +295,19 @@ struct rxe_qp {
 	atomic_t		ssn;
 	atomic_t		skb_out;
 	int			need_req_skb;
+	int			need_resp_skb;
 
-	/* Mode A engine-side admission (wire-spec section 6): this RC QP's
-	 * live charge against its device's link window. The link record is
-	 * reached through the device (rxe->tbl_link), which outlives every
-	 * QP of the device.
+	/* Mode A engine-side admission (wire-spec section 6). Each entry is one
+	 * unique outstanding request PSN. Keeping wire PSNs, rather than deriving
+	 * a count from the mutable requester cursor, makes retry rewind independent
+	 * from peer-consumption credit without charging duplicate retransmissions.
 	 */
-	u32			tbl_charged;
+	u32			*tbl_credits;
+	u16			tbl_credit_count;
+	u16			tbl_credit_cap;
+	u32			tbl_high_psn;
+	bool			tbl_high_valid;
+	u64			tbl_generation;
 
 	/* Timer for retranmitting packet when ACKs have been lost. RC
 	 * only. The requester sets it when it is not already

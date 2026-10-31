@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/prandom.h>
+#include <linux/refcount.h>
 #include <linux/string_helpers.h>
 #include <linux/utsname.h>
 #include <linux/uuid.h>
@@ -22,8 +23,11 @@
 
 #define XDOMAIN_SHORT_TIMEOUT			100	/* ms */
 #define XDOMAIN_DEFAULT_TIMEOUT			1000	/* ms */
+#define XDOMAIN_PROPERTIES_TIMEOUT		5000	/* ms */
 #define XDOMAIN_BONDING_TIMEOUT			10000	/* ms */
 #define XDOMAIN_RETRIES				10
+#define XDOMAIN_PACKET_RETRIES			10
+#define XDOMAIN_PACKET_RETRY_DELAY_MS		100
 /*
  * Lane-bonding re-arm from ENUMERATED: bounded attempts, doubling spacing
  * (10 s, 20 s, 40 s, 80 s, 160 s ~ 5 min total), sized to outlive the
@@ -34,6 +38,9 @@
 #define XDOMAIN_BONDING_REARM_TIMEOUT		10000	/* ms, doubles */
 #define XDOMAIN_DIRECT_BOND_RETRIES		10
 #define XDOMAIN_DEFAULT_MAX_HOPID		15
+#define XDOMAIN_UUID_BACKOFF_MAX_SHIFT		6
+#define XDOMAIN_QUARANTINE_RETRY_MS		1000
+#define XDOMAIN_QUARANTINE_PATH_RETRIES		3
 
 enum {
 	XDOMAIN_STATE_INIT,
@@ -80,6 +87,23 @@ static bool tb_xdomain_bonding_rearm_allowed(bool bonding_possible,
 }
 
 /*
+ * Preserve an explicit protocol capability result across enumeration.
+ * Transient transport failures leave bonding eligible for a later re-arm,
+ * while ERROR_NOT_SUPPORTED is terminal unless the state machine is about
+ * to use the early direct-bonding fallback instead.
+ */
+static bool
+tb_xdomain_bonding_after(bool bonding_possible, int status_ret,
+			 bool direct_fallback)
+{
+	if (!bonding_possible)
+		return false;
+	if (status_ret == -EOPNOTSUPP && !direct_fallback)
+		return false;
+	return true;
+}
+
+/*
  * Passive high side: whether an inbound XDP link-state-change request is
  * acceptable. A peer parked in BONDING_UUID_HIGH accepts one (the
  * original handshake); additionally an ENUMERATED, capable, unbonded peer
@@ -113,12 +137,35 @@ struct xdomain_request_work {
 	struct tb *tb;
 };
 
+struct xdomain_service_work {
+	struct work_struct work;
+	struct tb *tb;
+	size_t size;
+	u8 packet[];
+};
+
+struct xdomain_response_work {
+	struct work_struct work;
+	struct tb_ctl *ctl;
+	enum tb_cfg_pkg_type type;
+	size_t size;
+	u8 response[];
+};
+
+struct xdomain_request_submit {
+	struct tb_ctl *ctl;
+	const void *request;
+	size_t request_size;
+	enum tb_cfg_pkg_type request_type;
+};
+
 static bool tb_xdomain_enabled = true;
 module_param_named(xdomain, tb_xdomain_enabled, bool, 0444);
 MODULE_PARM_DESC(xdomain, "allow XDomain protocol (default: true)");
 
 static bool tb_xdomain_initial_state_needs_link_status(bool needs_uuid,
 						       bool bonding_possible);
+static bool tb_xdomain_announce_ready(bool needs_uuid, bool uuid_verified);
 static bool
 tb_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 					     bool services_published,
@@ -145,6 +192,48 @@ static DEFINE_MUTEX(xdomain_lock);
  * xdomain_dispatch_lock -> xdomain_lock.
  */
 static DEFINE_MUTEX(xdomain_dispatch_lock);
+
+struct tb_xdomain_quarantine_ops {
+	int (*disconnect)(void *data, struct tb_xdomain *xd,
+			  int transmit_path, int transmit_ring,
+			  int receive_path, int receive_ring);
+	void (*free_ring)(void *data, struct tb_ring *ring);
+	void *data;
+};
+
+struct tb_xdomain_quarantine {
+	struct list_head list;
+	struct delayed_work retry_work;
+	refcount_t refs;
+	struct tb_xdomain *xd;
+	struct tb_ring *transmit_dma_ring;
+	struct tb_ring *receive_dma_ring;
+	int transmit_path;
+	int transmit_ring;
+	int receive_path;
+	int receive_ring;
+	unsigned int attempts;
+	bool stopping;
+	struct tb_xdomain_quarantine_ops ops;
+};
+
+static LIST_HEAD(xdomain_quarantines);
+static DEFINE_MUTEX(xdomain_quarantines_lock);
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+static struct tb_xdomain_quarantine_ops xdomain_quarantine_test_ops;
+static bool xdomain_quarantine_test_ops_set;
+static bool xdomain_quarantine_test_fail_alloc;
+#endif
+
+static void tb_xdomain_quarantine_put(struct tb_xdomain_quarantine *q)
+{
+	if (!refcount_dec_and_test(&q->refs))
+		return;
+
+	tb_xdomain_put(q->xd);
+	kfree(q);
+}
 
 /* Properties exposed to the remote domains */
 static struct tb_property_dir *xdomain_property_dir;
@@ -221,6 +310,63 @@ bool tb_is_xdomain_enabled(void)
 	return tb_xdomain_enabled && tb_acpi_is_xdomain_allowed();
 }
 
+static enum tb_xdp_type tb_xdomain_response_type(enum tb_xdp_type request_type)
+{
+	switch (request_type) {
+	case UUID_REQUEST_OLD:
+	case UUID_REQUEST:
+		return UUID_RESPONSE;
+	case PROPERTIES_REQUEST:
+		return PROPERTIES_RESPONSE;
+	case PROPERTIES_CHANGED_REQUEST:
+		return PROPERTIES_CHANGED_RESPONSE;
+	case LINK_STATE_STATUS_REQUEST:
+		return LINK_STATE_STATUS_RESPONSE;
+	case LINK_STATE_CHANGE_REQUEST:
+		return LINK_STATE_CHANGE_RESPONSE;
+	default:
+		return 0;
+	}
+}
+
+static size_t tb_xdomain_response_min_size(enum tb_xdp_type response_type)
+{
+	switch (response_type) {
+	case UUID_RESPONSE:
+		return sizeof(struct tb_xdp_uuid_response);
+	case PROPERTIES_RESPONSE:
+		return sizeof(struct tb_xdp_properties_response);
+	case PROPERTIES_CHANGED_RESPONSE:
+		/*
+		 * The successful response is exactly the common XDP envelope.
+		 * struct tb_xdp_properties_changed_response is a receive union
+		 * whose error arm carries one additional dword; using the union
+		 * size here rejects a canonical successful peer response.
+		 */
+		return sizeof(struct tb_xdp_header);
+	case LINK_STATE_STATUS_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_status_response);
+	case LINK_STATE_CHANGE_RESPONSE:
+		return sizeof(struct tb_xdp_link_state_change_response);
+	case ERROR_RESPONSE:
+		return sizeof(struct tb_xdp_error_response);
+	default:
+		return SIZE_MAX;
+	}
+}
+
+static u8 tb_xdomain_sequence(const struct tb_xdp_header *hdr)
+{
+	return (hdr->xd_hdr.length_sn & TB_XDOMAIN_SN_MASK) >>
+		TB_XDOMAIN_SN_SHIFT;
+}
+
+static size_t tb_xdomain_packet_size(const struct tb_xdp_header *hdr)
+{
+	return (hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK) * sizeof(u32) +
+	       sizeof(hdr->xd_hdr);
+}
+
 static bool tb_xdomain_match(const struct tb_cfg_request *req,
 			     const struct ctl_pkg *pkg)
 {
@@ -251,20 +397,62 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 	case TB_CFG_PKG_XDOMAIN_RESP: {
 		const struct tb_xdp_header *res_hdr = pkg->buffer;
 		const struct tb_xdp_header *req_hdr = req->request;
+		enum tb_xdp_type expected_type;
+		size_t min_size;
 
-		if (pkg->frame.size < req->response_size / 4)
+		if (pkg->frame.size < sizeof(*res_hdr) ||
+		    pkg->frame.size > req->response_size)
+			return false;
+		if (tb_xdomain_packet_size(res_hdr) != pkg->frame.size)
 			return false;
 
-		/* Make sure route matches */
 		if ((res_hdr->xd_hdr.route_hi & ~BIT(31)) !=
-		     req_hdr->xd_hdr.route_hi)
+		    (req_hdr->xd_hdr.route_hi & ~BIT(31)))
 			return false;
-		if ((res_hdr->xd_hdr.route_lo) != req_hdr->xd_hdr.route_lo)
+		if (res_hdr->xd_hdr.route_lo != req_hdr->xd_hdr.route_lo)
 			return false;
 
-		/* Check that the XDomain protocol matches */
 		if (!uuid_equal(&res_hdr->uuid, &req_hdr->uuid))
 			return false;
+		if (tb_xdomain_sequence(res_hdr) != tb_xdomain_sequence(req_hdr))
+			return false;
+
+		/*
+		 * Only the discovery protocol gives the word after the UUID the
+		 * enum tb_xdp_type meaning. Service protocols own their payload and
+		 * may put an address, identifier, or another private header there.
+		 * Their common XDomain envelope has already been checked above.
+		 */
+		if (!uuid_equal(&req_hdr->uuid, &tb_xdp_uuid))
+			return true;
+
+		expected_type = tb_xdomain_response_type(req_hdr->type);
+		if (!expected_type ||
+		    (res_hdr->type != expected_type &&
+		     res_hdr->type != ERROR_RESPONSE))
+			return false;
+
+		min_size = tb_xdomain_response_min_size(res_hdr->type);
+		if (min_size == SIZE_MAX || pkg->frame.size < min_size)
+			return false;
+
+		/*
+		 * The sequence field is only two bits and wraps while discovery
+		 * retries. A delayed properties response can therefore have the
+		 * same route and sequence as a later chunk request. Keep that stale
+		 * response from completing the active request; the chunk offset is
+		 * the remaining transaction identity.
+		 */
+		if (req_hdr->type == PROPERTIES_REQUEST &&
+		    res_hdr->type == PROPERTIES_RESPONSE) {
+			const struct tb_xdp_properties *properties_req =
+				(const struct tb_xdp_properties *)req_hdr;
+			const struct tb_xdp_properties_response *properties_res =
+				(const struct tb_xdp_properties_response *)res_hdr;
+
+			if (properties_res->offset != properties_req->offset)
+				return false;
+		}
 
 		return true;
 	}
@@ -274,35 +462,155 @@ static bool tb_xdomain_match(const struct tb_cfg_request *req,
 	}
 }
 
+static enum tb_cfg_request_event
+tb_xdomain_intermediate(const struct tb_cfg_request *req,
+			const struct ctl_pkg *pkg)
+{
+	const struct icm_tr_pkg_xdomain_packet_response *status = pkg->buffer;
+	const struct tb_xdp_header *req_hdr = req->request;
+	u64 request_route, status_route;
+
+	if (!tb_ctl_is_xdomain_tx_status(pkg->frame.eof, pkg->buffer,
+					 pkg->frame.size))
+		return TB_CFG_REQUEST_EVENT_NONE;
+
+	request_route = ((u64)(req_hdr->xd_hdr.route_hi & ~BIT(31)) << 32) |
+			req_hdr->xd_hdr.route_lo;
+	status_route = ((u64)(status->route_hi & ~BIT(31)) << 32) |
+			status->route_lo;
+	if (request_route != status_route)
+		return TB_CFG_REQUEST_EVENT_NONE;
+
+	return status->hdr.flags & ICM_FLAGS_ERROR ?
+		TB_CFG_REQUEST_EVENT_LOCAL_FAILED :
+		TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED;
+}
+
 static bool tb_xdomain_copy(struct tb_cfg_request *req,
 			    const struct ctl_pkg *pkg)
 {
-	memcpy(req->response, pkg->buffer, req->response_size);
+	if (pkg->frame.eof == TB_CFG_PKG_ERROR) {
+		const struct cfg_error_pkg *error = pkg->buffer;
+
+		if (pkg->frame.size < sizeof(*error)) {
+			req->result.err = -EIO;
+			return true;
+		}
+
+		req->result.response_route = tb_cfg_get_route(&error->header);
+		req->result.response_port = error->port;
+		req->result.tb_error = error->error;
+		req->result.err = 1;
+		return true;
+	}
+
+	memset(req->response, 0, req->response_size);
+	memcpy(req->response, pkg->buffer, pkg->frame.size);
 	req->result.err = 0;
 	return true;
 }
 
-static void response_ready(void *data)
+static void tb_xdomain_init_packet_state(struct tb_cfg_request *req,
+					 bool expects_peer_response)
 {
-	tb_cfg_request_put(data);
+	req->intermediate = tb_xdomain_intermediate;
+	req->state.local = TB_CFG_LOCAL_WAITING;
+	if (expects_peer_response)
+		req->state.peer = TB_CFG_PEER_WAITING;
+}
+
+static bool tb_xdomain_packet_should_retry(const struct tb_cfg_result *res,
+					   unsigned int attempt)
+{
+	return res->local_failed && !res->local_timed_out && res->err == -EIO &&
+		attempt + 1 < XDOMAIN_PACKET_RETRIES;
+}
+
+static int tb_xdomain_send_packet(struct tb_ctl *ctl, const void *packet,
+				  size_t size, enum tb_cfg_pkg_type type)
+{
+	unsigned int attempt;
+
+	for (attempt = 0; attempt < XDOMAIN_PACKET_RETRIES; attempt++) {
+		struct tb_cfg_request *req;
+		struct tb_cfg_result res;
+
+		req = tb_cfg_request_alloc();
+		if (!req)
+			return -ENOMEM;
+
+		req->match = tb_xdomain_match;
+		req->copy = tb_xdomain_copy;
+		req->request = packet;
+		req->request_size = size;
+		req->request_type = type;
+		tb_xdomain_init_packet_state(req, false);
+
+		res = tb_cfg_request_sync(ctl, req, XDOMAIN_DEFAULT_TIMEOUT);
+		tb_cfg_request_put(req);
+
+		if (!tb_xdomain_packet_should_retry(&res, attempt))
+			return res.err == 1 ? -EIO : res.err;
+		msleep(XDOMAIN_PACKET_RETRY_DELAY_MS);
+	}
+
+	return -EIO;
 }
 
 static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 				 size_t size, enum tb_cfg_pkg_type type)
 {
-	struct tb_cfg_request *req;
+	return tb_xdomain_send_packet(ctl, response, size, type);
+}
 
-	req = tb_cfg_request_alloc();
-	if (!req)
+static bool tb_xdomain_response_should_defer(void)
+{
+	return true;
+}
+
+static void tb_xdomain_response_work(struct work_struct *work)
+{
+	struct xdomain_response_work *xw =
+		container_of(work, typeof(*xw), work);
+	struct tb_ctl *ctl = xw->ctl;
+	int ret;
+
+	ret = __tb_xdomain_response(ctl, xw->response, xw->size, xw->type);
+	if (ret && ret != -ENOTCONN && ret != -ESHUTDOWN)
+		pr_warn_ratelimited("failed to send deferred XDomain response: %d\n",
+				    ret);
+
+	kfree(xw);
+	/* Last touch: tb_ctl_free() may proceed when this reaches zero. */
+	tb_ctl_async_work_put(ctl);
+}
+
+static int tb_xdomain_queue_response(struct tb_ctl *ctl, const void *response,
+				     size_t size, enum tb_cfg_pkg_type type)
+{
+	struct xdomain_response_work *xw;
+
+	xw = kmalloc(struct_size(xw, response, size), GFP_KERNEL);
+	if (!xw)
 		return -ENOMEM;
 
-	req->match = tb_xdomain_match;
-	req->copy = tb_xdomain_copy;
-	req->request = response;
-	req->request_size = size;
-	req->request_type = type;
+	if (!tb_ctl_async_work_get(ctl)) {
+		kfree(xw);
+		return -ENOTCONN;
+	}
 
-	return tb_cfg_request(ctl, req, response_ready, req);
+	INIT_WORK(&xw->work, tb_xdomain_response_work);
+	xw->ctl = ctl;
+	xw->type = type;
+	xw->size = size;
+	memcpy(xw->response, response, size);
+	if (!schedule_work(&xw->work)) {
+		tb_ctl_async_work_put(ctl);
+		kfree(xw);
+		return -EBUSY;
+	}
+
+	return 0;
 }
 
 /**
@@ -320,15 +628,34 @@ static int __tb_xdomain_response(struct tb_ctl *ctl, const void *response,
 int tb_xdomain_response(struct tb_xdomain *xd, const void *response,
 			size_t size, enum tb_cfg_pkg_type type)
 {
+	if (tb_xdomain_response_should_defer())
+		return tb_xdomain_queue_response(xd->tb->ctl, response, size,
+						 type);
+
 	return __tb_xdomain_response(xd->tb->ctl, response, size, type);
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_response);
+
+static int tb_xdomain_submit_request(void *data)
+{
+	struct xdomain_request_submit *submit = data;
+
+	return tb_xdomain_send_packet(submit->ctl, submit->request,
+				      submit->request_size,
+				      submit->request_type);
+}
 
 static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	size_t request_size, enum tb_cfg_pkg_type request_type, void *response,
 	size_t response_size, enum tb_cfg_pkg_type response_type,
 	unsigned int timeout_msec)
 {
+	struct xdomain_request_submit submit = {
+		.ctl = ctl,
+		.request = request,
+		.request_size = request_size,
+		.request_type = request_type,
+	};
 	struct tb_cfg_request *req;
 	struct tb_cfg_result res;
 
@@ -344,8 +671,10 @@ static int __tb_xdomain_request(struct tb_ctl *ctl, const void *request,
 	req->response = response;
 	req->response_size = response_size;
 	req->response_type = response_type;
+	req->state.peer = TB_CFG_PEER_WAITING;
 
-	res = tb_cfg_request_sync(ctl, req, timeout_msec);
+	res = tb_cfg_request_sync_receive(ctl, req, timeout_msec,
+					  tb_xdomain_submit_request, &submit);
 
 	tb_cfg_request_put(req);
 
@@ -414,6 +743,61 @@ static int tb_xdp_handle_error(const struct tb_xdp_error_response *res)
 
 	return 0;
 }
+
+static bool tb_xdp_properties_ids_ok(const struct tb_xdp_properties_response *res,
+				     const uuid_t *local_uuid,
+				     const uuid_t *remote_uuid)
+{
+	return uuid_equal(&res->src_uuid, remote_uuid) &&
+	       uuid_equal(&res->dst_uuid, local_uuid);
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_properties_identity(bool source_matches,
+					 bool destination_matches)
+{
+	uuid_t local = UUID_INIT(0x11111111, 0x2222, 0x3333,
+				 0x44, 0x44, 0x55, 0x55, 0x66, 0x66,
+				 0x77, 0x77);
+	uuid_t remote = UUID_INIT(0xaaaaaaaa, 0xbbbb, 0xcccc,
+				  0xdd, 0xdd, 0xee, 0xee, 0xff, 0xff,
+				  0x00, 0x00);
+	struct tb_xdp_properties_response res = {};
+
+	uuid_copy(&res.src_uuid, source_matches ? &remote : &local);
+	uuid_copy(&res.dst_uuid, destination_matches ? &local : &remote);
+
+	return tb_xdp_properties_ids_ok(&res, &local, &remote);
+}
+
+bool tb_test_xdomain_properties_response_pkg_matches(u16 request_offset,
+						     u16 response_offset)
+{
+	struct tb_xdp_properties_response response = {};
+	struct tb_xdp_properties request = {};
+	struct tb_cfg_request req = {};
+	struct ctl_pkg pkg = {};
+
+	tb_xdp_fill_header(&request.hdr, 3, 0, PROPERTIES_REQUEST,
+			   sizeof(request));
+	tb_xdp_fill_header(&response.hdr, 3, 0, PROPERTIES_RESPONSE,
+			   sizeof(response));
+	request.offset = request_offset;
+	response.offset = response_offset;
+	req.request = &request;
+	req.response_size = sizeof(response);
+	pkg.buffer = &response;
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = sizeof(response);
+
+	return tb_xdomain_match(&req, &pkg);
+}
+
+unsigned int tb_test_xdomain_properties_timeout_ms(void)
+{
+	return XDOMAIN_PROPERTIES_TIMEOUT;
+}
+#endif
 
 static int tb_xdp_uuid_request(struct tb_ctl *ctl, u64 route, int retry,
 			       uuid_t *uuid, u64 *remote_route)
@@ -503,13 +887,17 @@ static int tb_xdp_properties_request(struct tb_ctl *ctl, u64 route,
 		ret = __tb_xdomain_request(ctl, &req, sizeof(req),
 					   TB_CFG_PKG_XDOMAIN_REQ, res,
 					   total_size, TB_CFG_PKG_XDOMAIN_RESP,
-					   XDOMAIN_DEFAULT_TIMEOUT);
+					   XDOMAIN_PROPERTIES_TIMEOUT);
 		if (ret)
 			goto err;
 
 		ret = tb_xdp_handle_error(&res->err);
 		if (ret)
 			goto err;
+		if (!tb_xdp_properties_ids_ok(res, src_uuid, dst_uuid)) {
+			ret = -EKEYREJECTED;
+			goto err;
+		}
 
 		/*
 		 * Package length includes the whole payload without the
@@ -646,10 +1034,10 @@ static int tb_xdp_properties_changed_request(struct tb_ctl *ctl, u64 route,
 static int
 tb_xdp_properties_changed_response(struct tb_ctl *ctl, u64 route, u8 sequence)
 {
-	struct tb_xdp_properties_changed_response res;
+	struct tb_xdp_header res;
 
 	memset(&res, 0, sizeof(res));
-	tb_xdp_fill_header(&res.hdr, route, sequence,
+	tb_xdp_fill_header(&res, route, sequence,
 			   PROPERTIES_CHANGED_RESPONSE, sizeof(res));
 	return __tb_xdomain_response(ctl, &res, sizeof(res),
 				     TB_CFG_PKG_XDOMAIN_RESP);
@@ -882,12 +1270,32 @@ static void start_handshake(struct tb_xdomain *xd)
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
 }
 
+static void
+tb_xdomain_control_event(struct tb_xdomain *xd,
+			 enum tb_xdomain_control_event event)
+{
+	mutex_lock(&xd->lock);
+	if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+		xd->control_rx_jiffies = jiffies;
+	xd->control_health_state = tb_xdomain_control_next(
+		xd->control_health_state, event);
+	mutex_unlock(&xd->lock);
+}
+
 /* Can be called from state_work */
 static void __stop_handshake(struct tb_xdomain *xd)
 {
+	/*
+	 * Publish the stop marker BEFORE the cancel. The announcement re-queues
+	 * itself indefinitely now, so a callback already inside its bounded wire
+	 * wait could otherwise re-arm after cancel_delayed_work_sync() has
+	 * returned and leave a delayed work pending across suspend or unload.
+	 * It re-reads this after the wait and declines.
+	 */
+	WRITE_ONCE(xd->properties_changed_retries, TB_XDOMAIN_ANNOUNCE_STOPPED);
 	cancel_delayed_work_sync(&xd->properties_changed_work);
-	xd->properties_changed_retries = 0;
 	xd->state_retries = 0;
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_STOPPED);
 }
 
 static void stop_handshake(struct tb_xdomain *xd)
@@ -1228,8 +1636,24 @@ static int remove_missing_service(struct device *dev, void *data)
 		return 0;
 
 	if (!tb_property_find(xd->remote_properties, svc->key,
-			      TB_PROPERTY_TYPE_DIRECTORY))
+			      TB_PROPERTY_TYPE_DIRECTORY)) {
+		/*
+		 * Unbinding a service destroys everything built on it: for
+		 * tbframe that is the session, the rail netdev and the
+		 * ib_device, and the client sees TBFRAME_DOWN_UNPLUG even
+		 * though no cable moved and no XDomain was removed. If a
+		 * property re-read ever lands a block that merely OMITS a key
+		 * -- a truncated or stale directory rather than a peer that
+		 * genuinely dropped the service -- this silently tears down a
+		 * working link and the next good read builds it again, which
+		 * is an endless publish/unpublish cycle no session survives.
+		 * Say so, so that case is distinguishable from a real removal.
+		 */
+		dev_warn(&xd->dev,
+			 "unregistering service '%s': absent from the peer's property block\n",
+			 svc->key);
 		device_unregister(dev);
+	}
 
 	return 0;
 }
@@ -1421,6 +1845,16 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	} else
 		ret = tb_xdp_uuid_request(tb->ctl, xd->route, xd->state_retries,
 					  &uuid, &route);
+	/*
+	 * An all-ones identity tail is what config space reads back when there
+	 * is no POWERED router behind the link, so this is not an answer -- it
+	 * is the absence of one. Fold it into the ordinary failed-read path so
+	 * the same bounded budget and the same re-arm apply.
+	 */
+	if (!ret && tb_xdomain_uuid_is_placeholder(uuid.b)) {
+		dev_dbg(&xd->dev, "no powered peer behind the link yet\n");
+		ret = -ENODATA;
+	}
 	if (ret < 0) {
 		if (xd->state_retries-- > 0) {
 			dev_dbg(&xd->dev, "failed to request UUID, retrying\n");
@@ -1446,8 +1880,32 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 	 * If the UUID is different, there is another domain connected
 	 * so mark this one unplugged and wait for the connection
 	 * manager to replace it.
+	 *
+	 * Unless what we hold is a PLACEHOLDER: the connection manager can
+	 * create an XDomain for a link whose peer is powered off, and the
+	 * identity it hands over is then the all-ones-tail read. That is not
+	 * "another domain", it is this domain finally answering, so adopt it.
+	 * Condemning here instead is what stranded appmana-008 against a
+	 * powered-off appmana-019 on 2026-08-24: the placeholder was latched at
+	 * boot, 019 powering on later looked like an identity change, and the
+	 * resulting terminal state had no replacement path under the node's
+	 * resident ICM.
 	 */
 	if (xd->remote_uuid && !uuid_equal(&uuid, xd->remote_uuid)) {
+		if (!xd->uuid_verified ||
+		    tb_xdomain_uuid_is_placeholder(xd->remote_uuid->b)) {
+			dev_info(&xd->dev,
+				 "verified route-local peer identity %pUb\n",
+				 &uuid);
+			mutex_lock(&xd->lock);
+			uuid_copy(xd->remote_uuid, &uuid);
+			xd->uuid_verified = true;
+			xd->needs_uuid = false;
+			/* Accept whatever generation the fresh peer reports. */
+			xd->remote_property_block_gen = 0;
+			mutex_unlock(&xd->lock);
+			return 0;
+		}
 		dev_dbg(&xd->dev, "remote UUID is different, unplugging\n");
 		xd->is_unplugged = true;
 		return -ENODEV;
@@ -1459,6 +1917,9 @@ static int tb_xdomain_get_uuid(struct tb_xdomain *xd)
 		if (!xd->remote_uuid)
 			return -ENOMEM;
 	}
+	xd->uuid_verified = true;
+	xd->needs_uuid = false;
+	xd->uuid_retry_failures = 0;
 
 	return 0;
 }
@@ -1491,7 +1952,19 @@ static int tb_xdomain_get_link_status(struct tb_xdomain *xd)
 				"failed to request remote link status, retrying\n");
 			return -EAGAIN;
 		}
-		dev_dbg(&xd->dev, "failed to receive remote link status\n");
+		/*
+		 * Log the errno. -EOPNOTSUPP means the peer answered
+		 * ERROR_NOT_SUPPORTED and bonding is simply unavailable;
+		 * -ETIMEDOUT means it never answered at all. Those demand
+		 * opposite responses -- stop asking, versus keep retrying --
+		 * and without the code they are indistinguishable. Observed
+		 * on appmana-019 against appmana-027 as an unbounded re-arm
+		 * loop that never printed the retry line, which is only
+		 * reachable on -EOPNOTSUPP or exhausted retries.
+		 */
+		dev_err(&xd->dev,
+			"failed to receive remote link status: %d (retries left %d, rearm %u)\n",
+			ret, xd->state_retries, xd->bonding_rearm_attempts);
 		return ret;
 	}
 
@@ -1647,14 +2120,34 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 				"failed to request remote properties, retrying\n");
 			return -EAGAIN;
 		}
-		/* Give up now */
-		dev_err(&xd->dev, "failed read XDomain properties from %pUb\n",
-			xd->remote_uuid);
+		/*
+		 * Give up now. Log the errno: this message is the only
+		 * record of why a peer never became reachable, and without
+		 * it -ETIMEDOUT (the peer's CM never answered) is
+		 * indistinguishable from -EIO (it answered with an error) or
+		 * -ENODATA (it answered with nothing). Observed on
+		 * appmana-019 and appmana-018 against the same peer, where
+		 * the XDomain was created, this failed, and the device was
+		 * torn back down leaving the peer permanently invisible
+		 * while it kept announcing.
+		 */
+		dev_err(&xd->dev,
+			"failed read XDomain properties from %pUb: %d (route %llx, retries exhausted)\n",
+			xd->remote_uuid, ret, xd->route);
 
 		return ret;
 	}
 
 	mutex_lock(&xd->lock);
+	/*
+	 * Firmware-managed controllers own the UUID-discovery stage. The ICM
+	 * connect event supplies an address claim, and a properties response
+	 * that names the claimed peer as source and this domain as destination
+	 * is the route-local peer proof. Nothing may globally match or publish
+	 * the identity before this exchange succeeds.
+	 */
+	xd->uuid_verified = true;
+	xd->needs_uuid = false;
 
 	/* Only accept newer generation properties (cached_gen==0 forces accept) */
 	if (tb_xdomain_generation_stale(xd->remote_properties, gen,
@@ -1737,6 +2230,7 @@ static int tb_xdomain_get_properties(struct tb_xdomain *xd)
 	}
 
 	enumerate_services(xd);
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_PEER_PROVEN);
 	return 0;
 
 err_free_dir:
@@ -1748,12 +2242,40 @@ err_free_block:
 	return ret;
 }
 
+static unsigned int tb_xdomain_uuid_retry_delay_ms(unsigned int failures)
+{
+	return XDOMAIN_DEFAULT_TIMEOUT <<
+		min(failures, (unsigned int)XDOMAIN_UUID_BACKOFF_MAX_SHIFT);
+}
+
 static void tb_xdomain_queue_uuid(struct tb_xdomain *xd)
 {
 	xd->state = XDOMAIN_STATE_UUID;
 	xd->state_retries = XDOMAIN_RETRIES;
+	xd->uuid_retry_failures = 0;
 	queue_delayed_work(xd->tb->wq, &xd->state_work,
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+unsigned int tb_test_xdomain_uuid_retry_delay_ms(unsigned int failures)
+{
+	return tb_xdomain_uuid_retry_delay_ms(failures);
+}
+#endif
+
+static void tb_xdomain_queue_uuid_backoff(struct tb_xdomain *xd)
+{
+	unsigned int failures = xd->uuid_retry_failures;
+	unsigned int delay_ms;
+
+	xd->state = XDOMAIN_STATE_UUID;
+	xd->state_retries = 0;
+	if (failures < XDOMAIN_UUID_BACKOFF_MAX_SHIFT)
+		xd->uuid_retry_failures = failures + 1;
+	delay_ms = tb_xdomain_uuid_retry_delay_ms(failures);
+	queue_delayed_work(xd->tb->wq, &xd->state_work,
+			   msecs_to_jiffies(delay_ms));
 }
 
 static void tb_xdomain_queue_link_status(struct tb_xdomain *xd)
@@ -1924,9 +2446,15 @@ static void tb_xdomain_queue_properties(struct tb_xdomain *xd)
 			   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
 }
 
+/*
+ * Arm (or re-arm) the announcement. properties_changed_retries counts
+ * CONSECUTIVE FAILURES upwards: it is the backoff shift and the diagnostic
+ * rate-limiter, and re-arming resets it so a peer-present event always gets the
+ * fast cadence back. The field name is fixed by the out-of-tree public header.
+ */
 static void tb_xdomain_queue_properties_changed(struct tb_xdomain *xd)
 {
-	xd->properties_changed_retries = XDOMAIN_RETRIES;
+	WRITE_ONCE(xd->properties_changed_retries, 0);
 	queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
 			   msecs_to_jiffies(XDOMAIN_SHORT_TIMEOUT));
 }
@@ -1941,6 +2469,7 @@ static void tb_xdomain_failed(struct tb_xdomain *xd)
 static void tb_xdomain_state_work(struct work_struct *work)
 {
 	struct tb_xdomain *xd = container_of(work, typeof(*xd), state_work.work);
+	bool announcement_ready;
 	int ret, state = xd->state;
 
 	if (WARN_ON_ONCE(state < XDOMAIN_STATE_INIT ||
@@ -1954,7 +2483,9 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (xd->needs_uuid) {
 			tb_xdomain_queue_uuid(xd);
 		} else {
-			tb_xdomain_queue_properties_changed(xd);
+			if (tb_xdomain_announce_ready(xd->needs_uuid,
+						      xd->uuid_verified))
+				tb_xdomain_queue_properties_changed(xd);
 			if (tb_xdomain_initial_state_needs_link_status(
 					xd->needs_uuid, xd->bonding_possible))
 				tb_xdomain_queue_link_status(xd);
@@ -2000,7 +2531,13 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				xd->is_unplugged = true;
 				tb_xdomain_failed(xd);
 			} else {
-				tb_xdomain_queue_uuid(xd);
+				/*
+				 * Keep an unverified route discoverable, but after the
+				 * initial fast budget probe it at an exponential cadence.
+				 * A new handshake event uses queue_uuid() and restores the
+				 * fast budget immediately.
+				 */
+				tb_xdomain_queue_uuid_backoff(xd);
 			}
 		} else {
 			tb_xdomain_queue_properties_changed(xd);
@@ -2023,6 +2560,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 				tb_xdomain_queue_direct_bonding(xd);
 				break;
 			}
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 
 			/*
 			 * If any of the lane bonding states fail we skip
@@ -2064,6 +2603,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 			tb_xdomain_queue_properties(xd);
 		} else {
 			tb_xdomain_queue_link_status2(xd);
@@ -2075,6 +2616,8 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		if (ret) {
 			if (ret == -EAGAIN)
 				goto retry_state;
+			xd->bonding_possible = tb_xdomain_bonding_after(xd->bonding_possible,
+									ret, false);
 			tb_xdomain_queue_properties(xd);
 		} else {
 			tb_xdomain_queue_bonding_uuid_low(xd);
@@ -2097,6 +2640,9 @@ static void tb_xdomain_state_work(struct work_struct *work)
 		break;
 
 	case XDOMAIN_STATE_PROPERTIES:
+		announcement_ready =
+			tb_xdomain_announce_ready(xd->needs_uuid,
+						  xd->uuid_verified);
 		ret = tb_xdomain_get_properties(xd);
 		if (ret) {
 			if (ret == -EAGAIN)
@@ -2130,6 +2676,17 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			else
 				tb_xdomain_queue_properties(xd);
 		} else {
+			/*
+			 * A firmware-supplied UUID is only an address claim. Its
+			 * first route-local properties response proves the peer and
+			 * starts the independent announcement machine. UUID discovery
+			 * already starts it after its own successful proof, so do not
+			 * re-arm that path here.
+			 */
+			if (!announcement_ready &&
+			    tb_xdomain_announce_ready(xd->needs_uuid,
+						      xd->uuid_verified))
+				tb_xdomain_queue_properties_changed(xd);
 			xd->state = XDOMAIN_STATE_ENUMERATED;
 			tb_xdomain_queue_bonding_rearm(xd);
 		}
@@ -2191,20 +2748,60 @@ static void tb_xdomain_properties_changed(struct work_struct *work)
 	}
 
 	ret = tb_xdp_properties_changed_request(xd->tb->ctl, xd->route,
-				xd->properties_changed_retries, xd->local_uuid);
+				max(READ_ONCE(xd->properties_changed_retries), 0),
+				xd->local_uuid);
 	if (ret) {
-		if (xd->properties_changed_retries-- > 0) {
+		int pending = READ_ONCE(xd->properties_changed_retries);
+		unsigned int failures;
+
+		/*
+		 * __stop_handshake() may have run while we were inside the
+		 * bounded wire wait above. Honour it here: re-arming past it
+		 * would defeat its cancel_delayed_work_sync().
+		 */
+		if (pending == TB_XDOMAIN_ANNOUNCE_STOPPED)
+			return;
+		failures = pending;
+
+		/*
+		 * Never stop announcing. This notification is what makes a
+		 * peer's connection manager re-arm its XDomain announce, so a
+		 * host that gives up can no longer be found by a neighbour that
+		 * powers on later -- appmana-008 gave up ~10 s into a boot whose
+		 * chain neighbour was powered off and never spoke to it again.
+		 * The spacing doubles to a 64 s ceiling so an absent neighbour
+		 * costs about one control packet per minute, and the diagnostic
+		 * is emitted once per doubling instead of once per attempt.
+		 */
+		if (tb_xdomain_announce_should_warn(failures))
+			dev_err(&xd->dev,
+				"failed to send properties changed notification: %d (route %llx, failure %u)\n",
+				ret, xd->route, failures);
+		else
 			dev_dbg(&xd->dev,
-				"failed to send properties changed notification, retrying\n");
-			queue_delayed_work(xd->tb->wq,
-					   &xd->properties_changed_work,
-					   msecs_to_jiffies(XDOMAIN_DEFAULT_TIMEOUT));
-		}
-		dev_err(&xd->dev, "failed to send properties changed notification\n");
+				"failed to send properties changed notification: %d (route %llx, failure %u)\n",
+				ret, xd->route, failures);
+
+		/*
+		 * Clamped at the ceiling: the counter only feeds the delay and
+		 * the rate-limit, both of which saturate there, and a counter
+		 * that grew forever would eventually overflow. The XDP sequence
+		 * nibble then stops rotating, which is safe because the request
+		 * timeout (1 s) is far inside the ceiling spacing (64 s), so two
+		 * attempts can never be in flight together.
+		 */
+		if (failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
+			WRITE_ONCE(xd->properties_changed_retries, failures + 1);
+
+		queue_delayed_work(xd->tb->wq, &xd->properties_changed_work,
+				   msecs_to_jiffies(tb_xdomain_announce_delay_ms(failures)));
 		return;
 	}
 
-	xd->properties_changed_retries = XDOMAIN_RETRIES;
+	if (READ_ONCE(xd->properties_changed_retries) !=
+	    TB_XDOMAIN_ANNOUNCE_STOPPED)
+		WRITE_ONCE(xd->properties_changed_retries, 0);
+	tb_xdomain_control_event(xd, TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED);
 }
 
 static ssize_t device_show(struct device *dev, struct device_attribute *attr,
@@ -2473,6 +3070,74 @@ static bool tb_xdomain_should_initialize_link(bool remote_uuid_known)
 	return true;
 }
 
+static bool tb_xdomain_initial_needs_uuid(bool remote_uuid_known)
+{
+	/* Firmware-managed controllers own UUID discovery for known peers. */
+	return !remote_uuid_known;
+}
+
+static bool tb_xdomain_announce_ready(bool needs_uuid, bool uuid_verified)
+{
+	return !needs_uuid && uuid_verified;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct tb_cfg_request_state
+tb_test_xdomain_packet_state(bool expects_peer_response,
+			     bool *has_local_classifier)
+{
+	struct tb_cfg_request req = { };
+
+	tb_xdomain_init_packet_state(&req, expects_peer_response);
+	*has_local_classifier = req.intermediate != NULL;
+
+	return req.state;
+}
+
+bool tb_test_xdomain_response_should_defer(void)
+{
+	return tb_xdomain_response_should_defer();
+}
+
+bool tb_test_xdomain_response_should_retry(bool local_failed,
+					   bool local_timed_out,
+					   int result,
+					   unsigned int attempt)
+{
+	struct tb_cfg_result res = {
+		.err = result,
+		.local_failed = local_failed,
+		.local_timed_out = local_timed_out,
+	};
+
+	return tb_xdomain_packet_should_retry(&res, attempt);
+}
+
+bool tb_test_xdomain_request_should_retry(bool local_failed,
+					  bool local_timed_out,
+					  int result,
+					  unsigned int attempt)
+{
+	struct tb_cfg_result res = {
+		.err = result,
+		.local_failed = local_failed,
+		.local_timed_out = local_timed_out,
+	};
+
+	return tb_xdomain_packet_should_retry(&res, attempt);
+}
+
+bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known)
+{
+	return tb_xdomain_initial_needs_uuid(remote_uuid_known);
+}
+
+bool tb_test_xdomain_announce_ready(bool needs_uuid, bool uuid_verified)
+{
+	return tb_xdomain_announce_ready(needs_uuid, uuid_verified);
+}
+#endif
+
 bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known)
 {
 	return tb_xdomain_should_initialize_link(remote_uuid_known);
@@ -2524,6 +3189,11 @@ bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
 						attempts);
 }
 
+bool tb_test_xdomain_bonding_after(bool possible, int ret, bool fallback)
+{
+	return tb_xdomain_bonding_after(possible, ret, fallback);
+}
+
 bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool enumerated,
 					       bool bonding_possible,
@@ -2566,6 +3236,143 @@ bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route)
 	return tb_xdomain_match(&req, &pkg);
 }
 
+enum tb_cfg_request_event
+tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,
+				   bool error)
+{
+	struct icm_tr_pkg_xdomain_packet_response status = {
+		.hdr = {
+			.code = ICM_XDOMAIN_PACKET,
+			.flags = error ? ICM_FLAGS_ERROR : 0,
+			.total_packets = 1,
+		},
+		.route_hi = upper_32_bits(status_route),
+		.route_lo = lower_32_bits(status_route),
+	};
+	struct tb_xdp_header req_hdr = {};
+	struct tb_cfg_request req = {
+		.request = &req_hdr,
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &status,
+	};
+
+	req_hdr.xd_hdr.route_hi = upper_32_bits(req_route);
+	req_hdr.xd_hdr.route_lo = lower_32_bits(req_route);
+	pkg.frame.eof = TB_CFG_PKG_ICM_RESP;
+	pkg.frame.size = sizeof(status);
+
+	return tb_xdomain_intermediate(&req, &pkg);
+}
+
+/* Exercise the real response matcher with a synthetic XDP exchange. */
+bool tb_test_xdomain_response_pkg_matches(u64 req_route,
+					  u32 req_type,
+					  u8 req_sequence,
+					  size_t response_capacity,
+					  u64 response_route,
+					  u32 response_type,
+					  u8 response_sequence,
+					  size_t response_size,
+					  size_t response_declared_size,
+					  bool same_protocol)
+{
+	struct tb_xdp_properties request = {};
+	struct tb_xdp_properties_response response = {};
+	struct tb_xdp_header *req_hdr = &request.hdr;
+	struct tb_xdp_header *response_hdr = &response.hdr;
+	struct tb_cfg_request req = {};
+	struct ctl_pkg pkg = {};
+
+	tb_xdp_fill_header(req_hdr, req_route, req_sequence, req_type,
+			   sizeof(*req_hdr));
+	tb_xdp_fill_header(response_hdr, response_route, response_sequence,
+			   response_type, response_declared_size);
+	if (!same_protocol)
+		response_hdr->uuid.b[0] ^= 0xff;
+
+	req.request = &request;
+	req.response_size = response_capacity;
+	pkg.buffer = &response;
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = response_size;
+
+	return tb_xdomain_match(&req, &pkg);
+}
+
+/* Exercise the real matcher with an opaque service protocol exchange. */
+bool tb_test_xdomain_service_response_pkg_matches(u64 req_route,
+						  u8 req_sequence,
+						  size_t response_capacity,
+						  u64 response_route,
+						  u8 response_sequence,
+						  size_t response_size,
+						  size_t response_declared_size,
+						  bool same_protocol)
+{
+	static const uuid_t service_uuid =
+		UUID_INIT(0x798f589e, 0x3616, 0x8a47,
+			  0x97, 0xc6, 0x56, 0x64, 0xa9, 0x20, 0xc8, 0xdd);
+	struct {
+		struct tb_xdomain_header xd_hdr;
+		uuid_t uuid;
+		u32 opaque[16];
+	} request = {};
+	struct {
+		struct tb_xdomain_header xd_hdr;
+		uuid_t uuid;
+		u32 opaque[18];
+	} response = {};
+	struct tb_cfg_request req = {
+		.request = &request,
+		.response_size = response_capacity,
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &response,
+	};
+
+	request.xd_hdr.route_hi = upper_32_bits(req_route);
+	request.xd_hdr.route_lo = lower_32_bits(req_route);
+	request.xd_hdr.length_sn =
+		(sizeof(request) - sizeof(request.xd_hdr)) / sizeof(u32) |
+		(req_sequence << TB_XDOMAIN_SN_SHIFT);
+	request.uuid = service_uuid;
+	request.opaque[0] = 0x80875a38;
+
+	response.xd_hdr.route_hi = upper_32_bits(response_route);
+	response.xd_hdr.route_lo = lower_32_bits(response_route);
+	response.xd_hdr.length_sn =
+		(response_declared_size - sizeof(response.xd_hdr)) / sizeof(u32) |
+		(response_sequence << TB_XDOMAIN_SN_SHIFT);
+	response.uuid = service_uuid;
+	response.opaque[0] = 0x80875166;
+	if (!same_protocol)
+		response.uuid.b[0] ^= 0xff;
+
+	pkg.frame.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	pkg.frame.size = response_size;
+	return tb_xdomain_match(&req, &pkg);
+}
+
+/* Return the completion status produced by the real copy path for an error. */
+int tb_test_xdomain_native_error_result(void)
+{
+	struct tb_xdp_uuid_response response = {};
+	struct cfg_error_pkg error = {};
+	struct tb_cfg_request req = {
+		.response = &response,
+		.response_size = sizeof(response),
+	};
+	struct ctl_pkg pkg = {
+		.buffer = &error,
+	};
+
+	pkg.frame.eof = TB_CFG_PKG_ERROR;
+	pkg.frame.size = sizeof(error);
+	tb_xdomain_copy(&req, &pkg);
+	return req.result.err;
+}
+
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
 {
 	return false;
@@ -2577,17 +3384,23 @@ bool tb_test_xdomain_direct_bonding_abort_disables_lane(void)
  * 4 only clears cached bonded flags; older generations synchronously disable
  * or re-enable lane 1.
  */
-static bool tb_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
+static bool tb_xdomain_link_exit_touches_lane_hardware(bool unplugged,
+						       bool firmware_cm,
 						       unsigned int generation)
 {
-	return !firmware_cm && generation < 4;
+	return !unplugged && !firmware_cm && generation < 4;
 }
 
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation)
 {
-	return tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
+	return tb_xdomain_link_exit_touches_lane_hardware(false, firmware_cm,
 							 generation);
+}
+
+bool tb_test_xdomain_unplugged_link_exit_touches_lane_hardware(void)
+{
+	return tb_xdomain_link_exit_touches_lane_hardware(true, false, 3);
 }
 
 static void tb_xdomain_link_init(struct tb_xdomain *xd, struct tb_port *down)
@@ -2619,6 +3432,7 @@ static void tb_xdomain_link_exit(struct tb_xdomain *xd)
 {
 	struct tb_port *down = tb_xdomain_downstream_port(xd);
 	unsigned int generation;
+	bool touches_hardware;
 	bool firmware_cm;
 
 	if (!down->dual_link_port)
@@ -2634,8 +3448,10 @@ static void tb_xdomain_link_exit(struct tb_xdomain *xd)
 	 * the ICM workqueue during module removal without waiting on dead hardware.
 	 * Gen 4 software-CM links likewise need only their cached flags cleared.
 	 */
-	if (!tb_xdomain_link_exit_touches_lane_hardware(firmware_cm,
-							  generation)) {
+	touches_hardware = tb_xdomain_link_exit_touches_lane_hardware(xd->is_unplugged,
+								      firmware_cm,
+								      generation);
+	if (!touches_hardware) {
 		down->bonded = false;
 		down->dual_link_port->bonded = false;
 		return;
@@ -2708,9 +3524,9 @@ struct tb_xdomain *tb_xdomain_alloc(struct tb *tb, struct device *parent,
 					  GFP_KERNEL);
 		if (!xd->remote_uuid)
 			goto err_free_local_uuid;
-	} else {
-		xd->needs_uuid = true;
 	}
+	/* A supplied UUID is a topology claim until the peer answers on route. */
+	xd->needs_uuid = tb_xdomain_initial_needs_uuid(remote_uuid);
 
 	if (tb_xdomain_should_initialize_link(remote_uuid))
 		tb_xdomain_link_init(xd, down);
@@ -2988,7 +3804,10 @@ EXPORT_SYMBOL_GPL(tb_xdomain_release_out_hopid);
  * path. If a transmit or receive path is not needed, pass %-1 for those
  * parameters.
  *
- * Return: %0 on success, negative errno otherwise.
+ * Return: %0 on success, %-EUCLEAN if activation failed and the
+ * exact rings and HopIDs remain owned by an unresolved hardware path, or
+ * another negative errno after a clean activation failure. On %-EUCLEAN the
+ * caller must retain those resources and retry tb_xdomain_disable_paths().
  */
 int tb_xdomain_enable_paths(struct tb_xdomain *xd, int transmit_path,
 			    int transmit_ring, int receive_path,
@@ -3055,6 +3874,397 @@ int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_paths_active);
 
+static int
+tb_xdomain_quarantine_disconnect(void *data, struct tb_xdomain *xd,
+				 int transmit_path, int transmit_ring,
+				 int receive_path, int receive_ring)
+{
+	return tb_domain_retry_xdomain_paths(xd->tb, xd, transmit_path,
+					     transmit_ring, receive_path,
+					     receive_ring);
+}
+
+static void tb_xdomain_quarantine_free_ring(void *data, struct tb_ring *ring)
+{
+	tb_ring_free(ring);
+}
+
+static const struct tb_xdomain_quarantine_ops xdomain_quarantine_real_ops = {
+	.disconnect = tb_xdomain_quarantine_disconnect,
+	.free_ring = tb_xdomain_quarantine_free_ring,
+};
+
+static bool
+tb_xdomain_quarantine_matches(const struct tb_xdomain_quarantine *q,
+			      const struct tb_xdomain *xd,
+			      int transmit_path, int transmit_ring,
+			      const struct tb_ring *transmit_dma_ring,
+			      int receive_path, int receive_ring,
+			      const struct tb_ring *receive_dma_ring)
+{
+	return q->xd == xd && q->transmit_path == transmit_path &&
+		q->transmit_ring == transmit_ring &&
+		q->transmit_dma_ring == transmit_dma_ring &&
+		q->receive_path == receive_path &&
+		q->receive_ring == receive_ring &&
+		q->receive_dma_ring == receive_dma_ring;
+}
+
+static bool tb_xdomain_quarantine_is_last(struct tb_xdomain_quarantine *q)
+{
+	struct tb_xdomain_quarantine *other;
+
+	list_for_each_entry(other, &xdomain_quarantines, list) {
+		if (other != q && other->xd == q->xd)
+			return false;
+	}
+	return true;
+}
+
+static void
+tb_xdomain_quarantine_release(struct tb_xdomain_quarantine *q, bool proven)
+{
+	bool clear_error;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	if (list_empty(&q->list)) {
+		mutex_unlock(&xdomain_quarantines_lock);
+		return;
+	}
+	clear_error = tb_xdomain_quarantine_is_last(q);
+	list_del_init(&q->list);
+	if (clear_error)
+		WRITE_ONCE(q->xd->path_teardown_err, 0);
+	mutex_unlock(&xdomain_quarantines_lock);
+
+	/* A successful exact disconnect and a proven reset are both revocation. */
+	if (q->transmit_dma_ring)
+		q->ops.free_ring(q->ops.data, q->transmit_dma_ring);
+	if (q->receive_dma_ring)
+		q->ops.free_ring(q->ops.data, q->receive_dma_ring);
+	if (q->transmit_path >= 0)
+		tb_xdomain_release_out_hopid(q->xd, q->transmit_path);
+	if (q->receive_path >= 0)
+		tb_xdomain_release_in_hopid(q->xd, q->receive_path);
+
+	if (proven)
+		dev_info(&q->xd->dev,
+			 "controller reset revoked quarantined DMA tuple %d/%d -> %d/%d\n",
+			 q->transmit_path, q->transmit_ring,
+			 q->receive_path, q->receive_ring);
+	/* Drop the quarantine-list ownership reference. */
+	tb_xdomain_quarantine_put(q);
+}
+
+static int
+tb_xdomain_quarantine_retry_record(struct tb_xdomain_quarantine *q,
+				   bool reschedule)
+{
+	int ret;
+
+	ret = q->ops.disconnect(q->ops.data, q->xd,
+				q->transmit_path, q->transmit_ring,
+				q->receive_path, q->receive_ring);
+	if (!ret) {
+		tb_xdomain_quarantine_release(q, false);
+		return 0;
+	}
+
+	q->attempts++;
+	if (q->attempts < XDOMAIN_QUARANTINE_PATH_RETRIES) {
+		if (reschedule && !READ_ONCE(q->stopping))
+			mod_delayed_work(q->xd->tb->wq, &q->retry_work,
+					 msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+		return ret;
+	}
+
+	dev_err_ratelimited(&q->xd->dev,
+		"DMA tuple %d/%d -> %d/%d remained owned after %u retries\n",
+		q->transmit_path, q->transmit_ring,
+		q->receive_path, q->receive_ring, q->attempts);
+	return ret;
+}
+
+static void tb_xdomain_quarantine_retry_work(struct work_struct *work)
+{
+	struct tb_xdomain_quarantine *q =
+		container_of(work, typeof(*q), retry_work.work);
+
+	refcount_inc(&q->refs);
+	if (!READ_ONCE(q->stopping))
+		tb_xdomain_quarantine_retry_record(q, true);
+	tb_xdomain_quarantine_put(q);
+}
+
+static bool tb_xdomain_quarantine_tuple_valid(struct tb_xdomain *xd,
+					      int path, int ring,
+					      struct tb_ring *dma_ring,
+					      bool transmit)
+{
+	if (path < 0)
+		return ring < 0 && !dma_ring;
+	if (!dma_ring || ring < 0 || dma_ring->hop != ring)
+		return false;
+	if (dma_ring->nhi != xd->tb->nhi || dma_ring->is_tx != transmit)
+		return false;
+	return true;
+}
+
+/**
+ * tb_xdomain_quarantine_paths() - transfer an unresolved DMA tuple to core
+ * @xd: XDomain that owns the path HopIDs
+ * @transmit_path: Locally allocated output HopID
+ * @transmit_ring: NHI TX ring HopID programmed into the path
+ * @transmit_dma_ring: Exact stopped TX ring object being transferred
+ * @receive_path: Locally allocated input HopID used by the peer
+ * @receive_ring: NHI RX ring HopID programmed into the path
+ * @receive_dma_ring: Exact stopped RX ring object being transferred
+ *
+ * Service remove callbacks cannot veto driver unbind. After an exact path
+ * disable returns an ownership error, this transfers the complete tuple to
+ * the core. The core fences callbacks, retains both XDomain IDA reservations,
+ * retries the real disable operation, and escalates through controller
+ * unbind/reset/reprobe when the bounded retry budget is exhausted.
+ *
+ * Return: %0 after ownership transfer or a negative errno before transfer.
+ */
+int tb_xdomain_quarantine_paths(struct tb_xdomain *xd,
+				int transmit_path, int transmit_ring,
+				struct tb_ring *transmit_dma_ring,
+				int receive_path, int receive_ring,
+				struct tb_ring *receive_dma_ring)
+{
+	const struct tb_xdomain_quarantine_ops *ops =
+		&xdomain_quarantine_real_ops;
+	struct tb_xdomain_quarantine *q, *existing;
+
+	if (!xd || (!transmit_dma_ring && !receive_dma_ring))
+		return -EINVAL;
+	if (!tb_xdomain_quarantine_tuple_valid(xd, transmit_path,
+					       transmit_ring, transmit_dma_ring, true) ||
+	    !tb_xdomain_quarantine_tuple_valid(xd, receive_path,
+					       receive_ring, receive_dma_ring, false) ||
+	    (transmit_dma_ring && transmit_dma_ring == receive_dma_ring))
+		return -EINVAL;
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (xdomain_quarantine_test_fail_alloc)
+		q = NULL;
+	else
+#endif
+		q = kzalloc(sizeof(*q), GFP_KERNEL);
+	if (!q) {
+		/*
+		 * Exact retry metadata could not be retained, but leaf removal
+		 * still cannot leave IRQ/work callbacks live. Ring quarantine is
+		 * enough to force the generic domain reset and abandonment gate.
+		 */
+		if (transmit_dma_ring)
+			tb_ring_quarantine(transmit_dma_ring);
+		if (receive_dma_ring)
+			tb_ring_quarantine(receive_dma_ring);
+		return -ENOMEM;
+	}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+	if (xdomain_quarantine_test_ops_set)
+		ops = &xdomain_quarantine_test_ops;
+#endif
+	INIT_LIST_HEAD(&q->list);
+	INIT_DELAYED_WORK(&q->retry_work, tb_xdomain_quarantine_retry_work);
+	refcount_set(&q->refs, 1);
+	q->xd = tb_xdomain_get(xd);
+	q->transmit_path = transmit_path;
+	q->transmit_ring = transmit_ring;
+	q->transmit_dma_ring = transmit_dma_ring;
+	q->receive_path = receive_path;
+	q->receive_ring = receive_ring;
+	q->receive_dma_ring = receive_dma_ring;
+	q->ops = *ops;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	list_for_each_entry(existing, &xdomain_quarantines, list) {
+		if (tb_xdomain_quarantine_matches(existing, xd,
+						  transmit_path, transmit_ring,
+						  transmit_dma_ring, receive_path,
+						  receive_ring, receive_dma_ring)) {
+			mutex_unlock(&xdomain_quarantines_lock);
+			tb_xdomain_quarantine_put(q);
+			return 0;
+		}
+	}
+	list_add_tail(&q->list, &xdomain_quarantines);
+	WRITE_ONCE(xd->path_teardown_err, -EUCLEAN);
+	mutex_unlock(&xdomain_quarantines_lock);
+
+	/* No leaf callback or polling pointer survives this function. */
+	if (transmit_dma_ring)
+		tb_ring_quarantine(transmit_dma_ring);
+	if (receive_dma_ring)
+		tb_ring_quarantine(receive_dma_ring);
+	queue_delayed_work(xd->tb->wq, &q->retry_work,
+			   msecs_to_jiffies(XDOMAIN_QUARANTINE_RETRY_MS));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tb_xdomain_quarantine_paths);
+
+void tb_xdomain_quarantine_prepare_reset(struct tb *tb)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb && !iter->stopping) {
+				iter->stopping = true;
+				refcount_inc(&iter->refs);
+				q = iter;
+				break;
+			}
+		}
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+void tb_xdomain_quarantine_finalize_reset(struct tb *tb,
+					  enum tb_domain_reset_state reset_state)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	if (reset_state != TB_DOMAIN_RESET_PROVEN)
+		return;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb) {
+				q = iter;
+				break;
+			}
+		}
+		if (q)
+			refcount_inc(&q->refs);
+		if (q)
+			q->stopping = true;
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		tb_xdomain_quarantine_release(q, true);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+void tb_xdomain_quarantine_discard_domain(struct tb *tb)
+{
+	struct tb_xdomain_quarantine *q, *iter;
+
+	for (;;) {
+		mutex_lock(&xdomain_quarantines_lock);
+		q = NULL;
+		list_for_each_entry(iter, &xdomain_quarantines, list) {
+			if (iter->xd->tb == tb) {
+				q = iter;
+				break;
+			}
+		}
+		if (q) {
+			refcount_inc(&q->refs);
+			q->stopping = true;
+			list_del_init(&q->list);
+		}
+		mutex_unlock(&xdomain_quarantines_lock);
+		if (!q)
+			break;
+		cancel_delayed_work_sync(&q->retry_work);
+		dev_err(&q->xd->dev,
+			"controller reset did not prove revocation; abandoning quarantined DMA allocation without reuse\n");
+		/* Drop the former list reference, then our traversal reference. */
+		tb_xdomain_quarantine_put(q);
+		tb_xdomain_quarantine_put(q);
+	}
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_xdomain_quarantine_set_ops(const struct tb_xdomain_quarantine_test_ops *ops)
+{
+	mutex_lock(&xdomain_quarantines_lock);
+	if (ops) {
+		xdomain_quarantine_test_ops.disconnect = ops->disconnect;
+		xdomain_quarantine_test_ops.free_ring = ops->free_ring;
+		xdomain_quarantine_test_ops.data = ops->data;
+		xdomain_quarantine_test_ops_set = true;
+	} else {
+		memset(&xdomain_quarantine_test_ops, 0,
+		       sizeof(xdomain_quarantine_test_ops));
+		xdomain_quarantine_test_ops_set = false;
+	}
+	mutex_unlock(&xdomain_quarantines_lock);
+}
+
+void tb_test_xdomain_quarantine_fail_alloc(bool fail)
+{
+	xdomain_quarantine_test_fail_alloc = fail;
+}
+
+static struct tb_xdomain_quarantine *
+tb_test_xdomain_quarantine_find(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+
+	list_for_each_entry(q, &xdomain_quarantines, list)
+		if (q->xd == xd)
+			return q;
+	return NULL;
+}
+
+int tb_test_xdomain_quarantine_retry(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+	int ret;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	q = tb_test_xdomain_quarantine_find(xd);
+	if (q) {
+		refcount_inc(&q->refs);
+		q->stopping = true;
+	}
+	mutex_unlock(&xdomain_quarantines_lock);
+	if (!q)
+		return -ENOENT;
+	cancel_delayed_work_sync(&q->retry_work);
+	q->stopping = false;
+	ret = tb_xdomain_quarantine_retry_record(q, false);
+	tb_xdomain_quarantine_put(q);
+	return ret;
+}
+
+void tb_test_xdomain_quarantine_finalize(struct tb *tb,
+					 enum tb_domain_reset_state reset_state)
+{
+	tb_xdomain_quarantine_finalize_reset(tb, reset_state);
+}
+
+unsigned int tb_test_xdomain_quarantine_count(struct tb_xdomain *xd)
+{
+	struct tb_xdomain_quarantine *q;
+	unsigned int count = 0;
+
+	mutex_lock(&xdomain_quarantines_lock);
+	list_for_each_entry(q, &xdomain_quarantines, list)
+		if (q->xd == xd)
+			count++;
+	mutex_unlock(&xdomain_quarantines_lock);
+	return count;
+}
+#endif
+
 struct tb_xdomain_lookup {
 	const uuid_t *uuid;
 	u8 link;
@@ -3062,10 +4272,46 @@ struct tb_xdomain_lookup {
 	u64 route;
 };
 
+static bool tb_xdomain_uuid_globally_matchable(const struct tb_xdomain *xd,
+					       const uuid_t *uuid)
+{
+	return xd->uuid_verified && xd->remote_uuid &&
+		uuid_equal(xd->remote_uuid, uuid);
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_uuid_globally_matchable(bool verified, bool equal)
+{
+	uuid_t remote = UUID_INIT(0x12345678, 0x1234, 0x5678,
+				  0x12, 0x34, 0x56, 0x78, 0x12, 0x34,
+				  0x56, 0x78);
+	uuid_t other = UUID_INIT(0x87654321, 0x4321, 0x8765,
+				 0x87, 0x65, 0x43, 0x21, 0x87, 0x65,
+				 0x43, 0x21);
+	struct tb_xdomain xd = {
+		.remote_uuid = &remote,
+		.uuid_verified = verified,
+	};
+
+	return tb_xdomain_uuid_globally_matchable(&xd,
+					     equal ? &remote : &other);
+}
+#endif
+
 static struct tb_xdomain *switch_find_xdomain(struct tb_switch *sw,
 	const struct tb_xdomain_lookup *lookup)
 {
 	struct tb_port *port;
+
+	/* A domain whose root switch failed to initialise still has a live
+	 * ring 0, so an inbound XDomain request can reach the lookup before
+	 * tb->root_switch exists. Observed on appmana-023 with 2.46: "failed
+	 * to initialize port 1" followed by a NULL deref at
+	 * switch_find_xdomain+0x11 from tb_xdomain_handle_request. Answering
+	 * "no such XDomain" is correct -- there are no ports to search.
+	 */
+	if (!sw)
+		return NULL;
 
 	tb_switch_for_each_port(sw, port) {
 		struct tb_xdomain *xd;
@@ -3074,8 +4320,8 @@ static struct tb_xdomain *switch_find_xdomain(struct tb_switch *sw,
 			xd = port->xdomain;
 
 			if (lookup->uuid) {
-				if (xd->remote_uuid &&
-				    uuid_equal(xd->remote_uuid, lookup->uuid))
+				if (tb_xdomain_uuid_globally_matchable(xd,
+								       lookup->uuid))
 					return xd;
 			} else {
 				if (lookup->link && lookup->link == xd->link &&
@@ -3186,37 +4432,21 @@ struct tb_xdomain *tb_xdomain_find_by_route(struct tb *tb, u64 route)
 }
 EXPORT_SYMBOL_GPL(tb_xdomain_find_by_route);
 
-bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
-			       const void *buf, size_t size)
+static bool tb_xdomain_dispatch_service(struct tb *tb, const void *buf,
+					size_t size)
 {
 	const struct tb_protocol_handler *handler;
 	const struct tb_xdp_header *hdr = buf;
 	struct tb_xdomain *source_xd = NULL;
-	unsigned int length;
 	int ret = 0;
 	u64 route;
-
-	/* We expect the packet is at least size of the header */
-	length = hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK;
-	if (length != size / 4 - sizeof(hdr->xd_hdr) / 4)
-		return true;
-	if (length < sizeof(*hdr) / 4 - sizeof(hdr->xd_hdr) / 4)
-		return true;
-
-	/*
-	 * Handle XDomain discovery protocol packets directly here. For
-	 * other protocols (based on their UUID) we call registered
-	 * handlers in turn.
-	 */
-	if (uuid_equal(&hdr->uuid, &tb_xdp_uuid)) {
-		if (type == TB_CFG_PKG_XDOMAIN_REQ)
-			return tb_xdp_schedule_request(tb, hdr, size);
-		return false;
-	}
 
 	route = ((u64)hdr->xd_hdr.route_hi << 32 | hdr->xd_hdr.route_lo) &
 		~BIT_ULL(63);
 	source_xd = tb_xdomain_find_by_route_locked(tb, route);
+	if (source_xd)
+		tb_xdomain_control_event(source_xd,
+					 TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
 
 	/*
 	 * The dispatch lock is held across the whole walk including the
@@ -3259,6 +4489,75 @@ bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
 	tb_xdomain_put(source_xd);
 
 	return ret > 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+bool tb_test_xdomain_dispatch_service(struct tb *tb, const void *buf,
+				      size_t size)
+{
+	return tb_xdomain_dispatch_service(tb, buf, size);
+}
+#endif
+
+static void tb_xdomain_service_work(struct work_struct *work)
+{
+	struct xdomain_service_work *xw =
+		container_of(work, typeof(*xw), work);
+
+	tb_xdomain_dispatch_service(xw->tb, xw->packet, xw->size);
+	tb_domain_put(xw->tb);
+	kfree(xw);
+}
+
+static bool tb_xdomain_schedule_service(struct tb *tb, const void *buf,
+					size_t size)
+{
+	struct xdomain_service_work *xw;
+
+	xw = kmalloc(struct_size(xw, packet, size), GFP_KERNEL);
+	if (!xw)
+		return false;
+
+	INIT_WORK(&xw->work, tb_xdomain_service_work);
+	xw->tb = tb_domain_get(tb);
+	xw->size = size;
+	memcpy(xw->packet, buf, size);
+	schedule_work(&xw->work);
+	return true;
+}
+
+bool tb_xdomain_handle_request(struct tb *tb, enum tb_cfg_pkg_type type,
+			       const void *buf, size_t size)
+{
+	const struct tb_xdp_header *hdr = buf;
+	unsigned int length;
+
+	/* We expect the packet is at least size of the header */
+	length = hdr->xd_hdr.length_sn & TB_XDOMAIN_LENGTH_MASK;
+	if (length != size / 4 - sizeof(hdr->xd_hdr) / 4)
+		return true;
+	if (length < sizeof(*hdr) / 4 - sizeof(hdr->xd_hdr) / 4)
+		return true;
+
+	/* Discovery requests and service callbacks may take tb->lock. */
+	if (uuid_equal(&hdr->uuid, &tb_xdp_uuid)) {
+		if (type == TB_CFG_PKG_XDOMAIN_REQ)
+			return tb_xdp_schedule_request(tb, hdr, size);
+		return false;
+	}
+
+	/*
+	 * A service response belongs first to the request matcher in ctl.c.
+	 * Queuing handler dispatch reports the event consumed before that matcher
+	 * runs, which turns every valid reply into an apparent peer timeout.
+	 * Only inbound requests are unsolicited handler work and may be deferred.
+	 */
+	if (tb_xdomain_service_dispatch_mode(
+			type == TB_CFG_PKG_XDOMAIN_RESP) ==
+	    TB_XDOMAIN_RX_DISPATCH_INLINE)
+		return false;
+
+	return tb_xdomain_schedule_service(tb, buf, size);
 }
 
 static int update_xdomain(struct device *dev, void *data)

@@ -94,7 +94,7 @@ HELLO payload (new, replaces the legacy tbv HELLO):
 | proto_version | u16 | this spec, starts at 1; mismatch = refuse session |
 | transmit_hopid | u16 | HopID the sender transmits on |
 | rx_ring_entries | u16 | power of two, 256..4096; basis of Mode A window |
-| capabilities | u32 | bit 0: E2E supported; bit 1: keepalive; rest reserved |
+| capabilities | u32 | bit 0: E2E supported; bit 1: keepalive; bit 2: directional keepalive acknowledgement; rest reserved |
 | gid_eui64 | u64 | sender's per-link ULA EUI-64 (GID derivation) |
 | session_cookie | u64 | random per boot; echoed in keepalives |
 
@@ -104,6 +104,16 @@ READY_ACK is withheld while a teardown of the current session is pending:
 the ack certifies the paths it vouches for, and certifying entries that
 are queued for removal lets the peer stream a full TX ring into a
 half-torn-down path (the 2026-08-18 router egress wedge).
+
+Capabilities have distinct offer and selection states. An initial HELLO may
+offer every locally supported bit. HELLO_ACK carries the intersection selected
+by the responder, and READY and every later session message carry only that
+selection. If HELLO_ACK selects a strict subset, the requester sends one
+bounded confirmation HELLO containing the selection before READY. This second
+round is required during a rolling update: an older responder may compare its
+inbound HELLO snapshot with its own requester snapshot and otherwise reject the
+selected subset as a crossed stale lifetime. Offer, selection confirmation,
+and readiness are separate transitions; none is inferred from another.
 
 BYE (op 5) / BYE_ACK (op 6), additive: orderly-teardown quiesce, the
 ThunderboltIP logout analog. A side about to tear its session down for a
@@ -123,9 +133,17 @@ egress persistently (credit state, reset-only recovery); measured on the
 - Level-triggered verify: `tb_xdomain_paths_active()` read-back on a timer
   (default 5 s) while the session is up; failure -> `link_down(reason)` and
   re-handshake. Hardware hot-events are hints, never the mechanism.
-- Optional keepalive frames (capability bit 1) carry the session cookie; a
-  cookie mismatch is a supersede signal (peer rebooted within one verify
-  interval).
+- Optional legacy keepalive frames (capability bit 1 without bit 2) carry the
+  8-byte session cookie; a cookie mismatch is a supersede signal (peer rebooted
+  within one verify interval).
+- Directional keepalives (capability bits 1 and 2) carry the session cookie,
+  a nonzero transmit sequence, and the most recent peer cookie and sequence as
+  an authenticated acknowledgement. Receiving a peer sequence proves the
+  receive direction; receiving an acknowledgement of a sequence from the
+  current local cookie proves the transmit direction. A session is not UP
+  until both proofs exist. The 32-byte format is selected only when both ends
+  negotiated bit 2; a rolling peer continues to receive the legacy 8-byte
+  format under the same wire-v3 envelope.
 
 ## 4. ICRC
 
@@ -169,21 +187,37 @@ Correctness never depends on hardware E2E.
 
 ### Mode A — static window (default, universal)
 
-- The sender bounds aggregate unacknowledged data frames per link to
-  `min(local cap, peer rx_ring_entries)` from HELLO.
+- The sender derives `data_window = min(local cap, peer rx_ring_entries) -
+  64` from HELLO. Aggregate request records never exceed `data_window`.
 - Enforcement: per-QP inflight caps (rxe's existing
   `RXE_INFLIGHT_SKBS_PER_QP_HIGH` analog, plus the 128-PSN unacked window)
   summed over the link; the tbframe admission check refuses `xmit` beyond
   the link cap and invokes the `tx_released` upcall as completions drain.
-- Invariant: every unacked data frame occupies at most one peer RX
-  descriptor, and the peer reposts descriptors before its engine emits the
-  ACK that releases the window. Therefore `window <= rx_ring_entries`
-  implies the RX ring cannot overflow. No credit messages exist; there is
-  nothing to lose or desynchronize.
+- Admission records every unique outstanding request PSN, keyed by QP and
+  PSN. ACK/NAK progress releases records below the peer's cumulative PSN; QP
+  reset/error and session-ring replacement release the corresponding
+  generation. Rewinding the local requester cursor for retry releases
+  nothing, but retransmitting an already-recorded PSN does not charge it
+  again. The frame RX callback copies the request into an skb and returns
+  before the responder emits an ACK, so the physical RX descriptor is already
+  recyclable when ACK state is pending. Retry state and descriptor admission
+  are separate state machines.
+- Retransmissions (PSNs below the QP's committed send high water) may use a
+  replay reserve held inside `data_window`: for valid negotiated rings,
+  `min(32, data_window / 8)` records are unavailable to fresh requests but
+  available to a replay PSN not present in the current generation. Replays of
+  an already-recorded PSN need no additional record. Every replay requests an
+  immediate cumulative ACK;
+  otherwise the reserve can fill before the ordinary periodic ACK cadence
+  reaches an ACK-requesting packet. This recovers a lost ACK after the fresh
+  window filled without forgetting the original flight. The separate
+  64-descriptor physical reserve remains wholly available to ACK/read-response
+  traffic.
 - ACK/control frames are small and bounded by data received (one ACK per
   ack-req packet); they are admitted outside the data window but counted
   against a fixed reserve (ring is sized with a control reserve:
-  `usable data window = rx_ring_entries - 64`).
+  `data_window = rx_ring_entries - 64`; request replay also stays inside that
+  data window).
 
 ### Mode B — hardware E2E (negotiated enhancement)
 
@@ -197,10 +231,11 @@ Correctness never depends on hardware E2E.
 
 ### What the PSN layer still covers (either mode)
 
-CRC-dropped frames, frames lost across `link_down -> link_up` transitions,
-and duplicates from retransmission. Loss model contract: frames are never
-silently lost while `link_state == UP`; any loss window is bracketed by a
-link_down/link_up pair and session reset.
+CRC/path-dropped frames while a session remains up, frames lost across
+`link_down -> link_up` transitions, and duplicates from retransmission.
+The admission ledger remains conservative across retry; session-ring
+replacement advances its generation and discards credits belonging to the
+old rings.
 
 ## 7. tbframe kernel API (contract for tbrxe)
 

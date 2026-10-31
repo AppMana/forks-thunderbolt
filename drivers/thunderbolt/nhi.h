@@ -27,8 +27,124 @@ enum nhi_mailbox_cmd {
 	NHI_MAILBOX_ALLOW_ALL_DEVS = 0x23,
 };
 
+struct tb_ring_snapshot {
+	u16 size;
+	u16 sw_head;
+	u16 sw_tail;
+	u16 hw_producer;
+	u16 hw_consumer;
+	u16 queued;
+	u16 in_flight;
+	u32 index_raw;
+	u32 options;
+	u32 tail_attributes;
+	bool running;
+	bool indices_valid;
+	bool full;
+};
+
+enum tb_ring_completion_anomaly {
+	TB_RING_COMPLETION_HW_CRC		= BIT(0),
+	TB_RING_COMPLETION_HW_OVERRUN		= BIT(1),
+	TB_RING_COMPLETION_OWNER_MISMATCH	= BIT(2),
+	TB_RING_COMPLETION_DMA_MISMATCH		= BIT(3),
+};
+
+/*
+ * Immutable evidence captured at the exact RX descriptor completion.  In
+ * particular, @slot is the software tail consumed by ring_work(), not the
+ * later live ring index sampled from a service callback.  @generation and
+ * @posted_* are retained when software publishes the slot, so a hardware CRC
+ * report can be distinguished from stale descriptor/list ownership.
+ */
+struct tb_ring_completion_evidence {
+	u64 generation;
+	dma_addr_t posted_phys;
+	dma_addr_t completed_phys;
+	dma_addr_t frame_phys;
+	u32 posted_attributes;
+	u32 completed_attributes;
+	u32 descriptor_time;
+	u32 index_raw;
+	u32 prev_attributes;
+	u32 next_attributes;
+	u32 anomalies;
+	u16 slot;
+	u16 sw_head;
+	u16 sw_tail;
+	u16 length;
+	u16 flags;
+	u8 eof;
+	u8 sof;
+};
+
+enum tb_nhi_ring_stop_step {
+	TB_NHI_RING_STOP_DISABLE	= BIT(0),
+	TB_NHI_RING_STOP_CLEAR_STATE	= BIT(1),
+	TB_NHI_RING_STOP_FLUSH_WRITES	= BIT(2),
+	TB_NHI_RING_STOP_SETTLE_ENGINE	= BIT(3),
+};
+
+/*
+ * Model the device-visible lifetime of a ring across posted MMIO writes.
+ * A read flushes the disable and state-clear writes, but the ring engine must
+ * also be given time to quiesce before software can reuse coherent memory.
+ */
+static inline unsigned int tb_nhi_ring_stop_steps(void)
+{
+	return TB_NHI_RING_STOP_DISABLE | TB_NHI_RING_STOP_CLEAR_STATE |
+	       TB_NHI_RING_STOP_FLUSH_WRITES |
+	       TB_NHI_RING_STOP_SETTLE_ENGINE;
+}
+
+static inline bool tb_nhi_ring_stop_reuse_safe(void)
+{
+	unsigned int steps = tb_nhi_ring_stop_steps();
+	bool device_enabled = true;
+	bool device_has_state = true;
+	bool disable_posted = false;
+	bool clear_posted = false;
+	bool engine_quiesced = false;
+
+	if (steps & TB_NHI_RING_STOP_DISABLE)
+		disable_posted = true;
+	if (steps & TB_NHI_RING_STOP_CLEAR_STATE)
+		clear_posted = true;
+	if (steps & TB_NHI_RING_STOP_FLUSH_WRITES) {
+		if (disable_posted)
+			device_enabled = false;
+		if (clear_posted)
+			device_has_state = false;
+	}
+	if ((steps & TB_NHI_RING_STOP_SETTLE_ENGINE) && !device_enabled &&
+	    !device_has_state)
+		engine_quiesced = true;
+
+	return !device_enabled && !device_has_state && engine_quiesced;
+}
+
+static inline bool
+tb_nhi_tx_descriptor_completed(const struct tb_ring_snapshot *snapshot)
+{
+	if (!snapshot || !snapshot->running || !snapshot->in_flight)
+		return false;
+
+	return snapshot->tail_attributes &
+		((u32)RING_DESC_COMPLETED << 20);
+}
+
 int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
 enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
+int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot);
+int tb_ring_completion_evidence(struct tb_ring *ring,
+				struct ring_frame *frame,
+				struct tb_ring_completion_evidence *evidence);
+int tb_ring_process_completions(struct tb_ring *ring);
+bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi);
+bool tb_nhi_has_quarantined_rings(struct tb_nhi *nhi);
+void tb_nhi_finalize_quarantined_rings(struct tb_nhi *nhi,
+				       bool controller_reset_proven);
+void tb_nhi_abandon_quarantined_rings(struct tb_nhi *nhi);
 
 /**
  * struct tb_nhi_ops - NHI specific optional operations
@@ -99,5 +215,46 @@ extern const struct tb_nhi_ops icl_nhi_ops;
 #define PCI_DEVICE_ID_INTEL_PTL_P_NHI1			0xe434
 
 #define PCI_CLASS_SERIAL_USB_USB4			0x0c0340
+
+static inline bool tb_icm_uses_legacy_allow_all(u16 nhi_device_id)
+{
+	switch (nhi_device_id) {
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
+		return false;
+	default:
+		return true;
+	}
+}
+
+static inline bool tb_nhi_recovery_supported(u16 vendor, u16 device)
+{
+	if (vendor != PCI_VENDOR_ID_INTEL)
+		return false;
+
+	return device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI ||
+	       device == PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+}
+
+static inline bool tb_nhi_arc_cio_recovery_supported(u16 vendor, u16 device)
+{
+	(void)vendor;
+	(void)device;
+	return false;
+}
+
+static inline bool tb_nhi_uses_auto_clear(u16 vendor, u16 device)
+{
+	(void)device;
+
+	return vendor == PCI_VENDOR_ID_INTEL;
+}
+
+/* No controller has a documented, independently validated live ICM restart. */
+static inline bool tb_icm_warm_restart_supported(u16 nhi_device_id)
+{
+	(void)nhi_device_id;
+	return false;
+}
 
 #endif

@@ -33,7 +33,7 @@
 #define ADM_WINDOW		4
 #define ADM_POSTS		8
 #define ADM_MSG_LEN		16
-#define ADM_POOL		64
+#define ADM_POOL		512
 #define ADM_FRAME_BYTES		512
 #define ADM_SQ_PSN		0x100
 #define ADM_POLL_MS		10
@@ -49,6 +49,7 @@ static DEFINE_SPINLOCK(adm_pool_lock);
  * >0 = that many allocations before exhaustion.
  */
 static atomic_t adm_alloc_budget = ATOMIC_INIT(-1);
+static atomic_t adm_alloc_refused;
 
 static bool adm_alloc_take_budget(void)
 {
@@ -65,7 +66,56 @@ static bool adm_alloc_take_budget(void)
 
 /* Wire capture: PSN of every DATA (non-ack-class) packet xmitted. */
 static u32 adm_sent_psn[ADM_POOL];
+static bool adm_sent_ack[ADM_POOL];
 static atomic_t adm_sent;
+static atomic_t adm_ctrl_sent;
+static u8 adm_ctrl_opcode[ADM_POOL];
+static u8 adm_ctrl_syn[ADM_POOL];
+static u32 adm_ctrl_psn[ADM_POOL];
+static u64 adm_ctrl_orig[ADM_POOL];
+static DEFINE_SPINLOCK(adm_ctrl_lock);
+
+#define ADM_WIRE_DEPTH		ADM_POOL
+
+struct adm_wire_packet {
+	void *dst_link;
+	u16 len;
+	u8 data[ADM_FRAME_BYTES];
+};
+
+static struct adm_wire_packet adm_wire[ADM_WIRE_DEPTH];
+static unsigned int adm_wire_head;
+static unsigned int adm_wire_tail;
+static unsigned int adm_wire_count;
+static void *adm_wire_a;
+static void *adm_wire_b;
+static bool adm_wire_forward;
+static unsigned int adm_wire_drop_ctrl;
+static DEFINE_SPINLOCK(adm_wire_lock);
+
+/*
+ * Optional peer-RX model.  A successful local xmit does not recycle a peer
+ * descriptor: tests explicitly consume remote frames.  This is deliberately
+ * separate from adm_pool_used, which models only local TX ownership.
+ */
+static bool adm_retain_remote;
+static atomic_t adm_remote_occupied;
+static atomic_t adm_remote_max;
+
+static void adm_remote_arrive(void)
+{
+	int occupied = atomic_inc_return(&adm_remote_occupied);
+	int old = atomic_read(&adm_remote_max);
+
+	while (occupied > old &&
+	       !atomic_try_cmpxchg(&adm_remote_max, &old, occupied))
+		;
+}
+
+static void adm_remote_consume_all(void)
+{
+	atomic_set(&adm_remote_occupied, 0);
+}
 
 static int adm_register_client(const struct tbframe_client_ops *ops, void *ctx)
 {
@@ -85,8 +135,10 @@ static int adm_alloc_frame(struct tbframe_link *link, u16 len, bool is_ctrl,
 	if (len > ADM_FRAME_BYTES)
 		return -EINVAL;
 
-	if (!adm_alloc_take_budget())
+	if (!adm_alloc_take_budget()) {
+		atomic_inc(&adm_alloc_refused);
 		return -ENOSPC;
+	}
 
 	spin_lock_irqsave(&adm_pool_lock, flags);
 	i = find_first_zero_bit(&adm_pool_used, ADM_POOL);
@@ -120,6 +172,7 @@ static int adm_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 {
 	u8 *bth = frame->data;
 	u32 psn = ((u32)bth[9] << 16) | ((u32)bth[10] << 8) | bth[11];
+	unsigned long flags;
 	int n;
 
 	/* Only count requester data packets; ack-class rides the reserve. */
@@ -127,6 +180,48 @@ static int adm_xmit(struct tbframe_link *link, struct tbframe_frame *frame)
 		n = atomic_fetch_inc(&adm_sent);
 		if (n < ADM_POOL)
 			adm_sent_psn[n] = psn & BTH_PSN_MASK;
+		if (n < ADM_POOL)
+			adm_sent_ack[n] = __bth_ack(bth);
+		if (adm_retain_remote)
+			adm_remote_arrive();
+	} else {
+		struct rxe_pkt_info pkt = {
+			.hdr = frame->data,
+		};
+
+		pkt.opcode = bth_opcode(&pkt);
+		pkt.mask = rxe_opcode[pkt.opcode].mask;
+		pkt.psn = bth_psn(&pkt);
+
+		spin_lock_irqsave(&adm_ctrl_lock, flags);
+		n = atomic_read(&adm_ctrl_sent);
+		if (n < ADM_POOL) {
+			adm_ctrl_opcode[n] = pkt.opcode;
+			adm_ctrl_psn[n] = pkt.psn;
+			adm_ctrl_syn[n] = pkt.mask & RXE_AETH_MASK ?
+				aeth_syn(&pkt) : 0;
+			adm_ctrl_orig[n] = pkt.mask & RXE_ATMACK_MASK ?
+				atmack_orig(&pkt) : 0;
+		}
+		atomic_inc(&adm_ctrl_sent);
+		spin_unlock_irqrestore(&adm_ctrl_lock, flags);
+	}
+	if (adm_wire_forward && frame->is_ctrl && adm_wire_drop_ctrl) {
+		adm_wire_drop_ctrl--;
+	} else if (adm_wire_forward) {
+		spin_lock_irqsave(&adm_wire_lock, flags);
+		if (WARN_ON_ONCE(adm_wire_count == ADM_WIRE_DEPTH)) {
+			spin_unlock_irqrestore(&adm_wire_lock, flags);
+			adm_frame_release(frame);
+			return -ENOSPC;
+		}
+		adm_wire[adm_wire_tail].dst_link =
+			(void *)link == adm_wire_a ? adm_wire_b : adm_wire_a;
+		adm_wire[adm_wire_tail].len = frame->len;
+		memcpy(adm_wire[adm_wire_tail].data, frame->data, frame->len);
+		adm_wire_tail = (adm_wire_tail + 1) % ADM_WIRE_DEPTH;
+		adm_wire_count++;
+		spin_unlock_irqrestore(&adm_wire_lock, flags);
 	}
 	adm_frame_release(frame);
 	return 0;
@@ -158,6 +253,29 @@ static const struct tbrxe_transport_ops adm_transport = {
 	.link_name		= adm_link_name,
 	.link_info		= adm_link_info,
 };
+
+static bool adm_wire_pump_one(void)
+{
+	struct adm_wire_packet packet;
+	struct tbframe_frame frame = {};
+	unsigned long flags;
+
+	spin_lock_irqsave(&adm_wire_lock, flags);
+	if (!adm_wire_count) {
+		spin_unlock_irqrestore(&adm_wire_lock, flags);
+		return false;
+	}
+	packet = adm_wire[adm_wire_head];
+	adm_wire_head = (adm_wire_head + 1) % ADM_WIRE_DEPTH;
+	adm_wire_count--;
+	spin_unlock_irqrestore(&adm_wire_lock, flags);
+
+	frame.data = packet.data;
+	frame.len = packet.len;
+	frame.pdf = TBFRAME_PDF_DATA;
+	tbrxe_frame_client_ops()->rx(NULL, packet.dst_link, &frame);
+	return true;
+}
 
 
 /*
@@ -196,6 +314,121 @@ static void adm_inject_ack(void *fake_link, u32 qpn, u32 psn)
 	adm_inject_aeth(fake_link, qpn, psn, AETH_ACK_UNLIMITED);
 }
 
+static void adm_inject_send(void *fake_link, u32 qpn, u32 psn,
+			    const void *payload, u16 payload_len)
+{
+	static u8 buf[RXE_BTH_BYTES + ADM_MSG_LEN + RXE_ICRC_SIZE];
+	static struct tbframe_frame frame;
+	struct rxe_pkt_info pkt = {};
+
+	memset(buf, 0, sizeof(buf));
+	pkt.hdr = buf;
+	pkt.opcode = IB_OPCODE_RC_SEND_ONLY;
+	pkt.mask = rxe_opcode[pkt.opcode].mask;
+	pkt.paylen = rxe_opcode[pkt.opcode].length + payload_len +
+		RXE_ICRC_SIZE;
+	pkt.psn = psn & BTH_PSN_MASK;
+
+	bth_init(&pkt, pkt.opcode, 0, 0, 0, 0xffff, qpn, 1, pkt.psn);
+	memcpy(payload_addr(&pkt), payload, payload_len);
+	rxe_icrc_generate(NULL, &pkt);
+
+	frame.data = buf;
+	frame.len = pkt.paylen;
+	frame.pdf = TBFRAME_PDF_DATA;
+	frame.is_ctrl = false;
+	tbrxe_frame_client_ops()->rx(NULL, fake_link, &frame);
+}
+
+static void adm_inject_fetch_add(void *fake_link, u32 qpn, u32 psn,
+				 u64 va, u32 rkey, u64 add)
+{
+	static u8 buf[RXE_BTH_BYTES + RXE_ATMETH_BYTES + RXE_ICRC_SIZE];
+	static struct tbframe_frame frame;
+	struct rxe_pkt_info pkt = {};
+
+	memset(buf, 0, sizeof(buf));
+	pkt.hdr = buf;
+	pkt.opcode = IB_OPCODE_RC_FETCH_ADD;
+	pkt.mask = rxe_opcode[pkt.opcode].mask;
+	pkt.paylen = sizeof(buf);
+	pkt.psn = psn & BTH_PSN_MASK;
+
+	bth_init(&pkt, pkt.opcode, 0, 0, 0, 0xffff, qpn, 0, pkt.psn);
+	atmeth_set_va(&pkt, va);
+	atmeth_set_rkey(&pkt, rkey);
+	atmeth_set_swap_add(&pkt, add);
+	atmeth_set_comp(&pkt, 0);
+	rxe_icrc_generate(NULL, &pkt);
+
+	frame.data = buf;
+	frame.len = sizeof(buf);
+	frame.pdf = TBFRAME_PDF_DATA;
+	frame.is_ctrl = false;
+	tbrxe_frame_client_ops()->rx(NULL, fake_link, &frame);
+}
+
+static int adm_wait_completion(struct ib_cq *cq, struct ib_wc *wc)
+{
+	int i, n;
+
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		n = ib_poll_cq(cq, 1, wc);
+		if (n < 0)
+			return n;
+		if (n == 1)
+			return 0;
+		msleep(ADM_POLL_MS);
+	}
+
+	return -ETIMEDOUT;
+}
+
+static int adm_wait_atomic_at_least(atomic_t *value, int want)
+{
+	int i;
+
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		if (atomic_read(value) >= want)
+			return 0;
+		msleep(ADM_POLL_MS);
+	}
+
+	return -ETIMEDOUT;
+}
+
+static int adm_wait_u64(const u64 *value, u64 want)
+{
+	int i;
+
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		if (READ_ONCE(*value) == want)
+			return 0;
+		msleep(ADM_POLL_MS);
+	}
+
+	return -ETIMEDOUT;
+}
+
+static void adm_tx_released(void *link)
+{
+	tbrxe_frame_client_ops()->tx_released(NULL, (struct tbframe_link *)link);
+}
+
+static bool adm_wait_qp_error(struct ib_qp *ibqp)
+{
+	struct rxe_qp *qp = to_rqp(ibqp);
+	int i;
+
+	for (i = 0; i < 50; i++) {
+		if (READ_ONCE(qp->attr.qp_state) == IB_QPS_ERR)
+			return true;
+		msleep(ADM_POLL_MS);
+	}
+
+	return false;
+}
+
 /* Wait until the data-packet xmit count stops changing, then return it. */
 static int adm_settled_sent(void)
 {
@@ -226,9 +459,10 @@ static int adm_wait_sent(int want)
 	return adm_settled_sent();
 }
 
-static int adm_connect_mtu(struct ib_qp *qp, u32 dest_qpn,
-			   const union ib_gid *dgid, u8 sgid_index,
-			   u8 timeout, enum ib_mtu mtu)
+static int adm_connect_mtu_access(struct ib_qp *qp, u32 dest_qpn,
+				  const union ib_gid *dgid, u8 sgid_index,
+				  u8 timeout, enum ib_mtu mtu,
+				  int access)
 {
 	struct ib_qp_attr attr;
 	int err;
@@ -237,7 +471,7 @@ static int adm_connect_mtu(struct ib_qp *qp, u32 dest_qpn,
 	attr.qp_state = IB_QPS_INIT;
 	attr.pkey_index = 0;
 	attr.port_num = 1;
-	attr.qp_access_flags = IB_ACCESS_LOCAL_WRITE;
+	attr.qp_access_flags = access;
 	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_PKEY_INDEX |
 			   IB_QP_PORT | IB_QP_ACCESS_FLAGS);
 	if (err)
@@ -275,11 +509,95 @@ static int adm_connect_mtu(struct ib_qp *qp, u32 dest_qpn,
 			    IB_QP_RNR_RETRY | IB_QP_MAX_QP_RD_ATOMIC);
 }
 
+static int adm_connect_mtu(struct ib_qp *qp, u32 dest_qpn,
+			   const union ib_gid *dgid, u8 sgid_index,
+			   u8 timeout, enum ib_mtu mtu)
+{
+	return adm_connect_mtu_access(qp, dest_qpn, dgid, sgid_index,
+				       timeout, mtu, IB_ACCESS_LOCAL_WRITE);
+}
+
 static int adm_connect(struct ib_qp *qp, u32 dest_qpn,
 		       const union ib_gid *dgid, u8 sgid_index, u8 timeout)
 {
 	return adm_connect_mtu(qp, dest_qpn, dgid, sgid_index, timeout,
 			       IB_MTU_2048);
+}
+
+static int adm_connect_pair(struct ib_qp *qp, u32 dest_qpn,
+			    const union ib_gid *dgid, u8 sgid_index,
+			    u32 sq_psn, u32 rq_psn)
+{
+	struct ib_qp_attr attr = {};
+	int err;
+
+	attr.qp_state = IB_QPS_INIT;
+	attr.pkey_index = 0;
+	attr.port_num = 1;
+	attr.qp_access_flags = IB_ACCESS_LOCAL_WRITE;
+	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_PKEY_INDEX |
+			   IB_QP_PORT | IB_QP_ACCESS_FLAGS);
+	if (err)
+		return err;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_RTR;
+	attr.path_mtu = IB_MTU_256;
+	attr.dest_qp_num = dest_qpn;
+	attr.rq_psn = rq_psn;
+	attr.max_dest_rd_atomic = 1;
+	attr.min_rnr_timer = 12;
+	attr.ah_attr.type = rdma_ah_find_type(qp->device, 1);
+	rdma_ah_set_port_num(&attr.ah_attr, 1);
+	rdma_ah_set_grh(&attr.ah_attr, (union ib_gid *)dgid, 0,
+			sgid_index, 64, 0);
+	err = ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_AV |
+			   IB_QP_PATH_MTU | IB_QP_DEST_QPN | IB_QP_RQ_PSN |
+			   IB_QP_MAX_DEST_RD_ATOMIC | IB_QP_MIN_RNR_TIMER);
+	if (err)
+		return err;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IB_QPS_RTS;
+	attr.sq_psn = sq_psn;
+	attr.timeout = 14;
+	attr.retry_cnt = 7;
+	attr.rnr_retry = 7;
+	attr.max_rd_atomic = 1;
+	return ib_modify_qp(qp, &attr, IB_QP_STATE | IB_QP_SQ_PSN |
+			    IB_QP_TIMEOUT | IB_QP_RETRY_CNT |
+			    IB_QP_RNR_RETRY | IB_QP_MAX_QP_RD_ATOMIC);
+}
+
+static int adm_wire_wait_pair(struct ib_cq *scq, struct ib_cq *rcq)
+{
+	struct ib_wc wc;
+	bool send_done = false;
+	bool recv_done = false;
+	int i, n;
+
+	for (i = 0; i < ADM_POLL_TRIES; i++) {
+		while (adm_wire_pump_one())
+			;
+
+		if (!send_done) {
+			n = ib_poll_cq(scq, 1, &wc);
+			if (n < 0 || (n == 1 && wc.status != IB_WC_SUCCESS))
+				return n < 0 ? n : -EIO;
+			send_done = n == 1;
+		}
+		if (!recv_done) {
+			n = ib_poll_cq(rcq, 1, &wc);
+			if (n < 0 || (n == 1 && wc.status != IB_WC_SUCCESS))
+				return n < 0 ? n : -EIO;
+			recv_done = n == 1;
+		}
+		if (send_done && recv_done)
+			return 0;
+		msleep(ADM_POLL_MS);
+	}
+
+	return -ETIMEDOUT;
 }
 
 /*
@@ -466,6 +784,218 @@ static void tbrxe_admission_charge_released_on_destroy(struct kunit *test)
 }
 
 /*
+ * A retry rewind is a requester cursor change, not evidence that the peer
+ * consumed any frame.  Keep a full advertised peer RX window occupied,
+ * prevent the retry itself from allocating a local frame, and let the retry
+ * timer rewind the first QP.  A second QP must remain parked: admitting it
+ * would put a fifth frame into a four-descriptor peer.
+ *
+ * The old req.psn-comp.psn accounting drops the first QP's entire charge at
+ * rewind.  The blocked retry consumes no transport slot, but the newly posted
+ * second QP observes an empty accounting window and transmits into the full
+ * modeled peer ring.
+ */
+static void tbrxe_admission_retry_rewind_keeps_peer_credit(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr	= ADM_POSTS + 2,
+			.max_recv_wr	= 2,
+			.max_send_sge	= 1,
+			.max_recv_sge	= 1,
+		},
+		.sq_sig_type	= IB_SIGNAL_ALL_WR,
+		.qp_type	= IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	struct ib_device *dev;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *first;
+	struct ib_qp *second;
+	u8 *src;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	atomic_set(&adm_remote_occupied, 0);
+	atomic_set(&adm_remote_max, 0);
+	adm_retain_remote = true;
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	dev = &rxe->ib_dev;
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	first = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, first);
+	second = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, second);
+	KUNIT_ASSERT_EQ(test, adm_connect(first, 0x42, &peer,
+					  sgid_index, 14), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(second, 0x43, &peer,
+					  sgid_index, 31), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = ADM_MSG_LEN;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(first, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(ADM_WINDOW), ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, atomic_read(&adm_remote_occupied), ADM_WINDOW);
+
+	/* Let the timeout rewind, but keep its replay parked in alloc_frame. */
+	atomic_set(&adm_alloc_budget, 0);
+	msleep(250);
+
+	/* Only the second QP is freshly scheduled after one slot is granted. */
+	atomic_set(&adm_alloc_budget, 1);
+	swr.wr_id = ADM_WINDOW;
+	KUNIT_ASSERT_EQ(test, ib_post_send(second, &swr, &bad_swr), 0);
+	msleep(100);
+	KUNIT_EXPECT_LE(test, atomic_read(&adm_remote_max), ADM_WINDOW);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_remote_consume_all();
+	adm_retain_remote = false;
+	ib_destroy_qp(second);
+	ib_destroy_qp(first);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* A non-terminal frame-session bounce replaces the peer RX rings while the
+ * ib_device and RC QPs survive.  Old-generation credits must disappear, and
+ * a late ACK on an old QP must not subtract records admitted in the new
+ * generation on another QP.
+ */
+static void tbrxe_admission_session_bounce_replaces_credit_generation(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 32 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = ADM_POSTS + 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *old_qp;
+	struct ib_qp *new_qp;
+	u8 *src;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	old_qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, old_qp);
+	new_qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, new_qp);
+	KUNIT_ASSERT_EQ(test, adm_connect(old_qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect(new_qp, 0x43, &peer,
+					  sgid_index, 31), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = ADM_MSG_LEN;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(old_qp, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(ADM_WINDOW), ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+
+	tbrxe_frame_client_ops()->link_down(NULL,
+					    (struct tbframe_link *)&fake_link,
+					    TBFRAME_DOWN_LOGOUT);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 0u);
+
+	for (i = 0; i < ADM_WINDOW; i++) {
+		swr.wr_id = ADM_WINDOW + i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(new_qp, &swr, &bad_swr), 0);
+	}
+	KUNIT_ASSERT_EQ(test, adm_wait_sent(2 * ADM_WINDOW),
+			2 * ADM_WINDOW);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+
+	/* Old-generation progress is harmless to the new QP's four records. */
+	adm_inject_ack(&fake_link, old_qp->qp_num,
+		       ADM_SQ_PSN + ADM_WINDOW - 1);
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, tbrxe_link_unacked(rxe), (u32)ADM_WINDOW);
+	adm_inject_ack(&fake_link, new_qp->qp_num,
+		       ADM_SQ_PSN + ADM_WINDOW - 1);
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, tbrxe_link_unacked(rxe), 0u);
+
+	ib_destroy_qp(new_qp);
+	ib_destroy_qp(old_qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/*
  * comp.psn AHEAD of req.psn is a state the engine reaches on its own: a
  * PSN-sequence-error NAK "implicitly acks all packets with psns before"
  * (rxe_comp.c), so a straggler NAK carrying the peer's pre-rewind e_psn,
@@ -510,7 +1040,7 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	struct ib_pd *pd;
 	struct ib_cq *cq;
 	struct ib_qp *qp;
-	int sent, i;
+	int sent;
 	u8 *src;
 
 	adm_pool_used = 0;
@@ -552,24 +1082,18 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	swr.wr_id = 0;
 	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
 
-	/* The full flight reaches the wire (timeout retries may repeat it). */
+	/* The full flight reaches the wire. */
 	sent = adm_wait_sent(8);
 	KUNIT_ASSERT_GE(test, sent, 8);
 
 	/*
-	 * One frame of transport budget: the next timeout retry rewinds
-	 * req.psn to 0x100, re-sends exactly the first packet (wqe back to
-	 * pending, req.psn = 0x101, one slot charged) and parks. Grant the
-	 * budget again if a racing in-flight burst swallowed it.
+	 * Exhaust local transport capacity before the timeout.  The next retry
+	 * rewinds req.psn to 0x100 and parks without transmitting.  Peer credit
+	 * remains eight: cursor rewind is deliberately not consumption.
 	 */
-	for (i = 0; i < ADM_POLL_TRIES; i++) {
-		if (tbrxe_link_unacked(rxe) == 1)
-			break;
-		if ((i % 50) == 49)
-			atomic_set(&adm_alloc_budget, 1);
-		msleep(ADM_POLL_MS);
-	}
-	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 1u);
+	atomic_set(&adm_alloc_budget, 0);
+	msleep(250);
+	KUNIT_ASSERT_EQ(test, tbrxe_link_unacked(rxe), 8u);
 
 	/*
 	 * Straggler NAK from the pre-rewind flight: the peer's e_psn of
@@ -583,18 +1107,10 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	/* The reconcile must not have charged the ~2^24 masked distance. */
 	KUNIT_EXPECT_LE(test, tbrxe_link_unacked(rxe), 8u);
 
-	/* The link must remain usable: with transport capacity restored, a
-	 * kick makes the pending flight (and this new WR) reach the wire.
-	 * A poisoned window refuses admission forever instead.
+	/* No masked req.psn-comp.psn conversion remains that can manufacture a
+	 * near-2^24 link charge.  Restore the mock before teardown.
 	 */
 	atomic_set(&adm_alloc_budget, -1);
-	sent = atomic_read(&adm_sent);
-	ssge.length = ADM_MSG_LEN;
-	swr.wr_id = 1;
-	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
-	for (i = 0; i < ADM_POLL_TRIES && atomic_read(&adm_sent) == sent; i++)
-		msleep(ADM_POLL_MS);
-	KUNIT_EXPECT_GT(test, atomic_read(&adm_sent), sent);
 
 	ib_destroy_qp(qp);
 	ib_destroy_cq(cq);
@@ -603,10 +1119,666 @@ static void tbrxe_admission_rewind_ack_race_no_poison(struct kunit *test)
 	tbrxe_set_transport_ops(NULL);
 }
 
+/*
+ * The aggregate replay reserve is deliberately much smaller than one RC
+ * unacknowledged flight.  Recovery therefore cannot wait for the ordinary
+ * every-N-packets ACK cadence: the requester would fill the reserve before
+ * reaching the first ACK-requesting replay and neither side could create the
+ * progress needed to reopen it.  Every replay must request cumulative ACK
+ * progress immediately.
+ */
+static void tbrxe_admission_replay_requests_immediate_ack(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 4 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 4,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_send_wr *bad_swr;
+	struct ib_send_wr swr = {};
+	struct ib_sge ssge;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	u8 *src;
+	int sent, i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, 192);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, 128 * 256, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	KUNIT_ASSERT_EQ(test, adm_connect_mtu(qp, 0x42, &peer, sgid_index,
+					      14, IB_MTU_256), 0);
+
+	ssge.addr = (uintptr_t)src;
+	ssge.length = 128 * 256;
+	ssge.lkey = pd->local_dma_lkey;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	KUNIT_ASSERT_EQ(test, ib_post_send(qp, &swr, &bad_swr), 0);
+
+	KUNIT_ASSERT_GE(test, adm_wait_sent(128), 128);
+	KUNIT_ASSERT_GE(test, adm_wait_sent(129), 129);
+	KUNIT_EXPECT_EQ(test, adm_sent_psn[128], (u32)ADM_SQ_PSN);
+	sent = adm_settled_sent();
+	for (i = 128; i < sent; i++)
+		KUNIT_EXPECT_TRUE(test, adm_sent_ack[i]);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* A processed request remains an ACK obligation while control-frame
+ * allocation is backpressured. Repeated release wakes must not discard that
+ * obligation, and restoring capacity must transmit the cumulative ACK.
+ */
+static void tbrxe_responder_retries_ack_after_backpressure(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 8 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_recv_wr *bad_rwr;
+	struct ib_recv_wr rwr = {};
+	struct ib_sge rsge;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	struct ib_wc wc;
+	u8 *src, *dst;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_ctrl_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	src = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	dst = kunit_kzalloc(test, ADM_MSG_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dst);
+	memset(src, 0x5a, ADM_MSG_LEN);
+
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+
+	rsge.addr = (uintptr_t)dst;
+	rsge.length = ADM_MSG_LEN;
+	rsge.lkey = pd->local_dma_lkey;
+	rwr.wr_id = 1;
+	rwr.sg_list = &rsge;
+	rwr.num_sge = 1;
+	KUNIT_ASSERT_EQ(test, ib_post_recv(qp, &rwr, &bad_rwr), 0);
+
+	atomic_set(&adm_alloc_budget, 0);
+	adm_inject_send(&fake_link, qp->qp_num, 0x300, src, ADM_MSG_LEN);
+	KUNIT_ASSERT_EQ(test, adm_wait_completion(cq, &wc), 0);
+	KUNIT_ASSERT_EQ(test, wc.status, IB_WC_SUCCESS);
+	KUNIT_ASSERT_EQ(test, memcmp(src, dst, ADM_MSG_LEN), 0);
+	KUNIT_ASSERT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+
+	/* Capacity is still closed on the first wake. */
+	adm_tx_released(&fake_link);
+	msleep(20);
+	KUNIT_ASSERT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_tx_released(&fake_link);
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, atomic_read(&adm_ctrl_sent), 1);
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* An atomic operation and its reply form one transaction. If reply
+ * allocation is backpressured, retrying the reply must neither execute the
+ * operation twice nor lose the original value held in the responder
+ * resource.
+ */
+static void tbrxe_responder_replays_atomic_ack_after_backpressure(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 8 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const u64 original = 0x1122334455667788ULL;
+	const u64 add = 0x31;
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	struct ib_mr *mr;
+	u64 *target;
+	int count;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_alloc_refused, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	target = kunit_kzalloc(test, sizeof(*target), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, target);
+	WRITE_ONCE(*target, original);
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	mr = pd->device->ops.get_dma_mr(pd, IB_ACCESS_LOCAL_WRITE |
+					  IB_ACCESS_REMOTE_ATOMIC);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, mr);
+	count = adm_connect_mtu_access(qp, 0x42, &peer, sgid_index, 31,
+				       IB_MTU_2048,
+				       IB_ACCESS_LOCAL_WRITE |
+				       IB_ACCESS_REMOTE_ATOMIC);
+	KUNIT_ASSERT_EQ(test, count, 0);
+
+	atomic_set(&adm_alloc_budget, 0);
+	adm_inject_fetch_add(&fake_link, qp->qp_num, 0x300,
+			     (uintptr_t)target, mr->rkey, add);
+	KUNIT_EXPECT_EQ(test, adm_wait_u64(target, original + add), 0);
+	count = adm_wait_atomic_at_least(&adm_alloc_refused, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_tx_released(&fake_link);
+	count = adm_wait_atomic_at_least(&adm_ctrl_sent, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	count = atomic_read(&adm_ctrl_sent);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(*target), original + add);
+	if (count > 0) {
+		KUNIT_EXPECT_EQ(test, adm_ctrl_opcode[0],
+				IB_OPCODE_RC_ATOMIC_ACKNOWLEDGE);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_psn[0], 0x300u);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_syn[0],
+				(u8)AETH_ACK_UNLIMITED);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_orig[0], original);
+	}
+
+	ib_destroy_qp(qp);
+	ib_dereg_mr(mr);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* A sequence-error NAK is still owed when its first transport allocation
+ * fails. Reopening capacity must retry that reply without requiring a new
+ * packet from the requester.
+ */
+static void tbrxe_responder_retries_psn_nak_after_backpressure(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 8 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	u8 payload[ADM_MSG_LEN] = {};
+	int count;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_alloc_refused, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+
+	atomic_set(&adm_alloc_budget, 0);
+	adm_inject_send(&fake_link, qp->qp_num, 0x302,
+			payload, sizeof(payload));
+	count = adm_wait_atomic_at_least(&adm_alloc_refused, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_tx_released(&fake_link);
+	count = adm_wait_atomic_at_least(&adm_ctrl_sent, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	count = atomic_read(&adm_ctrl_sent);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	if (count > 0) {
+		KUNIT_EXPECT_EQ(test, adm_ctrl_opcode[0],
+				IB_OPCODE_RC_ACKNOWLEDGE);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_psn[0], 0x300u);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_syn[0],
+				(u8)AETH_NAK_PSN_SEQ_ERROR);
+	}
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* RNR is a reply obligation too: a receive-less request must remain pending
+ * until its RNR NAK has actually reached the transport.
+ */
+static void tbrxe_responder_retries_rnr_nak_after_backpressure(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 8 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	u8 payload[ADM_MSG_LEN] = {};
+	int count;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_alloc_refused, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+
+	atomic_set(&adm_alloc_budget, 0);
+	adm_inject_send(&fake_link, qp->qp_num, 0x300,
+			payload, sizeof(payload));
+	count = adm_wait_atomic_at_least(&adm_alloc_refused, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_tx_released(&fake_link);
+	count = adm_wait_atomic_at_least(&adm_ctrl_sent, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	count = atomic_read(&adm_ctrl_sent);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	if (count > 0) {
+		KUNIT_EXPECT_EQ(test, adm_ctrl_opcode[0],
+				IB_OPCODE_RC_ACKNOWLEDGE);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_psn[0], 0x300u);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_syn[0],
+				(u8)(AETH_RNR_NAK | 12));
+	}
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* A class A/C error must put its NAK on the wire before the responder makes
+ * the QP terminal. Transport backpressure must therefore retain both the
+ * reply and the deferred error transition until capacity reopens.
+ */
+static void tbrxe_responder_defers_qp_error_until_invalid_nak_sent(struct kunit *test)
+{
+	static int fake_link;
+	struct ib_cq_init_attr cq_attr = { .cqe = 8 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 2,
+			.max_recv_wr = 2,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	struct rxe_dev *rxe;
+	union ib_gid peer, sgid;
+	u8 sgid_index = 0;
+	struct ib_pd *pd;
+	struct ib_cq *cq;
+	struct ib_qp *qp;
+	int count;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_alloc_refused, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window(&fake_link, ADM_WINDOW);
+	rxe = tbrxe_test_dev(&fake_link);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid(rxe, &sgid, &sgid_index), 0);
+	tbrxe_test_peer_gid(&peer);
+
+	pd = ib_alloc_pd(&rxe->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd);
+	cq = ib_create_cq(&rxe->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cq);
+	qp_init.send_cq = cq;
+	qp_init.recv_cq = cq;
+	qp = ib_create_qp(pd, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp);
+	/* Remote atomics are deliberately disabled: the otherwise valid atomic
+	 * request must produce an invalid-request class C NAK.
+	 */
+	KUNIT_ASSERT_EQ(test, adm_connect(qp, 0x42, &peer,
+					  sgid_index, 31), 0);
+
+	atomic_set(&adm_alloc_budget, 0);
+	adm_inject_fetch_add(&fake_link, qp->qp_num, 0x300,
+			     0x1000, 0, 1);
+	count = adm_wait_atomic_at_least(&adm_alloc_refused, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&adm_ctrl_sent), 0);
+	KUNIT_EXPECT_FALSE(test, adm_wait_qp_error(qp));
+
+	atomic_set(&adm_alloc_budget, -1);
+	adm_tx_released(&fake_link);
+	count = adm_wait_atomic_at_least(&adm_ctrl_sent, 1);
+	KUNIT_EXPECT_EQ(test, count, 0);
+	count = atomic_read(&adm_ctrl_sent);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	if (count > 0) {
+		KUNIT_EXPECT_EQ(test, adm_ctrl_opcode[0],
+				IB_OPCODE_RC_ACKNOWLEDGE);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_psn[0], 0x300u);
+		KUNIT_EXPECT_EQ(test, adm_ctrl_syn[0],
+				(u8)AETH_NAK_INVALID_REQ);
+	}
+	KUNIT_EXPECT_TRUE(test, adm_wait_qp_error(qp));
+
+	ib_destroy_qp(qp);
+	ib_destroy_cq(cq);
+	ib_dealloc_pd(pd);
+	tbrxe_test_link_down(&fake_link);
+	tbrxe_set_transport_ops(NULL);
+}
+
+/* Exercise the same two-device RC ping-pong shape used by latency tools.
+ * Requests and cumulative ACKs cross the transport boundary instead of the
+ * engine's self-GID shortcut, so admission release is driven only by the real
+ * requester, responder and completer paths.
+ */
+static void tbrxe_admission_wire_pingpong_makes_progress(struct kunit *test)
+{
+	static int fake_link_a;
+	static int fake_link_b;
+	struct ib_cq_init_attr cq_attr = { .cqe = 16 };
+	struct ib_qp_init_attr qp_init = {
+		.cap = {
+			.max_send_wr = 4,
+			.max_recv_wr = 4,
+			.max_send_sge = 1,
+			.max_recv_sge = 1,
+		},
+		.sq_sig_type = IB_SIGNAL_ALL_WR,
+		.qp_type = IB_QPT_RC,
+	};
+	const struct ib_recv_wr *bad_rwr;
+	const struct ib_send_wr *bad_swr;
+	struct ib_recv_wr rwr = {};
+	struct ib_send_wr swr = {};
+	struct ib_sge rsge = {};
+	struct ib_sge ssge = {};
+	struct rxe_dev *rxe_a;
+	struct rxe_dev *rxe_b;
+	union ib_gid gid_a, gid_b;
+	u8 gid_index_a = 0;
+	u8 gid_index_b = 0;
+	struct ib_pd *pd_a;
+	struct ib_pd *pd_b;
+	struct ib_cq *scq_a;
+	struct ib_cq *rcq_a;
+	struct ib_cq *scq_b;
+	struct ib_cq *rcq_b;
+	struct ib_qp *qp_a;
+	struct ib_qp *qp_b;
+	u8 *src_a, *src_b, *dst_a, *dst_b;
+	const u64 eui_a = TBRXE_TEST_LOCAL_EUI64;
+	const u64 eui_b = TBRXE_TEST_PEER_EUI64;
+	const size_t wire_msg_len = 128 * 256;
+	int i;
+
+	adm_pool_used = 0;
+	atomic_set(&adm_alloc_budget, -1);
+	atomic_set(&adm_sent, 0);
+	atomic_set(&adm_ctrl_sent, 0);
+	adm_wire_head = 0;
+	adm_wire_tail = 0;
+	adm_wire_count = 0;
+	adm_wire_drop_ctrl = 40;
+	adm_wire_a = &fake_link_a;
+	adm_wire_b = &fake_link_b;
+	adm_wire_forward = true;
+	tbrxe_set_transport_ops(&adm_transport);
+	tbrxe_test_link_up_window_ids(&fake_link_a, 192, eui_a, eui_b);
+	tbrxe_test_link_up_window_ids(&fake_link_b, 192, eui_b, eui_a);
+	rxe_a = tbrxe_test_dev(&fake_link_a);
+	rxe_b = tbrxe_test_dev(&fake_link_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rxe_b);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid_eui64(rxe_a, &gid_a,
+						   &gid_index_a, eui_a), 0);
+	KUNIT_ASSERT_EQ(test, tbrxe_test_gid_eui64(rxe_b, &gid_b,
+						   &gid_index_b, eui_b), 0);
+
+	src_a = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	src_b = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	dst_a = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	dst_b = kunit_kzalloc(test, wire_msg_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, src_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dst_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dst_b);
+	memset(src_a, 0xa5, wire_msg_len);
+	memset(src_b, 0x5a, wire_msg_len);
+
+	pd_a = ib_alloc_pd(&rxe_a->ib_dev, 0);
+	pd_b = ib_alloc_pd(&rxe_b->ib_dev, 0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pd_b);
+	scq_a = ib_create_cq(&rxe_a->ib_dev, NULL, NULL, NULL, &cq_attr);
+	rcq_a = ib_create_cq(&rxe_a->ib_dev, NULL, NULL, NULL, &cq_attr);
+	scq_b = ib_create_cq(&rxe_b->ib_dev, NULL, NULL, NULL, &cq_attr);
+	rcq_b = ib_create_cq(&rxe_b->ib_dev, NULL, NULL, NULL, &cq_attr);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq_a);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, scq_b);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, rcq_b);
+	qp_init.send_cq = scq_a;
+	qp_init.recv_cq = rcq_a;
+	qp_a = ib_create_qp(pd_a, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp_a);
+	qp_init.send_cq = scq_b;
+	qp_init.recv_cq = rcq_b;
+	qp_b = ib_create_qp(pd_b, &qp_init);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, qp_b);
+	KUNIT_ASSERT_EQ(test, adm_connect_pair(qp_a, qp_b->qp_num, &gid_b,
+					       gid_index_a, 0x100, 0x300), 0);
+	KUNIT_ASSERT_EQ(test, adm_connect_pair(qp_b, qp_a->qp_num, &gid_a,
+					       gid_index_b, 0x300, 0x100), 0);
+
+	rwr.sg_list = &rsge;
+	rwr.num_sge = 1;
+	swr.opcode = IB_WR_SEND;
+	swr.send_flags = IB_SEND_SIGNALED;
+	swr.sg_list = &ssge;
+	swr.num_sge = 1;
+	for (i = 0; i < 1; i++) {
+		rsge.addr = (uintptr_t)dst_b;
+		rsge.length = wire_msg_len;
+		rsge.lkey = pd_b->local_dma_lkey;
+		rwr.wr_id = 2 * i;
+		KUNIT_ASSERT_EQ(test, ib_post_recv(qp_b, &rwr, &bad_rwr), 0);
+		ssge.addr = (uintptr_t)src_a;
+		ssge.length = wire_msg_len;
+		ssge.lkey = pd_a->local_dma_lkey;
+		swr.wr_id = 2 * i;
+		KUNIT_ASSERT_EQ(test, ib_post_send(qp_a, &swr, &bad_swr), 0);
+		KUNIT_ASSERT_EQ(test, adm_wire_wait_pair(scq_a, rcq_b), 0);
+
+		rsge.addr = (uintptr_t)dst_a;
+		rsge.lkey = pd_a->local_dma_lkey;
+		rwr.wr_id = 2 * i + 1;
+		KUNIT_ASSERT_EQ(test, ib_post_recv(qp_a, &rwr, &bad_rwr), 0);
+		ssge.addr = (uintptr_t)src_b;
+		ssge.lkey = pd_b->local_dma_lkey;
+		swr.wr_id = 2 * i + 1;
+		KUNIT_ASSERT_EQ(test, ib_post_send(qp_b, &swr, &bad_swr), 0);
+		KUNIT_ASSERT_EQ(test, adm_wire_wait_pair(scq_b, rcq_a), 0);
+	}
+	KUNIT_EXPECT_EQ(test, memcmp(src_a, dst_b, wire_msg_len), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(src_b, dst_a, wire_msg_len), 0);
+
+	adm_wire_forward = false;
+	ib_destroy_qp(qp_b);
+	ib_destroy_qp(qp_a);
+	ib_destroy_cq(scq_b);
+	ib_destroy_cq(rcq_b);
+	ib_destroy_cq(scq_a);
+	ib_destroy_cq(rcq_a);
+	ib_dealloc_pd(pd_b);
+	ib_dealloc_pd(pd_a);
+	tbrxe_test_link_down(&fake_link_b);
+	tbrxe_test_link_down(&fake_link_a);
+	tbrxe_set_transport_ops(NULL);
+}
+
 static struct kunit_case tbrxe_admission_cases[] = {
 	KUNIT_CASE(tbrxe_admission_window_bounds_unacked),
 	KUNIT_CASE(tbrxe_admission_charge_released_on_destroy),
+	KUNIT_CASE_SLOW(tbrxe_admission_retry_rewind_keeps_peer_credit),
+	KUNIT_CASE(tbrxe_admission_session_bounce_replaces_credit_generation),
 	KUNIT_CASE_SLOW(tbrxe_admission_rewind_ack_race_no_poison),
+	KUNIT_CASE_SLOW(tbrxe_admission_replay_requests_immediate_ack),
+	KUNIT_CASE(tbrxe_responder_retries_ack_after_backpressure),
+	KUNIT_CASE(tbrxe_responder_replays_atomic_ack_after_backpressure),
+	KUNIT_CASE_SLOW(tbrxe_responder_retries_psn_nak_after_backpressure),
+	KUNIT_CASE_SLOW(tbrxe_responder_retries_rnr_nak_after_backpressure),
+	KUNIT_CASE_SLOW(tbrxe_responder_defers_qp_error_until_invalid_nak_sent),
+	KUNIT_CASE_SLOW(tbrxe_admission_wire_pingpong_makes_progress),
 	{}
 };
 

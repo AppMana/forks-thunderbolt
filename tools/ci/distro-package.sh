@@ -16,6 +16,8 @@ Environment:
   WORK_DIR        Scratch directory. Defaults to mktemp.
   TBFIX_LINT      Run lintian if available. Defaults to 0.
   TBFIX_SKIP_DEPS Skip apt dependency install. Defaults to 0.
+  TBFIX_SOURCE_SHA      Override recorded source commit.
+  TBFIX_SOURCE_DESCRIBE Override recorded source description.
 EOF
 }
 
@@ -37,6 +39,10 @@ lint="${TBFIX_LINT:-0}"
 skip_deps="${TBFIX_SKIP_DEPS:-0}"
 modname="thunderbolt-tbfix"
 pkgname="${modname}-dkms"
+source_sha="${TBFIX_SOURCE_SHA:-$(git -c safe.directory="$repo_root" \
+	-C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)}"
+source_describe="${TBFIX_SOURCE_DESCRIBE:-$(git -c safe.directory="$repo_root" \
+	-C "$repo_root" describe --always --dirty 2>/dev/null || printf unknown)}"
 
 mkdir -p "$out_dir" "$work_dir"
 
@@ -50,6 +56,7 @@ install_deps() {
 
 stage_source() {
 	local stage="$1"
+	local contaminant
 	install -d -m 0755 "$stage"
 	install -m 0644 "$repo_root/dkms/dkms.conf" "$stage/dkms.conf"
 	# TBFIX_VERSION is part of the public interface of this script. Keep the
@@ -66,13 +73,34 @@ stage_source() {
 	# Preserve the real drivers/ tree so net's in-tree include of the one
 	# canonical ../../thunderbolt/thunderbolt_negotiation.h resolves as in-tree.
 	install -d -m 0755 "$stage/drivers/net" "$stage/drivers/infiniband/sw"
-	tar -C "$repo_root/drivers/thunderbolt" -cf - . | tar -C "$stage/drivers" -xf - --one-top-level=thunderbolt
-	tar -C "$repo_root/drivers/net/thunderbolt" -cf - . | tar -C "$stage/drivers/net" -xf - --one-top-level=thunderbolt
-	tar -C "$repo_root/drivers/infiniband/sw/rxe" -cf - . | tar -C "$stage/drivers/infiniband/sw" -xf - --one-top-level=rxe
+	for source in thunderbolt net/thunderbolt infiniband/sw/rxe; do
+		case "$source" in
+			thunderbolt) destination="$stage/drivers" ;;
+			net/thunderbolt) destination="$stage/drivers/net" ;;
+			infiniband/sw/rxe) destination="$stage/drivers/infiniband/sw" ;;
+		esac
+		tar -C "$repo_root/drivers/$source" \
+			--exclude='*.o' --exclude='*.ko' --exclude='*.mod' \
+			--exclude='*.mod.c' --exclude='*.cmd' \
+			--exclude='Module.symvers' --exclude='modules.order' \
+			--exclude='.tmp_*' --exclude='.tbfix-gen-include' \
+			-cf - . | tar -C "$destination" -xf - \
+				--one-top-level="$(basename "$source")"
+	done
+	contaminant="$(find "$stage" -type f \( \
+		-name '*.o' -o -name '*.ko' -o -name '*.mod' -o \
+		-name '*.mod.c' -o -name '*.cmd' -o \
+		-name 'Module.symvers' -o -name 'modules.order' \
+		\) -print -quit)"
+	[[ -z "$contaminant" ]] || {
+		printf 'error: build artefact escaped DKMS source filter: %s\n' \
+			"$contaminant" >&2
+		exit 1
+	}
 	{
 		printf '# Auto-generated package source metadata\n'
-		printf 'fork-sha=%s\n' "$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)"
-		printf 'fork-describe=%s\n' "$(git -C "$repo_root" describe --always --dirty 2>/dev/null || printf unknown)"
+		printf 'fork-sha=%s\n' "$source_sha"
+		printf 'fork-describe=%s\n' "$source_describe"
 		printf 'packaged-at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} > "$stage/.tbfix-source"
 	# Worktrees may be group-writable.  A binary package must not preserve

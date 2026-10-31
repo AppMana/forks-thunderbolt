@@ -23,11 +23,14 @@ enum tb_tunnel_type {
  * @TB_TUNNEL_INACTIVE: tb_tunnel_activate() is not called for the tunnel
  * @TB_TUNNEL_ACTIVATING: tb_tunnel_activate() returned successfully for the tunnel
  * @TB_TUNNEL_ACTIVE: The tunnel is fully active
+ * @TB_TUNNEL_TEARDOWN_FAILED: Tunnel resources remain owned after an
+ *	unsuccessful deactivation
  */
 enum tb_tunnel_state {
 	TB_TUNNEL_INACTIVE,
 	TB_TUNNEL_ACTIVATING,
 	TB_TUNNEL_ACTIVE,
+	TB_TUNNEL_TEARDOWN_FAILED,
 };
 
 /**
@@ -55,6 +58,8 @@ enum tb_tunnel_state {
  * @list: Tunnels are linked using this field
  * @type: Type of the tunnel
  * @state: Current state of the tunnel
+ * @cleanup_only: Tunnel was discovered only so its hardware paths could be
+ *	removed. It must never be activated or published as a usable tunnel.
  * @max_up: Maximum upstream bandwidth (Mb/s) available for the tunnel.
  *	    Only set if the bandwidth needs to be limited.
  * @max_down: Maximum downstream bandwidth (Mb/s) available for the tunnel.
@@ -96,6 +101,7 @@ struct tb_tunnel {
 	struct list_head list;
 	enum tb_tunnel_type type;
 	enum tb_tunnel_state state;
+	bool cleanup_only;
 	int max_up;
 	int max_down;
 	int allocated_up;
@@ -135,9 +141,16 @@ struct tb_tunnel *tb_tunnel_alloc_usb3(struct tb *tb, struct tb_port *up,
 				       struct tb_port *down, int max_up,
 				       int max_down);
 
-void tb_tunnel_put(struct tb_tunnel *tunnel);
+int tb_tunnel_put(struct tb_tunnel *tunnel);
+void tb_tunnel_put_after_revoke(struct tb_tunnel *tunnel);
+void tb_tunnel_put_on_cm_stop(struct tb_tunnel *tunnel);
+bool tb_tunnel_release_safe(const struct tb_tunnel *tunnel);
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_tunnel_get(struct tb_tunnel *tunnel);
+#endif
 int tb_tunnel_activate(struct tb_tunnel *tunnel);
-void tb_tunnel_deactivate(struct tb_tunnel *tunnel);
+int tb_tunnel_deactivate(struct tb_tunnel *tunnel);
+void tb_tunnel_drain_deferred(struct tb_tunnel *tunnel);
 
 /**
  * tb_tunnel_is_active() - Is tunnel fully activated

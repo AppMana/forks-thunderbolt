@@ -51,8 +51,9 @@ static void req_retry(struct rxe_qp *qp)
 	qp->req.wqe_index	= cons;
 	qp->req.psn		= qp->comp.psn;
 	qp->req.opcode		= -1;
-	/* Rewound packets release their link admission charge; each re-send
-	 * re-charges (it re-occupies a peer RX descriptor).
+	/* Rewind changes only the requester cursor.  Existing link admission
+	 * records remain charged until cumulative peer ACK/NAK progress releases
+	 * them; each replay receives a separately bounded charge.
 	 */
 	tbrxe_unacked_sync(qp);
 
@@ -428,6 +429,7 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
 	int			solicited;
 	u32			qp_num;
 	int			ack_req = 0;
+	bool			replay = false;
 
 	/* length from start of bth to end of icrc */
 	paylen = rxe_opcode[opcode].length + payload + pad + RXE_ICRC_SIZE;
@@ -448,9 +450,11 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
 	qp_num = (pkt->mask & RXE_DETH_MASK) ? ibwr->wr.ud.remote_qpn :
 					 qp->attr.dest_qp_num;
 
-	if (qp_type(qp) != IB_QPT_UD && qp_type(qp) != IB_QPT_UC)
-		ack_req = ((pkt->mask & RXE_END_MASK) ||
-			   (qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK));
+	if (qp_type(qp) != IB_QPT_UD && qp_type(qp) != IB_QPT_UC) {
+		replay = tbrxe_admitted_replay(qp, pkt->psn);
+		ack_req = replay || (pkt->mask & RXE_END_MASK) ||
+			   (qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK);
+	}
 	if (ack_req)
 		qp->req.noack_pkts = 0;
 
@@ -656,6 +660,7 @@ int rxe_requester(struct rxe_qp *qp)
 	struct rxe_ah *ah;
 	struct rxe_av *av;
 	unsigned long flags;
+	bool credit_charged = false;
 
 	spin_lock_irqsave(&qp->state_lock, flags);
 	if (unlikely(!qp->valid)) {
@@ -787,7 +792,8 @@ int rxe_requester(struct rxe_qp *qp)
 	 * under the admission lock so the release sweep cannot miss it);
 	 * ACK-driven release reschedules the send task.
 	 */
-	if (qp_type(qp) == IB_QPT_RC && !tbrxe_admit(qp)) {
+	if (qp_type(qp) == IB_QPT_RC &&
+	    !tbrxe_admit(qp, &credit_charged)) {
 		if (ah)
 			rxe_put(ah);
 		goto exit;
@@ -834,10 +840,13 @@ int rxe_requester(struct rxe_qp *qp)
 	update_wqe_state(qp, wqe, &pkt);
 	update_wqe_psn(qp, wqe, &pkt, payload);
 	update_state(qp, &pkt);
-	/* Reconcile the admission pre-charge with the PSN advance (a READ
-	 * advances by its full response-packet count).
+	/* Commit the next never-sent PSN. The unique outstanding-PSN record
+	 * remains charged until ACK/NAK progress proves peer consumption.
 	 */
-	tbrxe_unacked_sync(qp);
+	if (qp_type(qp) == IB_QPT_RC) {
+		tbrxe_credit_commit(qp);
+		credit_charged = false;
+	}
 
 	/* A non-zero return value will cause rxe_do_task to
 	 * exit its loop and end the work item. A zero return
@@ -852,10 +861,11 @@ err:
 	wqe->state = wqe_state_error;
 	rxe_qp_error(qp);
 exit:
-	/* Return any admission pre-charge whose packet never reached the
-	 * wire (alloc/finish/xmit failure after tbrxe_admit()).
+	/* Return only this invocation's pre-charge when no frame reached the
+	 * wire.  Retry cursor rewind must never release older records.
 	 */
-	tbrxe_unacked_sync(qp);
+	if (credit_charged)
+		tbrxe_unadmit(qp);
 	ret = -EAGAIN;
 out:
 	return ret;

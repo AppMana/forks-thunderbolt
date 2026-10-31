@@ -13,6 +13,31 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/skbuff.h>
+#include <linux/slab.h>
+
+#ifndef default_gfp
+#define __default_gfp(a, b, ...) b
+#define default_gfp(...) __default_gfp(, ##__VA_ARGS__, GFP_KERNEL)
+#endif
+#ifndef kmalloc_obj
+#define __alloc_objs(KMALLOC, GFP, TYPE, COUNT)				\
+({									\
+	const size_t __obj_size = size_mul(sizeof(TYPE), COUNT);	\
+	(TYPE *)KMALLOC(__obj_size, GFP);				\
+})
+#define kmalloc_obj(VAR_OR_TYPE, ...)					\
+	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), 1)
+#define kmalloc_objs(VAR_OR_TYPE, COUNT, ...)				\
+	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), COUNT)
+#define kzalloc_obj(P, ...)						\
+	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), 1)
+#define kzalloc_objs(P, COUNT, ...)					\
+	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), COUNT)
+#endif
+#ifndef kvzalloc_flex
+#define kvzalloc_flex(VAR_OR_TYPE, FAM, COUNT, ...)			\
+	((typeof(VAR_OR_TYPE) *)kvzalloc(struct_size_t(typeof(VAR_OR_TYPE), FAM, COUNT), default_gfp(__VA_ARGS__)))
+#endif
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_user_verbs.h>

@@ -19,6 +19,7 @@ thunderbolt_net-objs := main.o trace.o
 # Login-handshake KUnit tests, built into the module only on a CONFIG_KUNIT
 # kernel. Run via drivers/thunderbolt_frame/tools/run-kunit.sh (kunit.py).
 thunderbolt_net-$(CONFIG_USB4_NET_KUNIT_TEST) += tests/tbnet_login_test.o
+thunderbolt_net-$(CONFIG_USB4_NET_KUNIT_TEST) += tests/tbnet_unbind_test.o
 
 # Tracepoints need to know where to find trace.h
 CFLAGS_trace.o := -I$(src)

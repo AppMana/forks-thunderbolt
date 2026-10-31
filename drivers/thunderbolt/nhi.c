@@ -43,6 +43,190 @@
 
 #define NHI_MAILBOX_TIMEOUT	500 /* ms */
 
+struct nhi_probe_recovery_record {
+	struct list_head list;
+	unsigned int domain;
+	u8 bus;
+	u8 devfn;
+	enum tb_nhi_recovery_state state;
+};
+
+struct nhi_probe_recovery_context {
+	struct pci_dev *pdev;
+	enum tb_nhi_recovery_state state;
+};
+
+struct nhi_probe_reprobe {
+	struct work_struct work;
+	struct device *dev;
+};
+
+static LIST_HEAD(nhi_probe_recoveries);
+static DEFINE_MUTEX(nhi_probe_recoveries_lock);
+static struct workqueue_struct *nhi_probe_recovery_wq;
+
+static unsigned int nhi_probe_recovery_wq_flags(void)
+{
+	return 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+unsigned int tb_test_nhi_probe_recovery_wq_flags(void)
+{
+	return nhi_probe_recovery_wq_flags();
+}
+#endif
+
+static bool nhi_probe_recovery_matches(const struct nhi_probe_recovery_record *r,
+				       const struct pci_dev *pdev)
+{
+	return r->domain == pci_domain_nr(pdev->bus) &&
+	       r->bus == pdev->bus->number && r->devfn == pdev->devfn;
+}
+
+static enum tb_nhi_recovery_state
+nhi_probe_recovery_get(struct pci_dev *pdev)
+{
+	struct nhi_probe_recovery_record *r;
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_IDLE;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry(r, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			state = r->state;
+			break;
+		}
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+
+	return state;
+}
+
+bool tb_nhi_startup_recovery_allowed(struct tb_nhi *nhi)
+{
+	if (!nhi)
+		return false;
+
+	return tb_nhi_startup_recovery_may_dispatch(
+		nhi_probe_recovery_get(nhi->pdev));
+}
+
+static int nhi_probe_recovery_set(struct pci_dev *pdev,
+				  enum tb_nhi_recovery_state state)
+{
+	struct nhi_probe_recovery_record *r, *new = NULL;
+	int ret = -ENOMEM;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry(r, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			r->state = state;
+			ret = 0;
+			goto out;
+		}
+	}
+
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		goto out;
+	new->domain = pci_domain_nr(pdev->bus);
+	new->bus = pdev->bus->number;
+	new->devfn = pdev->devfn;
+	new->state = state;
+	list_add_tail(&new->list, &nhi_probe_recoveries);
+	ret = 0;
+out:
+	mutex_unlock(&nhi_probe_recoveries_lock);
+	return ret;
+}
+
+static void nhi_probe_recovery_clear(struct pci_dev *pdev)
+{
+	struct nhi_probe_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_probe_recoveries, list) {
+		if (nhi_probe_recovery_matches(r, pdev)) {
+			list_del(&r->list);
+			kfree(r);
+			break;
+		}
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+}
+
+static void nhi_probe_recovery_clear_all(void)
+{
+	struct nhi_probe_recovery_record *r, *tmp;
+
+	mutex_lock(&nhi_probe_recoveries_lock);
+	list_for_each_entry_safe(r, tmp, &nhi_probe_recoveries, list) {
+		list_del(&r->list);
+		kfree(r);
+	}
+	mutex_unlock(&nhi_probe_recoveries_lock);
+}
+
+static void nhi_probe_reprobe_work(struct work_struct *work)
+{
+	struct nhi_probe_reprobe *reprobe = container_of(work, typeof(*reprobe),
+							 work);
+	struct pci_dev *pdev = to_pci_dev(reprobe->dev);
+	enum tb_nhi_recovery_state state;
+	int ret;
+
+	state = nhi_probe_recovery_get(pdev);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_DISPATCHED);
+	if (state != TB_NHI_RECOVERY_RETRYING ||
+	    nhi_probe_recovery_set(pdev, state)) {
+		dev_err(reprobe->dev,
+			"one-shot host-router recovery could not dispatch its reprobe\n");
+		goto out;
+	}
+
+	ret = device_attach(reprobe->dev);
+	if (ret != 1)
+		dev_err(reprobe->dev,
+			"one-shot host-router recovery reprobe did not bind: %d\n",
+			ret);
+out:
+	put_device(reprobe->dev);
+	kfree(reprobe);
+}
+
+static void nhi_probe_recovery_release(void *data)
+{
+	struct nhi_probe_recovery_context *ctx = data;
+	struct nhi_probe_reprobe *reprobe;
+
+	if (tb_nhi_recovery_action(ctx->state) !=
+	    TB_NHI_RECOVERY_ACTION_REPROBE)
+		return;
+
+	reprobe = kzalloc(sizeof(*reprobe), GFP_KERNEL);
+	if (!reprobe)
+		goto err_queue;
+	INIT_WORK(&reprobe->work, nhi_probe_reprobe_work);
+	reprobe->dev = get_device(&ctx->pdev->dev);
+	if (!queue_work(nhi_probe_recovery_wq, &reprobe->work)) {
+		put_device(reprobe->dev);
+		kfree(reprobe);
+		goto err_queue;
+	}
+
+	dev_warn(&ctx->pdev->dev,
+		 "host-router power-cycle request dispatched; queued one proof reprobe\n");
+	return;
+
+err_queue:
+	ctx->state = tb_nhi_recovery_next(ctx->state,
+					  TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
+	nhi_probe_recovery_set(ctx->pdev, ctx->state);
+	dev_err(&ctx->pdev->dev,
+		"one-shot host-router recovery could not queue its reprobe\n");
+}
+
 /* Host interface quirks */
 #define QUIRK_AUTO_CLEAR_INT	BIT(0)
 #define QUIRK_E2E		BIT(1)
@@ -141,35 +325,14 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 	u32 old, new;
 
 	if (ring->irq > 0) {
-		u32 step, shift, ivr, misc;
+		u32 step, shift, ivr;
 		void __iomem *ivr_base;
-		int auto_clear_bit;
 		int index;
 
 		if (ring->is_tx)
 			index = ring->hop;
 		else
 			index = ring->hop + ring->nhi->hop_count;
-
-		/*
-		 * Intel routers support a bit that isn't part of
-		 * the USB4 spec to ask the hardware to clear
-		 * interrupt status bits automatically since
-		 * we already know which interrupt was triggered.
-		 *
-		 * Other routers explicitly disable auto-clear
-		 * to prevent conditions that may occur where two
-		 * MSIX interrupts are simultaneously active and
-		 * reading the register clears both of them.
-		 */
-		misc = nhi_read(ring->nhi, ring->nhi->iobase + REG_DMA_MISC);
-		if (ring->nhi->quirks & QUIRK_AUTO_CLEAR_INT)
-			auto_clear_bit = REG_DMA_MISC_INT_AUTO_CLEAR;
-		else
-			auto_clear_bit = REG_DMA_MISC_DISABLE_AUTO_CLEAR;
-		if (!(misc & auto_clear_bit))
-			iowrite32(misc | auto_clear_bit,
-				  ring->nhi->iobase + REG_DMA_MISC);
 
 		ivr_base = ring->nhi->iobase + REG_INT_VEC_ALLOC_BASE;
 		step = index / REG_INT_VEC_ALLOC_REGS * REG_INT_VEC_ALLOC_BITS;
@@ -219,6 +382,25 @@ static void nhi_disable_interrupts(struct tb_nhi *nhi)
 	/* clear interrupt status bits */
 	for (i = 0; i < RING_NOTIFY_REG_COUNT(nhi); i++)
 		nhi_clear_interrupt(nhi, 4 * i);
+}
+
+static void nhi_mask_all_interrupts(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < RING_INTERRUPT_REG_COUNT(nhi); i++)
+		iowrite32(~0, nhi->iobase +
+			  REG_RING_INTERRUPT_MASK_CLEAR_BASE + 4 * i);
+}
+
+static void nhi_drain_interrupt_status(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < RING_NOTIFY_REG_COUNT(nhi); i++) {
+		nhi_read(nhi, nhi->iobase + REG_RING_NOTIFY_BASE + 4 * i);
+		iowrite32(~0, nhi->iobase + REG_RING_INT_CLEAR + 4 * i);
+	}
 }
 
 /* ring helper methods */
@@ -282,6 +464,166 @@ static void ring_iowrite32options(struct tb_ring *ring, u32 value, u32 offset)
 	iowrite32(value, ring_options_base(ring) + offset);
 }
 
+static bool ring_prepare_start(struct tb_ring *ring, u32 index)
+{
+	u16 anchor = ring->is_tx ? index & 0xffff : index >> 16;
+
+	if (anchor >= ring->size)
+		return false;
+	ring->head = anchor;
+	ring->tail = anchor;
+	return true;
+}
+
+static bool ring_start_indices_match(const struct tb_ring *ring, u32 index)
+{
+	u16 producer = index >> 16;
+	u16 consumer = index & 0xffff;
+
+	return producer == ring->head && consumer == ring->tail;
+}
+
+struct ring_start_io_ops {
+	void (*write_desc32)(void *ctx, struct tb_ring *ring, u32 value,
+			     u32 offset);
+	void (*write_desc64)(void *ctx, struct tb_ring *ring, u64 value,
+			     u32 offset);
+	void (*write_options32)(void *ctx, struct tb_ring *ring, u32 value,
+				u32 offset);
+	u32 (*read_desc32)(void *ctx, struct tb_ring *ring, u32 offset);
+};
+
+enum ring_start_result {
+	RING_START_OK,
+	RING_START_INVALID_INDEX,
+	RING_START_UNSYNCHRONIZED,
+};
+
+static void ring_start_write_desc32(void *ctx, struct tb_ring *ring,
+				    u32 value, u32 offset)
+{
+	ring_iowrite32desc(ring, value, offset);
+}
+
+static void ring_start_write_desc64(void *ctx, struct tb_ring *ring,
+				    u64 value, u32 offset)
+{
+	ring_iowrite64desc(ring, value, offset);
+}
+
+static void ring_start_write_options32(void *ctx, struct tb_ring *ring,
+				       u32 value, u32 offset)
+{
+	ring_iowrite32options(ring, value, offset);
+}
+
+static u32 ring_start_read_desc32(void *ctx, struct tb_ring *ring, u32 offset)
+{
+	return nhi_read(ring->nhi, ring_desc_base(ring) + offset);
+}
+
+static const struct ring_start_io_ops ring_start_real_io = {
+	.write_desc32 = ring_start_write_desc32,
+	.write_desc64 = ring_start_write_desc64,
+	.write_options32 = ring_start_write_options32,
+	.read_desc32 = ring_start_read_desc32,
+};
+
+static enum ring_start_result
+ring_program_start(struct tb_ring *ring, const struct ring_start_io_ops *io,
+		   void *ctx, u32 *initial_index, u32 *final_index)
+{
+	u16 frame_size;
+	u32 flags;
+
+	if (ring->flags & RING_FLAG_FRAME) {
+		frame_size = 0;
+		flags = RING_FLAG_ENABLE;
+	} else {
+		frame_size = TB_FRAME_SIZE;
+		flags = RING_FLAG_ENABLE | RING_FLAG_RAW;
+	}
+
+	io->write_desc64(ctx, ring, ring->descriptors_dma, 0);
+	if (ring->is_tx) {
+		io->write_desc32(ctx, ring, ring->size, 12);
+		io->write_options32(ctx, ring, 0, 4);
+	} else {
+		u32 sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
+
+		io->write_desc32(ctx, ring,
+				 (frame_size << 16) | ring->size, 12);
+		io->write_options32(ctx, ring, sof_eof_mask, 4);
+	}
+
+	*initial_index = io->read_desc32(ctx, ring, 8);
+	if (!ring_prepare_start(ring, *initial_index))
+		return RING_START_INVALID_INDEX;
+	io->write_desc32(ctx, ring,
+			 ring->is_tx ? (u32)ring->head << 16 : ring->tail, 8);
+	*final_index = io->read_desc32(ctx, ring, 8);
+	if (!ring_start_indices_match(ring, *final_index))
+		return RING_START_UNSYNCHRONIZED;
+
+	if (ring->flags & RING_FLAG_E2E) {
+		if (!ring->is_tx) {
+			u32 hop;
+
+			hop = ring->e2e_tx_hop << REG_RX_OPTIONS_E2E_HOP_SHIFT;
+			hop &= REG_RX_OPTIONS_E2E_HOP_MASK;
+			flags |= hop;
+		}
+		flags |= RING_FLAG_E2E_FLOW_CONTROL;
+	}
+	io->write_options32(ctx, ring, flags, 0);
+	return RING_START_OK;
+}
+
+int tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *snapshot)
+{
+	struct ring_frame *frame;
+	unsigned long flags;
+	u32 index;
+
+	if (!ring || !snapshot)
+		return -EINVAL;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	spin_lock_irqsave(&ring->nhi->lock, flags);
+	if (ring->nhi->going_away) {
+		spin_unlock_irqrestore(&ring->nhi->lock, flags);
+		return -ENODEV;
+	}
+	spin_lock(&ring->lock);
+	index = ioread32(ring_desc_base(ring) + 8);
+	snapshot->index_raw = index;
+	snapshot->options = ioread32(ring_options_base(ring));
+	snapshot->size = ring->size;
+	snapshot->sw_head = ring->head;
+	snapshot->sw_tail = ring->tail;
+	snapshot->running = ring->running;
+	list_for_each_entry(frame, &ring->queue, list)
+		snapshot->queued++;
+	list_for_each_entry(frame, &ring->in_flight, list)
+		snapshot->in_flight++;
+	if (snapshot->in_flight)
+		snapshot->tail_attributes =
+			READ_ONCE(ring->descriptors[ring->tail].attributes);
+	snapshot->hw_producer = index >> 16;
+	snapshot->hw_consumer = index & 0xffff;
+	snapshot->indices_valid = snapshot->size &&
+		snapshot->hw_producer < snapshot->size &&
+		snapshot->hw_consumer < snapshot->size;
+	if (ring->is_tx && snapshot->indices_valid)
+		snapshot->full = (snapshot->hw_producer + 1) % snapshot->size ==
+			snapshot->hw_consumer;
+	spin_unlock(&ring->lock);
+	spin_unlock_irqrestore(&ring->nhi->lock, flags);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tb_ring_snapshot);
+
 static bool ring_full(struct tb_ring *ring)
 {
 	return ((ring->head + 1) % ring->size) == ring->tail;
@@ -320,6 +662,158 @@ static u16 ring_descriptor_flags(u32 word)
 	return (word >> 20) & 0x0fff;
 }
 
+struct tb_ring_completion_record {
+	struct ring_frame *frame;
+	dma_addr_t posted_phys;
+	u32 posted_attributes;
+	u64 generation;
+	u16 slot;
+};
+
+struct tb_ring_completed_record {
+	struct ring_frame *frame;
+	struct tb_ring_completion_evidence evidence;
+};
+
+struct tb_ring_completion_diag {
+	struct tb_ring_completion_record *posted;
+	struct tb_ring_completed_record *completed;
+	u16 completed_count;
+	u16 size;
+};
+
+static void
+tb_ring_completion_record_post(struct tb_ring_completion_record *record,
+			       u16 slot, struct ring_frame *frame,
+			       u32 posted_attributes)
+{
+	u64 generation = record->generation + 1;
+
+	memset(record, 0, sizeof(*record));
+	record->generation = generation;
+	record->slot = slot;
+	record->frame = frame;
+	record->posted_phys = frame->buffer_phy;
+	record->posted_attributes = posted_attributes;
+}
+
+static bool
+tb_ring_completion_record_complete(
+		const struct tb_ring_completion_record *record,
+		struct ring_frame *frame, u32 completed_attributes,
+		dma_addr_t completed_phys, u32 descriptor_time, u16 sw_head,
+		u16 sw_tail, u32 index_raw, u32 prev_attributes,
+		u32 next_attributes, struct tb_ring_completion_evidence *evidence)
+{
+	u16 flags = ring_descriptor_flags(completed_attributes);
+
+	if (!record->generation || !(flags & RING_DESC_COMPLETED))
+		return false;
+
+	memset(evidence, 0, sizeof(*evidence));
+	evidence->generation = record->generation;
+	evidence->posted_phys = record->posted_phys;
+	evidence->completed_phys = completed_phys;
+	evidence->frame_phys = frame->buffer_phy;
+	evidence->posted_attributes = record->posted_attributes;
+	evidence->completed_attributes = completed_attributes;
+	evidence->descriptor_time = descriptor_time;
+	evidence->index_raw = index_raw;
+	evidence->prev_attributes = prev_attributes;
+	evidence->next_attributes = next_attributes;
+	evidence->slot = record->slot;
+	evidence->sw_head = sw_head;
+	evidence->sw_tail = sw_tail;
+	evidence->length = ring_descriptor_length(completed_attributes);
+	evidence->eof = ring_descriptor_eof(completed_attributes);
+	evidence->sof = ring_descriptor_sof(completed_attributes);
+	evidence->flags = flags;
+
+	if (flags & RING_DESC_CRC_ERROR)
+		evidence->anomalies |= TB_RING_COMPLETION_HW_CRC;
+	if (flags & RING_DESC_BUFFER_OVERRUN)
+		evidence->anomalies |= TB_RING_COMPLETION_HW_OVERRUN;
+	if (record->frame != frame)
+		evidence->anomalies |= TB_RING_COMPLETION_OWNER_MISMATCH;
+	if (record->posted_phys != completed_phys ||
+	    completed_phys != frame->buffer_phy)
+		evidence->anomalies |= TB_RING_COMPLETION_DMA_MISMATCH;
+
+	return true;
+}
+
+static struct tb_ring_completion_diag *
+ring_completion_diag(struct tb_ring *ring)
+{
+	return ring->completion_records;
+}
+
+static int ring_completion_diag_alloc(struct tb_ring *ring)
+{
+	struct tb_ring_completion_diag *diag;
+
+	/* TX descriptors do not carry the RX CRC/overrun interpretation. */
+	if (ring->is_tx || !(ring->flags & RING_FLAG_FRAME))
+		return 0;
+
+	diag = kzalloc(sizeof(*diag), GFP_KERNEL);
+	if (!diag)
+		return -ENOMEM;
+	diag->posted = kcalloc(ring->size, sizeof(*diag->posted), GFP_KERNEL);
+	diag->completed = kcalloc(ring->size, sizeof(*diag->completed),
+				 GFP_KERNEL);
+	if (!diag->posted || !diag->completed) {
+		kfree(diag->completed);
+		kfree(diag->posted);
+		kfree(diag);
+		return -ENOMEM;
+	}
+	diag->size = ring->size;
+	ring->completion_records = diag;
+	return 0;
+}
+
+static void ring_completion_diag_free(struct tb_ring *ring)
+{
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
+
+	if (!diag)
+		return;
+	kfree(diag->completed);
+	kfree(diag->posted);
+	kfree(diag);
+	ring->completion_records = NULL;
+}
+
+int tb_ring_completion_evidence(
+		struct tb_ring *ring, struct ring_frame *frame,
+		struct tb_ring_completion_evidence *evidence)
+{
+	struct tb_ring_completion_diag *diag;
+	unsigned long flags;
+	u16 i;
+	int ret = -ENODATA;
+
+	if (!ring || !frame || !evidence)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ring->lock, flags);
+	diag = ring_completion_diag(ring);
+	if (!diag)
+		goto out;
+	for (i = 0; i < diag->completed_count; i++) {
+		if (diag->completed[i].frame != frame)
+			continue;
+		*evidence = diag->completed[i].evidence;
+		ret = 0;
+		break;
+	}
+out:
+	spin_unlock_irqrestore(&ring->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(tb_ring_completion_evidence);
+
 /*
  * ring_write_descriptors() - post frames from ring->queue to the controller
  *
@@ -327,13 +821,18 @@ static u16 ring_descriptor_flags(u32 word)
  */
 static void ring_write_descriptors(struct tb_ring *ring)
 {
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
 	struct ring_frame *frame, *n;
 	struct ring_desc *descriptor;
 	list_for_each_entry_safe(frame, n, &ring->queue, list) {
+		u32 posted_attributes;
+		u16 slot;
+
 		if (ring_full(ring))
 			break;
 		list_move_tail(&frame->list, &ring->in_flight);
-		descriptor = &ring->descriptors[ring->head];
+		slot = ring->head;
+		descriptor = &ring->descriptors[slot];
 		/*
 		 * A reused descriptor still contains POSTED|COMPLETED from its
 		 * previous trip around the ring. Unpublish it before changing
@@ -344,12 +843,15 @@ static void ring_write_descriptors(struct tb_ring *ring)
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
 		dma_wmb();
-		WRITE_ONCE(descriptor->attributes,
-			   ring_descriptor_word(
-				   ring->is_tx ? frame->size : 0,
-				   ring->is_tx ? frame->eof : 0,
-				   ring->is_tx ? frame->sof : 0,
-				   RING_DESC_POSTED | RING_DESC_INTERRUPT));
+		posted_attributes = ring_descriptor_word(
+			ring->is_tx ? frame->size : 0,
+			ring->is_tx ? frame->eof : 0,
+			ring->is_tx ? frame->sof : 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+		WRITE_ONCE(descriptor->attributes, posted_attributes);
+		if (diag)
+			tb_ring_completion_record_post(&diag->posted[slot], slot,
+						       frame, posted_attributes);
 		/*
 		 * The descriptor must be visible in coherent memory before the
 		 * doorbell tells the device to look at it; the doorbell is an
@@ -377,12 +879,15 @@ static void ring_write_descriptors(struct tb_ring *ring)
 static void ring_work(struct work_struct *work)
 {
 	struct tb_ring *ring = container_of(work, typeof(*ring), work);
+	struct tb_ring_completion_diag *diag = ring_completion_diag(ring);
 	struct ring_frame *frame;
 	bool canceled = false;
 	unsigned long flags;
 	LIST_HEAD(done);
 
 	spin_lock_irqsave(&ring->lock, flags);
+	if (diag)
+		diag->completed_count = 0;
 
 	if (!ring->running) {
 		/*  Move all frames to done and mark them as canceled. */
@@ -393,10 +898,14 @@ static void ring_work(struct work_struct *work)
 	}
 
 	while (!ring_empty(ring)) {
+		struct ring_desc *descriptor = &ring->descriptors[ring->tail];
 		u32 attributes =
-			READ_ONCE(ring->descriptors[ring->tail].attributes);
+			READ_ONCE(descriptor->attributes);
+		u16 slot = ring->tail;
+		u16 desc_flags;
 
-		if (!(ring_descriptor_flags(attributes) & RING_DESC_COMPLETED))
+		desc_flags = ring_descriptor_flags(attributes);
+		if (!(desc_flags & RING_DESC_COMPLETED))
 			break;
 		/*
 		 * The metadata came from one snapshot above. Order subsequent
@@ -406,6 +915,28 @@ static void ring_work(struct work_struct *work)
 		dma_rmb();
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
+		if (diag &&
+		    desc_flags & (RING_DESC_CRC_ERROR |
+				  RING_DESC_BUFFER_OVERRUN) &&
+		    diag->completed_count < diag->size) {
+			struct tb_ring_completed_record *completed =
+				&diag->completed[diag->completed_count];
+			u16 prev = (slot + ring->size - 1) % ring->size;
+			u16 next = (slot + 1) % ring->size;
+
+			if (tb_ring_completion_record_complete(
+					&diag->posted[slot], frame, attributes,
+					READ_ONCE(descriptor->phys),
+					READ_ONCE(descriptor->time), ring->head,
+					ring->tail,
+					ioread32(ring_desc_base(ring) + 8),
+					READ_ONCE(ring->descriptors[prev].attributes),
+					READ_ONCE(ring->descriptors[next].attributes),
+					&completed->evidence)) {
+				completed->frame = frame;
+				diag->completed_count++;
+			}
+		}
 		list_move_tail(&frame->list, &done);
 		if (!ring->is_tx) {
 			frame->size = ring_descriptor_length(attributes);
@@ -445,6 +976,18 @@ static struct workqueue_struct *ring_workqueue(void)
 	return system_unbound_wq;
 }
 
+int tb_ring_process_completions(struct tb_ring *ring)
+{
+	if (!ring)
+		return -EINVAL;
+	if (current_work() == &ring->work)
+		return -EDEADLK;
+
+	queue_work(ring_workqueue(), &ring->work);
+	flush_work(&ring->work);
+	return 0;
+}
+
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void)
 {
@@ -463,7 +1006,7 @@ int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame)
 	int ret = 0;
 
 	spin_lock_irqsave(&ring->lock, flags);
-	if (ring->running) {
+	if (ring->running && !ring->quarantined) {
 		list_add_tail(&frame->list, &ring->queue);
 		ring_write_descriptors(ring);
 	} else {
@@ -813,12 +1356,14 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	ring->running = false;
 	ring->start_poll = start_poll;
 	ring->poll_data = poll_data;
+	if (ring_completion_diag_alloc(ring))
+		goto err_free_ring;
 
 	ring->descriptors = dma_alloc_coherent(&ring->nhi->pdev->dev,
 			size * sizeof(*ring->descriptors),
 			&ring->descriptors_dma, GFP_KERNEL | __GFP_ZERO);
 	if (!ring->descriptors)
-		goto err_free_ring;
+		goto err_free_diag;
 
 	if (ring_request_msix(ring, flags & RING_FLAG_NO_SUSPEND))
 		goto err_free_descs;
@@ -834,6 +1379,8 @@ err_free_descs:
 	dma_free_coherent(&ring->nhi->pdev->dev,
 			  ring->size * sizeof(*ring->descriptors),
 			  ring->descriptors, ring->descriptors_dma);
+err_free_diag:
+	ring_completion_diag_free(ring);
 err_free_ring:
 	kfree(ring);
 
@@ -890,11 +1437,14 @@ EXPORT_SYMBOL_GPL(tb_ring_alloc_rx);
  */
 void tb_ring_start(struct tb_ring *ring)
 {
-	u16 frame_size;
-	u32 flags;
+	u32 index, readback;
+	enum ring_start_result result;
 
 	spin_lock_irq(&ring->nhi->lock);
 	spin_lock(&ring->lock);
+	/* Terminal ownership handoff is permanent until controller reset. */
+	if (ring->quarantined)
+		goto err;
 	if (ring->nhi->going_away)
 		goto err;
 	if (ring->running) {
@@ -904,54 +1454,41 @@ void tb_ring_start(struct tb_ring *ring)
 	dev_dbg(&ring->nhi->pdev->dev, "starting %s %d\n",
 		RING_TYPE(ring), ring->hop);
 
-	if (ring->flags & RING_FLAG_FRAME) {
-		/* Means 4096 */
-		frame_size = 0;
-		flags = RING_FLAG_ENABLE;
-	} else {
-		frame_size = TB_FRAME_SIZE;
-		flags = RING_FLAG_ENABLE | RING_FLAG_RAW;
-	}
-
-	ring_iowrite64desc(ring, ring->descriptors_dma, 0);
-	if (ring->is_tx) {
-		ring_iowrite32desc(ring, ring->size, 12);
-		ring_iowrite32options(ring, 0, 4);
-		ring_iowrite32options(ring, flags, 0);
-	} else {
-		u32 sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
-
-		ring_iowrite32desc(ring, (frame_size << 16) | ring->size, 12);
-		ring_iowrite32options(ring, sof_eof_mask, 4);
-		ring_iowrite32options(ring, flags, 0);
-	}
-
 	/*
-	 * Now that the ring valid bit is set we can configure E2E if
-	 * enabled for the ring.
+	 * The NHI owns the TX consumer and RX producer halves of the index
+	 * register, so clearing the whole word at stop cannot reset both halves.
+	 * Rebase the replacement software ring to the retained device index while
+	 * the ring is still disabled. Enabling first lets the controller consume
+	 * stale descriptors before software and hardware agree on slot ownership.
 	 */
-	if (ring->flags & RING_FLAG_E2E) {
-		if (!ring->is_tx) {
-			u32 hop;
-
-			hop = ring->e2e_tx_hop << REG_RX_OPTIONS_E2E_HOP_SHIFT;
-			hop &= REG_RX_OPTIONS_E2E_HOP_MASK;
-			flags |= hop;
-
-			dev_dbg(&ring->nhi->pdev->dev,
-				"enabling E2E for %s %d with TX HopID %d\n",
-				RING_TYPE(ring), ring->hop, ring->e2e_tx_hop);
-		} else {
-			dev_dbg(&ring->nhi->pdev->dev, "enabling E2E for %s %d\n",
-				RING_TYPE(ring), ring->hop);
-		}
-
-		flags |= RING_FLAG_E2E_FLOW_CONTROL;
-		ring_iowrite32options(ring, flags, 0);
+	result = ring_program_start(ring, &ring_start_real_io, NULL,
+				    &index, &readback);
+	if (result == RING_START_INVALID_INDEX) {
+		dev_warn(&ring->nhi->pdev->dev,
+			 "%s %d retained invalid index %#x for size %u\n",
+			 RING_TYPE(ring), ring->hop, index, ring->size);
+		goto err_clear;
 	}
+	if (result == RING_START_UNSYNCHRONIZED) {
+		dev_warn(&ring->nhi->pdev->dev,
+			 "%s %d could not synchronize retained index %#x -> %#x\n",
+			 RING_TYPE(ring), ring->hop, index, readback);
+		goto err_clear;
+	}
+	dev_dbg(&ring->nhi->pdev->dev,
+		"starting %s %d at retained index %u\n",
+		RING_TYPE(ring), ring->hop, ring->head);
 
 	ring_interrupt_active(ring, true);
 	ring->running = true;
+	goto err;
+
+err_clear:
+	ring_iowrite32options(ring, 0, 0);
+	ring_iowrite64desc(ring, 0, 0);
+	ring_iowrite32desc(ring, 0, 8);
+	ring_iowrite32desc(ring, 0, 12);
+	nhi_read(ring->nhi, ring_desc_base(ring) + 12);
 err:
 	spin_unlock(&ring->lock);
 	spin_unlock_irq(&ring->nhi->lock);
@@ -999,6 +1536,8 @@ EXPORT_SYMBOL_GPL(tb_ring_flush);
  */
 void tb_ring_stop(struct tb_ring *ring)
 {
+	bool settle = false;
+
 	spin_lock_irq(&ring->nhi->lock);
 	spin_lock(&ring->lock);
 	dev_dbg(&ring->nhi->pdev->dev, "stopping %s %d\n",
@@ -1025,12 +1564,30 @@ void tb_ring_stop(struct tb_ring *ring)
 	 * above.
 	 */
 	if (!ring->nhi->going_away) {
+		u32 count;
+
 		ring_interrupt_active(ring, false);
 
 		ring_iowrite32options(ring, 0, 0);
 		ring_iowrite64desc(ring, 0, 0);
 		ring_iowrite32desc(ring, 0, 8);
 		ring_iowrite32desc(ring, 0, 12);
+		/*
+		 * The writes above are posted.  Do not let callbacks release the
+		 * frame mappings, or tb_ring_free() release the coherent descriptor
+		 * array, until the device has observed both the disable and every
+		 * state clear.  Reusing the same HopID before this ownership transfer
+		 * can make the replacement ring replay the prior ring's descriptors.
+		 */
+		if (tb_nhi_ring_stop_steps() & TB_NHI_RING_STOP_FLUSH_WRITES) {
+			count = nhi_read(ring->nhi, ring_desc_base(ring) + 12);
+			if (count && !ring->nhi->going_away)
+				dev_warn(&ring->nhi->pdev->dev,
+					 "%s %d did not clear descriptor count: %#x\n",
+					 RING_TYPE(ring), ring->hop, count);
+		}
+		settle = tb_nhi_ring_stop_steps() &
+			 TB_NHI_RING_STOP_SETTLE_ENGINE;
 	}
 	ring->head = 0;
 	ring->tail = 0;
@@ -1039,6 +1596,14 @@ void tb_ring_stop(struct tb_ring *ring)
 err:
 	spin_unlock(&ring->lock);
 	spin_unlock_irq(&ring->nhi->lock);
+	/*
+	 * VALID is clear and the posted writes have reached the device, but the
+	 * ring engine can still hold its cached descriptor base briefly.  Keep
+	 * callbacks and tb_ring_free() from releasing either DMA allocation until
+	 * that internal ownership has settled.
+	 */
+	if (settle)
+		usleep_range(1000, 2000);
 
 	/*
 	 * schedule ring->work to invoke callbacks on all remaining frames.
@@ -1047,6 +1612,157 @@ err:
 	flush_work(&ring->work);
 }
 EXPORT_SYMBOL_GPL(tb_ring_stop);
+
+/**
+ * tb_ring_quarantine() - hand an unresolved stopped ring to the core
+ * @ring: Ring whose leaf owner is going away
+ *
+ * This is a software-lifetime fence, not evidence that the fabric path was
+ * drained. It prevents reuse, synchronously cancels every queued frame, and
+ * erases the only ring-level callback/data pair that may point into a leaf
+ * module. The NHI slot, coherent descriptor allocation, IRQ and HopID remain
+ * owned by the core until exact path readback proves a drain or a synchronous
+ * controller reset proves revocation.
+ *
+ * The caller must have fenced producers and joined any external poll consumer
+ * (for example NAPI) before calling. It must not call this from a frame
+ * callback and must never access the ring after ownership is handed off.
+ */
+void tb_ring_quarantine(struct tb_ring *ring)
+{
+	bool running;
+
+	if (!ring)
+		return;
+
+	spin_lock_irq(&ring->nhi->lock);
+	spin_lock(&ring->lock);
+	if (ring->quarantined) {
+		spin_unlock(&ring->lock);
+		spin_unlock_irq(&ring->nhi->lock);
+		flush_work(&ring->work);
+		return;
+	}
+
+	/* Close both admission paths before the callback drain starts. */
+	ring->quarantined = true;
+	ring->start_poll = NULL;
+	ring->poll_data = NULL;
+	running = ring->running;
+	spin_unlock(&ring->lock);
+	spin_unlock_irq(&ring->nhi->lock);
+
+	if (running) {
+		tb_ring_stop(ring);
+	} else {
+		/* ring_work's stopped branch cancels both software lists. */
+		schedule_work(&ring->work);
+		flush_work(&ring->work);
+	}
+}
+EXPORT_SYMBOL_GPL(tb_ring_quarantine);
+
+/* True when a leaf handoff requires a reset before core ring reclamation. */
+bool tb_nhi_has_quarantined_rings(struct tb_nhi *nhi)
+{
+	unsigned int i;
+	bool found = false;
+
+	spin_lock_irq(&nhi->lock);
+	for (i = 0; i < nhi->hop_count; i++) {
+		if ((nhi->tx_rings[i] && nhi->tx_rings[i]->quarantined) ||
+		    (nhi->rx_rings[i] && nhi->rx_rings[i]->quarantined)) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irq(&nhi->lock);
+
+	return found;
+}
+
+/*
+ * Reclaim the core-owned ring allocations after synchronous host-router reset
+ * success.  A reset request that was merely dispatched, timed out, or failed
+ * is not proof and must pass false.  Domain stop serializes this walk against
+ * allocation and leaf handoff; XDomain path/HopID allocators are torn down by
+ * their own topology destruction after this reset boundary.
+ */
+void tb_nhi_finalize_quarantined_rings(struct tb_nhi *nhi,
+				       bool controller_reset_proven)
+{
+	unsigned int i;
+
+	if (!controller_reset_proven)
+		return;
+
+	for (i = 0; i < nhi->hop_count; i++) {
+		struct tb_ring *ring;
+
+		spin_lock_irq(&nhi->lock);
+		ring = nhi->rx_rings[i];
+		if (!ring || !ring->quarantined)
+			ring = NULL;
+		spin_unlock_irq(&nhi->lock);
+		if (ring)
+			tb_ring_free(ring);
+
+		spin_lock_irq(&nhi->lock);
+		ring = nhi->tx_rings[i];
+		if (!ring || !ring->quarantined)
+			ring = NULL;
+		spin_unlock_irq(&nhi->lock);
+		if (ring)
+			tb_ring_free(ring);
+	}
+}
+
+static struct tb_ring *
+tb_nhi_detach_quarantined_ring(struct tb_nhi *nhi,
+			       struct tb_ring **rings, unsigned int hop)
+{
+	struct tb_ring *ring;
+
+	spin_lock_irq(&nhi->lock);
+	ring = rings[hop];
+	if (ring && ring->quarantined)
+		rings[hop] = NULL;
+	else
+		ring = NULL;
+	spin_unlock_irq(&nhi->lock);
+	return ring;
+}
+
+static void tb_nhi_abandon_quarantined_ring(struct tb_ring *ring)
+{
+	if (!ring)
+		return;
+
+	/*
+	 * An unproven reset cannot authorize reuse of the coherent descriptor
+	 * allocation. It still must not leave an IRQ action or queued work naming
+	 * module text and a devres-owned NHI after PCI remove returns. Detach the
+	 * HopID, join the IRQ, and drain work, then deliberately retain the inert
+	 * ring and descriptor allocation until physical reset removes ownership.
+	 */
+	ring_release_msix(ring);
+	flush_work(&ring->work);
+	ring->nhi = NULL;
+}
+
+void tb_nhi_abandon_quarantined_rings(struct tb_nhi *nhi)
+{
+	unsigned int i;
+
+	for (i = 0; i < nhi->hop_count; i++) {
+		struct tb_ring *ring;
+
+		ring = tb_nhi_detach_quarantined_ring(nhi, nhi->rx_rings, i);
+		tb_nhi_abandon_quarantined_ring(ring);
+		ring = tb_nhi_detach_quarantined_ring(nhi, nhi->tx_rings, i);
+		tb_nhi_abandon_quarantined_ring(ring);
+	}
+}
 
 /*
  * tb_ring_free() - free ring
@@ -1095,6 +1811,7 @@ void tb_ring_free(struct tb_ring *ring)
 	 * to finish before freeing the ring.
 	 */
 	flush_work(&ring->work);
+	ring_completion_diag_free(ring);
 	kfree(ring);
 }
 EXPORT_SYMBOL_GPL(tb_ring_free);
@@ -1417,6 +2134,17 @@ static void nhi_shutdown(struct tb_nhi *nhi)
 	}
 	nhi_disable_interrupts(nhi);
 	/*
+	 * Past this point nothing may touch the BAR: pcim devres will iounmap
+	 * it and release the IRQ vectors as soon as nhi_remove() returns, and
+	 * the WARNs above establish that a straggler ring can still exist.
+	 * Poison the MMIO funnel so every remaining read returns ~0U and every
+	 * ring/interrupt path takes its going_away bail-out, instead of
+	 * touching an unmapped BAR -- the shape that presents as a silent MMIO
+	 * stall rather than a clean fault. Also correct for the reboot path,
+	 * where this is the last thing the driver does.
+	 */
+	WRITE_ONCE(nhi->going_away, true);
+	/*
 	 * We have to release the irq before calling flush_work. Otherwise an
 	 * already executing IRQ handler could call schedule_work again.
 	 */
@@ -1438,7 +2166,9 @@ static void nhi_check_quirks(struct tb_nhi *nhi)
 		 * status register right after interrupt is being
 		 * issued.
 		 */
-		nhi->quirks |= QUIRK_AUTO_CLEAR_INT;
+		if (tb_nhi_uses_auto_clear(nhi->pdev->vendor,
+					   nhi->pdev->device))
+			nhi->quirks |= QUIRK_AUTO_CLEAR_INT;
 
 		switch (nhi->pdev->device) {
 		case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_2C_NHI:
@@ -1495,21 +2225,21 @@ static void nhi_check_iommu(struct tb_nhi *nhi)
 		str_enabled_disabled(port_ok));
 }
 
-static void nhi_reset(struct tb_nhi *nhi)
+static int __nhi_reset(struct tb_nhi *nhi, bool force)
 {
 	ktime_t timeout;
 	u32 val;
 
 	val = nhi_read(nhi, nhi->iobase + REG_CAPS);
 	if (READ_ONCE(nhi->going_away))
-		return;
+		return -ENODEV;
 	/* Reset only v2 and later routers */
 	if (FIELD_GET(REG_CAPS_VERSION_MASK, val) < REG_CAPS_VERSION_2)
-		return;
+		return -EOPNOTSUPP;
 
-	if (!host_reset) {
+	if (!force && !host_reset) {
 		dev_dbg(&nhi->pdev->dev, "skipping host router reset\n");
-		return;
+		return 0;
 	}
 
 	iowrite32(REG_RESET_HRR, nhi->iobase + REG_RESET);
@@ -1519,25 +2249,37 @@ static void nhi_reset(struct tb_nhi *nhi)
 	do {
 		val = nhi_read(nhi, nhi->iobase + REG_RESET);
 		if (READ_ONCE(nhi->going_away))
-			break;
+			return -ENODEV;
 		if (!(val & REG_RESET_HRR)) {
 			dev_warn(&nhi->pdev->dev, "host router reset successful\n");
-			return;
+			return 0;
 		}
 		usleep_range(10, 20);
 	} while (ktime_before(ktime_get(), timeout));
 
 	dev_warn(&nhi->pdev->dev, "timeout resetting host router\n");
+	return -ETIMEDOUT;
+}
+
+int tb_nhi_reset_host(struct tb_nhi *nhi)
+{
+	return __nhi_reset(nhi, true);
 }
 
 static int nhi_init_msi(struct tb_nhi *nhi)
 {
 	struct pci_dev *pdev = nhi->pdev;
 	struct device *dev = &pdev->dev;
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_RESET;
+	enum tb_nhi_irq_mode mode;
+	u32 misc, new, readback;
 	int res, irq, nvec;
 
-	/* In case someone left them on. */
-	nhi_disable_interrupts(nhi);
+	/* Establish a quiescent point before changing the global DMA policy. */
+	nhi_mask_all_interrupts(nhi);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_MASK_ALL);
+	nhi_drain_interrupt_status(nhi);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_DRAIN_STATUS);
 
 	nhi_enable_int_throttling(nhi);
 
@@ -1566,6 +2308,32 @@ static int nhi_init_msi(struct tb_nhi *nhi)
 				       IRQF_NO_SUSPEND, "thunderbolt", nhi);
 		if (res)
 			return dev_err_probe(dev, res, "request_irq failed, aborting\n");
+	} else {
+		/*
+		 * DMA_MISC is global to the NHI. Configure it once while every
+		 * cause is masked and drained, before any ring programs a vector or
+		 * enables its cause. Intel uses automatic status clearing; the
+		 * explicit W1C mode remains the non-Intel MSI-X policy.
+		 */
+		mode = nhi->quirks & QUIRK_AUTO_CLEAR_INT ?
+			TB_NHI_IRQ_AUTO_STATUS_CLEAR : TB_NHI_IRQ_EXPLICIT_W1C;
+		misc = nhi_read(nhi, nhi->iobase + REG_DMA_MISC);
+		new = tb_nhi_dma_misc_interrupt_policy(misc, mode);
+		if (new != misc)
+			iowrite32(new, nhi->iobase + REG_DMA_MISC);
+		phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+
+		/* Flush the posted policy write before vector routing can begin. */
+		readback = nhi_read(nhi, nhi->iobase + REG_DMA_MISC);
+		phase = tb_nhi_irq_setup_next(phase,
+					      TB_NHI_IRQ_SETUP_FLUSH_MODE);
+		if (READ_ONCE(nhi->going_away) || phase != TB_NHI_IRQ_SETUP_READY ||
+		    tb_nhi_dma_misc_interrupt_mode(readback) != mode) {
+			pci_free_irq_vectors(pdev);
+			return -EIO;
+		}
+		dev_dbg(dev, "DMA_MISC interrupt policy %#010x -> %#010x\n",
+			misc, readback);
 	}
 
 	return 0;
@@ -1627,12 +2395,26 @@ static struct tb *nhi_select_cm(struct tb_nhi *nhi)
 static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
+	struct nhi_probe_recovery_context *recovery;
+	enum tb_nhi_recovery_event recovery_event;
+	enum tb_nhi_recovery_state recovery_next;
 	struct tb_nhi *nhi;
 	struct tb *tb;
+	int recovery_res;
 	int res;
 
 	if (!nhi_imr_valid(pdev))
 		return dev_err_probe(dev, -ENODEV, "firmware image not valid, aborting\n");
+
+	recovery = devm_kzalloc(dev, sizeof(*recovery), GFP_KERNEL);
+	if (!recovery)
+		return -ENOMEM;
+	recovery->pdev = pdev;
+	recovery->state = nhi_probe_recovery_get(pdev);
+	res = devm_add_action_or_reset(dev, nhi_probe_recovery_release,
+				       recovery);
+	if (res)
+		return res;
 
 	res = pcim_enable_device(pdev);
 	if (res)
@@ -1662,7 +2444,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	nhi_check_quirks(nhi);
 	nhi_check_iommu(nhi);
-	nhi_reset(nhi);
+	__nhi_reset(nhi, false);
 
 	res = nhi_init_msi(nhi);
 	if (res)
@@ -1705,19 +2487,57 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_warn(dev,
 			 "PCIe hotplug is firmware-controlled (_OSC did not grant it, often caused by pcie_aspm=off); PCIe tunnel devices will NOT enumerate\n");
 
-	init_completion(&nhi->domain_released);
-
 	res = tb_domain_add(tb, host_reset);
 	if (res) {
-		/*
-		 * At this point the RX/TX rings might already have been
-		 * activated. Do a proper shutdown.
-		 */
+		if (res == -ETIMEDOUT &&
+		    tb_nhi_recovery_supported(pdev->vendor, pdev->device)) {
+			if (icm_root_power_cycle_dispatched(tb))
+				recovery_event =
+					TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED;
+			else if (icm_driver_ready_timed_out(tb))
+				recovery_event =
+					TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT;
+			else if (icm_root_config_timed_out(tb))
+				recovery_event = TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT;
+			else
+				recovery_event = TB_NHI_RECOVERY_OTHER_FAILURE;
+		} else {
+			recovery_event = TB_NHI_RECOVERY_OTHER_FAILURE;
+		}
+		recovery_next = tb_nhi_recovery_next(recovery->state,
+						     recovery_event);
+
+		if (tb_nhi_recovery_action(recovery_next) ==
+		    TB_NHI_RECOVERY_ACTION_REPROBE) {
+			recovery_res = nhi_probe_recovery_set(pdev, recovery_next);
+			if (recovery_res) {
+				dev_err(dev,
+					"cannot reserve one-shot host-router recovery state: %d\n",
+					recovery_res);
+				goto release_domain;
+			}
+			recovery->state = recovery_next;
+		}
+
+release_domain:
+		/* Release every ring and mapping before the deferred reprobe. */
 		tb_domain_put(tb);
-		wait_for_completion(&nhi->domain_released);
 		nhi_shutdown(nhi);
+
+		if (recovery->state == TB_NHI_RECOVERY_REPROBE_PENDING)
+			return res;
+
+		if (recovery->state != TB_NHI_RECOVERY_IDLE)
+			nhi_probe_recovery_clear(pdev);
+		recovery->state = recovery_next;
 		return res;
 	}
+	if (recovery->state == TB_NHI_RECOVERY_RETRYING)
+		dev_info(dev,
+			 "probe succeeded after one-shot host-router power cycle\n");
+	nhi_probe_recovery_clear(pdev);
+	recovery->state = tb_nhi_recovery_next(recovery->state,
+					       TB_NHI_RECOVERY_PROBE_SUCCEEDED);
 	pci_set_drvdata(pdev, tb);
 
 	device_wakeup_enable(&pdev->dev);
@@ -1730,7 +2550,7 @@ static int nhi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 }
 
-static void nhi_remove(struct pci_dev *pdev)
+static void __nhi_remove(struct pci_dev *pdev)
 {
 	struct tb *tb = pci_get_drvdata(pdev);
 	struct tb_nhi *nhi = tb->nhi;
@@ -1740,8 +2560,17 @@ static void nhi_remove(struct pci_dev *pdev)
 	pm_runtime_forbid(&pdev->dev);
 
 	tb_domain_remove(tb);
-	wait_for_completion(&nhi->domain_released);
 	nhi_shutdown(nhi);
+}
+
+static void nhi_remove(struct pci_dev *pdev)
+{
+	__nhi_remove(pdev);
+}
+
+static void nhi_pci_shutdown(struct pci_dev *pdev)
+{
+	__nhi_remove(pdev);
 }
 
 /*
@@ -1869,7 +2698,7 @@ static struct pci_driver nhi_driver = {
 	.id_table = nhi_ids,
 	.probe = nhi_probe,
 	.remove = nhi_remove,
-	.shutdown = nhi_remove,
+	.shutdown = nhi_pci_shutdown,
 	.driver.pm = &nhi_pm_ops,
 };
 
@@ -1880,17 +2709,448 @@ static int __init nhi_init(void)
 	ret = tb_domain_init();
 	if (ret)
 		return ret;
-	ret = pci_register_driver(&nhi_driver);
-	if (ret)
+
+	nhi_probe_recovery_wq = alloc_ordered_workqueue("thunderbolt_recovery",
+							nhi_probe_recovery_wq_flags());
+	if (!nhi_probe_recovery_wq) {
 		tb_domain_exit();
+		return -ENOMEM;
+	}
+	ret = pci_register_driver(&nhi_driver);
+	if (ret) {
+		destroy_workqueue(nhi_probe_recovery_wq);
+		tb_domain_exit();
+	}
 	return ret;
 }
 
 static void __exit nhi_unload(void)
 {
 	pci_unregister_driver(&nhi_driver);
+	destroy_workqueue(nhi_probe_recovery_wq);
+	nhi_probe_recovery_clear_all();
 	tb_domain_exit();
 }
 
 rootfs_initcall(nhi_init);
 module_exit(nhi_unload);
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+#include <kunit/test.h>
+
+struct ring_quarantine_test_frame {
+	struct ring_frame frame;
+	unsigned int *canceled;
+};
+
+enum ring_start_test_event {
+	RING_START_TEST_BASE,
+	RING_START_TEST_COUNT,
+	RING_START_TEST_AUX,
+	RING_START_TEST_READ_RETAINED,
+	RING_START_TEST_WRITE_PEER,
+	RING_START_TEST_READBACK,
+	RING_START_TEST_ENABLE,
+};
+
+struct ring_start_test_io {
+	u32 index;
+	enum ring_start_test_event events[8];
+	u8 event_count;
+	bool peer_written;
+};
+
+static void ring_start_test_record(struct ring_start_test_io *io,
+				   enum ring_start_test_event event)
+{
+	io->events[io->event_count++] = event;
+}
+
+static void ring_start_test_write_desc32(void *ctx, struct tb_ring *ring,
+					 u32 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 12) {
+		ring_start_test_record(io, RING_START_TEST_COUNT);
+	} else if (offset == 8) {
+		ring_start_test_record(io, RING_START_TEST_WRITE_PEER);
+		if (ring->is_tx)
+			io->index = (io->index & 0xffff) | (value & 0xffff0000);
+		else
+			io->index = (io->index & 0xffff0000) | (value & 0xffff);
+		io->peer_written = true;
+	}
+}
+
+static void ring_start_test_write_desc64(void *ctx, struct tb_ring *ring,
+					 u64 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (!offset)
+		ring_start_test_record(io, RING_START_TEST_BASE);
+}
+
+static void ring_start_test_write_options32(void *ctx, struct tb_ring *ring,
+					    u32 value, u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 4)
+		ring_start_test_record(io, RING_START_TEST_AUX);
+	else if (!offset && value & RING_FLAG_ENABLE)
+		ring_start_test_record(io, RING_START_TEST_ENABLE);
+}
+
+static u32 ring_start_test_read_desc32(void *ctx, struct tb_ring *ring,
+				       u32 offset)
+{
+	struct ring_start_test_io *io = ctx;
+
+	if (offset == 8)
+		ring_start_test_record(io, io->peer_written ?
+				       RING_START_TEST_READBACK :
+				       RING_START_TEST_READ_RETAINED);
+	return io->index;
+}
+
+static const struct ring_start_io_ops ring_start_test_ops = {
+	.write_desc32 = ring_start_test_write_desc32,
+	.write_desc64 = ring_start_test_write_desc64,
+	.write_options32 = ring_start_test_write_options32,
+	.read_desc32 = ring_start_test_read_desc32,
+};
+
+static void ring_quarantine_test_callback(struct tb_ring *ring,
+					  struct ring_frame *frame,
+					  bool canceled)
+{
+	struct ring_quarantine_test_frame *tf =
+		container_of(frame, typeof(*tf), frame);
+
+	if (canceled)
+		(*tf->canceled)++;
+}
+
+static void ring_quarantine_test_poll(void *data)
+{
+	unsigned int *calls = data;
+
+	(*calls)++;
+}
+
+/*
+ * Exercise the real ring ownership handoff. A quarantined ring must drain all
+ * leaf callbacks before returning, erase the polling callback/data pair, stay
+ * reserved in the NHI HopID table, and refuse both enqueue and restart.
+ */
+static void tb_test_ring_quarantine_detaches_leaf_lifetime(struct kunit *test)
+{
+	struct ring_quarantine_test_frame queued = { }, in_flight = { };
+	struct tb_nhi *nhi;
+	struct tb_ring *ring;
+	unsigned int canceled = 0, poll_calls = 0;
+
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	spin_lock_init(&nhi->lock);
+	nhi->hop_count = 2;
+	nhi->tx_rings = kunit_kcalloc(test, nhi->hop_count,
+				      sizeof(*nhi->tx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi->tx_rings);
+	nhi->rx_rings = kunit_kcalloc(test, nhi->hop_count,
+				      sizeof(*nhi->rx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi->rx_rings);
+
+	ring = kunit_kzalloc(test, sizeof(*ring), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ring);
+	spin_lock_init(&ring->lock);
+	INIT_LIST_HEAD(&ring->queue);
+	INIT_LIST_HEAD(&ring->in_flight);
+	INIT_WORK(&ring->work, ring_work);
+	init_waitqueue_head(&ring->wait);
+	ring->nhi = nhi;
+	ring->hop = 1;
+	ring->is_tx = true;
+	ring->start_poll = ring_quarantine_test_poll;
+	ring->poll_data = &poll_calls;
+	nhi->tx_rings[ring->hop] = ring;
+
+	queued.canceled = &canceled;
+	queued.frame.callback = ring_quarantine_test_callback;
+	INIT_LIST_HEAD(&queued.frame.list);
+	list_add_tail(&queued.frame.list, &ring->queue);
+	in_flight.canceled = &canceled;
+	in_flight.frame.callback = ring_quarantine_test_callback;
+	INIT_LIST_HEAD(&in_flight.frame.list);
+	list_add_tail(&in_flight.frame.list, &ring->in_flight);
+
+	tb_ring_quarantine(ring);
+
+	KUNIT_EXPECT_EQ(test, 2u, canceled);
+	KUNIT_EXPECT_TRUE(test, list_empty(&ring->queue));
+	KUNIT_EXPECT_TRUE(test, list_empty(&ring->in_flight));
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->start_poll);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->poll_data);
+	KUNIT_EXPECT_TRUE(test, ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, tb_nhi_has_quarantined_rings(nhi));
+	KUNIT_EXPECT_PTR_EQ(test, ring, nhi->tx_rings[ring->hop]);
+	/* Unproven reset state must not turn quarantine into a free. */
+	tb_nhi_finalize_quarantined_rings(nhi, false);
+	KUNIT_EXPECT_PTR_EQ(test, ring, nhi->tx_rings[ring->hop]);
+	/* Sequential handoff is idempotent and cannot repeat callbacks. */
+	tb_ring_quarantine(ring);
+	KUNIT_EXPECT_EQ(test, 2u, canceled);
+	KUNIT_EXPECT_EQ(test, -ESHUTDOWN,
+			__tb_ring_enqueue(ring, &queued.frame));
+	tb_ring_start(ring);
+	KUNIT_EXPECT_FALSE(test, ring->running);
+	KUNIT_EXPECT_EQ(test, 0u, poll_calls);
+	/* Failed reset still detaches every IRQ/work lifetime before devres. */
+	tb_nhi_abandon_quarantined_rings(nhi);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, nhi->tx_rings[ring->hop]);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, ring->nhi);
+	KUNIT_EXPECT_FALSE(test, tb_nhi_has_quarantined_rings(nhi));
+}
+
+static void tb_test_ring_restart_rebases_retained_rx_producer(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = false,
+	};
+	u32 index = 31 << 16;
+
+	ring_prepare_start(&ring, index);
+
+	KUNIT_EXPECT_EQ(test, (u16)31, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)31, ring.tail);
+}
+
+static void tb_test_ring_restart_rebases_retained_tx_consumer(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = true,
+	};
+	u32 index = 47;
+
+	ring_prepare_start(&ring, index);
+
+	KUNIT_EXPECT_EQ(test, (u16)47, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)47, ring.tail);
+}
+
+static void tb_test_ring_restart_requires_both_indices_aligned(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 2048,
+		.is_tx = false,
+	};
+	u32 retained = 31 << 16;
+
+	KUNIT_ASSERT_TRUE(test, ring_prepare_start(&ring, retained));
+	KUNIT_EXPECT_FALSE(test,
+			   ring_start_indices_match(&ring, retained));
+	KUNIT_EXPECT_TRUE(test,
+			  ring_start_indices_match(&ring, 31 << 16 | 31));
+}
+
+static void tb_test_ring_restart_synchronizes_before_enable(struct kunit *test)
+{
+	static const enum ring_start_test_event expected[] = {
+		RING_START_TEST_BASE,
+		RING_START_TEST_COUNT,
+		RING_START_TEST_AUX,
+		RING_START_TEST_READ_RETAINED,
+		RING_START_TEST_WRITE_PEER,
+		RING_START_TEST_READBACK,
+		RING_START_TEST_ENABLE,
+	};
+	struct tb_ring ring = {
+		.size = 2048,
+		.flags = RING_FLAG_FRAME,
+		.is_tx = false,
+	};
+	struct ring_start_test_io io = {
+		.index = 31 << 16,
+	};
+	enum ring_start_result result;
+	u32 initial = 0, final = 0;
+	int i;
+
+	result = ring_program_start(&ring, &ring_start_test_ops, &io,
+				    &initial, &final);
+	KUNIT_ASSERT_EQ(test, RING_START_OK, result);
+	KUNIT_ASSERT_EQ(test, (u8)ARRAY_SIZE(expected), io.event_count);
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, expected[i], io.events[i]);
+	KUNIT_EXPECT_EQ(test, (u32)(31 << 16), initial);
+	KUNIT_EXPECT_EQ(test, (u32)(31 << 16 | 31), final);
+
+	memset(&ring, 0, sizeof(ring));
+	ring.size = 2048;
+	ring.flags = RING_FLAG_FRAME;
+	ring.is_tx = true;
+	memset(&io, 0, sizeof(io));
+	io.index = 47;
+	result = ring_program_start(&ring, &ring_start_test_ops, &io,
+				    &initial, &final);
+	KUNIT_ASSERT_EQ(test, RING_START_OK, result);
+	KUNIT_ASSERT_EQ(test, (u8)ARRAY_SIZE(expected), io.event_count);
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, expected[i], io.events[i]);
+	KUNIT_EXPECT_EQ(test, (u32)47, initial);
+	KUNIT_EXPECT_EQ(test, (u32)(47 << 16 | 47), final);
+}
+
+static void tb_test_ring_restart_rejects_invalid_retained_index(struct kunit *test)
+{
+	struct tb_ring ring = {
+		.size = 32,
+		.is_tx = false,
+	};
+	u32 index = 33 << 16;
+
+	KUNIT_EXPECT_FALSE(test, ring_prepare_start(&ring, index));
+	KUNIT_EXPECT_EQ(test, (u16)0, ring.head);
+	KUNIT_EXPECT_EQ(test, (u16)0, ring.tail);
+}
+
+/*
+ * RX descriptor flags are state-dependent: software publishes 0x0c
+ * (POSTED|INTERRUPT), while hardware completion 0x07 means
+ * CRC_ERROR|COMPLETED|BUFFER_OVERRUN.  The raw word alone cannot prove that
+ * the completed descriptor still belongs to the frame at the head of the
+ * in-flight list.  Model the evidence that production must retain at post
+ * time and correlate at completion time.
+ */
+static void tb_test_ring_completion_correlates_exact_owner(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(700, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 37, &frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &frame, completed,
+			frame.buffer_phy, 0, 38, 37, 0x00260025,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test, (u16)37, evidence.slot);
+	KUNIT_EXPECT_EQ(test, (u64)1, evidence.generation);
+	KUNIT_EXPECT_EQ(test, posted, evidence.posted_attributes);
+	KUNIT_EXPECT_EQ(test, completed, evidence.completed_attributes);
+	KUNIT_EXPECT_EQ(test, (u64)frame.buffer_phy,
+			(u64)evidence.posted_phys);
+	KUNIT_EXPECT_EQ(test, (u64)frame.buffer_phy,
+			(u64)evidence.completed_phys);
+	KUNIT_EXPECT_EQ(test, (u16)700, evidence.length);
+	KUNIT_EXPECT_EQ(test, (u8)4, evidence.eof);
+	KUNIT_EXPECT_EQ(test, (u8)0, evidence.sof);
+	KUNIT_EXPECT_EQ(test, (u16)(RING_DESC_CRC_ERROR |
+			RING_DESC_COMPLETED | RING_DESC_INTERRUPT),
+			evidence.flags);
+	KUNIT_EXPECT_EQ(test, (u32)TB_RING_COMPLETION_HW_CRC,
+			evidence.anomalies);
+}
+
+static void tb_test_ring_completion_exposes_owner_and_dma_drift(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame posted_frame = {
+		.buffer_phy = 0x12345000,
+	};
+	struct ring_frame completed_frame = {
+		.buffer_phy = 0x56789000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(956, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 91, &posted_frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &completed_frame,
+			completed, 0xdead0000, 0, 92, 91, 0x005c005b,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test,
+		(u32)(TB_RING_COMPLETION_HW_CRC |
+		      TB_RING_COMPLETION_OWNER_MISMATCH |
+		      TB_RING_COMPLETION_DMA_MISMATCH),
+		evidence.anomalies);
+}
+
+static void tb_test_ring_completion_decodes_rx_0x07_not_posted(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct tb_ring_completion_evidence evidence = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+	u32 completed = ring_descriptor_word(444, 4, 0,
+			RING_DESC_CRC_ERROR | RING_DESC_COMPLETED |
+			RING_DESC_BUFFER_OVERRUN);
+
+	tb_ring_completion_record_post(&record, 7, &frame, posted);
+	KUNIT_ASSERT_TRUE(test,
+		tb_ring_completion_record_complete(&record, &frame, completed,
+			frame.buffer_phy, 0, 8, 7, 0x00080007,
+			0x00a04000, 0x00c00000, &evidence));
+
+	KUNIT_EXPECT_EQ(test, (u16)0x07, evidence.flags);
+	KUNIT_EXPECT_EQ(test,
+		(u32)(TB_RING_COMPLETION_HW_CRC |
+		      TB_RING_COMPLETION_HW_OVERRUN),
+		evidence.anomalies);
+}
+
+static void tb_test_ring_completion_generation_advances_on_repost(struct kunit *test)
+{
+	struct tb_ring_completion_record record = {};
+	struct ring_frame frame = {
+		.buffer_phy = 0x12345000,
+	};
+	u32 posted = ring_descriptor_word(0, 0, 0,
+			RING_DESC_POSTED | RING_DESC_INTERRUPT);
+
+	tb_ring_completion_record_post(&record, 3, &frame, posted);
+	KUNIT_EXPECT_EQ(test, (u64)1, record.generation);
+	tb_ring_completion_record_post(&record, 3, &frame, posted);
+	KUNIT_EXPECT_EQ(test, (u64)2, record.generation);
+}
+
+static struct kunit_case tb_ring_quarantine_cases[] = {
+	KUNIT_CASE(tb_test_ring_quarantine_detaches_leaf_lifetime),
+	KUNIT_CASE(tb_test_ring_restart_rebases_retained_rx_producer),
+	KUNIT_CASE(tb_test_ring_restart_rebases_retained_tx_consumer),
+	KUNIT_CASE(tb_test_ring_restart_requires_both_indices_aligned),
+	KUNIT_CASE(tb_test_ring_restart_synchronizes_before_enable),
+	KUNIT_CASE(tb_test_ring_restart_rejects_invalid_retained_index),
+	KUNIT_CASE(tb_test_ring_completion_correlates_exact_owner),
+	KUNIT_CASE(tb_test_ring_completion_exposes_owner_and_dma_drift),
+	KUNIT_CASE(tb_test_ring_completion_decodes_rx_0x07_not_posted),
+	KUNIT_CASE(tb_test_ring_completion_generation_advances_on_repost),
+	{}
+};
+
+static struct kunit_suite tb_ring_quarantine_suite = {
+	.name = "thunderbolt_ring_quarantine",
+	.test_cases = tb_ring_quarantine_cases,
+};
+
+kunit_test_suite(tb_ring_quarantine_suite);
+#endif

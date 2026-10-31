@@ -19,19 +19,15 @@
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+#include <kunit/test.h>
+#endif
+
 #include "ctl.h"
+#include "dma_port.h"
 #include "nhi_regs.h"
 #include "tb.h"
 #include "tunnel.h"
-
-#define PCIE2CIO_CMD			0x30
-#define PCIE2CIO_CMD_TIMEOUT		BIT(31)
-#define PCIE2CIO_CMD_START		BIT(30)
-#define PCIE2CIO_CMD_WRITE		BIT(21)
-#define PCIE2CIO_CMD_CS_MASK		GENMASK(20, 19)
-#define PCIE2CIO_CMD_CS_SHIFT		19
-#define PCIE2CIO_CMD_PORT_MASK		GENMASK(18, 13)
-#define PCIE2CIO_CMD_PORT_SHIFT		13
 
 #define PCIE2CIO_WRDATA			0x34
 #define PCIE2CIO_RDDATA			0x38
@@ -41,8 +37,93 @@
 #define PHY_PORT_CS1_LINK_STATE_MASK	GENMASK(29, 26)
 #define PHY_PORT_CS1_LINK_STATE_SHIFT	26
 
+#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE	0x1133
+#define PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE	0x1136
+
 #define ICM_TIMEOUT			5000	/* ms */
 #define ICM_RETRIES			3
+#define ICM_XDOMAIN_SETTLE_MIN_US	2000
+#define ICM_XDOMAIN_SETTLE_MAX_US	2500
+
+struct tb_icm_xdomain_path_transition
+tb_icm_xdomain_path_next(enum tb_icm_xdomain_path_state state,
+			 enum tb_icm_xdomain_path_event event)
+{
+	struct tb_icm_xdomain_path_transition next = {
+		.state = state,
+		.action = TB_ICM_XDOMAIN_PATH_REJECT,
+	};
+
+	switch (state) {
+	case TB_ICM_XDOMAIN_PATH_INACTIVE:
+		if (event == TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE) {
+			next.state = TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+			next.action = TB_ICM_XDOMAIN_PATH_ACTIVATE;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_ACTIVE:
+		if (event == TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE) {
+			next.state =
+				TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY;
+			next.action = TB_ICM_XDOMAIN_PATH_SEND_STAGE2;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY:
+		if (event == TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE) {
+			next.state =
+				TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING;
+			next.action = TB_ICM_XDOMAIN_PATH_SETTLE;
+			next.settle_min_us = ICM_XDOMAIN_SETTLE_MIN_US;
+			next.settle_max_us = ICM_XDOMAIN_SETTLE_MAX_US;
+		}
+		break;
+	case TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING:
+		if (event == TB_ICM_XDOMAIN_PATH_SETTLED) {
+			next.state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+			next.action = TB_ICM_XDOMAIN_PATH_DEACTIVATE;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return next;
+}
+
+/*
+ * How long __icm_driver_ready() waits for the root switch config space to
+ * become readable. Each pass issues one 100 ms request in a continuous
+ * sequence stream and then sleeps 50 ms, so the default 50 is about 7.5 s.
+ * Completed descriptors are reaped and reusable; this budget is independent
+ * of both the generic config retry policy and the ring size.
+ *
+ * This is NOT a cosmetic knob. Exhausting it returns -ETIMEDOUT, and
+ * tb_icm_wedged() turns any driver-ready error into the verdict "ICM
+ * advertises running but does not respond; wedged firmware". A budget that
+ * is merely too short for a particular boot is therefore indistinguishable
+ * in the log from genuinely dead firmware. Tunable at runtime so the two can
+ * actually be told apart on hardware instead of inferred.
+ */
+static unsigned int icm_cfg_space_retries = 50;
+module_param(icm_cfg_space_retries, uint, 0644);
+MODULE_PARM_DESC(icm_cfg_space_retries,
+		 "single-request root config-space readiness passes, ~150ms each (default 50)");
 #define ICM_APPROVE_TIMEOUT		10000	/* ms */
 #define ICM_MAX_LINK			4
 
@@ -110,6 +191,8 @@ struct usb4_switch_nvm_auth {
 /**
  * struct icm - Internal connection manager private data
  * @request_lock: Makes sure only one message is send to ICM at time
+ * @notification_lock: Serializes notification admission with shutdown
+ * @stopping: Prevents new notification work from being admitted
  * @rescan_work: Work used to rescan the surviving switches after resume
  * @upstream_port: Pointer to the PCIe upstream port this host
  *		   controller is connected. This is only set for systems
@@ -143,6 +226,8 @@ struct usb4_switch_nvm_auth {
  */
 struct icm {
 	struct mutex request_lock;
+	struct mutex notification_lock; /* Protects notification admission */
+	bool stopping;
 	struct delayed_work rescan_work;
 	struct pci_dev *upstream_port;
 	int vnd_cap;
@@ -158,6 +243,9 @@ struct icm {
 	unsigned int pcie_rescan_retries;
 	bool pcie_rescan_reclaim_empty;
 	bool veto;
+	bool driver_ready_timed_out;
+	bool root_config_timed_out;
+	bool root_power_cycle_dispatched;
 	bool (*is_supported)(struct tb *tb);
 	int (*cio_reset)(struct tb *tb);
 	int (*get_mode)(struct tb *tb);
@@ -266,28 +354,58 @@ static inline u64 get_parent_route(u64 route)
 }
 
 static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw);
-static void icm_disconnect_pcie_tunnels(struct tb *tb);
+static int icm_disconnect_pcie_tunnels(struct tb *tb);
 static void icm_cancel_pcie_rescan(struct icm *icm);
 static void icm_schedule_native_pcie_hotplug_rescan(struct tb *tb,
 						    struct tb_switch *sw);
 
+struct icm_teardown_ops {
+	int (*disconnect_pcie_tunnels)(struct tb *tb, void *data);
+	int (*disconnect_pcie_paths)(struct tb *tb, void *data);
+	void (*put_after_revoke)(struct tb_tunnel *tunnel, void *data);
+	void (*put_on_cm_stop)(struct tb_tunnel *tunnel, void *data);
+	void (*remove_topology)(struct tb *tb, void *data);
+	void (*driver_unloads)(struct tb *tb, void *data);
+	void (*release_auth)(struct tb *tb, void *data);
+};
+
 static int pci2cio_wait_completion(struct icm *icm, unsigned long timeout_msec)
 {
 	unsigned long end = jiffies + msecs_to_jiffies(timeout_msec);
+	struct pci_dev *pdev = icm->upstream_port;
+	enum tb_pcie2cio_completion_state state;
+	int ret;
 	u32 cmd;
 
 	do {
-		pci_read_config_dword(icm->upstream_port,
-				      icm->vnd_cap + PCIE2CIO_CMD, &cmd);
-		if (!(cmd & PCIE2CIO_CMD_START)) {
-			if (cmd & PCIE2CIO_CMD_TIMEOUT)
-				break;
+		ret = pci_read_config_dword(pdev,
+					    icm->vnd_cap + PCIE2CIO_CMD, &cmd);
+		if (ret != PCIBIOS_SUCCESSFUL) {
+			pci_err(pdev,
+				"PCIe2CIO command status read failed: VSEC %#x status %#x\n",
+				icm->vnd_cap, ret);
+			return -EIO;
+		}
+
+		state = tb_pcie2cio_completion_state(cmd);
+		switch (state) {
+		case TB_PCIE2CIO_COMPLETION_COMPLETE:
 			return 0;
+		case TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT:
+			pci_err(pdev,
+				"PCIe2CIO target timed out: VSEC %#x command %#010x\n",
+				icm->vnd_cap, cmd);
+			return -ETIMEDOUT;
+		case TB_PCIE2CIO_COMPLETION_BUSY:
+			break;
 		}
 
 		msleep(50);
 	} while (time_before(jiffies, end));
 
+	pci_err(pdev,
+		"PCIe2CIO command remained busy: VSEC %#x command %#010x after %lu ms\n",
+		icm->vnd_cap, cmd, timeout_msec);
 	return -ETIMEDOUT;
 }
 
@@ -302,14 +420,22 @@ static int pcie2cio_read(struct icm *icm, enum tb_cfg_space cs,
 	cmd |= (port << PCIE2CIO_CMD_PORT_SHIFT) & PCIE2CIO_CMD_PORT_MASK;
 	cmd |= (cs << PCIE2CIO_CMD_CS_SHIFT) & PCIE2CIO_CMD_CS_MASK;
 	cmd |= PCIE2CIO_CMD_START;
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO command write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	ret = pci2cio_wait_completion(icm, 5000);
 	if (ret)
 		return ret;
 
-	pci_read_config_dword(pdev, vnd_cap + PCIE2CIO_RDDATA, data);
-	return 0;
+	ret = pci_read_config_dword(pdev, vnd_cap + PCIE2CIO_RDDATA, data);
+	if (ret == PCIBIOS_SUCCESSFUL)
+		return 0;
+
+	pci_err(pdev, "PCIe2CIO result read failed: status %#x\n", ret);
+	return -EIO;
 }
 
 static int pcie2cio_write(struct icm *icm, enum tb_cfg_space cs,
@@ -317,15 +443,24 @@ static int pcie2cio_write(struct icm *icm, enum tb_cfg_space cs,
 {
 	struct pci_dev *pdev = icm->upstream_port;
 	int vnd_cap = icm->vnd_cap;
+	int ret;
 	u32 cmd;
 
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_WRDATA, data);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_WRDATA, data);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO data write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	cmd = index;
 	cmd |= (port << PCIE2CIO_CMD_PORT_SHIFT) & PCIE2CIO_CMD_PORT_MASK;
 	cmd |= (cs << PCIE2CIO_CMD_CS_SHIFT) & PCIE2CIO_CMD_CS_MASK;
 	cmd |= PCIE2CIO_CMD_WRITE | PCIE2CIO_CMD_START;
-	pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	ret = pci_write_config_dword(pdev, vnd_cap + PCIE2CIO_CMD, cmd);
+	if (ret != PCIBIOS_SUCCESSFUL) {
+		pci_err(pdev, "PCIe2CIO command write failed: status %#x\n", ret);
+		return -EIO;
+	}
 
 	return pci2cio_wait_completion(icm, 5000);
 }
@@ -357,9 +492,12 @@ static bool icm_copy(struct tb_cfg_request *req, const struct ctl_pkg *pkg)
 	return hdr->packet_id == hdr->total_packets - 1;
 }
 
-static int icm_request(struct tb *tb, const void *request, size_t request_size,
-		       void *response, size_t response_size, size_t npackets,
-		       int retries, unsigned int timeout_msec)
+static int __icm_request(struct tb *tb, const void *request,
+			 size_t request_size, void *response,
+			 size_t response_size, size_t npackets, int retries,
+			 unsigned int timeout_msec,
+			 unsigned int settle_min_us,
+			 unsigned int settle_max_us)
 {
 	struct icm *icm = tb_priv(tb);
 
@@ -383,6 +521,14 @@ static int icm_request(struct tb *tb, const void *request, size_t request_size,
 
 		mutex_lock(&icm->request_lock);
 		res = tb_cfg_request_sync(tb->ctl, req, timeout_msec);
+		/*
+		 * Some firmware commands acknowledge before their path context is
+		 * externally stable. Keep the command stream serialized through the
+		 * caller-selected settle interval so another command cannot observe
+		 * or reuse the intermediate state.
+		 */
+		if (!res.err && settle_min_us)
+			usleep_range(settle_min_us, settle_max_us);
 		mutex_unlock(&icm->request_lock);
 
 		tb_cfg_request_put(req);
@@ -394,6 +540,28 @@ static int icm_request(struct tb *tb, const void *request, size_t request_size,
 	} while (retries--);
 
 	return -ETIMEDOUT;
+}
+
+static int icm_request(struct tb *tb, const void *request, size_t request_size,
+		       void *response, size_t response_size, size_t npackets,
+		       int retries, unsigned int timeout_msec)
+{
+	return __icm_request(tb, request, request_size, response, response_size,
+			     npackets, retries, timeout_msec, 0, 0);
+}
+
+static int
+icm_xdomain_request(struct tb *tb, const void *request, size_t request_size,
+		    void *response, size_t response_size,
+		    const struct tb_icm_xdomain_path_transition *transition)
+{
+	if (transition->action != TB_ICM_XDOMAIN_PATH_SETTLE)
+		return -EINVAL;
+
+	return __icm_request(tb, request, request_size, response, response_size,
+			     1, ICM_RETRIES, ICM_TIMEOUT,
+			     transition->settle_min_us,
+			     transition->settle_max_us);
 }
 
 /*
@@ -774,6 +942,22 @@ static void remove_switch(struct tb_switch *sw)
 	tb_switch_remove(sw);
 }
 
+static bool icm_xdomain_connected_event_valid(struct tb *tb,
+					      const struct icm_pkg_header *hdr,
+					      const uuid_t *local_uuid,
+					      const uuid_t *remote_uuid)
+{
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return false;
+	if (!tb->root_switch || !tb->root_switch->uuid ||
+	    !uuid_equal(local_uuid, tb->root_switch->uuid))
+		return false;
+	/* An all-ones event value is absence, not a globally usable identity. */
+	if (!memchr_inv(remote_uuid->b, 0xff, UUID_SIZE))
+		return false;
+	return true;
+}
+
 static void add_xdomain(struct tb_switch *sw, u64 route,
 			const uuid_t *local_uuid, const uuid_t *remote_uuid,
 			u8 link, u8 depth)
@@ -796,13 +980,6 @@ static void add_xdomain(struct tb_switch *sw, u64 route,
 out:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
-}
-
-static void update_xdomain(struct tb_xdomain *xd, u64 route, u8 link)
-{
-	xd->link = link;
-	xd->route = route;
-	xd->is_unplugged = false;
 }
 
 static void remove_xdomain(struct tb_xdomain *xd)
@@ -1019,6 +1196,12 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	u8 link, depth;
 	u64 route;
 
+	if (!icm_xdomain_connected_event_valid(tb, hdr, &pkg->local_uuid,
+					       &pkg->remote_uuid)) {
+		tb_warn(tb, "invalid XDomain connected event, ignoring\n");
+		return;
+	}
+
 	link = pkg->link_info & ICM_LINK_INFO_LINK_MASK;
 	depth = (pkg->link_info & ICM_LINK_INFO_DEPTH_MASK) >>
 		ICM_LINK_INFO_DEPTH_SHIFT;
@@ -1029,29 +1212,6 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	}
 
 	route = get_route(pkg->local_route_hi, pkg->local_route_lo);
-
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
-	if (xd) {
-		u8 xd_phy_port, phy_port;
-
-		xd_phy_port = phy_port_from_route(xd->route, xd->depth);
-		phy_port = phy_port_from_route(route, depth);
-
-		if (xd->depth == depth && xd_phy_port == phy_port) {
-			update_xdomain(xd, route, link);
-			tb_xdomain_put(xd);
-			return;
-		}
-
-		/*
-		 * If we find an existing XDomain connection remove it
-		 * now. We need to go through login handshake and
-		 * everything anyway to be able to re-establish the
-		 * connection.
-		 */
-		remove_xdomain(xd);
-		tb_xdomain_put(xd);
-	}
 
 	/*
 	 * Look if there already exists an XDomain in the same place
@@ -1090,7 +1250,7 @@ icm_fr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 		return;
 	}
 
-	add_xdomain(sw, route, &pkg->local_uuid, &pkg->remote_uuid, link,
+	add_xdomain(sw, route, tb->root_switch->uuid, &pkg->remote_uuid, link,
 		    depth);
 	tb_switch_put(sw);
 }
@@ -1101,13 +1261,28 @@ icm_fr_xdomain_disconnected(struct tb *tb, const struct icm_pkg_header *hdr)
 	const struct icm_fr_event_xdomain_disconnected *pkg =
 		(const struct icm_fr_event_xdomain_disconnected *)hdr;
 	struct tb_xdomain *xd;
+	u8 link, depth;
+
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return;
+	link = pkg->link_info & ICM_LINK_INFO_LINK_MASK;
+	depth = (pkg->link_info & ICM_LINK_INFO_DEPTH_MASK) >>
+		ICM_LINK_INFO_DEPTH_SHIFT;
+	if (link > ICM_MAX_LINK || depth > TB_SWITCH_MAX_DEPTH)
+		return;
 
 	/*
 	 * If the connection is through one or multiple devices, the
 	 * XDomain device is removed along with them so it is fine if we
 	 * cannot find it here.
 	 */
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
+	xd = tb_xdomain_find_by_link_depth(tb, link, depth);
+	if (!xd) {
+		u8 dual_link = dual_link_from_link(link);
+
+		if (dual_link)
+			xd = tb_xdomain_find_by_link_depth(tb, dual_link, depth);
+	}
 	if (xd) {
 		remove_xdomain(xd);
 		tb_xdomain_put(xd);
@@ -1679,24 +1854,33 @@ static int icm_disconnect_pcie_tunnel(struct tb *tb, struct tb_switch *sw)
 
 	tb_switch_xhci_disconnect(sw);
 	icm_remove_pcie_devices(tb, tunnel->src_port);
-	tb_tunnel_deactivate(tunnel);
+	if (tb_tunnel_deactivate(tunnel))
+		return -EUCLEAN;
 	list_del(&tunnel->list);
 	tb_tunnel_put(tunnel);
 	return 0;
 }
 
-static void icm_disconnect_pcie_tunnels(struct tb *tb)
+static int icm_disconnect_pcie_tunnels(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
 
 	list_for_each_entry_safe_reverse(tunnel, n, &icm->tunnel_list, list) {
 		if (tunnel->type == TB_TUNNEL_PCI) {
-			tb_tunnel_deactivate(tunnel);
+			res = tb_tunnel_deactivate(tunnel);
+			if (res) {
+				if (!ret)
+					ret = res;
+				continue;
+			}
 			list_del(&tunnel->list);
 			tb_tunnel_put(tunnel);
 		}
 	}
+
+	return ret;
 }
 
 static int icm_tunnel_pcie_fallback(struct tb *tb, struct tb_switch *sw)
@@ -1736,7 +1920,10 @@ static int icm_tunnel_pcie_fallback(struct tb *tb, struct tb_switch *sw)
 	if (ret) {
 		tb_sw_warn(sw, "tbfix: software PCIe tunnel activation failed: %d\n",
 			   ret);
-		tb_tunnel_put(tunnel);
+		if (ret == -EUCLEAN)
+			list_add_tail(&tunnel->list, &icm->tunnel_list);
+		else
+			tb_tunnel_put(tunnel);
 		return ret;
 	}
 
@@ -1861,8 +2048,11 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 					int transmit_path, int transmit_ring,
 					int receive_path, int receive_ring)
 {
+	struct tb_icm_xdomain_path_transition transition;
 	struct icm_tr_pkg_approve_xdomain_response reply;
 	struct icm_tr_pkg_approve_xdomain request;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
 	int ret;
 
 	memset(&request, 0, sizeof(request));
@@ -1875,13 +2065,22 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	request.receive_ring = receive_ring;
 	memcpy(&request.remote_uuid, xd->remote_uuid, sizeof(*xd->remote_uuid));
 
+	state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	transition = tb_icm_xdomain_path_next(state, event);
 	memset(&reply, 0, sizeof(reply));
-	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
-			  1, ICM_RETRIES, ICM_TIMEOUT);
+	ret = icm_xdomain_request(tb, &request, sizeof(request), &reply,
+				  sizeof(reply), &transition);
 	if (ret)
 		return ret;
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
+		return -EIO;
+
+	state = transition.state;
+	transition = tb_icm_xdomain_path_next(state,
+					      TB_ICM_XDOMAIN_PATH_SETTLED);
+	if (WARN_ON_ONCE(transition.action != TB_ICM_XDOMAIN_PATH_ACTIVATE))
 		return -EIO;
 
 	icm_xdomain_activated(xd, true);
@@ -1889,11 +2088,24 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 }
 
 static int icm_tr_xdomain_tear_down(struct tb *tb, struct tb_xdomain *xd,
-				    int stage)
+				    int stage,
+				    enum tb_icm_xdomain_path_state *state,
+				    enum tb_icm_xdomain_path_action *action)
 {
+	struct tb_icm_xdomain_path_transition transition;
 	struct icm_tr_pkg_disconnect_xdomain_response reply;
 	struct icm_tr_pkg_disconnect_xdomain request;
+	enum tb_icm_xdomain_path_event event;
 	int ret;
+
+	if (stage == 1)
+		event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE;
+	else if (stage == 2)
+		event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	else
+		return -EINVAL;
+
+	transition = tb_icm_xdomain_path_next(*state, event);
 
 	memset(&request, 0, sizeof(request));
 	request.hdr.code = ICM_DISCONNECT_XDOMAIN;
@@ -1903,14 +2115,22 @@ static int icm_tr_xdomain_tear_down(struct tb *tb, struct tb_xdomain *xd,
 	memcpy(&request.remote_uuid, xd->remote_uuid, sizeof(*xd->remote_uuid));
 
 	memset(&reply, 0, sizeof(reply));
-	ret = icm_request(tb, &request, sizeof(request), &reply, sizeof(reply),
-			  1, ICM_RETRIES, ICM_TIMEOUT);
+	ret = icm_xdomain_request(tb, &request, sizeof(request), &reply,
+				  sizeof(reply), &transition);
 	if (ret)
 		return ret;
 
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
 		return -EIO;
 
+	*state = transition.state;
+	transition = tb_icm_xdomain_path_next(*state,
+					      TB_ICM_XDOMAIN_PATH_SETTLED);
+	if (transition.action == TB_ICM_XDOMAIN_PATH_REJECT)
+		return -EIO;
+
+	*state = transition.state;
+	*action = transition.action;
 	return 0;
 }
 
@@ -1918,16 +2138,22 @@ static int icm_tr_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 					   int transmit_path, int transmit_ring,
 					   int receive_path, int receive_ring)
 {
+	enum tb_icm_xdomain_path_action action;
+	enum tb_icm_xdomain_path_state state;
 	int ret;
 
-	ret = icm_tr_xdomain_tear_down(tb, xd, 1);
+	state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+	ret = icm_tr_xdomain_tear_down(tb, xd, 1, &state, &action);
 	if (ret)
 		return ret;
+	if (WARN_ON_ONCE(action != TB_ICM_XDOMAIN_PATH_SEND_STAGE2))
+		return -EIO;
 
-	usleep_range(10, 50);
-	ret = icm_tr_xdomain_tear_down(tb, xd, 2);
+	ret = icm_tr_xdomain_tear_down(tb, xd, 2, &state, &action);
 	if (ret)
 		return ret;
+	if (WARN_ON_ONCE(action != TB_ICM_XDOMAIN_PATH_DEACTIVATE))
+		return -EIO;
 
 	icm_xdomain_activated(xd, false);
 	return 0;
@@ -2104,22 +2330,13 @@ icm_tr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 	struct tb_switch *sw;
 	u64 route;
 
-	if (!tb->root_switch)
+	if (!icm_xdomain_connected_event_valid(tb, hdr, &pkg->local_uuid,
+					       &pkg->remote_uuid)) {
+		tb_warn(tb, "invalid XDomain connected event, ignoring\n");
 		return;
+	}
 
 	route = get_route(pkg->local_route_hi, pkg->local_route_lo);
-
-	xd = tb_xdomain_find_by_uuid(tb, &pkg->remote_uuid);
-	if (xd) {
-		if (xd->route == route) {
-			update_xdomain(xd, route, 0);
-			tb_xdomain_put(xd);
-			return;
-		}
-
-		remove_xdomain(xd);
-		tb_xdomain_put(xd);
-	}
 
 	/* An existing xdomain with the same address */
 	xd = tb_xdomain_find_by_route(tb, route);
@@ -2145,7 +2362,7 @@ icm_tr_xdomain_connected(struct tb *tb, const struct icm_pkg_header *hdr)
 		return;
 	}
 
-	add_xdomain(sw, route, &pkg->local_uuid, &pkg->remote_uuid, 0, 0);
+	add_xdomain(sw, route, tb->root_switch->uuid, &pkg->remote_uuid, 0, 0);
 	tb_switch_put(sw);
 }
 
@@ -2156,6 +2373,9 @@ icm_tr_xdomain_disconnected(struct tb *tb, const struct icm_pkg_header *hdr)
 		(const struct icm_tr_event_xdomain_disconnected *)hdr;
 	struct tb_xdomain *xd;
 	u64 route;
+
+	if (hdr->packet_id || hdr->total_packets != 1)
+		return;
 
 	route = get_route(pkg->route_hi, pkg->route_lo);
 
@@ -2190,17 +2410,38 @@ static struct pci_dev *get_upstream_port(struct pci_dev *pdev)
 	case PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_BRIDGE:
 	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_BRIDGE:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_BRIDGE:
+	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_BRIDGE:
 		return parent;
 	}
 
 	return NULL;
 }
 
+static bool icm_find_upstream_vsec(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+	struct pci_dev *upstream_port;
+	int cap;
+
+	if (icm->upstream_port)
+		return true;
+
+	upstream_port = get_upstream_port(tb->nhi->pdev);
+	if (!upstream_port)
+		return false;
+
+	cap = pci_find_ext_capability(upstream_port, PCI_EXT_CAP_ID_VNDR);
+	if (cap <= 0)
+		return false;
+
+	icm->upstream_port = upstream_port;
+	icm->vnd_cap = cap;
+	return true;
+}
+
 static bool icm_ar_is_supported(struct tb *tb)
 {
-	struct pci_dev *upstream_port;
-	struct icm *icm = tb_priv(tb);
-
 	/*
 	 * Starting from Alpine Ridge we can use ICM on Apple machines
 	 * as well. We just need to reset and re-enable it first.
@@ -2215,21 +2456,7 @@ static bool icm_ar_is_supported(struct tb *tb)
 	 * Find the upstream PCIe port in case we need to do reset
 	 * through its vendor specific registers.
 	 */
-	upstream_port = get_upstream_port(tb->nhi->pdev);
-	if (upstream_port) {
-		int cap;
-
-		cap = pci_find_ext_capability(upstream_port,
-					      PCI_EXT_CAP_ID_VNDR);
-		if (cap > 0) {
-			icm->upstream_port = upstream_port;
-			icm->vnd_cap = cap;
-
-			return true;
-		}
-	}
-
-	return false;
+	return icm_find_upstream_vsec(tb);
 }
 
 static int icm_ar_cio_reset(struct tb *tb)
@@ -2512,6 +2739,7 @@ static void icm_handle_notification(struct work_struct *work)
 static void icm_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 			     const void *buf, size_t size)
 {
+	struct icm *icm = tb_priv(tb);
 	struct icm_notification *n;
 
 	n = kmalloc_obj(*n);
@@ -2527,7 +2755,86 @@ static void icm_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 	INIT_WORK(&n->work, icm_handle_notification);
 	n->tb = tb;
 
-	queue_work(tb->wq, &n->work);
+	/*
+	 * Domain teardown keeps ring 0 running until path ownership has been
+	 * resolved, so the control callback can still arrive after ->stop has
+	 * begun removing topology. Serialize the admission decision with
+	 * icm_stop(): work admitted before the gate closes is drained by
+	 * icm_deinit(), and work arriving afterwards is discarded here.
+	 */
+	mutex_lock(&icm->notification_lock);
+	if (!icm->stopping) {
+		queue_work(tb->wq, &n->work);
+		n = NULL;
+	}
+	mutex_unlock(&icm->notification_lock);
+
+	if (n) {
+		kfree(n->pkg);
+		kfree(n);
+	}
+}
+
+static int
+icm_log_startup_failure(struct tb *tb, const char *stage, int error,
+			const struct tb_icm_startup_proof *proof,
+			const struct tb_ctl_stats *before)
+{
+	struct tb_ctl_stats after;
+	u32 fw_sts, outmail;
+	unsigned int mode;
+
+	tb_ctl_get_stats(tb->ctl, &after);
+	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
+	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
+	mode = FIELD_GET(REG_OUTMAIL_CMD_OPMODE_MASK, outmail);
+
+	tb_err(tb, "ICM startup proof failed at %s (%d)\n", stage, error);
+	tb_err(tb,
+	       "ICM startup claims: firmware-ready=%u mailbox-ready=%u fw_sts=%#x outmail=%#x mode=%u\n",
+	       proof->firmware_ready, proof->mailbox_ready, fw_sts, outmail, mode);
+	tb_err(tb, "ICM startup proofs: driver-ready=%u root-config=%u\n",
+	       proof->driver_ready, proof->root_config_ready);
+	tb_err(tb,
+	       "ring0 startup delta: tx-done=%u tx-canceled=%u rx-total=%u\n",
+	       after.tx_done - before->tx_done,
+	       after.tx_canceled - before->tx_canceled,
+	       after.rx_total - before->rx_total);
+	tb_err(tb,
+	       "ring0 startup delta: rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
+	       after.rx_matched - before->rx_matched,
+	       after.rx_unmatched - before->rx_unmatched,
+	       after.rx_xdomain_tx_status - before->rx_xdomain_tx_status,
+	       after.rx_dropped - before->rx_dropped);
+
+	return error;
+}
+
+static struct tb_cfg_result
+icm_wait_for_root_config(struct tb *tb, unsigned int *passes)
+{
+	struct tb_cfg_result res = { .err = -ETIMEDOUT };
+	unsigned int pass;
+
+	for (pass = 0;
+	     pass < tb_icm_root_config_request_count(icm_cfg_space_retries);
+	     pass++) {
+		u32 tmp;
+
+		res = tb_cfg_read_raw_once(tb->ctl, &tmp, 0, 0,
+					   TB_CFG_SWITCH, 0, 1,
+					   TB_ICM_ROOT_CONFIG_TIMEOUT_MS,
+					   pass);
+		if (!res.err) {
+			*passes = pass + 1;
+			return res;
+		}
+
+		msleep(TB_ICM_ROOT_CONFIG_INTERVAL_MS);
+	}
+
+	*passes = pass;
+	return res;
 }
 
 static int
@@ -2535,34 +2842,68 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
 		   u8 *proto_version, size_t *nboot_acl, bool *rpm)
 {
 	struct icm *icm = tb_priv(tb);
-	unsigned int retries = 50;
+	struct tb_ctl_stats before, after;
+	struct tb_icm_startup_proof proof;
+	struct tb_cfg_result res = { .err = -ETIMEDOUT };
+	unsigned long started = jiffies;
+	unsigned int pass;
+	bool mailbox_ready;
+	u32 fw_sts, outmail;
 	int ret;
+
+	icm->driver_ready_timed_out = false;
+	icm->root_config_timed_out = false;
+	icm->root_power_cycle_dispatched = false;
+
+	fw_sts = ioread32(tb->nhi->iobase + REG_FW_STS);
+	outmail = ioread32(tb->nhi->iobase + REG_OUTMAIL_CMD);
+	mailbox_ready = FIELD_GET(REG_OUTMAIL_CMD_OPMODE_MASK, outmail) ==
+			NHI_FW_CM_MODE;
+	proof = tb_icm_startup_proof_begin(fw_sts, mailbox_ready);
+	tb_ctl_get_stats(tb->ctl, &before);
 
 	ret = icm->driver_ready(tb, security_level, proto_version, nboot_acl,
 				rpm);
 	if (ret) {
-		tb_err(tb, "failed to send driver ready to ICM\n");
-		return ret;
+		icm->driver_ready_timed_out = ret == -ETIMEDOUT;
+		return icm_log_startup_failure(tb, "DriverReady", ret, &proof,
+					       &before);
+	}
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
+
+	/* Prove that DriverReady also made the root config space accessible. */
+	res = icm_wait_for_root_config(tb, &pass);
+	if (!res.err) {
+		tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+		tb_ctl_get_stats(tb->ctl, &after);
+		tb_info(tb,
+			"ICM startup proved in %u pass(es) / %u ms: firmware-ready=%u mailbox-ready=%u driver-ready=%u root-config=%u; ring0 delta tx-done=%u tx-canceled=%u rx-total=%u rx-matched=%u rx-unmatched=%u rx-local-status=%u rx-dropped=%u\n",
+			pass, jiffies_to_msecs(jiffies - started),
+			proof.firmware_ready, proof.mailbox_ready,
+			proof.driver_ready, proof.root_config_ready,
+			after.tx_done - before.tx_done,
+			after.tx_canceled - before.tx_canceled,
+			after.rx_total - before.rx_total,
+			after.rx_matched - before.rx_matched,
+			after.rx_unmatched - before.rx_unmatched,
+			after.rx_xdomain_tx_status -
+				before.rx_xdomain_tx_status,
+			after.rx_dropped - before.rx_dropped);
+		return 0;
 	}
 
 	/*
-	 * Hold on here until the switch config space is accessible so
-	 * that we can read root switch config successfully.
+	 * Report each independent proof and the ring-zero deltas. The status and
+	 * mailbox registers are firmware claims; only the command completion and
+	 * matched config response prove the end-to-end control path.
 	 */
-	do {
-		struct tb_cfg_result res;
-		u32 tmp;
-
-		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-				      0, 1, 100);
-		if (!res.err)
-			return 0;
-
-		msleep(50);
-	} while (--retries);
-
-	tb_err(tb, "failed to read root switch config space, giving up\n");
-	return -ETIMEDOUT;
+	tb_err(tb,
+	       "root config proof exhausted %u single-request pass(es) / %u ms\n",
+	       tb_icm_root_config_request_count(pass),
+	       jiffies_to_msecs(jiffies - started));
+	icm->root_config_timed_out = res.err == -ETIMEDOUT;
+	return icm_log_startup_failure(tb, "root config", res.err, &proof,
+				       &before);
 }
 
 /**
@@ -2570,7 +2911,7 @@ __icm_driver_ready(struct tb *tb, enum tb_security_level *security_level,
  * @tb: Domain (owned by the software CM, NOT the firmware CM)
  *
  * Called from the software CM's driver_ready hook when it takes over a
- * domain whose broken ICM firmware is left resident (force_sw_cm). Until
+ * domain whose ICM firmware is left resident (force_sw_cm). Until
  * the firmware has seen DRIVER_READY it does not serve config space
  * access, so the software CM's very first root switch read times out and
  * the whole probe fails with -ETIMEDOUT. Send the generic DRIVER_READY
@@ -2588,7 +2929,7 @@ int icm_unlock_config_space(struct tb *tb)
 		.hdr.code = ICM_DRIVER_READY,
 	};
 	struct icm_tr_pkg_driver_ready_response reply;
-	unsigned int retries = 50;
+	unsigned int passes;
 	struct tb_cfg_request *req;
 	struct tb_cfg_result res;
 
@@ -2614,49 +2955,79 @@ int icm_unlock_config_space(struct tb *tb)
 	tb_cfg_request_put(req);
 
 	if (res.err) {
-		tb_err(tb, "resident ICM did not answer DRIVER_READY: %d\n",
-		       res.err == 1 ? -EIO : res.err);
-		return res.err == 1 ? -EIO : res.err;
+		int err = res.err == 1 ? -EIO : res.err;
+
+		tb_err(tb,
+		       "resident ICM did not answer DRIVER_READY (%d); exclusive ring-0 ownership is not established\n",
+		       err);
+		return err;
 	}
 
-	do {
-		u32 tmp;
+	res = icm_wait_for_root_config(tb, &passes);
+	if (!res.err) {
+		tb_dbg(tb, "resident ICM opened the config space in %u pass(es)\n",
+		       passes);
+		return 0;
+	}
 
-		res = tb_cfg_read_raw(tb->ctl, &tmp, 0, 0, TB_CFG_SWITCH,
-				      0, 1, 100);
-		if (!res.err) {
-			tb_dbg(tb, "resident ICM opened the config space\n");
-			return 0;
-		}
-
-		msleep(50);
-	} while (--retries);
-
-	tb_err(tb, "resident ICM answered DRIVER_READY but never opened the config space\n");
+	tb_err(tb,
+	       "resident ICM never opened the config space after %u single-request pass(es)\n",
+	       passes);
 	return -ETIMEDOUT;
 }
 
 static int icm_firmware_reset(struct tb *tb, struct tb_nhi *nhi)
 {
 	struct icm *icm = tb_priv(tb);
-	u32 val;
+	u32 before, reset_requested, arc_restarted, val;
 
 	if (!icm->upstream_port)
 		return -ENODEV;
 
 	/* Put ARC to wait for CIO reset event to happen */
-	val = ioread32(nhi->iobase + REG_FW_STS);
+	before = ioread32(nhi->iobase + REG_FW_STS);
+	val = before;
 	val |= REG_FW_STS_CIO_RESET_REQ;
 	iowrite32(val, nhi->iobase + REG_FW_STS);
+	reset_requested = ioread32(nhi->iobase + REG_FW_STS);
 
 	/* Re-start ARC */
 	val = ioread32(nhi->iobase + REG_FW_STS);
 	val |= REG_FW_STS_ICM_EN_INVERT;
 	val |= REG_FW_STS_ICM_EN_CPU;
 	iowrite32(val, nhi->iobase + REG_FW_STS);
+	arc_restarted = ioread32(nhi->iobase + REG_FW_STS);
+
+	tb_info(tb,
+		"ARC/CIO reset request: FW_STS %#010x -> %#010x -> %#010x\n",
+		before, reset_requested, arc_restarted);
 
 	/* Trigger CIO reset now */
 	return icm->cio_reset(tb);
+}
+
+static int icm_quiesced_reset(struct tb *tb)
+{
+	struct tb_nhi *nhi = tb->nhi;
+	u32 before, after;
+	int ret;
+
+	before = ioread32(nhi->iobase + REG_FW_STS);
+	ret = icm_firmware_reset(tb, nhi);
+	if (ret)
+		return ret;
+
+	/* Let the ARC leave reset before the new domain sends DriverReady. */
+	msleep(100);
+	after = ioread32(nhi->iobase + REG_FW_STS);
+	if (after == (u32)~0U)
+		return -ENODEV;
+	if (!(after & REG_FW_STS_NVM_AUTH_DONE))
+		return -ETIMEDOUT;
+
+	tb_info(tb, "quiesced ARC/CIO reset completed (FW_STS %#010x -> %#010x)\n",
+		before, after);
+	return 0;
 }
 
 static int icm_firmware_start(struct tb *tb, struct tb_nhi *nhi)
@@ -2723,8 +3094,9 @@ static int icm_reset_phy_port(struct tb *tb, int phy_port)
 	state1 = val1 & PHY_PORT_CS1_LINK_STATE_MASK;
 	state1 >>= PHY_PORT_CS1_LINK_STATE_SHIFT;
 
-	/* If they are both up we need to reset them now */
-	if (state0 != TB_PORT_UP || state1 != TB_PORT_UP)
+	/* One trained lane is enough to make the physical connector active. */
+	if (!tb_icm_phy_port_needs_reset(state0 == TB_PORT_UP,
+					 state1 == TB_PORT_UP))
 		return 0;
 
 	val0 |= PHY_PORT_CS1_LINK_DISABLE;
@@ -2777,8 +3149,9 @@ static int icm_firmware_init(struct tb *tb)
 			break;
 
 		case NHI_FW_CM_MODE:
-			/* Ask ICM to accept all Thunderbolt devices */
-			nhi_mailbox_cmd(nhi, NHI_MAILBOX_ALLOW_ALL_DEVS, 0);
+			if (tb_icm_uses_legacy_allow_all(nhi->pdev->device))
+				nhi_mailbox_cmd(nhi,
+						NHI_MAILBOX_ALLOW_ALL_DEVS, 0);
 			break;
 
 		default:
@@ -2804,6 +3177,66 @@ static int icm_firmware_init(struct tb *tb)
 	return 0;
 }
 
+static int icm_root_power_cycle(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+	enum tb_icm_root_recovery_state state = TB_ICM_ROOT_RECOVERY_IDLE;
+	struct pci_dev *pdev = tb->nhi->pdev;
+	struct tb_cfg_result res;
+	bool tx_consumed;
+	int port;
+
+	state = tb_icm_root_recovery_next(
+		state, icm->driver_ready_timed_out ?
+		TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT :
+		icm->root_config_timed_out ?
+		TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT :
+		TB_ICM_ROOT_RECOVERY_OTHER_FAILURE);
+	if (state != TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING)
+		return -EOPNOTSUPP;
+
+	port = dma_port_for_nhi(pdev->vendor, pdev->device);
+	if (port < 0)
+		return port;
+
+	/*
+	 * The normal reference path first changes a root-router plug-event-delay
+	 * bit, but that preflight itself needs the config service that failed here.
+	 * Its safe-mode path sends this same command without the preflight. A fresh
+	 * probe, not the write response, remains the recovery proof.
+	 */
+	tb_warn(tb,
+		"startup control proof failed at %s; issuing one host-router power-cycle request on DMA port %d\n",
+		icm->driver_ready_timed_out ? "DriverReady" : "root config",
+		port);
+	res = dma_port_power_cycle_raw(tb->ctl, port);
+	tx_consumed = res.tx_state == TB_CFG_TX_CONSUMED;
+	state = tb_icm_root_recovery_next(
+		state, tb_icm_root_recovery_command_event(res.err, tx_consumed));
+	if (state != TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED) {
+		if (res.err == 1)
+			tb_err(tb,
+			       "host-router power-cycle request rejected: tb_error=%u response=%#llx:%u tx_state=%u\n",
+			       res.tb_error, res.response_route,
+			       res.response_port, res.tx_state);
+		else
+			tb_err(tb,
+			       "host-router power-cycle request has no request-local TX completion proof: error=%d tx_state=%u\n",
+			       res.err, res.tx_state);
+		return res.err > 0 ? -EIO : res.err;
+	}
+
+	icm->root_power_cycle_dispatched = true;
+	if (res.err == -ETIMEDOUT)
+		tb_warn(tb,
+			"host-router power-cycle request was consumed but got no reply; treating execution as unproven and requiring a fresh probe\n");
+	else
+		tb_info(tb,
+			"host-router power-cycle request was acknowledged; requiring a fresh probe\n");
+
+	return 0;
+}
+
 static int icm_driver_ready(struct tb *tb)
 {
 	struct icm *icm = tb_priv(tb);
@@ -2823,24 +3256,24 @@ static int icm_driver_ready(struct tb *tb)
 	ret = __icm_driver_ready(tb, &tb->security_level, &icm->proto_version,
 				 &tb->nboot_acl, &icm->rpm);
 	if (ret) {
+		if ((icm->driver_ready_timed_out ||
+		     icm->root_config_timed_out) &&
+		    tb_nhi_startup_recovery_allowed(tb->nhi) &&
+		    tb_nhi_recovery_supported(tb->nhi->pdev->vendor,
+					      tb->nhi->pdev->device))
+			icm_root_power_cycle(tb);
+
 		/*
-		 * The wedged-but-running ICM: REG_FW_STS still advertises
-		 * ICM_EN, so icm_firmware_start() skipped the reset, but the
-		 * firmware's message loop is dead and DRIVER_READY timed out.
-		 * Do NOT force icm_firmware_reset() here: on Alpine/Titan
-		 * Ridge the NVM authentication asserting NVM_AUTH_DONE is
-		 * performed only by the on-die mask ROM at a true chip reset
-		 * (AppMana/intel-thunderbolt-firmwares,
-		 * out/ICM_8051_FINDINGS.md), so a warm ICM_EN_CPU restart
-		 * comes back UNAUTHENTICATED -- it converts "wedged" into an
-		 * equally terminal "not authenticated" plus a multi-second
-		 * stall (the reverted tbfix 1.7/1.8 experiment). Tell the
-		 * operator the truth instead of a generic timeout. KUnit:
-		 * tb_test_icm_wedged_running.
+		 * ICM_EN is not a liveness signal, and a DRIVER_READY timeout is
+		 * not proof that every firmware path has stopped. A partial
+		 * failure may still own XDomain responses while config requests
+		 * time out. Neither software takeover nor an undocumented live
+		 * firmware restart can establish exclusive ownership here.
 		 */
-		if (icm_firmware_running(tb->nhi))
+		if (tb_icm_wedged(ret, ioread32(tb->nhi->iobase + REG_FW_STS))) {
 			tb_err(tb,
-			       "ICM advertises running (ICM_EN) but does not respond; wedged firmware. A warm reset cannot re-authenticate this controller -- a board COLD power cycle is required\n");
+			       "ICM advertises running but does not respond; refusing an unproven live restart or software takeover\n");
+		}
 		return ret;
 	}
 
@@ -2855,6 +3288,30 @@ static int icm_driver_ready(struct tb *tb)
 		tb_dbg(tb, "USB4 proxy operations supported\n");
 
 	return 0;
+}
+
+bool icm_root_config_timed_out(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->root_config_timed_out;
+}
+
+bool icm_root_power_cycle_dispatched(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->root_power_cycle_dispatched;
+}
+
+bool icm_driver_ready_timed_out(struct tb *tb)
+{
+	if (!tb->cm_ops || tb->cm_ops->driver_ready != icm_driver_ready)
+		return false;
+
+	return ((struct icm *)tb_priv(tb))->driver_ready_timed_out;
 }
 
 static int icm_suspend(struct tb *tb)
@@ -3042,38 +3499,152 @@ static int icm_start(struct tb *tb, bool not_used)
 	return ret;
 }
 
-static void icm_stop(struct tb *tb)
+static int icm_teardown_disconnect_pcie_tunnels(struct tb *tb, void *data)
+{
+	return icm_disconnect_pcie_tunnels(tb);
+}
+
+static int icm_teardown_disconnect_pcie_paths(struct tb *tb, void *data)
+{
+	return nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DISCONNECT_PCIE_PATHS, 0);
+}
+
+static void icm_teardown_put_after_revoke(struct tb_tunnel *tunnel, void *data)
+{
+	tb_tunnel_put_after_revoke(tunnel);
+}
+
+static void icm_teardown_put_on_cm_stop(struct tb_tunnel *tunnel, void *data)
+{
+	tb_tunnel_put_on_cm_stop(tunnel);
+}
+
+static void icm_teardown_remove_topology(struct tb *tb, void *data)
+{
+	tb_switch_remove(tb->root_switch);
+	tb->root_switch = NULL;
+}
+
+static void icm_teardown_driver_unloads(struct tb *tb, void *data)
+{
+	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
+}
+
+static void icm_teardown_release_auth(struct tb *tb, void *data)
 {
 	struct icm *icm = tb_priv(tb);
 
-	cancel_delayed_work(&icm->rescan_work);
-	icm_cancel_pcie_rescan(icm);
-	icm_disconnect_pcie_tunnels(tb);
-	tb_switch_remove(tb->root_switch);
-	tb->root_switch = NULL;
-	nhi_mailbox_cmd(tb->nhi, NHI_MAILBOX_DRV_UNLOADS, 0);
-
-	/*
-	 * Do NOT try to reset the ICM firmware here to "clean up" for the next
-	 * driver load. On Alpine/Titan Ridge a live rmmod+modprobe wedges the
-	 * controller and CANNOT be recovered by any runtime reset: the NVM
-	 * authentication that asserts REG_FW_STS_NVM_AUTH_DONE is performed only
-	 * by the on-die mask ROM at a true chip reset. icm_firmware_reset()
-	 * (ICM_EN_CPU) is a warm CPU restart that re-enters the flashed
-	 * application image; that image reads read-only reset-cause registers
-	 * (CA41/CB5E), sees "warm", and skips re-init -- so it never
-	 * re-authenticates. A CIO reset here only swaps the "-110 driver-not-
-	 * ready" wedge for an equally terminal "firmware not authenticated"
-	 * (and costs a multi-second shutdown stall). These boards have no
-	 * D3cold, so only a board power cycle re-enters the ROM. AR/TR core
-	 * changes must therefore be deployed via reboot, not a live reload.
-	 * Proven by firmware reverse-engineering: AppMana/intel-thunderbolt-
-	 * firmwares (out/ICM_8051_FINDINGS.md). Maple Ridge has a real reset
-	 * vector and re-authenticates on a warm restart, so it is unaffected.
-	 */
-
 	kfree(icm->last_nvm_auth);
 	icm->last_nvm_auth = NULL;
+}
+
+static const struct icm_teardown_ops icm_teardown_ops = {
+	.disconnect_pcie_tunnels = icm_teardown_disconnect_pcie_tunnels,
+	.disconnect_pcie_paths = icm_teardown_disconnect_pcie_paths,
+	.put_after_revoke = icm_teardown_put_after_revoke,
+	.put_on_cm_stop = icm_teardown_put_on_cm_stop,
+	.remove_topology = icm_teardown_remove_topology,
+	.driver_unloads = icm_teardown_driver_unloads,
+	.release_auth = icm_teardown_release_auth,
+};
+
+static int __icm_stop(struct tb *tb, const struct icm_teardown_ops *ops,
+		      void *data)
+{
+	int ret, retry_ret;
+
+	ret = ops->disconnect_pcie_tunnels(tb, data);
+	if (!ret)
+		return 0;
+
+	/*
+	 * A mailbox acknowledgment only says that firmware accepted the
+	 * request. Prove that every tracked path is inactive by running the
+	 * normal deactivation/readback path again before releasing ownership.
+	 */
+	ret = ops->disconnect_pcie_paths(tb, data);
+	if (ret) {
+		tb_warn(tb, "failed to request PCIe path disconnect: %d\n", ret);
+		return ret;
+	}
+
+	retry_ret = ops->disconnect_pcie_tunnels(tb, data);
+	if (retry_ret)
+		tb_warn(tb,
+			"PCIe tunnel ownership remains unresolved after firmware disconnect: %d\n",
+			retry_ret);
+
+	return retry_ret;
+}
+
+static void __icm_finalize_stop(struct tb *tb,
+				enum tb_domain_reset_state reset_state,
+				const struct icm_teardown_ops *ops, void *data)
+{
+	struct icm *icm = tb_priv(tb);
+	struct tb_tunnel *tunnel, *n;
+
+	list_for_each_entry_safe_reverse(tunnel, n, &icm->tunnel_list, list) {
+		list_del_init(&tunnel->list);
+		if (reset_state == TB_DOMAIN_RESET_PROVEN) {
+			ops->put_after_revoke(tunnel, data);
+		} else {
+			if (WARN_ON(tb_tunnel_is_dma(tunnel)))
+				continue;
+			ops->put_on_cm_stop(tunnel, data);
+		}
+	}
+
+	ops->remove_topology(tb, data);
+	ops->driver_unloads(tb, data);
+
+	/*
+	 * Do not reset resident firmware merely to clean up for the next load.
+	 * Alpine/Titan Ridge authentication is mask-ROM-only and is lost across
+	 * the available warm CPU restart. No other family has a documented and
+	 * independently validated live restart contract here.
+	 */
+	ops->release_auth(tb, data);
+}
+
+static int icm_stop(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+
+	/*
+	 * Close notification admission before any topology is detached. The
+	 * control channel intentionally remains live for the teardown mailbox,
+	 * therefore stopping ring 0 cannot serve as this boundary.
+	 */
+	mutex_lock(&icm->notification_lock);
+	icm->stopping = true;
+	mutex_unlock(&icm->notification_lock);
+
+	cancel_delayed_work(&icm->rescan_work);
+	icm_cancel_pcie_rescan(icm);
+	return __icm_stop(tb, &icm_teardown_ops, NULL);
+}
+
+static void icm_finalize_stop(struct tb *tb,
+			      enum tb_domain_reset_state reset_state,
+			      bool ownership_unresolved)
+{
+	__icm_finalize_stop(tb, reset_state, &icm_teardown_ops, NULL);
+}
+
+/*
+ * icm_stop() runs under tb->lock, while notification and rescan work take the
+ * same lock, so it cannot synchronously wait for either there. Domain removal
+ * calls ->deinit with tb->lock dropped. The admission gate set by icm_stop()
+ * ensures that this drain is final even though ring 0 remains live until the
+ * teardown mailbox and ownership checks finish.
+ */
+static void icm_deinit(struct tb *tb)
+{
+	struct icm *icm = tb_priv(tb);
+
+	cancel_delayed_work_sync(&icm->rescan_work);
+	flush_workqueue(tb->wq);
 }
 
 static int icm_disconnect_pcie_paths(struct tb *tb)
@@ -3245,6 +3816,8 @@ static const struct tb_cm_ops icm_fr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.handle_event = icm_handle_event,
@@ -3261,6 +3834,8 @@ static const struct tb_cm_ops icm_ar_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -3283,6 +3858,36 @@ static const struct tb_cm_ops icm_tr_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
+	.deinit = icm_deinit,
+	.quiesced_reset = icm_quiesced_reset,
+	.suspend = icm_suspend,
+	.complete = icm_complete,
+	.runtime_suspend = icm_runtime_suspend,
+	.runtime_resume = icm_runtime_resume,
+	.runtime_suspend_switch = icm_runtime_suspend_switch,
+	.runtime_resume_switch = icm_runtime_resume_switch,
+	.handle_event = icm_handle_event,
+	.get_boot_acl = icm_ar_get_boot_acl,
+	.set_boot_acl = icm_ar_set_boot_acl,
+	.approve_switch = icm_tr_approve_switch,
+	.add_switch_key = icm_tr_add_switch_key,
+	.challenge_switch_key = icm_tr_challenge_switch_key,
+	.disconnect_pcie_paths = icm_disconnect_pcie_paths,
+	.approve_xdomain_paths = icm_tr_approve_xdomain_paths,
+	.disconnect_xdomain_paths = icm_tr_disconnect_xdomain_paths,
+	.usb4_switch_op = icm_usb4_switch_op,
+	.usb4_switch_nvm_authenticate_status =
+		icm_usb4_switch_nvm_authenticate_status,
+};
+
+/* Maple Ridge uses Titan Ridge messages but has no host PCIe2CIO reset. */
+static const struct tb_cm_ops icm_mr_ops = {
+	.driver_ready = icm_driver_ready,
+	.start = icm_start,
+	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
+	.deinit = icm_deinit,
 	.suspend = icm_suspend,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
@@ -3308,6 +3913,8 @@ static const struct tb_cm_ops icm_icl_ops = {
 	.driver_ready = icm_driver_ready,
 	.start = icm_start,
 	.stop = icm_stop,
+	.finalize_stop = icm_finalize_stop,
+	.deinit = icm_deinit,
 	.complete = icm_complete,
 	.runtime_suspend = icm_runtime_suspend,
 	.runtime_resume = icm_runtime_resume,
@@ -3332,6 +3939,7 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 	INIT_DELAYED_WORK(&icm->rescan_work, icm_rescan_work);
 	INIT_DELAYED_WORK(&icm->pcie_rescan_work, icm_pcie_rescan_work);
 	mutex_init(&icm->request_lock);
+	mutex_init(&icm->notification_lock);
 	INIT_LIST_HEAD(&icm->tunnel_list);
 
 	switch (nhi->pdev->device) {
@@ -3435,7 +4043,7 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 		icm->device_disconnected = icm_tr_device_disconnected;
 		icm->xdomain_connected = icm_tr_xdomain_connected;
 		icm->xdomain_disconnected = icm_tr_xdomain_disconnected;
-		tb->cm_ops = &icm_tr_ops;
+		tb->cm_ops = &icm_mr_ops;
 		break;
 	}
 
@@ -3449,3 +4057,245 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	return tb;
 }
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct icm_teardown_test_ctx {
+	struct icm_teardown_ops ops;
+	int disconnect_ret[2];
+	unsigned int disconnect_calls;
+	int mailbox_ret;
+	unsigned int mailbox_calls;
+	unsigned int revoke_put_calls;
+	unsigned int cm_stop_put_calls;
+	unsigned int remove_calls;
+	bool list_empty_at_remove;
+	unsigned int unload_calls;
+	unsigned int auth_release_calls;
+};
+
+static int icm_teardown_test_disconnect(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+	unsigned int call = ctx->disconnect_calls++;
+
+	return ctx->disconnect_ret[min(call, 1U)];
+}
+
+static int icm_teardown_test_mailbox(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->mailbox_calls++;
+	return ctx->mailbox_ret;
+}
+
+static void icm_teardown_test_revoke_put(struct tb_tunnel *tunnel, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->revoke_put_calls++;
+}
+
+static void icm_teardown_test_cm_stop_put(struct tb_tunnel *tunnel, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->cm_stop_put_calls++;
+}
+
+static void icm_teardown_test_remove(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+	struct icm *icm = tb_priv(tb);
+
+	ctx->remove_calls++;
+	ctx->list_empty_at_remove = list_empty(&icm->tunnel_list);
+}
+
+static void icm_teardown_test_unload(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->unload_calls++;
+}
+
+static void icm_teardown_test_release_auth(struct tb *tb, void *data)
+{
+	struct icm_teardown_test_ctx *ctx = data;
+
+	ctx->auth_release_calls++;
+}
+
+static void icm_teardown_test_domain_release(struct device *dev)
+{
+}
+
+static void icm_teardown_test_init(struct icm_teardown_test_ctx *ctx)
+{
+	ctx->ops.disconnect_pcie_tunnels = icm_teardown_test_disconnect;
+	ctx->ops.disconnect_pcie_paths = icm_teardown_test_mailbox;
+	ctx->ops.put_after_revoke = icm_teardown_test_revoke_put;
+	ctx->ops.put_on_cm_stop = icm_teardown_test_cm_stop_put;
+	ctx->ops.remove_topology = icm_teardown_test_remove;
+	ctx->ops.driver_unloads = icm_teardown_test_unload;
+	ctx->ops.release_auth = icm_teardown_test_release_auth;
+}
+
+static struct tb *icm_teardown_test_alloc_tb(struct kunit *test)
+{
+	struct pci_dev *pdev;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb) + sizeof(struct icm), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	pdev->dev.init_name = "thunderbolt-icm-test";
+	nhi->pdev = pdev;
+	tb->nhi = nhi;
+	tb->dev.release = icm_teardown_test_domain_release;
+	device_initialize(&tb->dev);
+	mutex_init(&tb->lock);
+	mutex_init(&((struct icm *)tb_priv(tb))->notification_lock);
+	INIT_LIST_HEAD(&((struct icm *)tb_priv(tb))->tunnel_list);
+	return tb;
+}
+
+static atomic_t icm_test_notification_calls;
+
+static void icm_test_count_notification(struct tb *tb,
+					const struct icm_pkg_header *hdr)
+{
+	atomic_inc(&icm_test_notification_calls);
+}
+
+/*
+ * Once shutdown closes notification admission, a late ICM packet must not
+ * queue topology work. Otherwise the work can unregister the same XDomain
+ * tree concurrently with domain teardown.
+ */
+static void icm_stopping_rejects_late_notification_test(struct kunit *test)
+{
+	struct icm_icl_event_rtd3_veto event = {
+		.hdr.code = ICM_EVENT_RTD3_VETO,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	tb = icm_teardown_test_alloc_tb(test);
+	tb->wq = alloc_ordered_workqueue("tb-icm-kunit", 0);
+	KUNIT_ASSERT_NOT_NULL(test, tb->wq);
+	tb->root_switch = (struct tb_switch *)tb;
+	icm = tb_priv(tb);
+	icm->rtd3_veto = icm_test_count_notification;
+	icm->stopping = true;
+	atomic_set(&icm_test_notification_calls, 0);
+
+	icm_handle_event(tb, TB_CFG_PKG_ICM_EVENT, &event, sizeof(event));
+	flush_workqueue(tb->wq);
+
+	KUNIT_EXPECT_EQ(test, atomic_read(&icm_test_notification_calls), 0);
+	destroy_workqueue(tb->wq);
+	put_device(&tb->dev);
+}
+
+static void icm_stop_mailbox_ack_needs_readback_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+	int ret;
+
+	icm_teardown_test_init(&ctx);
+	ctx.disconnect_ret[0] = -ETIMEDOUT;
+	ctx.disconnect_ret[1] = -ETIMEDOUT;
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	ret = __icm_stop(tb, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, ctx.disconnect_calls, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.mailbox_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, list_empty(&icm->tunnel_list));
+}
+
+static void icm_finalize_unproven_non_dma_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	icm_teardown_test_init(&ctx);
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	__icm_finalize_stop(tb, TB_DOMAIN_RESET_NONE, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_TRUE(test, list_empty(&icm->tunnel_list));
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.cm_stop_put_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.list_empty_at_remove);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 1U);
+}
+
+static void icm_finalize_proven_revoke_test(struct kunit *test)
+{
+	struct icm_teardown_test_ctx ctx = {};
+	struct tb_tunnel tunnel = {
+		.type = TB_TUNNEL_PCI,
+	};
+	struct icm *icm;
+	struct tb *tb;
+
+	icm_teardown_test_init(&ctx);
+	tb = icm_teardown_test_alloc_tb(test);
+	icm = tb_priv(tb);
+	INIT_LIST_HEAD(&tunnel.list);
+	list_add_tail(&tunnel.list, &icm->tunnel_list);
+
+	__icm_finalize_stop(tb, TB_DOMAIN_RESET_PROVEN, &ctx.ops, &ctx);
+
+	KUNIT_EXPECT_TRUE(test, list_empty(&icm->tunnel_list));
+	KUNIT_EXPECT_EQ(test, ctx.revoke_put_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.cm_stop_put_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.remove_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.list_empty_at_remove);
+	KUNIT_EXPECT_EQ(test, ctx.unload_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.auth_release_calls, 1U);
+}
+
+static struct kunit_case icm_teardown_test_cases[] = {
+	KUNIT_CASE(icm_stopping_rejects_late_notification_test),
+	KUNIT_CASE(icm_stop_mailbox_ack_needs_readback_test),
+	KUNIT_CASE(icm_finalize_unproven_non_dma_test),
+	KUNIT_CASE(icm_finalize_proven_revoke_test),
+	{}
+};
+
+static struct kunit_suite icm_teardown_test_suite = {
+	.name = "thunderbolt_icm_teardown",
+	.test_cases = icm_teardown_test_cases,
+};
+
+kunit_test_suite(icm_teardown_test_suite);
+#endif

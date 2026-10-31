@@ -47,9 +47,28 @@ struct rxe_mmap_info {
 	void			*obj;
 
 	struct mminfo info;
+
+	/*
+	 * Revocation (rxe_disassociate_ucontext). uc_node links the info into
+	 * its ucontext's list and is guarded by the file-global rxe_mmap_lock,
+	 * which outlives the device. revoked is set once, under that lock, when
+	 * the ucontext is disassociated; from then on the info no longer points
+	 * at a live ucontext or rxe_dev and its user mappings fault onto
+	 * dead_page. inode is the uverbs char device the ring was mapped
+	 * through, pinned so its i_mmap tree can be zapped.
+	 */
+	struct list_head	uc_node;
+	struct list_head	revoke_node;
+	bool			revoked;
+	struct inode		*inode;
+	struct page		*dead_page;
 };
 
 void rxe_mmap_release(struct kref *ref);
+
+void rxe_mmap_info_publish(struct rxe_dev *rxe, struct rxe_mmap_info *ip);
+
+void rxe_disassociate_ucontext(struct ib_ucontext *ibuc);
 
 struct rxe_mmap_info *rxe_create_mmap_info(struct rxe_dev *dev, u32 size,
 					   struct ib_udata *udata, void *obj);
@@ -102,13 +121,15 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
 const char *rxe_parent_name(struct rxe_dev *rxe, unsigned int port_num);
 
 /* Mode A engine-side admission (tbrxe_frame.c, wire-spec section 6):
- * tbrxe_admit() charges one wire packet against the QP's link and refuses
- * (returns false) when the aggregate unacked charge would exceed the
- * advertised window; tbrxe_unacked_sync() reconciles the QP's charge with
- * its live PSN distance (req.psn - comp.psn), releasing window as ACKs
- * arrive and on retry rewind / reset / destroy.
+ * every unique outstanding request PSN gets one credit record. ACK/NAK
+ * progress, reset or destroy release records; retry cursor rewind does not.
  */
-bool tbrxe_admit(struct rxe_qp *qp);
+int tbrxe_credit_init(struct rxe_qp *qp);
+void tbrxe_credit_cleanup(struct rxe_qp *qp);
+bool tbrxe_admit(struct rxe_qp *qp, bool *charged);
+bool tbrxe_admitted_replay(struct rxe_qp *qp, u32 psn);
+void tbrxe_unadmit(struct rxe_qp *qp);
+void tbrxe_credit_commit(struct rxe_qp *qp);
 void tbrxe_unacked_sync(struct rxe_qp *qp);
 
 /* rxe_qp.c */
@@ -125,6 +146,7 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr,
 int rxe_qp_to_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask);
 void rxe_qp_error(struct rxe_qp *qp);
 int rxe_qp_chk_destroy(struct rxe_qp *qp);
+void rxe_qp_prepare_cleanup(struct rxe_qp *qp);
 void rxe_qp_cleanup(struct rxe_pool_elem *elem);
 
 static inline int qp_num(struct rxe_qp *qp)
@@ -199,6 +221,27 @@ int rxe_receiver(struct rxe_qp *qp);
 /* rxe_icrc.c */
 int rxe_icrc_check(struct sk_buff *skb, struct rxe_pkt_info *pkt);
 void rxe_icrc_generate(struct sk_buff *skb, struct rxe_pkt_info *pkt);
+
+enum tbrxe_bad_frame_icrc {
+	TBRXE_BAD_FRAME_TOO_SHORT,
+	TBRXE_BAD_FRAME_UNSUPPORTED_OPCODE,
+	TBRXE_BAD_FRAME_ICRC_MATCH,
+	TBRXE_BAD_FRAME_ICRC_MISMATCH,
+};
+
+struct tbrxe_bad_frame_diagnostic {
+	enum tbrxe_bad_frame_icrc icrc;
+	u32 qpn;
+	u32 psn;
+	u32 fingerprint;
+	u16 len;
+	u16 header_len;
+	u8 opcode;
+	u8 pad;
+};
+
+void tbrxe_bad_frame_diagnose(const void *data, u16 len,
+			      struct tbrxe_bad_frame_diagnostic *diagnostic);
 
 void rxe_resp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb);
 

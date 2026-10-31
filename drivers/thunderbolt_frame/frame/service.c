@@ -32,6 +32,7 @@ static const uuid_t tbframe_service_uuid =
 static struct tbframe *tbframe_service_tf;
 static struct tb_property_dir *tbframe_service_dir;
 static bool tbframe_service_driver_registered;
+static DEFINE_MUTEX(tbframe_service_lock);
 
 struct tbframe_service_binding {
 	struct tbframe_link	*link;
@@ -57,12 +58,17 @@ static int tbframe_service_probe(struct tb_service *svc,
 	struct tbframe_hw *hw;
 	int ret;
 
-	if (!tbframe_service_tf)
-		return -ENODEV;
+	mutex_lock(&tbframe_service_lock);
+	if (!tbframe_service_tf) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
 
 	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
-	if (!binding)
-		return -ENOMEM;
+	if (!binding) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
 
 	hw = tbframe_hw_create(tbframe_service_tf, xd);
 	if (!hw) {
@@ -82,12 +88,15 @@ static int tbframe_service_probe(struct tb_service *svc,
 	tb_service_set_drvdata(svc, binding);
 	pr_info("bound service id=%d route=0x%llx link_speed=%uGb/s width=0x%x\n",
 		svc->id, xd->route, xd->link_speed, xd->link_width);
-	return 0;
+	ret = 0;
+	goto out_unlock;
 
 err_destroy_hw:
 	tbframe_hw_destroy(hw);
 err_free_binding:
 	kfree(binding);
+out_unlock:
+	mutex_unlock(&tbframe_service_lock);
 	return ret;
 }
 
@@ -108,18 +117,49 @@ static void tbframe_service_remove(struct tb_service *svc)
 		TBFRAME_DOWN_UNPLUG : TBFRAME_DOWN_CLOSED;
 
 	if (binding) {
+		int ret;
+
 		/*
 		 * A forced (leaked) link teardown still references the hw
 		 * context from its leaked frames; leak the hw context too
 		 * rather than hand those frames a dangling pointer.
 		 */
-		if (tbframe_link_destroy(binding->link, reason))
-			pr_err("leaking hw context after forced link teardown\n");
-		else
-			tbframe_hw_destroy(binding->hw);
+		ret = tbframe_link_destroy(binding->link, reason);
+		if (ret) {
+			pr_err("leaking forced link and hw context after client references failed to drain\n");
+			return;
+		}
+		tbframe_hw_destroy(binding->hw);
 	}
 	tb_service_set_drvdata(svc, NULL);
 	kfree(binding);
+}
+
+/*
+ * System shutdown / reboot. Not a mirror of remove: the link object is NOT
+ * destroyed (there is no later unbind on a reboot, and destroying would run
+ * the full negotiated teardown), only quiesced, with every peer wait
+ * collapsed. See tbframe_link_shutdown() for why this callback has to exist
+ * at all -- without it a rebooting node reached nhi_shutdown() with live
+ * rings and enabled hop entries.
+ */
+static void tbframe_service_shutdown(struct tb_service *svc)
+{
+	struct tbframe_service_binding *binding = tb_service_get_drvdata(svc);
+	struct tbframe *tf;
+
+	if (!binding)
+		return;
+
+	mutex_lock(&tbframe_service_lock);
+	tf = tbframe_service_tf;
+	if (tf && !READ_ONCE(tf->shutdown_mode)) {
+		WRITE_ONCE(tf->shutdown_mode, true);
+		tbframe_prepare_shutdown(tf);
+	}
+	mutex_unlock(&tbframe_service_lock);
+
+	tbframe_link_shutdown(binding->link);
 }
 
 static const struct tb_service_id tbframe_service_ids[] = {
@@ -135,6 +175,7 @@ static struct tb_service_driver tbframe_service_driver = {
 	},
 	.probe = tbframe_service_probe,
 	.remove = tbframe_service_remove,
+	.shutdown = tbframe_service_shutdown,
 	.id_table = tbframe_service_ids,
 };
 
@@ -164,7 +205,9 @@ int tbframe_service_start(struct tbframe *tf)
 {
 	int ret;
 
+	mutex_lock(&tbframe_service_lock);
 	tbframe_service_tf = tf;
+	mutex_unlock(&tbframe_service_lock);
 
 	memset(&tbframe_protocol_handler, 0, sizeof(tbframe_protocol_handler));
 	tbframe_protocol_handler.uuid = &tbframe_service_uuid;
@@ -220,7 +263,9 @@ err_handler:
 	tb_unregister_protocol_handler(&tbframe_protocol_handler);
 	tbframe_protocol_handler_registered = false;
 err_clear:
+	mutex_lock(&tbframe_service_lock);
 	tbframe_service_tf = NULL;
+	mutex_unlock(&tbframe_service_lock);
 	return ret;
 }
 
@@ -251,6 +296,18 @@ void tbframe_service_stop(struct tbframe *tf)
 		tb_unregister_protocol_handler(&tbframe_protocol_handler);
 		tbframe_protocol_handler_registered = false;
 	}
+
+	/*
+	 * Exclude new probes, then globally stop every existing link before
+	 * driver-core starts the first per-device remove callback. A probe that
+	 * was already running holds this lock until its link is on tf->links, so
+	 * the global pass cannot miss it.
+	 */
+	mutex_lock(&tbframe_service_lock);
+	tbframe_service_tf = NULL;
+	tbframe_prepare_stop(tf);
+	mutex_unlock(&tbframe_service_lock);
+
 	if (tbframe_service_driver_registered) {
 		/* Unbinds every service, destroying its link. */
 		tb_unregister_service_driver(&tbframe_service_driver);
@@ -262,5 +319,4 @@ void tbframe_service_stop(struct tbframe *tf)
 		tb_property_free_dir(tbframe_service_dir);
 		tbframe_service_dir = NULL;
 	}
-	tbframe_service_tf = NULL;
 }

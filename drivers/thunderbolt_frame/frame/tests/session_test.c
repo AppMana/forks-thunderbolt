@@ -11,6 +11,92 @@
  */
 #include "tbframe_mock.h"
 
+/*
+ * Directional keepalive acknowledgements are an additive capability, not a
+ * new framing protocol. A rolling update must keep the deployed v3 HELLO
+ * envelope so an upgraded endpoint can negotiate a legacy keepalive with its
+ * not-yet-upgraded neighbour.
+ */
+static void tbframe_session_directional_keepalive_rolls_with_v3(struct kunit *test)
+{
+	struct tbframe_wire_hello hello = {
+		.proto_version = 3,
+		.transmit_hopid = 12,
+		.rx_ring_entries = 256,
+		.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE,
+		.gid_eui64 = 0x1122334455667788ULL,
+		.session_cookie = 0x8877665544332211ULL,
+	};
+	struct tbframe_wire_hello parsed = {};
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	int ret;
+
+	ret = tbframe_wire_build_hello(msg, sizeof(msg), &hello,
+				       TBFRAME_WIRE_OP_HELLO, 1, 1, 1);
+	KUNIT_ASSERT_EQ(test, ret, (int)sizeof(msg));
+	KUNIT_EXPECT_EQ(test, tbframe_wire_peek_version(msg, sizeof(msg)), 3);
+	KUNIT_EXPECT_EQ(test,
+			tbframe_wire_parse_hello(msg, sizeof(msg), &parsed, NULL),
+			0);
+}
+
+/*
+ * HELLO is a capability offer; HELLO_ACK is the selected intersection.  If
+ * an upgraded endpoint echoes its whole offer to a legacy requester, the two
+ * endpoints select different keepalive layouts and READY can succeed over a
+ * data path on which neither endpoint can parse the other's proof frames.
+ */
+static void tbframe_session_legacy_hello_selects_legacy_keepalive(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	struct tbframe_wire_hello selected = {};
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	KUNIT_ASSERT_EQ(test, 0,
+			tbframe_wire_parse_hello(fx->mock.last_response,
+						 sizeof(fx->mock.last_response),
+						 &selected, NULL));
+	KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+			selected.capabilities);
+}
+
+static void tbframe_session_legacy_selection_survives_ready(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	unsigned int i;
+
+	fx->mock.peer.capabilities = TBFRAME_WIRE_CAP_KEEPALIVE;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_ASSERT_EQ(test, 1u, fx->client.up_count);
+	KUNIT_ASSERT_GE(test, fx->mock.req_count, 3u);
+	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_WIRE_OP_HELLO,
+			fx->mock.req_ops[0]);
+	KUNIT_EXPECT_EQ(test,
+			(u32)(TBFRAME_WIRE_CAP_KEEPALIVE |
+			      TBFRAME_WIRE_CAP_KEEPALIVE_ACK),
+			fx->mock.req_caps[0]);
+	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_WIRE_OP_HELLO,
+			fx->mock.req_ops[1]);
+	KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+			fx->mock.req_caps[1]);
+	for (i = 0; i < fx->mock.req_count; i++) {
+		if (fx->mock.req_ops[i] != TBFRAME_WIRE_OP_READY)
+			continue;
+		KUNIT_EXPECT_EQ(test, (u32)TBFRAME_WIRE_CAP_KEEPALIVE,
+				fx->mock.req_caps[i]);
+		return;
+	}
+	KUNIT_FAIL(test, "session never sent READY");
+}
+
 static void tbframe_session_happy_path(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -92,6 +178,32 @@ static void tbframe_session_ready_withheld_until_paths(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
 }
 
+/*
+ * An early inbound READY is a responder-side operation with its own lifetime.
+ * Enabling the paths must finish that pending response; requiring the peer to
+ * retransmit makes two otherwise healthy simultaneous handshakes incur a full
+ * request timeout before either can converge.
+ */
+static void tbframe_session_early_ready_is_acked_after_paths(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	KUNIT_ASSERT_FALSE(test, fx->mock.have_response);
+
+	/* Keep the requester half red; only the deferred responder may reply. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+	KUNIT_EXPECT_TRUE(test, fx->mock.have_response);
+}
+
 static void tbframe_session_hello_retries_reannounce(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
@@ -107,6 +219,291 @@ static void tbframe_session_hello_retries_reannounce(struct kunit *test)
 	fx->mock.control_err = 0;
 	tbframe_link_session_step(fx->link);
 	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+static void tbframe_session_wrong_ack_cannot_advance_state(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+
+	/* A late ACK for another operation must not complete HELLO. */
+	fx->mock.response_op = TBFRAME_WIRE_OP_READY_ACK;
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+
+	/* The valid response then advances the ordinary session path. */
+	fx->mock.response_op = 0;
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_TRUE(test, fx->link->hello_done);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+/*
+ * Reply packets belong to the requester state machine.  A delayed reply from
+ * an earlier peer instance may still traverse the shared dispatch path before
+ * request matching; it must not seed a new session with stale peer fields.
+ */
+static void tbframe_session_unsolicited_hello_ack_cannot_seed_session(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 current_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(7);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx,
+						    TBFRAME_WIRE_OP_HELLO_ACK,
+						    msg, sizeof(msg)),
+			0);
+	KUNIT_EXPECT_EQ(test, 0,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	/* Only a correlated control_request() response may finish HELLO. */
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_EQ(test, 0ull, fx->link->remote_cookie);
+
+	fx->mock.peer.session_cookie = current_cookie;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, current_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+/*
+ * A response that arrives after its HELLO requester timed out must not satisfy
+ * a later HELLO attempt.  Replaying the response through control_request()
+ * (rather than calling a copied matcher) exercises the production wire parser
+ * and the exact point where the peer cookie becomes session state.
+ */
+static void
+tbframe_session_delayed_hello_ack_cannot_seed_new_attempt(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 stale_cookie = fx->mock.peer.session_cookie;
+
+	/* The first real HELLO's ACK remains in the control channel past timeout. */
+	fx->mock.delay_next_hello_ack = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->mock.delayed_hello_ack_pending);
+	KUNIT_ASSERT_FALSE(test, fx->link->hello_done);
+
+	/* The peer advances before the next real HELLO attempt is issued. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(29);
+	KUNIT_ASSERT_NE(test, stale_cookie, fx->mock.peer.session_cookie);
+	tbframe_link_session_step(fx->link);
+
+	/* An ACK correlated to the expired attempt cannot seed current state. */
+	KUNIT_EXPECT_FALSE(test, fx->link->hello_done);
+	KUNIT_EXPECT_NE(test, stale_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_FALSE(test, fx->mock.rings_alloced);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+/*
+ * Existing responders cache READY's private sequence in eight bits before
+ * echoing it.  READY is also bound to the peer cookie negotiated by HELLO, so
+ * preserve that deployed wire behavior while HELLO uses full-width request
+ * correlation to protect the identity transition itself.
+ */
+static void tbframe_session_ready_sequence_interoperates_with_u8_peer(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+
+	fx->link->request_seq = 0x12345600;
+	fx->mock.ready_ack_u8_seq = true;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_EQ(test, (int)TBFRAME_STATE_UP, fx->link->state);
+	KUNIT_EXPECT_EQ(test, 1u, fx->client.up_count);
+}
+
+/*
+ * READY belongs to the peer instance negotiated by HELLO.  A delayed READY
+ * from an earlier instance must not satisfy the responder half of the current
+ * handshake or receive an acknowledgement for paths it does not own.
+ */
+static void tbframe_session_stale_ready_cannot_complete_responder(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	/* Negotiate HELLO and program paths without completing READY. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_TRUE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_FALSE(test, fx->link->hs.peer_seen);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(17);
+	KUNIT_ASSERT_NE(test, negotiated_cookie,
+			fx->mock.peer.session_cookie);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_READY,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+}
+
+/*
+ * The requester half has the same binding requirement: a delayed READY_ACK
+ * from a prior peer instance cannot certify the paths negotiated by HELLO.
+ */
+static void tbframe_session_stale_ready_ack_cannot_complete_requester(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+
+	/* Leave the requester waiting after a valid HELLO and path setup. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_TRUE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_FALSE(test, fx->link->hs.request_sent);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(23);
+	KUNIT_ASSERT_NE(test, negotiated_cookie,
+			fx->mock.peer.session_cookie);
+	fx->mock.fail_ready = false;
+	tbframe_link_session_step(fx->link);
+
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.request_sent);
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
+}
+
+/*
+ * The inbound responder and outbound requester can observe control packets in
+ * either order.  They must converge on one peer instance before either is
+ * allowed to replace the session identity used by the data path.
+ */
+static void tbframe_session_crossed_hello_cookies_cannot_mix(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 negotiated_cookie = fx->mock.peer.session_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	KUNIT_ASSERT_EQ(test, negotiated_cookie, fx->link->remote_cookie);
+
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	mutex_lock(&fx->link->session_lock);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	KUNIT_EXPECT_EQ(test, negotiated_cookie, fx->link->remote_cookie);
+	KUNIT_EXPECT_FALSE(test, fx->link->hs.peer_seen);
+	mutex_unlock(&fx->link->session_lock);
+}
+
+/*
+ * A peer-driven replacement advances the peer's session identity, not ours.
+ *
+ * If both halves share one teardown epoch, receiving a fresh crossed HELLO
+ * schedules SUPERSEDE and down_session() rotates our local cookie too.  The
+ * peer has already negotiated the old local cookie in the response to its
+ * HELLO, so our rotation immediately makes that peer session stale.  When it
+ * re-HELLOs, the same transition repeats on the other side: neither pair of
+ * cookies can converge and every data proof sees the preceding cookie.
+ *
+ * Keep requester and responder lifetimes separate: only a locally initiated
+ * replacement advances the local identity.  The peer-driven teardown still
+ * rebuilds rings and paths, but it must retain the local cookie that the peer
+ * has just negotiated.
+ */
+static void tbframe_session_peer_supersede_keeps_local_identity(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 local_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	/* Negotiate one requester session but hold it below READY/UP. */
+	fx->mock.fail_ready = true;
+	tbframe_link_session_step(fx->link);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_done);
+	local_cookie = fx->link->local_cookie;
+
+	/* The peer independently advances its responder session. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	/* Service the peer-driven teardown, but not the delayed retry. */
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_FALSE(test, fx->link->hello_done);
+	KUNIT_ASSERT_FALSE(test, fx->mock.rings_started);
+	KUNIT_ASSERT_FALSE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_EQ(test, (int)TBFRAME_DOWN_SUPERSEDE,
+			fx->link->down_reason);
+
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/*
+ * LOGOUT keeps the peer-facing local identity while fencing the old hardware.
+ * A returning peer rebuilds from that same local identity, so the peer-owned
+ * transition must not silently advance the identity it previously negotiated.
+ */
+static void tbframe_session_logout_rebuild_keeps_local_identity(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 local_cookie;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+
+	tbframe_mock_link_up(test, fx);
+	local_cookie = fx->link->local_cookie;
+
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_BYE,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+	KUNIT_ASSERT_FALSE(test, fx->mock.rings_started);
+	KUNIT_ASSERT_FALSE(test, fx->mock.paths_on);
+	KUNIT_ASSERT_EQ(test, local_cookie, fx->link->local_cookie);
+
+	/* The peer advances its identity and starts the fenced rebuild. */
+	fx->mock.peer.session_cookie ^= BIT_ULL(31);
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_ASSERT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+	flush_workqueue(fx->tf.wq);
+
+	KUNIT_EXPECT_EQ(test, local_cookie, fx->link->local_cookie);
+}
+
+/*
+ * A session cookie authenticates data frames for one negotiated lifetime.
+ * Reusing it after teardown lets delayed frames from the old rings prove the
+ * replacement session even though they predate its HELLO/READY exchange.
+ */
+static void tbframe_session_teardown_rotates_local_cookie(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u64 old_cookie;
+
+	tbframe_mock_link_up(test, fx);
+	old_cookie = fx->link->local_cookie;
+
+	fx->mock.paths_active_ret = 0;
+	tbframe_link_verify_step(fx->link);
+	flush_workqueue(fx->tf.wq);
+
+	KUNIT_EXPECT_NE(test, old_cookie, fx->link->local_cookie);
 }
 
 static void tbframe_session_event_ordering(struct kunit *test)
@@ -186,9 +583,23 @@ static void tbframe_session_test_exit(struct kunit *test)
 }
 
 static struct kunit_case tbframe_session_cases[] = {
+	KUNIT_CASE(tbframe_session_directional_keepalive_rolls_with_v3),
+	KUNIT_CASE(tbframe_session_legacy_hello_selects_legacy_keepalive),
+	KUNIT_CASE(tbframe_session_legacy_selection_survives_ready),
 	KUNIT_CASE(tbframe_session_happy_path),
 	KUNIT_CASE(tbframe_session_ready_withheld_until_paths),
+	KUNIT_CASE(tbframe_session_early_ready_is_acked_after_paths),
 	KUNIT_CASE(tbframe_session_hello_retries_reannounce),
+	KUNIT_CASE(tbframe_session_wrong_ack_cannot_advance_state),
+	KUNIT_CASE(tbframe_session_unsolicited_hello_ack_cannot_seed_session),
+	KUNIT_CASE(tbframe_session_delayed_hello_ack_cannot_seed_new_attempt),
+	KUNIT_CASE(tbframe_session_ready_sequence_interoperates_with_u8_peer),
+	KUNIT_CASE(tbframe_session_stale_ready_cannot_complete_responder),
+	KUNIT_CASE(tbframe_session_stale_ready_ack_cannot_complete_requester),
+	KUNIT_CASE(tbframe_session_crossed_hello_cookies_cannot_mix),
+	KUNIT_CASE(tbframe_session_peer_supersede_keeps_local_identity),
+	KUNIT_CASE(tbframe_session_logout_rebuild_keeps_local_identity),
+	KUNIT_CASE(tbframe_session_teardown_rotates_local_cookie),
 	KUNIT_CASE(tbframe_session_event_ordering),
 	{}
 };

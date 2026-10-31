@@ -70,6 +70,63 @@ module_param(port_retrain, bool, 0644);
 MODULE_PARM_DESC(port_retrain,
 		 "toggle lane disable to re-arm detection on unplugged root ports (default: true)");
 
+/*
+ * Plug-directed bounded retrain (tb_port_plug_retrain()). Unlike the blind
+ * port_retrain kick this one is allowed under a resident ICM: it only ever
+ * touches a port whose lane sample has been STABLE for the whole quiet
+ * window (so the firmware's port state machine has settled -- both 05d1e4c
+ * wedges were edges inside the firmware's transition window), it is
+ * directed by evidence of presence (a lane parked at CONNECTING, or the
+ * resident ICM's own connect notification for a latched-off lane), and it
+ * is bounded per episode. Kept in lockstep with cm_plug_retrain() in
+ * tests/negotiation_model.h.
+ */
+static bool plug_retrain = true;
+module_param(plug_retrain, bool, 0644);
+MODULE_PARM_DESC(plug_retrain,
+		 "bounded plug-directed lane retrain of stuck root ports (default: true)");
+
+/* Lane sample must be stable this long before a retrain may touch it. */
+#define TB_PLUG_RETRAIN_QUIET_MS	10000
+/* A resident-ICM connect notification older than this is stale. */
+#define TB_PLUG_RETRAIN_HINT_MAX_MS	60000
+/* Retrain attempts per episode; episode ends on training or idle reset. */
+#define TB_PLUG_RETRAIN_MAX_ATTEMPTS	3
+/* An UNPLUGGED port idle this long starts a fresh episode. */
+#define TB_PLUG_RETRAIN_IDLE_RESET_MS	30000
+/*
+ * A resident-ICM notification arriving this soon after our own retrain
+ * edge is attributed to that edge (the firmware announces the bounce it
+ * just consumed) and must NOT arm a new hint, or every retrain would seed
+ * the next one -- a self-sustaining bounce loop (proven in the model:
+ * cm_hw_lane_edge arming the hint turns the bounded retrain into a
+ * periodic blind one).
+ */
+#define TB_PLUG_RETRAIN_SELF_MS		5000
+
+/*
+ * Full-connector software replug (tb_port_connector_replug_*): both lane
+ * adapters disabled TOGETHER, held down, then enabled TOGETHER, then a
+ * fresh enumeration. Live 2026-08-23 appmana-001 (ASM246x/KIOXIA
+ * enclosure, resident Titan Ridge ICM): the peer arms its secondary-lane
+ * receiver only during the connector handshake, so no single-lane edge
+ * ever wakes it -- 3/3 bounded lane-directed retrains bounced off, and
+ * device-side DPR/SLI/PE pokes were inert -- while both-lanes-down 12 s +
+ * both-up + rescan trained the link to bonded x2 20 Gb/s with zero
+ * firmware races. The hold must exceed the resident ICM's settling
+ * window: the disable is itself an edge the firmware consumes, and
+ * re-enabling inside that window is the 2026-08-22 wedge recipe.
+ */
+#define TB_CONNECTOR_REPLUG_HOLD_MS		12000
+/* Replug episodes before the port is left alone (until idle re-arm). */
+#define TB_CONNECTOR_REPLUG_MAX_ATTEMPTS	2
+/*
+ * A stuck secondary idle this long since the last episode re-arms the
+ * budget: permanently-degraded hardware gets a slow bounded retry, not a
+ * teardown loop.
+ */
+#define TB_CONNECTOR_REPLUG_IDLE_RESET_MS	600000
+
 #define TB_RECONCILE_PROBE_MS	500
 
 static unsigned int reconcile_probe_ms = TB_RECONCILE_PROBE_MS;
@@ -90,6 +147,17 @@ MODULE_PARM_DESC(reconcile_probe_ms,
  *		 runtime resume
  * @reconcile_work: Periodic reconciliation of root port lane state with
  *		    the software topology (synthesizes lost hotplug edges)
+ * @icm_hint: A resident ICM (force_sw_cm) emitted a hot-event
+ *	      notification of its own (TB_CFG_PKG_ICM_EVENT, the live
+ *	      "unexpected event 0xa"). Under a resident ICM the software
+ *	      CM receives NO native hot-plug packets -- the firmware eats
+ *	      the edges and speaks its own protocol -- so this is the only
+ *	      connect-request signal a latched-off port ever produces.
+ *	      Consumed (aged) by tb_port_plug_retrain().
+ * @icm_hint_at: jiffies @icm_hint was last set.
+ * @last_retrain_at: jiffies of the last plug-directed retrain edge on any
+ *		     port; ICM notifications inside the self-attribution
+ *		     window after it do not arm @icm_hint.
  * @groups: Bandwidth groups used in this domain.
  */
 struct tb_cm {
@@ -98,6 +166,9 @@ struct tb_cm {
 	bool hotplug_active;
 	struct delayed_work remove_work;
 	struct delayed_work reconcile_work;
+	bool icm_hint;
+	unsigned long icm_hint_at;
+	unsigned long last_retrain_at;
 	struct tb_bandwidth_group groups[MAX_GROUPS];
 };
 
@@ -117,10 +188,13 @@ struct tb_hotplug_event {
 
 static void tb_scan_port(struct tb_port *port);
 static void tb_handle_hotplug(struct work_struct *work);
-static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
-				       const char *reason);
+static int tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
+				      const char *reason);
 static void tb_queue_dp_bandwidth_request(struct tb *tb, u64 route, u8 port,
 					  int retry, unsigned long delay);
+static int __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+					 int transmit_path, int transmit_ring,
+					 int receive_path, int receive_ring);
 
 static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
 {
@@ -207,7 +281,7 @@ static void tb_discover_dp_resources(struct tb *tb)
 	struct tb_tunnel *tunnel;
 
 	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_dp(tunnel))
+		if (!tunnel->cleanup_only && tb_tunnel_is_dp(tunnel))
 			tb_discover_dp_resource(tb, tunnel->dst_port);
 	}
 }
@@ -535,6 +609,20 @@ static struct tb_tunnel *tb_find_tunnel(struct tb *tb, enum tb_tunnel_type type,
 	}
 
 	return NULL;
+}
+
+static bool tb_tunnels_quarantined(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	const struct tb_tunnel *tunnel;
+
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tunnel->cleanup_only ||
+		    tunnel->state == TB_TUNNEL_TEARDOWN_FAILED)
+			return true;
+	}
+
+	return false;
 }
 
 static struct tb_tunnel *tb_find_first_usb3_tunnel(struct tb *tb,
@@ -942,6 +1030,9 @@ static int tb_tunnel_usb3(struct tb *tb, struct tb_switch *sw)
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 
+	if (tb_tunnels_quarantined(tb))
+		return -EUCLEAN;
+
 	if (!tb_acpi_may_tunnel_usb3()) {
 		tb_dbg(tb, "USB3 tunneling disabled, not creating tunnel\n");
 		return 0;
@@ -1004,10 +1095,16 @@ static int tb_tunnel_usb3(struct tb *tb, struct tb_switch *sw)
 		goto err_reclaim;
 	}
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(up,
 			     "USB3 tunnel activation failed, aborting\n");
-		ret = -EIO;
+		if (ret == -EUCLEAN) {
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return ret;
+		}
 		goto err_free;
 	}
 
@@ -1386,6 +1483,21 @@ static void tb_scan_port(struct tb_port *port)
 	 * alone no longer does.
 	 */
 	if (port->xdomain) {
+		port->xdomain->path_teardown_err =
+			__tb_disconnect_xdomain_paths(port->sw->tb,
+						      port->xdomain, -1, -1, -1, -1);
+		/*
+		 * Loud, because this is a REPLACEMENT, not a hotplug: a scan
+		 * found a router where an XDomain already existed. Every pass
+		 * through here destroys the peer object and everything built
+		 * on it -- tbframe sees TBFRAME_DOWN_UNPLUG, tears the session
+		 * down and republishes a fresh usb4_rdmaN. If the reconcile is
+		 * synthesizing plugs on a port that is already enumerated,
+		 * this becomes a churn loop that no session can outlive.
+		 */
+		tb_port_warn(port,
+			     "replacing existing XDomain %llx on scan (route %llx)\n",
+			     port->xdomain->route, tb_route(sw));
 		port->xdomain->is_unplugged = true;
 		tb_xdomain_remove(port->xdomain);
 		tb_port_unconfigure_xdomain(port);
@@ -1735,6 +1847,8 @@ static void tb_discover_tunnels(struct tb *tb)
 	tb_switch_discover_tunnels(tb->root_switch, &tcm->tunnel_list, true);
 
 	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tunnel->cleanup_only)
+			continue;
 		if (tb_tunnel_is_pci(tunnel)) {
 			struct tb_switch *parent = tunnel->dst_port->sw;
 
@@ -1755,16 +1869,25 @@ static void tb_discover_tunnels(struct tb *tb)
 	}
 }
 
-static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
+static int tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 {
 	struct tb_port *src_port, *dst_port;
 	struct tb *tb;
+	int ret;
 
 	if (!tunnel)
-		return;
+		return 0;
 
-	tb_tunnel_deactivate(tunnel);
-	list_del(&tunnel->list);
+	ret = tb_tunnel_deactivate(tunnel);
+	if (ret)
+		return ret;
+
+	list_del_init(&tunnel->list);
+
+	if (tunnel->cleanup_only) {
+		WARN_ON(tb_tunnel_put(tunnel));
+		return 0;
+	}
 
 	tb = tunnel->tb;
 	src_port = tunnel->src_port;
@@ -1802,22 +1925,63 @@ static void tb_deactivate_and_free_tunnel(struct tb_tunnel *tunnel)
 		break;
 	}
 
-	tb_tunnel_put(tunnel);
+	WARN_ON(tb_tunnel_put(tunnel));
+
+	return 0;
 }
 
 /*
  * tb_free_invalid_tunnels() - destroy tunnels of devices that have gone away
  */
-static void tb_free_invalid_tunnels(struct tb *tb)
+static int tb_free_invalid_tunnels(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
+	int res, ret = 0;
 
 	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_invalid(tunnel))
-			tb_deactivate_and_free_tunnel(tunnel);
+		if (!tb_tunnel_is_invalid(tunnel))
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
 	}
+
+	return ret;
+}
+
+static int tb_retry_quarantined_tunnels(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
+
+	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
+		if (!tunnel->cleanup_only &&
+		    tunnel->state != TB_TUNNEL_TEARDOWN_FAILED)
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
+	}
+
+	return ret;
+}
+
+static bool tb_has_invalid_tunnels(struct tb *tb)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel;
+
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
+		if (tb_tunnel_is_invalid(tunnel))
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -1832,6 +1996,12 @@ static void tb_free_unplugged_children(struct tb_switch *sw)
 			continue;
 
 		if (port->remote->sw->is_unplugged) {
+			/* Paths hold raw port pointers, so topology must outlive them. */
+			if (tb_has_invalid_tunnels(sw->tb)) {
+				tb_port_warn(port,
+					     "retaining unplugged topology referenced by unresolved tunnel\n");
+				continue;
+			}
 			tb_retimer_remove_all(port);
 			tb_remove_dp_resources(port->remote->sw);
 			tb_switch_unconfigure_link(port->remote->sw);
@@ -1957,7 +2127,11 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		if (ret) {
 			tb_tunnel_warn(tunnel,
 				       "failed to read consumed bandwidth, tearing down\n");
-			tb_deactivate_and_free_tunnel(tunnel);
+			ret = tb_deactivate_and_free_tunnel(tunnel);
+			if (ret)
+				tb_warn(tb,
+					"DP tunnel teardown failed (%d), quarantining tunnel\n",
+					ret);
 		} else {
 			tb_reclaim_usb3_bandwidth(tb, in, out);
 			/*
@@ -1997,7 +2171,10 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 		 * the DP IN again.
 		 */
 		tb_tunnel_warn(tunnel, "not active, tearing down\n");
-		tb_dp_resource_unavailable(tb, in, "DPRX negotiation failed");
+		if (tb_dp_resource_unavailable(tb, in,
+					       "DPRX negotiation failed"))
+			tb_warn(tb,
+				"failed to tear down unusable DP resource; tunnel quarantined\n");
 	}
 	mutex_unlock(&tb->lock);
 
@@ -2074,6 +2251,15 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 	ret = tb_tunnel_activate(tunnel);
 	if (ret && ret != -EINPROGRESS) {
 		tb_port_info(out, "DP tunnel activation failed, aborting\n");
+		if (ret == -EUCLEAN) {
+			/* No deferred callback will release this reference. */
+			tunnel->callback = NULL;
+			tunnel->callback_data = NULL;
+			tb_domain_put(tb);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return;
+		}
 		list_del(&tunnel->list);
 		goto err_free;
 	}
@@ -2100,6 +2286,11 @@ static void tb_tunnel_dp(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_port *port, *in, *out;
+
+	if (tb_tunnels_quarantined(tb)) {
+		tb_warn(tb, "tunnel ownership unresolved, not creating DP tunnel\n");
+		return;
+	}
 
 	if (!tb_acpi_may_tunnel_dp()) {
 		tb_dbg(tb, "DP tunneling disabled, not creating tunnel\n");
@@ -2211,11 +2402,12 @@ static void tb_switch_exit_redrive(struct tb_switch *sw)
 	}
 }
 
-static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
-				       const char *reason)
+static int tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
+				      const char *reason)
 {
 	struct tb_port *in, *out;
 	struct tb_tunnel *tunnel;
+	int ret;
 
 	if (tb_port_is_dpin(port)) {
 		tb_port_dbg(port, "DP IN resource unavailable: %s\n", reason);
@@ -2228,10 +2420,13 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 	}
 
 	tunnel = tb_find_tunnel(tb, TB_TUNNEL_DP, in, out);
-	if (tunnel)
-		tb_deactivate_and_free_tunnel(tunnel);
-	else
+	if (tunnel) {
+		ret = tb_deactivate_and_free_tunnel(tunnel);
+		if (ret)
+			return ret;
+	} else {
 		tb_enter_redrive(port);
+	}
 	list_del_init(&port->list);
 
 	/*
@@ -2240,6 +2435,7 @@ static void tb_dp_resource_unavailable(struct tb *tb, struct tb_port *port,
 	 */
 	tb_recalc_estimated_bandwidth(tb);
 	tb_tunnel_dp(tb);
+	return 0;
 }
 
 static void tb_dp_resource_available(struct tb *tb, struct tb_port *port)
@@ -2264,19 +2460,26 @@ static void tb_dp_resource_available(struct tb *tb, struct tb_port *port)
 	tb_tunnel_dp(tb);
 }
 
-static void tb_disconnect_and_release_dp(struct tb *tb)
+static int tb_disconnect_and_release_dp(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
+	int res, ret = 0;
 
 	/*
 	 * Tear down all DP tunnels and release their resources. They
 	 * will be re-established after resume based on plug events.
 	 */
 	list_for_each_entry_safe_reverse(tunnel, n, &tcm->tunnel_list, list) {
-		if (tb_tunnel_is_dp(tunnel))
-			tb_deactivate_and_free_tunnel(tunnel);
+		if (!tb_tunnel_is_dp(tunnel))
+			continue;
+
+		res = tb_deactivate_and_free_tunnel(tunnel);
+		if (res && !ret)
+			ret = res;
 	}
+	if (ret)
+		return ret;
 
 	while (!list_empty(&tcm->dp_resources)) {
 		struct tb_port *port;
@@ -2285,6 +2488,8 @@ static void tb_disconnect_and_release_dp(struct tb *tb)
 					struct tb_port, list);
 		list_del_init(&port->list);
 	}
+
+	return 0;
 }
 
 static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
@@ -2302,10 +2507,7 @@ static int tb_disconnect_pci(struct tb *tb, struct tb_switch *sw)
 
 	tb_switch_xhci_disconnect(sw);
 
-	tb_tunnel_deactivate(tunnel);
-	list_del(&tunnel->list);
-	tb_tunnel_put(tunnel);
-	return 0;
+	return tb_deactivate_and_free_tunnel(tunnel);
 }
 
 static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
@@ -2313,6 +2515,10 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 	struct tb_port *up, *down, *port;
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
+	int ret;
+
+	if (tb_tunnels_quarantined(tb))
+		return -EUCLEAN;
 
 	up = tb_switch_find_port(sw, TB_TYPE_PCIE_UP);
 	if (!up)
@@ -2331,11 +2537,18 @@ static int tb_tunnel_pci(struct tb *tb, struct tb_switch *sw)
 	if (!tunnel)
 		return -ENOMEM;
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(up,
 			     "PCIe tunnel activation failed, aborting\n");
+		if (ret == -EUCLEAN) {
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			return ret;
+		}
 		tb_tunnel_put(tunnel);
-		return -EIO;
+		return ret;
 	}
 
 	/*
@@ -2367,6 +2580,10 @@ static int tb_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	nhi_port = tb_switch_find_port(tb->root_switch, TB_TYPE_NHI);
 
 	mutex_lock(&tb->lock);
+	if (tb_tunnels_quarantined(tb)) {
+		ret = -EUCLEAN;
+		goto err_unlock;
+	}
 
 	/*
 	 * When tunneling DMA paths the link should not enter CL states
@@ -2381,10 +2598,18 @@ static int tb_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 		goto err_clx;
 	}
 
-	if (tb_tunnel_activate(tunnel)) {
+	ret = tb_tunnel_activate(tunnel);
+	if (ret) {
 		tb_port_info(nhi_port,
 			     "DMA tunnel activation failed, aborting\n");
-		ret = -EIO;
+		if (tunnel->state == TB_TUNNEL_TEARDOWN_FAILED) {
+			/* Keep ambiguous path and HopID ownership discoverable. */
+			list_add_tail(&tunnel->list, &tcm->tunnel_list);
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
+			ret = -EUCLEAN;
+			goto err_unlock;
+		}
 		goto err_free;
 	}
 
@@ -2396,19 +2621,21 @@ err_free:
 	tb_tunnel_put(tunnel);
 err_clx:
 	tb_enable_clx(sw);
+err_unlock:
 	mutex_unlock(&tb->lock);
 
 	return ret;
 }
 
-static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
-					  int transmit_path, int transmit_ring,
-					  int receive_path, int receive_ring)
+static int __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+					 int transmit_path, int transmit_ring,
+					 int receive_path, int receive_ring)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_port *nhi_port, *dst_port;
 	struct tb_tunnel *tunnel, *n;
 	struct tb_switch *sw;
+	int res, ret = 0;
 
 	sw = tb_to_switch(xd->dev.parent);
 	dst_port = tb_port_at(xd->route, sw);
@@ -2421,8 +2648,11 @@ static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 			continue;
 
 		if (tb_tunnel_match_dma(tunnel, transmit_path, transmit_ring,
-					receive_path, receive_ring))
-			tb_deactivate_and_free_tunnel(tunnel);
+					receive_path, receive_ring)) {
+			res = tb_deactivate_and_free_tunnel(tunnel);
+			if (res && !ret)
+				ret = res;
+		}
 	}
 
 	/*
@@ -2430,22 +2660,62 @@ static void __tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	 * because we may still have another DMA tunnel active through
 	 * the same host router USB4 downstream port.
 	 */
-	tb_enable_clx(sw);
+	if (!ret)
+		tb_enable_clx(sw);
+
+	return ret;
 }
 
 static int tb_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring)
 {
+	int ret = 0;
+
 	if (!xd->is_unplugged) {
 		mutex_lock(&tb->lock);
-		__tb_disconnect_xdomain_paths(tb, xd, transmit_path,
-					      transmit_ring, receive_path,
-					      receive_ring);
+		ret = __tb_disconnect_xdomain_paths(tb, xd, transmit_path,
+						    transmit_ring, receive_path,
+						    receive_ring);
+		if (ret)
+			WRITE_ONCE(xd->path_teardown_err, ret);
 		mutex_unlock(&tb->lock);
+		if (ret)
+			ret = -EUCLEAN;
+	} else {
+		/*
+		 * The service-facing contract reports ownership, not the last
+		 * transport/config-space errno. Once removal has severed the
+		 * topology, any recorded teardown failure means the exact tuple is
+		 * still owned and cannot be retried through this dead XDomain.
+		 */
+		ret = xd->path_teardown_err ? -EUCLEAN : 0;
 	}
-	return 0;
+	return ret;
 }
+
+static int tb_retry_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+				  int transmit_path, int transmit_ring,
+				  int receive_path, int receive_ring)
+{
+	int ret;
+
+	mutex_lock(&tb->lock);
+	ret = __tb_disconnect_xdomain_paths(tb, xd, transmit_path,
+					    transmit_ring, receive_path,
+					    receive_ring);
+	if (!ret)
+		WRITE_ONCE(xd->path_teardown_err, 0);
+	mutex_unlock(&tb->lock);
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd)
+{
+	return tb_disconnect_xdomain_paths(tb, xd, -1, -1, -1, -1);
+}
+#endif
 
 static int tb_check_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
 					 int transmit_path, int transmit_ring,
@@ -2531,10 +2801,25 @@ static void tb_handle_hotplug(struct work_struct *work)
 	if (ev->unplug) {
 		tb_retimer_remove_all(port);
 
+		/* Quiet window for the plug-directed retrain: a resident
+		 * ICM processes the same physical unplug edge and must not
+		 * be raced with a host edge (the 2026-08-22 wedge). */
+		port->retrain_teardown = jiffies;
+
 		if (tb_port_has_remote(port)) {
+			int ret;
+
 			tb_port_dbg(port, "switch unplugged\n");
 			tb_sw_set_unplugged(port->remote->sw);
-			tb_free_invalid_tunnels(tb);
+			ret = tb_free_invalid_tunnels(tb);
+			if (ret) {
+				tb_port_warn(port,
+					     "tunnel teardown failed (%d), retaining unplugged topology\n",
+					     ret);
+				mod_delayed_work(tb->wq, &tcm->remove_work,
+						 msecs_to_jiffies(1000));
+				goto rpm_put;
+			}
 			tb_remove_dp_resources(port->remote->sw);
 			tb_switch_tmu_disable(port->remote->sw);
 			tb_switch_unconfigure_link(port->remote->sw);
@@ -2550,22 +2835,28 @@ static void tb_handle_hotplug(struct work_struct *work)
 		} else if (port->xdomain) {
 			struct tb_xdomain *xd = tb_xdomain_get(port->xdomain);
 
-			tb_port_dbg(port, "xdomain unplugged\n");
 			/*
-			 * Service drivers are unbound during
-			 * tb_xdomain_remove() so setting XDomain as
-			 * unplugged here prevents deadlock if they call
-			 * tb_xdomain_disable_paths(). We will tear down
-			 * all the tunnels below.
+			 * Warn, not dbg: this is the other way a peer object
+			 * dies, and telling the two apart is the whole
+			 * question when a link cycles. This one is a real
+			 * unplug event from the fabric; the scan-replacement
+			 * path above is not.
 			 */
+			tb_port_warn(port, "xdomain unplugged (hotplug event)\n");
+			/* Preserve teardown ownership before severing topology. */
+			xd->path_teardown_err =
+				__tb_disconnect_xdomain_paths(tb, xd,
+							      -1, -1, -1, -1);
 			xd->is_unplugged = true;
 			tb_xdomain_remove(xd);
 			port->xdomain = NULL;
-			__tb_disconnect_xdomain_paths(tb, xd, -1, -1, -1, -1);
 			tb_xdomain_put(xd);
 			tb_port_unconfigure_xdomain(port);
 		} else if (tb_port_is_dpout(port) || tb_port_is_dpin(port)) {
-			tb_dp_resource_unavailable(tb, port, "adapter unplug");
+			if (tb_dp_resource_unavailable(tb, port,
+						       "adapter unplug"))
+				tb_port_warn(port,
+					     "DP teardown failed; retaining resource in quarantine\n");
 		} else if (!port->port) {
 			tb_sw_dbg(sw, "xHCI disconnect request\n");
 			tb_switch_xhci_disconnect(sw);
@@ -2589,6 +2880,7 @@ static void tb_handle_hotplug(struct work_struct *work)
 		}
 	}
 
+rpm_put:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
 
@@ -2614,10 +2906,25 @@ out:
  * detection itself was latched off. A port that is genuinely empty just
  * re-arms harmlessly. Deliberately-disabled ports (TB_PORT_DISABLED) are left
  * alone.
+ *
+ * Never under a resident ICM (force_sw_cm): the lane bounce is a hardware
+ * edge the coexisting 8051 firmware also consumes, and it races the
+ * firmware's own port state machine. 2026-08-20 appmana-001: a kick on a
+ * live link wedged the resident Titan Ridge ICM and hung the control path.
+ * 2026-08-22 appmana-001: the kick after a REAL enclosure unplug (lane
+ * state 7, peer probe dead) was followed within three seconds by a silent
+ * machine freeze of the known NHI MMIO-stall class -- journald stopped
+ * mid-line, no hung-task output, hard reset required. The re-arm recipe
+ * exists for detection-wedged chain segments (019<->008), which run the
+ * software CM natively with no resident firmware; on those nothing else
+ * consumes the edge and the kick stays. Same coexistence gate as CLx
+ * (tb_enable_clx()).
  */
 static void tb_port_kick_detection(struct tb_port *port)
 {
 	if (!port_retrain)
+		return;
+	if (tb_force_sw_cm)
 		return;
 	if (!tb_port_is_null(port) || tb_is_upstream_port(port))
 		return;
@@ -2631,6 +2938,316 @@ static void tb_port_kick_detection(struct tb_port *port)
 	usleep_range(10, 100);
 	tb_port_enable(port);
 	tb_port_enable(port->dual_link_port);
+}
+
+/*
+ * tb_port_plug_retrain() - bounded plug-directed retrain of a stuck port
+ * @port: Bare root null port (nothing enumerated) to consider
+ * @state: Lane state the reconcile pass just sampled
+ *
+ * The ICM-safe replacement for the blind kick on hosts where
+ * tb_port_kick_detection() is gated out (force_sw_cm, resident ICM). Two
+ * stuck signatures need a host lane edge to ever produce a device:
+ *
+ *  (a) detection latched off: the lane samples UNPLUGGED forever with a
+ *      powered peer on the cable (019<->008 class; ASM246x enclosures).
+ *      Under a resident ICM the ONLY plug signal is the firmware's own
+ *      connect notification (tcm->icm_hint) -- the lane never moves.
+ *  (b) half-trained: the lane parks at CONNECTING and never reaches UP
+ *      (live appmana-001 port 0:4, 2026-08-22: "failed to reach state
+ *      TB_PORT_UP. Ignoring port..."), which is neither present nor gone,
+ *      so the reconcile ignores it forever. The parked state itself is
+ *      the presence signal.
+ *
+ * Safety under the resident ICM (the 05d1e4c wedge class): both observed
+ * wedges were edges issued while the firmware's port state machine was
+ * mid-transition -- on a live link (2026-08-20) and 3 s after a real
+ * unplug (2026-08-22). So an edge is issued only when the firmware is
+ * provably quiescent on this port: the lane sample has been stable for
+ * TB_PLUG_RETRAIN_QUIET_MS, no teardown inside the window, the ICM's own
+ * notification has aged past it, and attempts are spaced by it. Live and
+ * CLx states are never touched. Attempts are capped per episode so a dead
+ * enclosure gets a bounded number of edges and a clean log, not a bounce
+ * loop. Kept in lockstep with cm_plug_retrain() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_plug_retrain(struct tb_port *port, int state)
+{
+	struct tb_cm *tcm = tb_priv(port->sw->tb);
+	unsigned long quiet = msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS);
+
+	if (!plug_retrain)
+		return;
+	if (!tb_port_is_null(port) || tb_is_upstream_port(port))
+		return;
+	if (state != TB_PORT_CONNECTING && state != TB_PORT_UNPLUGGED)
+		return;
+	if (time_before(jiffies, port->retrain_state_since + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_teardown + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_last_attempt + quiet))
+		return;
+
+	if (state == TB_PORT_UNPLUGGED) {
+		/*
+		 * Plug-directed only: an UNPLUGGED lane is indistinguishable
+		 * from an empty port, so it is bounced only on the resident
+		 * ICM's aged connect notification, once per notification.
+		 * Chain hosts get the blind start-time kick and native hot
+		 * events instead.
+		 */
+		if (!tcm->icm_hint)
+			return;
+		if (time_before(jiffies, tcm->icm_hint_at + quiet))
+			return;
+		if (time_after(jiffies, tcm->icm_hint_at +
+			       msecs_to_jiffies(TB_PLUG_RETRAIN_HINT_MAX_MS)))
+			return;
+		if (time_after_eq(port->retrain_last_attempt, tcm->icm_hint_at))
+			return;
+	}
+
+	if (port->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS) {
+		if (state == TB_PORT_UNPLUGGED &&
+		    time_after(jiffies, port->retrain_state_since +
+			       msecs_to_jiffies(TB_PLUG_RETRAIN_IDLE_RESET_MS)))
+			port->retrain_attempts = 0;
+		else
+			return;
+	}
+
+	port->retrain_attempts++;
+	port->retrain_last_attempt = jiffies;
+	tcm->last_retrain_at = jiffies;
+	tb_port_warn(port,
+		     "plug-directed lane retrain %u/%u (lane state %d)\n",
+		     port->retrain_attempts, TB_PLUG_RETRAIN_MAX_ATTEMPTS,
+		     state);
+	if (tb_port_disable(port))
+		return;
+	tb_port_disable(port->dual_link_port);
+	usleep_range(10, 100);
+	tb_port_enable(port);
+	tb_port_enable(port->dual_link_port);
+}
+
+/*
+ * tb_port_connector_replug_start() - begin a full-connector software replug
+ * @tb: Domain
+ * @port: Primary lane adapter whose secondary is stuck at CONNECTING
+ * @lane1_state: The secondary lane state the caller just sampled
+ *
+ * Escalation for the exhausted single-lane budget: the live 2026-08-23
+ * appmana-001 evidence shows a peer (ASM246x) that arms its secondary
+ * -lane receiver only during the connector handshake, so no number of
+ * single-lane edges can wake it, while a full-connector electrical train
+ * -- the replug's essential ingredient -- can be issued from software:
+ * tear the topology down, disable BOTH lanes together, hold, enable
+ * together, and re-enumerate through the normal synthesized-plug path,
+ * where bonding-at-enumeration finds both lanes up.
+ *
+ * Keys ONLY on a secondary parked at CONNECTING (hardware provably
+ * present on lane 1); an absent or UNPLUGGED secondary (single-lane
+ * cable) is never touched. The caller has already enforced stability,
+ * cooldown, spacing and hint-age discipline; here the episodes are
+ * budgeted and the budget re-arms only after a long idle window. Kept in
+ * lockstep with cm_connector_replug_start() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_connector_replug_start(struct tb *tb, struct tb_port *port,
+					   int lane1_state)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	if (lane1_state != TB_PORT_CONNECTING)
+		return;
+	if (port->replug_phase != TB_REPLUG_IDLE)
+		return;
+	if (time_before(jiffies, port->replug_last_attempt +
+			msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+		return;
+	if (port->replug_attempts >= TB_CONNECTOR_REPLUG_MAX_ATTEMPTS) {
+		if (time_before(jiffies, port->replug_last_attempt +
+				msecs_to_jiffies(TB_CONNECTOR_REPLUG_IDLE_RESET_MS)))
+			return;
+		port->replug_attempts = 0;
+	}
+
+	port->replug_attempts++;
+	port->replug_last_attempt = jiffies;
+	tcm->last_retrain_at = jiffies;
+	port->replug_phase = TB_REPLUG_TEARDOWN;
+	port->reconcile_synth = TB_RECONCILE_UNPLUG;
+	tb_port_warn(port,
+		     "connector replug %u/%u: secondary lane needs a full-connector train; tearing down\n",
+		     port->replug_attempts, TB_CONNECTOR_REPLUG_MAX_ATTEMPTS);
+	tb_queue_hotplug(tb, tb_route(port->sw), port->port, true);
+}
+
+/*
+ * tb_port_connector_replug_step() - step an in-flight connector replug
+ * @tb: Domain
+ * @port: Primary lane adapter with a replug episode in flight
+ *
+ * TEARDOWN: wait (bounded) for the queued synthesized unplug to land so
+ * the software topology below the connector is gone -- a bounce of an
+ * enumerated primary is the 2026-08-20 wedge and stays forbidden -- then
+ * disable BOTH lane adapters together.
+ *
+ * HELD: keep the lanes down for the full hold, extended while a fresh
+ * resident-ICM notification is in flight (re-enabling into the
+ * firmware's busy window is the 2026-08-22 wedge recipe), then enable
+ * both together. The fresh full-connector train rejoins the normal
+ * reconcile flow: lane UP with nothing enumerated synthesizes a plug and
+ * enumeration bonds the trained pair. Kept in lockstep with
+ * cm_connector_replug_step() in tests/negotiation_model.h.
+ */
+static void tb_port_connector_replug_step(struct tb *tb, struct tb_port *port)
+{
+	struct tb_port *lane1 = port->dual_link_port;
+	struct tb_cm *tcm = tb_priv(tb);
+
+	if (!lane1) {
+		port->replug_phase = TB_REPLUG_IDLE;
+		return;
+	}
+
+	switch (port->replug_phase) {
+	case TB_REPLUG_TEARDOWN:
+		if (port->remote || port->xdomain) {
+			/* The queued synthesized unplug has not landed yet. */
+			if (time_after(jiffies, port->replug_last_attempt +
+				       msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS))) {
+				tb_port_warn(port,
+					     "connector replug: teardown did not complete; aborting\n");
+				port->replug_phase = TB_REPLUG_IDLE;
+			}
+			return;
+		}
+		tb_port_warn(port, "connector replug: holding both lanes down\n");
+		if (tb_port_disable(port)) {
+			port->replug_phase = TB_REPLUG_IDLE;
+			return;
+		}
+		tb_port_disable(lane1);
+		port->replug_hold_since = jiffies;
+		tcm->last_retrain_at = jiffies;
+		port->replug_phase = TB_REPLUG_HELD;
+		return;
+	case TB_REPLUG_HELD:
+		if (time_before(jiffies, port->replug_hold_since +
+				msecs_to_jiffies(TB_CONNECTOR_REPLUG_HOLD_MS)))
+			return;
+		/* A fresh firmware notification: extend the hold. */
+		if (tcm->icm_hint &&
+		    time_before(jiffies, tcm->icm_hint_at +
+				msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+			return;
+		tb_port_warn(port, "connector replug: re-enabling both lanes\n");
+		tb_port_enable(port);
+		tb_port_enable(lane1);
+		tcm->last_retrain_at = jiffies;
+		port->replug_last_attempt = jiffies;
+		lane1->retrain_last_attempt = jiffies;
+		port->retrain_state_since = jiffies;
+		port->replug_phase = TB_REPLUG_IDLE;
+		return;
+	}
+}
+
+/*
+ * tb_port_lane1_recover() - recover a degraded x1 link's secondary lane
+ * @tb: Domain
+ * @port: Primary lane adapter with an enumerated remote router
+ *
+ * The live appmana-001 0-3/0:4 signature (2026-08-22): the enclosure's
+ * router enumerates on lane 0, but lane 1 parks at CONNECTING, so
+ * tb_switch_lane_bonding_enable() fails once at enumeration ("0:4:
+ * failed to reach state TB_PORT_UP. Ignoring port..." is its
+ * tb_wait_for_port() on the dual_link_port) and the link runs degraded
+ * at x1 forever: neither the lane nor the bonding is ever retried
+ * upstream. On this enclosure the degraded link's PCIe payload never
+ * comes up at all ("Slot(4): No link" on an activated tunnel).
+ *
+ * Two bounded recoveries, same quiet-window discipline as
+ * tb_port_plug_retrain():
+ *
+ *  - lane 1 parked at CONNECTING: bounce the SECONDARY lane adapter
+ *    only. The primary -- carrying the router and its tunnels -- is
+ *    never touched: a full-connector bounce of a live link is the
+ *    2026-08-20 resident-ICM wedge and stays forbidden. The firmware's
+ *    per-connector state machine is settled (lane 0 stable UP, no
+ *    fresh notification), which is the regime the bounded edge is
+ *    allowed in.
+ *  - lane 1 UP but the link still x1: re-run lane bonding via
+ *    tb_switch_set_link_width(TB_LINK_WIDTH_DUAL) (no lane edge at
+ *    all). Upstream attempts bonding only at enumeration.
+ *
+ * Budget and stamps live on the SECONDARY lane adapter's retrain
+ * fields. Kept in lockstep with cm_lane1_recover() in
+ * tests/negotiation_model.h.
+ */
+static void tb_port_lane1_recover(struct tb *tb, struct tb_port *port)
+{
+	unsigned long quiet = msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS);
+	struct tb_port *lane1 = port->dual_link_port;
+	struct tb_cm *tcm = tb_priv(tb);
+	int state;
+
+	if (!plug_retrain || !lane1 || !port->remote)
+		return;
+	if (port->bonded) {
+		lane1->retrain_attempts = 0;
+		port->replug_attempts = 0;
+		return;
+	}
+
+	state = tb_port_state(lane1);
+	if (state < 0)
+		return;
+	if (state != lane1->retrain_last_state) {
+		lane1->retrain_last_state = state;
+		lane1->retrain_state_since = jiffies;
+	}
+	if (state != TB_PORT_CONNECTING && state != TB_PORT_UP)
+		return;
+	if (time_before(jiffies, lane1->retrain_state_since + quiet))
+		return;
+	if (time_before(jiffies, port->retrain_teardown + quiet))
+		return;
+	if (time_before(jiffies, lane1->retrain_last_attempt + quiet))
+		return;
+	/* A fresh firmware notification: the ICM may be mid-transition. */
+	if (tcm->icm_hint &&
+	    time_before(jiffies, tcm->icm_hint_at + quiet))
+		return;
+	if (lane1->retrain_attempts >= TB_PLUG_RETRAIN_MAX_ATTEMPTS) {
+		tb_port_connector_replug_start(tb, port, state);
+		return;
+	}
+
+	lane1->retrain_attempts++;
+	lane1->retrain_last_attempt = jiffies;
+
+	if (state == TB_PORT_CONNECTING) {
+		tcm->last_retrain_at = jiffies;
+		tb_port_warn(lane1,
+			     "secondary lane half-trained; lane-directed retrain %u/%u\n",
+			     lane1->retrain_attempts,
+			     TB_PLUG_RETRAIN_MAX_ATTEMPTS);
+		if (tb_port_disable(lane1))
+			return;
+		usleep_range(10, 100);
+		tb_port_enable(lane1);
+		return;
+	}
+
+	tb_port_warn(lane1,
+		     "secondary lane trained; enabling lane bonding %u/%u\n",
+		     lane1->retrain_attempts, TB_PLUG_RETRAIN_MAX_ATTEMPTS);
+	if (!tb_switch_set_link_width(port->remote->sw, TB_LINK_WIDTH_DUAL))
+		lane1->retrain_attempts = 0;
 }
 
 /*
@@ -2745,6 +3362,19 @@ static void tb_reconcile_work(struct work_struct *work)
 			  (state >= TB_PORT_TX_CL0S && state <= TB_PORT_CL2);
 		gone = state == TB_PORT_UNPLUGGED;
 
+		/* Lane-state stability, measured in wall time across passes:
+		 * the plug-directed retrain refuses to touch a port whose
+		 * sample moved inside the quiet window. */
+		if (state != port->retrain_last_state) {
+			port->retrain_last_state = state;
+			port->retrain_state_since = jiffies;
+		}
+
+		if (port->replug_phase != TB_REPLUG_IDLE) {
+			tb_port_connector_replug_step(tb, port);
+			continue;
+		}
+
 		if ((port->xdomain || port->remote) &&
 		    (gone || (port->xdomain && port->xdomain->is_unplugged))) {
 			if (port->reconcile_synth == TB_RECONCILE_UNPLUG)
@@ -2766,6 +3396,7 @@ static void tb_reconcile_work(struct work_struct *work)
 				continue;
 			}
 			port->reconcile_synth = TB_RECONCILE_UNPLUG;
+			port->retrain_teardown = jiffies;
 			tb_port_warn(port,
 				     "lost unplug: %s but lane state %d, synthesizing unplug\n",
 				     port->xdomain ? "XDomain present" :
@@ -2781,14 +3412,34 @@ static void tb_reconcile_work(struct work_struct *work)
 			if (gone)
 				tb_port_kick_detection(port);
 		} else if (!port->xdomain && !port->remote && present) {
-			if (port->reconcile_synth == TB_RECONCILE_PLUG)
-				continue;
+			port->retrain_attempts = 0;	/* episode over */
+			if (port->reconcile_synth == TB_RECONCILE_PLUG) {
+				/*
+				 * The synthesized plug's scan failed (a
+				 * marginal link answering the lane but not
+				 * config space) while the lane still reads
+				 * present: retry at a bounded rate instead
+				 * of latching the divergence forever.
+				 */
+				if (time_before(jiffies, port->plug_synth_at +
+						msecs_to_jiffies(TB_PLUG_RETRAIN_QUIET_MS)))
+					continue;
+			}
 			port->reconcile_synth = TB_RECONCILE_PLUG;
+			port->plug_synth_at = jiffies;
 			tb_port_warn(port,
 				     "lost plug: lane state %d but nothing enumerated, synthesizing plug\n",
 				     state);
 			tb_queue_hotplug(tb, tb_route(port->sw), port->port,
 					 false);
+		} else if (!port->xdomain && !port->remote &&
+			   (state == TB_PORT_CONNECTING ||
+			    state == TB_PORT_UNPLUGGED)) {
+			port->reconcile_synth = TB_RECONCILE_NONE;
+			tb_port_plug_retrain(port, state);
+		} else if (port->remote && present) {
+			port->reconcile_synth = TB_RECONCILE_NONE;
+			tb_port_lane1_recover(tb, port);
 		} else {
 			port->reconcile_synth = TB_RECONCILE_NONE;
 		}
@@ -3198,6 +3849,37 @@ static void tb_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 		return;
 	case TB_CFG_PKG_EVENT:
 		break;
+	case TB_CFG_PKG_ICM_EVENT:
+		if (tb_force_sw_cm) {
+			struct tb_cm *tcm = tb_priv(tb);
+
+			/*
+			 * The resident ICM eats the physical hot edges and
+			 * announces them in its own protocol, so the
+			 * software CM never receives a native hot-plug
+			 * packet on this host. Record the notification as a
+			 * connect-request hint for the plug-directed retrain
+			 * and pull the next reconcile pass forward so a
+			 * healthy plug is detected promptly. A notification
+			 * right after our own retrain edge is the firmware
+			 * announcing that edge back to us: never arm it as
+			 * a hint or every retrain seeds the next one.
+			 */
+			if (!time_before(jiffies, tcm->last_retrain_at +
+					 msecs_to_jiffies(TB_PLUG_RETRAIN_SELF_MS)) ||
+			    !tcm->last_retrain_at) {
+				tcm->icm_hint = true;
+				tcm->icm_hint_at = jiffies;
+			}
+			tb_dbg(tb,
+			       "resident ICM event %#x: scheduling reconcile\n",
+			       type);
+			if (tcm->hotplug_active && port_reconcile_ms)
+				mod_delayed_work(tb->wq, &tcm->reconcile_work,
+						 msecs_to_jiffies(500));
+			return;
+		}
+		fallthrough;
 	default:
 		tb_warn(tb, "unexpected event %#x, ignoring\n", type);
 		return;
@@ -3211,33 +3893,199 @@ static void tb_handle_event(struct tb *tb, enum tb_cfg_pkg_type type,
 	tb_queue_hotplug(tb, route, pkg->port, pkg->unplug);
 }
 
-static void tb_stop(struct tb *tb)
+static void tb_finalize_stopped_tunnels(struct tb *tb,
+					struct list_head *tunnels,
+					enum tb_domain_reset_state reset_state)
+{
+	struct tb_tunnel *tunnel;
+	struct tb_tunnel *n;
+	int ret;
+
+	list_for_each_entry_safe(tunnel, n, tunnels, list) {
+		if (!tb_tunnel_is_dma(tunnel)) {
+			list_del_init(&tunnel->list);
+			tb_tunnel_put_on_cm_stop(tunnel);
+		} else if (reset_state == TB_DOMAIN_RESET_PROVEN) {
+			list_del_init(&tunnel->list);
+			tb_tunnel_put_after_revoke(tunnel);
+		} else if (!tb_tunnel_release_safe(tunnel)) {
+			tb_warn(tb,
+				"retaining unresolved tunnel after unproven controller revocation\n");
+		} else {
+			list_del_init(&tunnel->list);
+			ret = tb_tunnel_put(tunnel);
+			WARN_ON(ret);
+		}
+	}
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+void tb_test_cm_finalize_stopped_tunnels(struct tb *tb,
+					 struct list_head *tunnels,
+					 bool controller_revoked)
+{
+	tb_finalize_stopped_tunnels(tb, tunnels,
+				    controller_revoked ? TB_DOMAIN_RESET_PROVEN :
+				    TB_DOMAIN_RESET_NONE);
+}
+#endif
+
+static int tb_stop(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel;
 	struct tb_tunnel *n;
+	struct tb_port *port;
+	bool revoke_required = false;
+	bool ctl_live;
+	int ret;
 
+	/*
+	 * Everything below that touches config space is best-effort cleanup of
+	 * hardware that is about to be re-initialised by the next driver load.
+	 * When the control channel has stopped answering, those transactions
+	 * cannot succeed -- and are not merely wasted. On appmana-019
+	 * (2026-08-25 17:30:26) a live rmmod+modprobe ran while the software CM
+	 * was already failing reads; tb_stop() pushed its teardown I/O into the
+	 * unresponsive controller and the CIO went permanently mute (rx_total=0
+	 * thereafter, surviving module reloads and warm reboots; only power
+	 * removal clears it). So: ask first, and skip the hardware half of the
+	 * teardown when nobody is listening. The software half (freeing tunnel
+	 * objects, unregistering the switch) always runs.
+	 */
+	tb_ctl_enter_teardown(tb->ctl);
+	ctl_live = tb_ctl_is_responsive(tb->ctl);
+	if (!ctl_live)
+		tb_warn(tb,
+			"control channel unresponsive; skipping config space teardown to avoid hanging the controller\n");
+
+	/*
+	 * Close the re-arm gate FIRST, then cancel synchronously.
+	 *
+	 * The old order (cancel, then clear hotplug_active at the very end)
+	 * left a window in which tb_handle_event() could re-arm reconcile_work
+	 * with a 500 ms delay -- the control channel is still running here,
+	 * tb_domain_remove() only stops it after cm_ops->stop() returns. A
+	 * non-sync cancel_delayed_work() does not wait for a running instance
+	 * either. flush_workqueue() in tb_domain_remove() does not wait on an
+	 * armed timer, so the timer could fire after destroy_workqueue(tb->wq)
+	 * and kfree(tb): __queue_work() on a destroyed workqueue with a freed
+	 * tcm. Nothing in the tree sync-cancelled reconcile_work at all.
+	 *
+	 * The cancels stay NON-sync here on purpose: tb_stop() runs under
+	 * tb->lock (tb_domain_remove()) and both work items take tb->lock, so
+	 * a sync cancel here would be the appmana-008 inversion again. The
+	 * synchronous sweep is in tb_deinit(), which tb_domain_remove() calls
+	 * with the lock dropped.
+	 */
+	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
 	cancel_delayed_work(&tcm->reconcile_work);
 	cancel_delayed_work(&tcm->remove_work);
-	/* tunnels are only present after everything has been initialized */
-	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		/*
-		 * DMA tunnels require the driver to be functional so we
-		 * tear them down. Other protocol tunnels can be left
-		 * intact.
-		 */
-		if (tb_tunnel_is_dma(tunnel))
-			tb_tunnel_deactivate(tunnel);
-		tb_tunnel_put(tunnel);
+	/*
+	 * A connector replug caught mid-hold must not strand the lanes
+	 * disabled across a driver stop: the next start would read
+	 * TB_PORT_DISABLED forever (deliberately-disabled ports are left
+	 * alone by design).
+	 */
+	if (tb->root_switch) {
+		tb_switch_for_each_port(tb->root_switch, port) {
+			if (ctl_live && port->replug_phase == TB_REPLUG_HELD) {
+				tb_port_enable(port);
+				tb_port_enable(port->dual_link_port);
+			}
+			port->replug_phase = TB_REPLUG_IDLE;
+		}
 	}
+	/*
+	 * Quiesce every tunnel while its descriptor endpoints and the control
+	 * channel still exist. A failed path remains owned; do not let the final
+	 * reference silently return its HopIDs to an allocator.
+	 */
+	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
+		if (!tb_tunnel_is_dma(tunnel))
+			continue;
+		if (!ctl_live) {
+			revoke_required = true;
+			continue;
+		}
+
+		ret = tb_tunnel_deactivate(tunnel);
+		if (ret)
+			revoke_required = true;
+	}
+	if (tb_nhi_has_quarantined_rings(tb->nhi))
+		revoke_required = true;
+
+	return revoke_required ? -EUCLEAN : 0;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+static void tb_mark_topology_unplugged(struct tb_switch *sw, bool revoked,
+				       bool ownership_unresolved)
+{
+	struct tb_port *port;
+
+	sw->is_unplugged = true;
+	tb_switch_for_each_port(sw, port) {
+		if (tb_port_has_remote(port)) {
+			tb_mark_topology_unplugged(port->remote->sw, revoked,
+						   ownership_unresolved);
+		} else if (port->xdomain) {
+			if (revoked)
+				port->xdomain->path_teardown_err = 0;
+			else if (ownership_unresolved &&
+				 !port->xdomain->path_teardown_err)
+				port->xdomain->path_teardown_err = -EUCLEAN;
+			port->xdomain->is_unplugged = true;
+		}
+	}
+}
+
+void tb_test_cm_mark_topology_unplugged(struct tb_switch *sw, bool revoked,
+					bool ownership_unresolved)
+{
+	tb_mark_topology_unplugged(sw, revoked, ownership_unresolved);
+}
+#endif
+
+static void tb_finalize_stop(struct tb *tb,
+			     enum tb_domain_reset_state reset_state,
+			     bool ownership_unresolved)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	tb_finalize_stopped_tunnels(tb, &tcm->tunnel_list, reset_state);
 	tb_switch_remove(tb->root_switch);
-	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
+	/*
+	 * tb_switch_remove() ends in device_unregister() -> kfree(sw), and
+	 * tb_remove_work() dereferences tb->root_switch with no
+	 * hotplug_active guard (tb_free_unplugged_xdomains() is called
+	 * unconditionally). Leaving the pointer dangling made an already
+	 * queued tb_remove_work run against freed memory when
+	 * tb_domain_remove()'s flush_workqueue() picked it up. icm_stop()
+	 * has always nulled it here; the software CM never did.
+	 */
+	tb->root_switch = NULL;
 }
 
 static void tb_deinit(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	struct tb_tunnel *tunnel;
 	int i;
+
+	/*
+	 * Synchronous sweep of everything tb_stop() could only cancel
+	 * non-synchronously (it runs under tb->lock and these take tb->lock).
+	 * tb_domain_remove() calls tb_deinit() with the lock dropped, so this
+	 * is the one place that can safely WAIT for them, and it must: an
+	 * armed delayed_work timer survives flush_workqueue() and would fire
+	 * after destroy_workqueue(tb->wq) and kfree(tb).
+	 */
+	cancel_delayed_work_sync(&tcm->reconcile_work);
+	cancel_delayed_work_sync(&tcm->remove_work);
+	list_for_each_entry(tunnel, &tcm->tunnel_list, list)
+		tb_tunnel_drain_deferred(tunnel);
 
 	/* Cancel all the release bandwidth workers */
 	for (i = 0; i < ARRAY_SIZE(tcm->groups); i++)
@@ -3326,6 +4174,9 @@ static int tb_start(struct tb *tb, bool reset)
 		tb_scan_switch(tb->root_switch);
 		/* Find out tunnels created by the boot firmware */
 		tb_discover_tunnels(tb);
+		if (tb_tunnels_quarantined(tb))
+			mod_delayed_work(tb->wq, &tcm->remove_work,
+					 msecs_to_jiffies(1000));
 		/* Add DP resources from the DP tunnels created by the boot firmware */
 		tb_discover_dp_resources(tb);
 	}
@@ -3380,9 +4231,12 @@ static int tb_start(struct tb *tb, bool reset)
 static int tb_suspend_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	int ret;
 
 	tb_dbg(tb, "suspending...\n");
-	tb_disconnect_and_release_dp(tb);
+	ret = tb_disconnect_and_release_dp(tb);
+	if (ret)
+		return ret;
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, false);
 	tcm->hotplug_active = false; /* signal tb_handle_hotplug to quit */
@@ -3442,12 +4296,90 @@ static void tb_free_unplugged_xdomains(struct tb_switch *sw)
 	}
 }
 
+struct tb_resume_activation_ops {
+	void (*schedule_cleanup)(struct tb *tb, void *data);
+};
+
+static void tb_resume_schedule_cleanup(struct tb *tb, void *data)
+{
+	struct tb_cm *tcm = tb_priv(tb);
+
+	mod_delayed_work(tb->wq, &tcm->remove_work, msecs_to_jiffies(1000));
+}
+
+static const struct tb_resume_activation_ops tb_resume_activation_ops = {
+	.schedule_cleanup = tb_resume_schedule_cleanup,
+};
+
+static int __tb_resume_activate_tunnels(struct tb *tb,
+					struct list_head *tunnels,
+					unsigned int usb3_delay,
+					const struct tb_resume_activation_ops *ops,
+					void *data)
+{
+	struct tb_tunnel *tunnel, *n;
+	bool cleanup_required = false;
+	int res, ret;
+
+	list_for_each_entry_safe(tunnel, n, tunnels, list) {
+		if (usb3_delay && tb_tunnel_is_usb3(tunnel)) {
+			msleep(usb3_delay);
+			usb3_delay = 0;
+		}
+		ret = tb_tunnel_activate(tunnel);
+		if (ret && ret != -EINPROGRESS)
+			goto rollback;
+	}
+
+	return 0;
+
+rollback:
+	/*
+	 * Tunnel activation is one resume transaction. A later failure must not
+	 * leave an earlier prefix passing traffic against a partially restored
+	 * topology. The failing tunnel has already attempted its own rollback;
+	 * preserve that quarantine and unwind every earlier activation even if
+	 * one of those deactivations also fails.
+	 */
+	if (tunnel->cleanup_only ||
+	    tunnel->state == TB_TUNNEL_TEARDOWN_FAILED)
+		cleanup_required = true;
+	list_for_each_entry_continue_reverse(tunnel, tunnels, list) {
+		res = tb_tunnel_deactivate(tunnel);
+		if (res)
+			cleanup_required = true;
+	}
+
+	if (cleanup_required) {
+		ops->schedule_cleanup(tb, data);
+		return -EUCLEAN;
+	}
+
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_resume_activate_tunnels(struct tb *tb, struct list_head *tunnels,
+				    unsigned int usb3_delay,
+				    void (*schedule_cleanup)(struct tb *tb,
+							     void *data),
+				    void *data)
+{
+	const struct tb_resume_activation_ops ops = {
+		.schedule_cleanup = schedule_cleanup,
+	};
+
+	return __tb_resume_activate_tunnels(tb, tunnels, usb3_delay, &ops, data);
+}
+#endif
+
 static int tb_resume_noirq(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
 	struct tb_tunnel *tunnel, *n;
 	unsigned int usb3_delay = 0;
 	LIST_HEAD(tunnels);
+	int res, ret = 0;
 
 	tb_dbg(tb, "resuming...\n");
 
@@ -3459,7 +4391,11 @@ static int tb_resume_noirq(struct tb *tb)
 		tb_switch_reset(tb->root_switch);
 
 	tb_switch_resume(tb->root_switch, false);
-	tb_free_invalid_tunnels(tb);
+	ret = tb_free_invalid_tunnels(tb);
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return ret;
+	}
 	tb_free_unplugged_children(tb->root_switch);
 	tb_free_unplugged_xdomains(tb->root_switch);
 	tb_restore_children(tb->root_switch);
@@ -3474,20 +4410,31 @@ static int tb_resume_noirq(struct tb *tb)
 	list_for_each_entry_safe_reverse(tunnel, n, &tunnels, list) {
 		if (tb_tunnel_is_usb3(tunnel))
 			usb3_delay = 500;
-		tb_tunnel_deactivate(tunnel);
-		tb_tunnel_put(tunnel);
+		tunnel->cleanup_only = true;
+		res = tb_tunnel_deactivate(tunnel);
+		if (res) {
+			list_move_tail(&tunnel->list, &tcm->tunnel_list);
+			if (!ret)
+				ret = res;
+			continue;
+		}
+		list_del_init(&tunnel->list);
+		WARN_ON(tb_tunnel_put(tunnel));
+	}
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return ret;
+	}
+	if (tb_tunnels_quarantined(tb)) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		return -EUCLEAN;
 	}
 
 	/* Re-create our tunnels now */
-	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list) {
-		/* USB3 requires delay before it can be re-activated */
-		if (tb_tunnel_is_usb3(tunnel)) {
-			msleep(usb3_delay);
-			/* Only need to do it once */
-			usb3_delay = 0;
-		}
-		tb_tunnel_activate(tunnel);
-	}
+	ret = __tb_resume_activate_tunnels(tb, &tcm->tunnel_list, usb3_delay,
+					   &tb_resume_activation_ops, NULL);
+	if (ret)
+		return ret;
 	if (!list_empty(&tcm->tunnel_list)) {
 		/*
 		 * the pcie links need some time to get going.
@@ -3539,13 +4486,18 @@ static void tb_complete(struct tb *tb)
 static int tb_runtime_suspend(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
+	int ret;
 
 	mutex_lock(&tb->lock);
 	/*
 	 * The below call only releases DP resources to allow exiting and
 	 * re-entering redrive mode.
 	 */
-	tb_disconnect_and_release_dp(tb);
+	ret = tb_disconnect_and_release_dp(tb);
+	if (ret) {
+		mutex_unlock(&tb->lock);
+		return ret;
+	}
 	tb_switch_exit_redrive(tb->root_switch);
 	tb_switch_suspend(tb->root_switch, true);
 	tcm->hotplug_active = false;
@@ -3559,26 +4511,49 @@ static void tb_remove_work(struct work_struct *work)
 {
 	struct tb_cm *tcm = container_of(work, struct tb_cm, remove_work.work);
 	struct tb *tb = tcm_to_tb(tcm);
+	int ret = 0;
 
 	mutex_lock(&tb->lock);
-	if (tb->root_switch)
-		tb_free_unplugged_children(tb->root_switch);
+	if (tb->root_switch) {
+		ret = tb_retry_quarantined_tunnels(tb);
+		if (!ret)
+			ret = tb_free_invalid_tunnels(tb);
+		if (!ret) {
+			tb_free_unplugged_children(tb->root_switch);
+			tb_free_unplugged_xdomains(tb->root_switch);
+		}
+	}
 	mutex_unlock(&tb->lock);
+	if (ret)
+		mod_delayed_work(tb->wq, &tcm->remove_work,
+				 msecs_to_jiffies(1000));
 
-	tb_free_unplugged_xdomains(tb->root_switch);
+	/* Service-driver unbind callbacks must run without the domain lock. */
+	tb_domain_unregister_unplugged_xdomains(tb);
 }
 
 static int tb_runtime_resume(struct tb *tb)
 {
 	struct tb_cm *tcm = tb_priv(tb);
-	struct tb_tunnel *tunnel, *n;
+	int ret;
 
 	mutex_lock(&tb->lock);
 	tb_switch_resume(tb->root_switch, true);
-	tb_free_invalid_tunnels(tb);
+	ret = tb_free_invalid_tunnels(tb);
+	if (ret) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		goto err_unlock;
+	}
+	if (tb_tunnels_quarantined(tb)) {
+		tb_resume_schedule_cleanup(tb, NULL);
+		ret = -EUCLEAN;
+		goto err_unlock;
+	}
 	tb_restore_children(tb->root_switch);
-	list_for_each_entry_safe(tunnel, n, &tcm->tunnel_list, list)
-		tb_tunnel_activate(tunnel);
+	ret = __tb_resume_activate_tunnels(tb, &tcm->tunnel_list, 0,
+					   &tb_resume_activation_ops, NULL);
+	if (ret)
+		goto err_unlock;
 	tb_switch_enter_redrive(tb->root_switch);
 	tcm->hotplug_active = true;
 	if (port_reconcile_ms)
@@ -3593,6 +4568,10 @@ static int tb_runtime_resume(struct tb *tb)
 	 */
 	queue_delayed_work(tb->wq, &tcm->remove_work, msecs_to_jiffies(50));
 	return 0;
+
+err_unlock:
+	mutex_unlock(&tb->lock);
+	return ret;
 }
 
 /*
@@ -3612,6 +4591,7 @@ static const struct tb_cm_ops tb_cm_ops = {
 	.driver_ready = tb_driver_ready,
 	.start = tb_start,
 	.stop = tb_stop,
+	.finalize_stop = tb_finalize_stop,
 	.deinit = tb_deinit,
 	.suspend_noirq = tb_suspend_noirq,
 	.resume_noirq = tb_resume_noirq,
@@ -3625,6 +4605,7 @@ static const struct tb_cm_ops tb_cm_ops = {
 	.approve_switch = tb_tunnel_pci,
 	.approve_xdomain_paths = tb_approve_xdomain_paths,
 	.disconnect_xdomain_paths = tb_disconnect_xdomain_paths,
+	.retry_xdomain_paths = tb_retry_xdomain_paths,
 	.xdomain_paths_active = tb_check_xdomain_paths_active,
 };
 

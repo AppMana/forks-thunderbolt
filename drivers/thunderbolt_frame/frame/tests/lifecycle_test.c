@@ -167,9 +167,10 @@ static void tbframe_lifecycle_double_register_refused(struct kunit *test)
 
 /*
  * Teardown must release the in-HopID it ACTUALLY allocated, not whatever the
- * peer's most recent HELLO left in ->remote_hopid. An inbound HELLO runs from
- * the dispatch context with no session lock, so it can move that field at any
- * time; releasing the moved value both splats ida_free() in the core and
+ * peer's most recent HELLO advertised. An inbound HELLO runs from the dispatch
+ * context with no session lock, so its responder snapshot can move at any
+ * time. It must not mutate the requester snapshot used by the active hardware;
+ * releasing the newly advertised value both splats ida_free() in the core and
  * leaks the real HopID, after which the next session's alloc fails -EBUSY and
  * the link never comes back across a reload.
  */
@@ -186,8 +187,10 @@ static void tbframe_lifecycle_hopid_release_matches_alloc(struct kunit *test)
 	/* Peer re-HELLOs from a different transmit HopID while we are up. */
 	fx->mock.peer.transmit_hopid = allocated + 5;
 	tbframe_lifecycle_inject(fx, TBFRAME_WIRE_OP_HELLO);
+	KUNIT_ASSERT_EQ(test, allocated, (int)fx->link->remote_hopid);
+	KUNIT_ASSERT_TRUE(test, fx->link->hello_responder.seen);
 	KUNIT_ASSERT_EQ(test, (int)fx->mock.peer.transmit_hopid,
-			(int)fx->link->remote_hopid);
+			(int)fx->link->hello_responder.peer.transmit_hopid);
 
 	tbframe_link_destroy(fx->link, TBFRAME_DOWN_UNPLUG);
 	fx->link_destroyed = true;

@@ -49,8 +49,19 @@ static char *resp_state_name[] = {
 /* rxe_recv calls here to add a request packet to the input queue */
 void rxe_resp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&qp->state_lock, flags);
+	if (!qp->valid) {
+		spin_unlock_irqrestore(&qp->state_lock, flags);
+		rxe_put(qp);
+		kfree_skb(skb);
+		ib_device_put(qp->ibqp.device);
+		return;
+	}
 	skb_queue_tail(&qp->req_pkts, skb);
 	rxe_sched_task(&qp->recv_task);
+	spin_unlock_irqrestore(&qp->state_lock, flags);
 }
 
 static inline enum resp_states get_req(struct rxe_qp *qp,
@@ -1240,19 +1251,21 @@ static int send_read_response_ack(struct rxe_qp *qp, u8 syndrome, u32 psn)
 static enum resp_states acknowledge(struct rxe_qp *qp,
 				    struct rxe_pkt_info *pkt)
 {
+	int err = 0;
+
 	if (qp_type(qp) != IB_QPT_RC)
 		return RESPST_CLEANUP;
 
 	if (qp->resp.aeth_syndrome != AETH_ACK_UNLIMITED)
-		send_ack(qp, qp->resp.aeth_syndrome, pkt->psn);
+		err = send_ack(qp, qp->resp.aeth_syndrome, pkt->psn);
 	else if (pkt->mask & RXE_ATOMIC_MASK)
-		send_atomic_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
+		err = send_atomic_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
 	else if (pkt->mask & (RXE_FLUSH_MASK | RXE_ATOMIC_WRITE_MASK))
-		send_read_response_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
+		err = send_read_response_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
 	else if (bth_ack(pkt))
-		send_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
+		err = send_ack(qp, AETH_ACK_UNLIMITED, pkt->psn);
 
-	return RESPST_CLEANUP;
+	return err && qp->need_resp_skb ? RESPST_EXIT : RESPST_CLEANUP;
 }
 
 static enum resp_states cleanup(struct rxe_qp *qp,
@@ -1303,8 +1316,9 @@ static enum resp_states duplicate_request(struct rxe_qp *qp,
 	if (pkt->mask & RXE_SEND_MASK ||
 	    pkt->mask & RXE_WRITE_MASK) {
 		/* SEND. Ack again and cleanup. C9-105. */
-		send_ack(qp, AETH_ACK_UNLIMITED, prev_psn);
-		return RESPST_CLEANUP;
+		return send_ack(qp, AETH_ACK_UNLIMITED, prev_psn) &&
+		       qp->need_resp_skb ?
+			RESPST_EXIT : RESPST_CLEANUP;
 	} else if (pkt->mask & RXE_FLUSH_MASK) {
 		struct resp_res *res;
 
@@ -1587,8 +1601,16 @@ int rxe_receiver(struct rxe_qp *qp)
 			break;
 		case RESPST_ERR_PSN_OUT_OF_SEQ:
 			/* RC only - Class B. Drop packet. */
-			send_ack(qp, AETH_NAK_PSN_SEQ_ERROR, qp->resp.psn);
-			state = RESPST_CLEANUP;
+			if (send_ack(qp, AETH_NAK_PSN_SEQ_ERROR,
+				     qp->resp.psn) && qp->need_resp_skb) {
+				/* check_psn suppresses duplicate sequence NAKs.
+				 * Re-arm it while this NAK is still unsent.
+				 */
+				qp->resp.sent_psn_nak = 0;
+				state = RESPST_EXIT;
+			} else {
+				state = RESPST_CLEANUP;
+			}
 			break;
 
 		case RESPST_ERR_TOO_MANY_RDMA_ATM_REQ:
@@ -1609,10 +1631,13 @@ int rxe_receiver(struct rxe_qp *qp)
 			if (qp_type(qp) == IB_QPT_RC) {
 				rxe_counter_inc(rxe, RXE_CNT_SND_RNR);
 				/* RC - class B */
-				send_ack(qp, AETH_RNR_NAK |
-					 (~AETH_TYPE_MASK &
-					 qp->attr.min_rnr_timer),
-					 pkt->psn);
+				if (send_ack(qp, AETH_RNR_NAK |
+					     (~AETH_TYPE_MASK &
+					      qp->attr.min_rnr_timer),
+					     pkt->psn) && qp->need_resp_skb) {
+					state = RESPST_EXIT;
+					break;
+				}
 			} else {
 				/* UD/UC - class D */
 				qp->resp.drop_msg = 1;
@@ -1684,7 +1709,7 @@ int rxe_receiver(struct rxe_qp *qp)
 			goto done;
 
 		case RESPST_EXIT:
-			if (qp->resp.goto_error) {
+			if (qp->resp.goto_error && !qp->need_resp_skb) {
 				state = RESPST_ERROR;
 				break;
 			}

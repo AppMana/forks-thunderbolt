@@ -28,9 +28,7 @@ int do_mmap_info(struct rxe_dev *rxe, struct mminfo __user *outbuf,
 			goto err2;
 		}
 
-		spin_lock_bh(&rxe->pending_lock);
-		list_add(&ip->pending_mmaps, &rxe->pending_mmaps);
-		spin_unlock_bh(&rxe->pending_lock);
+		rxe_mmap_info_publish(rxe, ip);
 	}
 
 	*ip_p = ip;

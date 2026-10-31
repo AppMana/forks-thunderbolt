@@ -118,6 +118,34 @@ static const uuid_t dma_test_dir_uuid =
 
 static struct tb_property_dir *dma_test_dir;
 static void *dma_test_pattern;
+static int dma_test_stop_rings(struct dma_test *dt);
+
+/*
+ * A service remove callback cannot veto unbind.  Leave unresolved path and
+ * HopID ownership with the core, while permanently disconnecting this leaf
+ * module from the stopped rings and their callbacks.
+ */
+static int dma_test_terminal_handoff(struct dma_test *dt)
+{
+	int ret;
+
+#ifdef TB_XDOMAIN_HAS_PATH_QUARANTINE
+	ret = tb_xdomain_quarantine_paths(dt->xd,
+					  dt->tx_ring ? dt->tx_hopid : -1,
+					  dt->tx_ring ? dt->tx_ring->hop : -1,
+					  dt->tx_ring,
+					  dt->rx_ring ? dt->rx_hopid : -1,
+					  dt->rx_ring ? dt->rx_ring->hop : -1,
+					  dt->rx_ring);
+#else
+	ret = -EOPNOTSUPP;
+#endif
+	if (ret)
+		return ret;
+	dt->rx_ring = NULL;
+	dt->tx_ring = NULL;
+	return 0;
+}
 
 static void dma_test_free_rings(struct dma_test *dt)
 {
@@ -139,6 +167,9 @@ static int dma_test_start_rings(struct dma_test *dt)
 	struct tb_xdomain *xd = dt->xd;
 	int ret, e2e_tx_hop = 0;
 	struct tb_ring *ring;
+
+	if (dt->tx_ring || dt->rx_ring)
+		return -EBUSY;
 
 	/*
 	 * If we are both sender and receiver (traffic goes over a
@@ -191,40 +222,56 @@ static int dma_test_start_rings(struct dma_test *dt)
 		dt->rx_hopid = ret;
 	}
 
-	ret = tb_xdomain_enable_paths(dt->xd, dt->tx_hopid,
-				      dt->tx_ring ? dt->tx_ring->hop : -1,
-				      dt->rx_hopid,
-				      dt->rx_ring ? dt->rx_ring->hop : -1);
-	if (ret) {
-		dma_test_free_rings(dt);
-		return ret;
-	}
-
 	if (dt->tx_ring)
 		tb_ring_start(dt->tx_ring);
 	if (dt->rx_ring)
 		tb_ring_start(dt->rx_ring);
 
+	ret = tb_xdomain_enable_paths(dt->xd,
+				      dt->tx_ring ? dt->tx_hopid : -1,
+				      dt->tx_ring ? dt->tx_ring->hop : -1,
+				      dt->rx_ring ? dt->rx_hopid : -1,
+				      dt->rx_ring ? dt->rx_ring->hop : -1);
+	if (ret) {
+		if (ret == -EUCLEAN) {
+			int stop_ret = dma_test_stop_rings(dt);
+
+			return stop_ret ?: ret;
+		}
+		if (dt->rx_ring)
+			tb_ring_stop(dt->rx_ring);
+		if (dt->tx_ring)
+			tb_ring_stop(dt->tx_ring);
+		dma_test_free_rings(dt);
+		return ret;
+	}
+
 	return 0;
 }
 
-static void dma_test_stop_rings(struct dma_test *dt)
+static int dma_test_stop_rings(struct dma_test *dt)
 {
 	int ret;
+
+	ret = tb_xdomain_disable_paths(dt->xd,
+				       dt->tx_ring ? dt->tx_hopid : -1,
+				       dt->tx_ring ? dt->tx_ring->hop : -1,
+				       dt->rx_ring ? dt->rx_hopid : -1,
+				       dt->rx_ring ? dt->rx_ring->hop : -1);
+	if (ret) {
+		dev_warn(&dt->svc->dev,
+			 "failed to disable DMA paths; retaining ring and HopID ownership\n");
+	}
 
 	if (dt->rx_ring)
 		tb_ring_stop(dt->rx_ring);
 	if (dt->tx_ring)
 		tb_ring_stop(dt->tx_ring);
-
-	ret = tb_xdomain_disable_paths(dt->xd, dt->tx_hopid,
-				       dt->tx_ring ? dt->tx_ring->hop : -1,
-				       dt->rx_hopid,
-				       dt->rx_ring ? dt->rx_ring->hop : -1);
 	if (ret)
-		dev_warn(&dt->svc->dev, "failed to disable DMA paths\n");
+		return ret;
 
 	dma_test_free_rings(dt);
+	return 0;
 }
 
 static void dma_test_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
@@ -580,7 +627,14 @@ static int test_store(void *data, u64 val)
 	}
 
 out_stop:
-	dma_test_stop_rings(dt);
+	{
+		int stop_ret = dma_test_stop_rings(dt);
+
+		if (!ret)
+			ret = stop_ret;
+		if (stop_ret)
+			dt->error_code = DMA_TEST_DMA_ERROR;
+	}
 out_unlock:
 	dma_test_check_errors(dt, ret);
 	mutex_unlock(&dt->lock);
@@ -656,10 +710,24 @@ static int dma_test_probe(struct tb_service *svc, const struct tb_service_id *id
 static void dma_test_remove(struct tb_service *svc)
 {
 	struct dma_test *dt = tb_service_get_drvdata(svc);
+	int ret = 0;
+
+	debugfs_remove_recursive(dt->debugfs_dir);
 
 	mutex_lock(&dt->lock);
-	debugfs_remove_recursive(dt->debugfs_dir);
+	if (dt->rx_ring || dt->tx_ring)
+		ret = dma_test_stop_rings(dt);
+	if (ret) {
+		dev_warn(&svc->dev,
+			 "DMA paths remain unresolved; quarantining rings\n");
+		ret = dma_test_terminal_handoff(dt);
+		if (ret)
+			dev_err(&svc->dev,
+				"failed to transfer unresolved DMA tuple to core: %d\n",
+				ret);
+	}
 	mutex_unlock(&dt->lock);
+	tb_service_set_drvdata(svc, NULL);
 }
 
 static int __maybe_unused dma_test_suspend(struct device *dev)

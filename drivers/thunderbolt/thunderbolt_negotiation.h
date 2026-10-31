@@ -47,6 +47,20 @@
 #include <linux/types.h>
 
 /**
+ * tb_icm_phy_port_needs_reset() - is either lane of a connector active?
+ * @lane0_up: first lane reports TB_PORT_UP
+ * @lane1_up: second lane reports TB_PORT_UP
+ *
+ * The resident connection manager resets a physical connector during startup
+ * when it is already carrying a link. A single-lane link is active even though
+ * its paired lane remains disabled.
+ */
+static inline bool tb_icm_phy_port_needs_reset(bool lane0_up, bool lane1_up)
+{
+	return lane0_up || lane1_up;
+}
+
+/**
  * tb_xdomain_generation_stale() - should a freshly-read remote block be dropped?
  * @have_remote: whether we already hold this peer's properties/identity
  * @remote_gen:  generation reported with the just-read block
@@ -78,6 +92,229 @@ static inline bool tb_xdomain_generation_stale(bool have_remote, u32 remote_gen,
 					       u32 cached_gen)
 {
 	return have_remote && remote_gen == cached_gen;
+}
+
+/**
+ * tb_xdomain_uuid_is_placeholder() - is this a peer identity at all?
+ * @uuid: the 16 raw UUID bytes in wire order (as printed by %pUb)
+ *
+ * A Thunderbolt peer's UUID is assembled from router config-space reads. With
+ * no POWERED router behind the link EVERY dword reads back all-ones, so the
+ * absent-peer identity is all-ones across all 16 bytes.
+ *
+ * This used to test only the low 64 bits, and that was wrong on this fleet.
+ * The Maple Ridge controllers genuinely report an identity whose low half is
+ * all-ones; the high half is what distinguishes one board from another. Read
+ * live 2026-08-25:
+ *
+ *   385a8780-0004-402c-ffff-ffffffffffff  (appmana-019, its OWN root switch)
+ *   5bdf8780-004d-b184-ffff-ffffffffffff  (appmana-027)
+ *   385a8780-0025-7a2c-ffff-ffffffffffff  (appmana-008)
+ *   6bbc8780-00c1-11c0-ffff-ffffffffffff  (appmana-021)
+ *
+ * The old docstring cited the first of those as a placeholder sample; it is
+ * appmana-019's real identity. Testing the low half alone therefore classified
+ * every Maple Ridge peer as "no peer": tb_xdomain_get_uuid() folded a
+ * SUCCESSFUL read into -ENODATA, the XDomain never left state UUID, no
+ * property exchange ever ran, and no service ever bound. Captured on
+ * appmana-019 against appmana-027 as an endless
+ * "requesting remote UUID / failed to request UUID, retrying" loop while
+ * appmana-027's announcements were arriving normally.
+ *
+ * appmana-004 is the control: a Titan Ridge board whose UUID
+ * (cc030000-0070-7c0e-83a2-d82206a48924) has no all-ones tail, and whose link
+ * never exhibited this failure.
+ *
+ * Such a value must never be latched as an XDomain's final identity. XDP
+ * property requests carry dst_uuid and a healthy peer ignores a mismatch, so a
+ * placeholder identity fails every property read; worse, when the peer finally
+ * powers on and answers with its REAL UUID, tb_xdomain_get_uuid() reads the
+ * difference as "another domain connected" and condemns the XDomain. On a chain
+ * node with a resident ICM nothing then replaces the condemned object, so the
+ * XDomain never registers and no service ever binds until the host is rebooted
+ * with the neighbour already up.
+ *
+ * Distinct from the generation gate above: that one decides whether a peer's
+ * property BLOCK is fresh; this one decides whether an identity is real. Pure
+ * predicate, exercised by KUnit.
+ */
+static inline bool tb_xdomain_uuid_is_placeholder(const u8 *uuid)
+{
+	int i;
+
+	for (i = 0; i < 16; i++)
+		if (uuid[i] != 0xff)
+			return false;
+
+	return true;
+}
+
+/*
+ * Properties-changed announcement backoff.
+ *
+ * The announcement is what makes a peer's connection manager re-arm its
+ * XDomain announce, so a host that stops sending it can never be found again by
+ * a neighbour that powers on later. It therefore must not have a give-up point.
+ * An absent neighbour is cheap at these numbers: the spacing doubles from 1 s to
+ * a 64 s ceiling, so a peer that stays powered off costs about one control
+ * packet per minute and seven log lines in total, forever.
+ */
+#define TB_XDOMAIN_ANNOUNCE_BASE_MS	1000	/* == XDOMAIN_DEFAULT_TIMEOUT */
+#define TB_XDOMAIN_ANNOUNCE_MAX_SHIFT	6	/* 1 s, 2 s, ... 64 s */
+
+/*
+ * An announcement that never gives up re-queues its own delayed work, so it
+ * needs an explicit stop marker: __stop_handshake() writes this to the failure
+ * counter BEFORE cancel_delayed_work_sync(), and the work re-reads the counter
+ * after its (bounded) wire wait and declines to re-arm when it sees it.
+ * Without that, a callback that started before the cancel could re-queue after
+ * it and outlive module unload or suspend. Arming clears the marker.
+ */
+#define TB_XDOMAIN_ANNOUNCE_STOPPED	(-1)
+
+/**
+ * tb_xdomain_announce_delay_ms() - spacing before the next announce attempt
+ * @failures: consecutive failed attempts BEFORE the one being scheduled
+ */
+static inline unsigned int tb_xdomain_announce_delay_ms(unsigned int failures)
+{
+	if (failures > TB_XDOMAIN_ANNOUNCE_MAX_SHIFT)
+		failures = TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
+
+	return TB_XDOMAIN_ANNOUNCE_BASE_MS << failures;
+}
+
+/**
+ * tb_xdomain_announce_should_warn() - rate-limit the announce diagnostics
+ * @failures: consecutive failed attempts BEFORE the one that just failed
+ *
+ * One line per doubling of the backoff, then silence. The old code emitted its
+ * dev_err on the retrying path as well as the giving-up path, so a single
+ * absent neighbour produced a burst of identical lines.
+ */
+static inline bool tb_xdomain_announce_should_warn(unsigned int failures)
+{
+	return failures <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT;
+}
+
+/**
+ * tb_xdomain_control_inbound_since() - did opposite-direction traffic overlap?
+ * @request_started: timestamp sampled immediately before the outbound request
+ * @inbound_seen: timestamp of the last route-correlated inbound request
+ *
+ * A peer packet from before the outbound failure only proves that the peer was
+ * present then.  Controller recovery needs independent evidence that the
+ * opposite direction remained live during the failing request.  The signed
+ * subtraction is the same wrap-safe ordering used by time_after_eq().
+ */
+static inline bool
+tb_xdomain_control_inbound_since(unsigned long request_started,
+				 unsigned long inbound_seen)
+{
+	return inbound_seen && (long)(inbound_seen - request_started) >= 0;
+}
+
+/*
+ * Control-channel liveness is independent of discovery and announcement.
+ * An absent peer may leave announcement retrying forever, but a route that was
+ * previously proven and is still delivering inbound service requests is not
+ * absent. If announcements in the opposite direction reach saturated backoff,
+ * the controller owns a persistent one-way failure and needs bounded recovery.
+ */
+enum tb_xdomain_control_state {
+	TB_XDOMAIN_CONTROL_UNPROVEN,
+	TB_XDOMAIN_CONTROL_QUIET,
+	TB_XDOMAIN_CONTROL_PEER_ACTIVE,
+	TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED,
+	TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED,
+};
+
+enum tb_xdomain_control_event {
+	TB_XDOMAIN_CONTROL_PEER_PROVEN,
+	TB_XDOMAIN_CONTROL_INBOUND_PROGRESS,
+	TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED,
+	TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED,
+	TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED,
+	TB_XDOMAIN_CONTROL_STOPPED,
+};
+
+/*
+ * Ring 0 completion processing is the only context that can retire a
+ * synchronous control request.  Taking tb->lock from that context is unsafe:
+ * sysfs and connection-manager paths legitimately hold tb->lock while waiting
+ * for a ring 0 response.  Model the dispatch decision explicitly so service
+ * protocol handling cannot silently regain an inline, blocking route lookup.
+ */
+enum tb_xdomain_rx_dispatch_class {
+	TB_XDOMAIN_RX_DISCOVERY_REQUEST,
+	TB_XDOMAIN_RX_DISCOVERY_RESPONSE,
+	TB_XDOMAIN_RX_SERVICE_REQUEST,
+	TB_XDOMAIN_RX_SERVICE_RESPONSE,
+};
+
+enum tb_xdomain_rx_dispatch_mode {
+	TB_XDOMAIN_RX_DISPATCH_INLINE,
+	TB_XDOMAIN_RX_DISPATCH_DEFERRED,
+};
+
+static inline enum tb_xdomain_rx_dispatch_mode
+tb_xdomain_rx_dispatch_mode(enum tb_xdomain_rx_dispatch_class class)
+{
+	if (class == TB_XDOMAIN_RX_DISCOVERY_RESPONSE ||
+	    class == TB_XDOMAIN_RX_SERVICE_RESPONSE)
+		return TB_XDOMAIN_RX_DISPATCH_INLINE;
+
+	return TB_XDOMAIN_RX_DISPATCH_DEFERRED;
+}
+
+/*
+ * Keep the wire-type split in the same helper used by the receive path and its
+ * KUnit model.  Requests are unsolicited handler work; responses are owned by
+ * the synchronous request matcher that was armed before transmission.
+ */
+static inline enum tb_xdomain_rx_dispatch_mode
+tb_xdomain_service_dispatch_mode(bool response)
+{
+	return tb_xdomain_rx_dispatch_mode(response ?
+		TB_XDOMAIN_RX_SERVICE_RESPONSE :
+		TB_XDOMAIN_RX_SERVICE_REQUEST);
+}
+
+static inline enum tb_xdomain_control_state
+tb_xdomain_control_next(enum tb_xdomain_control_state state,
+			 enum tb_xdomain_control_event event)
+{
+	if (event == TB_XDOMAIN_CONTROL_STOPPED)
+		return TB_XDOMAIN_CONTROL_UNPROVEN;
+
+	switch (state) {
+	case TB_XDOMAIN_CONTROL_UNPROVEN:
+		if (event == TB_XDOMAIN_CONTROL_PEER_PROVEN)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+			return TB_XDOMAIN_CONTROL_PEER_ACTIVE;
+		break;
+	case TB_XDOMAIN_CONTROL_QUIET:
+		if (event == TB_XDOMAIN_CONTROL_INBOUND_PROGRESS)
+			return TB_XDOMAIN_CONTROL_PEER_ACTIVE;
+		break;
+	case TB_XDOMAIN_CONTROL_PEER_ACTIVE:
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED)
+			return TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED;
+		break;
+	case TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED:
+		if (event == TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED)
+			return TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED;
+		if (event == TB_XDOMAIN_CONTROL_OUTBOUND_SUCCEEDED)
+			return TB_XDOMAIN_CONTROL_QUIET;
+		break;
+	case TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED:
+		break;
+	}
+
+	return state;
 }
 
 /**

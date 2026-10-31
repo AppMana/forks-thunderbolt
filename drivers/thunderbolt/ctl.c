@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/dmapool.h>
+#include <linux/semaphore.h>
 #include <linux/workqueue.h>
 
 #include "ctl.h"
@@ -20,6 +21,8 @@
 
 #define TB_CTL_RX_PKG_COUNT	10
 #define TB_CTL_RETRIES		4
+/* Windows waits this long for the independent local ring command. */
+#define TB_CTL_XDOMAIN_TX_TIMEOUT_MS 25000
 
 /**
  * struct tb_ctl - Thunderbolt control channel
@@ -45,7 +48,57 @@ struct tb_ctl {
 	struct ctl_pkg *rx_packets[TB_CTL_RX_PKG_COUNT];
 	struct mutex request_queue_lock;
 	struct list_head request_queue;
+	/* Ring-0 firmware commands can lose completions when they overlap. */
+	struct semaphore command_sem;
+	bool xdomain_tx_occupied;
 	bool running;
+	/* Best-effort hardware cleanup uses a fail-fast admission policy. */
+	bool teardown;
+	/*
+	 * Requests whose ->work has been accepted by system_wq and synchronous
+	 * command-slot owners that have not finished. tb_cfg_request_work()
+	 * dereferences req->ctl AFTER the
+	 * callback (tb_cfg_request_dequeue() takes ctl->request_queue_lock),
+	 * so the ctl must outlive every such item. Nothing else ties them
+	 * together: the kref counts the REQUEST, the ctl has no refcount, and
+	 * neither tb_ctl_stop() nor tb_ctl_free() used to flush them.
+	 */
+	atomic_t req_works;
+	wait_queue_head_t req_work_wait;
+
+	/*
+	 * Ring 0 liveness, diagnostic only. When a control request times out
+	 * the driver reports "no answer", which is three different faults
+	 * wearing one face: the packet never left, it left and nothing came
+	 * back, or replies are arriving and not matching. REG_FW_STS cannot
+	 * separate them -- it reads 0x800001a1 on healthy and failing hosts
+	 * alike (appmana-019 vs -021/-023, 2026-08-25) -- so the counters
+	 * that distinguish "the firmware is not executing" from "we are not
+	 * transmitting" have to come from the ring itself.
+	 */
+	atomic_t tx_done;
+	atomic_t tx_canceled;
+	atomic_t rx_total;
+	atomic_t rx_matched;
+	atomic_t rx_unmatched;
+	atomic_t rx_xdomain_tx_status;
+	atomic_t rx_dropped;
+
+	/*
+	 * Consecutive request timeouts with no matched reply in between, and
+	 * the basis of tb_ctl_is_responsive(). Not diagnostic: the teardown
+	 * path consults it before pushing config space I/O at the controller.
+	 *
+	 * appmana-019, 2026-08-25 17:30:26: the software CM was already
+	 * failing reads ("0: timeout reading config space 1 from 0x37") when a
+	 * live rmmod+modprobe ran. tb_stop() then issued its unconditional
+	 * teardown writes into a controller that was not answering, and the
+	 * CIO went from degraded to permanently mute -- rx_total=0 from that
+	 * second onward, surviving module reloads AND warm reboots (only power
+	 * removal clears it). Every one of those writes is a 250 ms..5 s
+	 * timeout that accomplishes nothing when nothing is listening.
+	 */
+	atomic_t consec_timeouts;
 
 	int timeout_msec;
 	event_cb callback;
@@ -53,6 +106,17 @@ struct tb_ctl {
 
 	int index;
 };
+
+void tb_ctl_get_stats(const struct tb_ctl *ctl, struct tb_ctl_stats *stats)
+{
+	stats->tx_done = atomic_read(&ctl->tx_done);
+	stats->tx_canceled = atomic_read(&ctl->tx_canceled);
+	stats->rx_total = atomic_read(&ctl->rx_total);
+	stats->rx_matched = atomic_read(&ctl->rx_matched);
+	stats->rx_unmatched = atomic_read(&ctl->rx_unmatched);
+	stats->rx_xdomain_tx_status = atomic_read(&ctl->rx_xdomain_tx_status);
+	stats->rx_dropped = atomic_read(&ctl->rx_dropped);
+}
 
 
 #define tb_ctl_WARN(ctl, format, arg...) \
@@ -73,9 +137,46 @@ struct tb_ctl {
 #define tb_ctl_dbg_once(ctl, format, arg...) \
 	dev_dbg_once(&(ctl)->nhi->pdev->dev, format, ## arg)
 
+/*
+ * A stalled handshake retries forever, so the ring-0 diagnostic below has
+ * to be rate limited or it becomes the fault.
+ */
+#define tb_ctl_warn_ratelimited(ctl, format, arg...) \
+	dev_warn_ratelimited(&(ctl)->nhi->pdev->dev, format, ## arg)
+
+static void tb_ctl_schedule_req_work(struct tb_cfg_request *req);
+static struct tb_cfg_request_state
+tb_cfg_request_read_state(struct tb_cfg_request *req);
+
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
+static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_local_queue);
 /* Serializes access to request kref_get/put */
 static DEFINE_MUTEX(tb_cfg_request_lock);
+
+static void tb_ctl_req_work_put(struct tb_ctl *ctl)
+{
+	if (atomic_dec_and_test(&ctl->req_works))
+		wake_up_all(&ctl->req_work_wait);
+}
+
+bool tb_ctl_async_work_get(struct tb_ctl *ctl)
+{
+	bool acquired = false;
+
+	mutex_lock(&ctl->request_queue_lock);
+	if (ctl->running) {
+		atomic_inc(&ctl->req_works);
+		acquired = true;
+	}
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return acquired;
+}
+
+void tb_ctl_async_work_put(struct tb_ctl *ctl)
+{
+	tb_ctl_req_work_put(ctl);
+}
 
 /**
  * tb_cfg_request_alloc() - Allocates a new config request
@@ -94,6 +195,7 @@ struct tb_cfg_request *tb_cfg_request_alloc(void)
 		return NULL;
 
 	kref_init(&req->kref);
+	spin_lock_init(&req->state_lock);
 
 	return req;
 }
@@ -137,9 +239,12 @@ static int tb_cfg_request_enqueue(struct tb_ctl *ctl,
 	WARN_ON(req->ctl);
 
 	mutex_lock(&ctl->request_queue_lock);
-	if (!ctl->running) {
+	if (!tb_ctl_request_may_start(ctl->running, ctl->teardown,
+				      atomic_read(&ctl->consec_timeouts))) {
+		int ret = ctl->running ? -ESHUTDOWN : -ENOTCONN;
+
 		mutex_unlock(&ctl->request_queue_lock);
-		return -ENOTCONN;
+		return ret;
 	}
 	req->ctl = ctl;
 	list_add_tail(&req->list, &ctl->request_queue);
@@ -177,6 +282,11 @@ tb_cfg_request_find(struct tb_ctl *ctl, struct ctl_pkg *pkg)
 
 	mutex_lock(&pkg->ctl->request_queue_lock);
 	list_for_each_entry(iter, &pkg->ctl->request_queue, list) {
+		struct tb_cfg_request_state state;
+
+		state = tb_cfg_request_read_state(iter);
+		if (tb_cfg_request_match_owner(&state) == TB_CFG_MATCH_NONE)
+			continue;
 		tb_cfg_request_get(iter);
 		if (iter->match(iter, pkg)) {
 			req = iter;
@@ -187,6 +297,80 @@ tb_cfg_request_find(struct tb_ctl *ctl, struct ctl_pkg *pkg)
 	mutex_unlock(&pkg->ctl->request_queue_lock);
 
 	return req;
+}
+
+static struct tb_cfg_request *
+tb_cfg_request_find_intermediate(struct tb_ctl *ctl, struct ctl_pkg *pkg,
+				 enum tb_cfg_request_event *event)
+{
+	struct tb_cfg_request *req = NULL, *iter;
+
+	*event = TB_CFG_REQUEST_EVENT_NONE;
+	mutex_lock(&ctl->request_queue_lock);
+	list_for_each_entry(iter, &ctl->request_queue, list) {
+		if (!iter->intermediate)
+			continue;
+		if (!tb_cfg_local_slot_is_owned(tb_cfg_request_read_state(iter).local))
+			continue;
+
+		*event = iter->intermediate(iter, pkg);
+		if (*event == TB_CFG_REQUEST_EVENT_NONE)
+			continue;
+
+		tb_cfg_request_get(iter);
+		req = iter;
+		break;
+	}
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return req;
+}
+
+static enum tb_cfg_request_action
+tb_cfg_request_update_state(struct tb_cfg_request *req,
+			    enum tb_cfg_request_event event)
+{
+	enum tb_cfg_request_action action;
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	action = tb_cfg_request_state_step(&req->state, event);
+	spin_unlock_irqrestore(&req->state_lock, flags);
+
+	return action;
+}
+
+static struct tb_cfg_request_state
+tb_cfg_request_read_state(struct tb_cfg_request *req)
+{
+	struct tb_cfg_request_state state;
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	state = req->state;
+	spin_unlock_irqrestore(&req->state_lock, flags);
+
+	return state;
+}
+
+static void tb_cfg_request_update_tx(struct tb_cfg_request *req,
+				     enum tb_cfg_tx_event event)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&req->state_lock, flags);
+	tb_cfg_request_tx_step(&req->state, event);
+	spin_unlock_irqrestore(&req->state_lock, flags);
+}
+
+static void tb_cfg_request_release_local_slot(struct tb_cfg_request *req)
+{
+	struct tb_ctl *ctl = req->ctl;
+
+	if (!ctl || !test_and_clear_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags))
+		return;
+
+	WRITE_ONCE(ctl->xdomain_tx_occupied, false);
 }
 
 /* utility functions */
@@ -325,6 +509,8 @@ static __be32 tb_crc(const void *data, size_t len)
 static void tb_ctl_pkg_free(struct ctl_pkg *pkg)
 {
 	if (pkg) {
+		if (pkg->request)
+			tb_cfg_request_put(pkg->request);
 		dma_pool_free(pkg->ctl->frame_pool,
 			      pkg->buffer, pkg->frame.buffer_phy);
 		kfree(pkg);
@@ -353,6 +539,17 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			       bool canceled)
 {
 	struct ctl_pkg *pkg = container_of(frame, typeof(*pkg), frame);
+
+	if (pkg->ctl) {
+		if (canceled)
+			atomic_inc(&pkg->ctl->tx_canceled);
+		else
+			atomic_inc(&pkg->ctl->tx_done);
+	}
+	if (pkg->request)
+		tb_cfg_request_update_tx(pkg->request, canceled ?
+					 TB_CFG_TX_EVENT_CANCELED :
+					 TB_CFG_TX_EVENT_CONSUMED);
 	tb_ctl_pkg_free(pkg);
 }
 
@@ -364,7 +561,7 @@ static void tb_ctl_tx_callback(struct tb_ring *ring, struct ring_frame *frame,
  * Return: %0 on success, negative errno otherwise.
  */
 static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
-		     enum tb_cfg_pkg_type type)
+		     enum tb_cfg_pkg_type type, struct tb_cfg_request *request)
 {
 	int res;
 	struct ctl_pkg *pkg;
@@ -384,6 +581,11 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	pkg->frame.size = len + 4;
 	pkg->frame.sof = type;
 	pkg->frame.eof = type;
+	if (request) {
+		tb_cfg_request_update_tx(request, TB_CFG_TX_EVENT_QUEUED);
+		tb_cfg_request_get(request);
+		pkg->request = request;
+	}
 
 	trace_tb_tx(ctl->index, type, data, len);
 
@@ -391,8 +593,12 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	*(__be32 *) (pkg->buffer + len) = tb_crc(pkg->buffer, len);
 
 	res = tb_ring_tx(ctl->tx, &pkg->frame);
-	if (res) /* ring is stopped */
+	if (res) { /* ring is stopped */
+		if (request)
+			tb_cfg_request_update_tx(request,
+						 TB_CFG_TX_EVENT_CANCELED);
 		tb_ctl_pkg_free(pkg);
+	}
 	return res;
 }
 
@@ -446,7 +652,10 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			       bool canceled)
 {
 	struct ctl_pkg *pkg = container_of(frame, typeof(*pkg), frame);
-	struct tb_cfg_request *req;
+	struct tb_cfg_request *req, *intermediate_req = NULL;
+	enum tb_cfg_request_event event;
+	enum tb_cfg_request_action action;
+	bool xdomain_tx_status;
 	__be32 crc32;
 
 	if (canceled)
@@ -455,7 +664,11 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 			 * ctl->rx_packets.
 			 */
 
+	/* Anything at all arriving on ring 0 counts here. */
+	atomic_inc(&pkg->ctl->rx_total);
+
 	if (frame->size < 4 || frame->size % 4 != 0) {
+		atomic_inc(&pkg->ctl->rx_dropped);
 		tb_ctl_err(pkg->ctl, "RX: invalid size %#x, dropping packet\n",
 			   frame->size);
 		goto rx;
@@ -472,6 +685,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	case TB_CFG_PKG_OVERRIDE:
 	case TB_CFG_PKG_RESET:
 		if (*(__be32 *)(pkg->buffer + frame->size) != crc32) {
+			atomic_inc(&pkg->ctl->rx_dropped);
 			tb_ctl_err(pkg->ctl,
 				   "RX: checksum mismatch, dropping packet\n");
 			goto rx;
@@ -487,6 +701,7 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	case TB_CFG_PKG_XDOMAIN_RESP:
 	case TB_CFG_PKG_XDOMAIN_REQ:
 		if (*(__be32 *)(pkg->buffer + frame->size) != crc32) {
+			atomic_inc(&pkg->ctl->rx_dropped);
 			tb_ctl_err(pkg->ctl,
 				   "RX: checksum mismatch, dropping packet\n");
 			goto rx;
@@ -508,28 +723,128 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	 * triggered from messing with the active requests.
 	 */
 	req = tb_cfg_request_find(pkg->ctl, pkg);
+	if (req) {
+		struct tb_cfg_request_state state;
+		enum tb_cfg_match_owner owner;
 
-	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size, !req);
+		state = tb_cfg_request_read_state(req);
+		owner = tb_cfg_request_match_owner(&state);
+		if (owner == TB_CFG_MATCH_PEER) {
+			event = TB_CFG_REQUEST_EVENT_PEER_MATCHED;
+			action = tb_cfg_request_update_state(req, event);
+			if (action != TB_CFG_REQUEST_ACTION_COMPLETE) {
+				tb_cfg_request_put(req);
+				req = NULL;
+			}
+		} else if (owner == TB_CFG_MATCH_NONE) {
+			tb_cfg_request_put(req);
+			req = NULL;
+		}
+	}
+	xdomain_tx_status = !req && tb_ctl_is_xdomain_tx_status(frame->eof,
+								 pkg->buffer,
+								 frame->size);
+	if (xdomain_tx_status)
+		intermediate_req = tb_cfg_request_find_intermediate(pkg->ctl, pkg,
+								    &event);
+
+	if (req) {
+		atomic_inc(&pkg->ctl->rx_matched);
+		/*
+		 * A reply we asked for came back: the controller is answering,
+		 * so the run of timeouts (if any) is over. Only a MATCHED reply
+		 * clears this -- unmatched ones mean ring 0 moves packets but
+		 * the request/response pairing is broken, which is exactly the
+		 * degraded state that must still gate teardown I/O.
+		 */
+		atomic_set(&pkg->ctl->consec_timeouts,
+			   tb_ctl_liveness_next(atomic_read(&pkg->ctl->consec_timeouts),
+						TB_CTL_EVENT_REPLY_MATCHED));
+	} else if (xdomain_tx_status) {
+		const struct icm_pkg_header *hdr = pkg->buffer;
+
+		atomic_inc(&pkg->ctl->rx_xdomain_tx_status);
+		if (intermediate_req) {
+			action = tb_cfg_request_update_state(intermediate_req,
+							     event);
+			tb_cfg_request_release_local_slot(intermediate_req);
+			wake_up_all(&tb_cfg_request_local_queue);
+			if (action == TB_CFG_REQUEST_ACTION_FAIL) {
+				intermediate_req->result.err = -EIO;
+				tb_ctl_schedule_req_work(intermediate_req);
+			}
+		}
+		if (hdr->flags & ICM_FLAGS_ERROR)
+			tb_ctl_warn_ratelimited(pkg->ctl,
+						"XDomain transmit completion reported an error\n");
+	} else {
+		atomic_inc(&pkg->ctl->rx_unmatched);
+		/*
+		 * A reply nobody claimed. Ring 0 is alive -- it arrived, it
+		 * was well formed -- and the request that wanted it is going
+		 * to time out anyway, so print what it was. eof is the packet
+		 * type the matchers key on, and the first dword carries the
+		 * ICM code / config-space route, which is the other half of
+		 * every match predicate.
+		 */
+		{
+			const u32 *dw = pkg->buffer;
+
+			tb_ctl_warn_ratelimited(pkg->ctl,
+						"RX: unmatched reply eof=%#x size=%u dw0=%#010x dw1=%#010x\n",
+						pkg->frame.eof, frame->size,
+						frame->size >= 4 ? dw[0] : 0,
+						frame->size >= 8 ? dw[1] : 0);
+		}
+	}
+
+	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size,
+		    !req && !xdomain_tx_status);
 
 	if (req) {
 		if (req->copy(req, pkg))
-			schedule_work(&req->work);
+			tb_ctl_schedule_req_work(req);
 		tb_cfg_request_put(req);
 	}
+	if (intermediate_req)
+		tb_cfg_request_put(intermediate_req);
 
 rx:
 	tb_ctl_rx_submit(pkg);
 }
 
+/*
+ * Schedule a request's completion work and account for it, so tb_ctl_free()
+ * can fence the ctl against items that are still going to dereference it.
+ * schedule_work() is a no-op on an already-pending item (req->work is a single
+ * work_struct scheduled from the RX callback, the no-response fast path and
+ * cancel), so the counter may only move when the queue actually accepted it.
+ */
+static void tb_ctl_schedule_req_work(struct tb_cfg_request *req)
+{
+	struct tb_ctl *ctl = req->ctl;
+
+	if (ctl)
+		atomic_inc(&ctl->req_works);
+	if (!schedule_work(&req->work) && ctl)
+		tb_ctl_req_work_put(ctl);
+}
+
 static void tb_cfg_request_work(struct work_struct *work)
 {
 	struct tb_cfg_request *req = container_of(work, typeof(*req), work);
+	struct tb_ctl *ctl = req->ctl;
 
-	if (!test_bit(TB_CFG_REQUEST_CANCELED, &req->flags))
+	if (tb_cfg_request_work_runs_callback(req->flags))
 		req->callback(req->callback_data);
 
-	tb_cfg_request_dequeue(req);
-	tb_cfg_request_put(req);
+	if (!test_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags)) {
+		tb_cfg_request_dequeue(req);
+		tb_cfg_request_put(req);
+	}
+	/* Last touch of @ctl: after this the ctl may be freed. */
+	if (ctl)
+		tb_ctl_req_work_put(ctl);
 }
 
 /**
@@ -549,7 +864,9 @@ int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 {
 	int ret;
 
-	req->flags = 0;
+	req->flags &= BIT(TB_CFG_REQUEST_LOCAL_SLOT);
+	if (req->state.local != TB_CFG_LOCAL_DISABLED)
+		set_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags);
 	req->callback = callback;
 	req->callback_data = callback_data;
 	INIT_WORK(&req->work, tb_cfg_request_work);
@@ -561,12 +878,12 @@ int tb_cfg_request(struct tb_ctl *ctl, struct tb_cfg_request *req,
 		goto err_put;
 
 	ret = tb_ctl_tx(ctl, req->request, req->request_size,
-			req->request_type);
+			req->request_type, req);
 	if (ret)
 		goto err_dequeue;
 
 	if (!req->response)
-		schedule_work(&req->work);
+		tb_ctl_schedule_req_work(req);
 
 	return 0;
 
@@ -588,8 +905,9 @@ err_put:
  */
 void tb_cfg_request_cancel(struct tb_cfg_request *req, int err)
 {
+	tb_cfg_request_update_state(req, TB_CFG_REQUEST_EVENT_CANCELED);
 	set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
-	schedule_work(&req->work);
+	tb_ctl_schedule_req_work(req);
 	wait_event(tb_cfg_request_cancel_queue, !tb_cfg_request_is_active(req));
 	req->result.err = err;
 }
@@ -597,6 +915,85 @@ void tb_cfg_request_cancel(struct tb_cfg_request *req, int err)
 static void tb_cfg_request_complete(void *data)
 {
 	complete(data);
+}
+
+static int tb_cfg_request_receive(struct tb_ctl *ctl,
+				  struct tb_cfg_request *req,
+				  void (*callback)(void *),
+				  void *callback_data)
+{
+	int ret;
+
+	req->flags = 0;
+	req->callback = callback;
+	req->callback_data = callback_data;
+	INIT_WORK(&req->work, tb_cfg_request_work);
+	INIT_LIST_HEAD(&req->list);
+
+	tb_cfg_request_get(req);
+	ret = tb_cfg_request_enqueue(ctl, req);
+	if (ret)
+		tb_cfg_request_put(req);
+
+	return ret;
+}
+
+/**
+ * tb_cfg_request_sync_receive() - Arm a response waiter before submitting
+ * @ctl: Control channel to use
+ * @req: Receive-only request matcher and response storage
+ * @timeout_msec: Overall deadline, including submission
+ * @submit: Function that submits the independently completed command
+ * @submit_data: Data passed to @submit
+ *
+ * The receive waiter is queued first and remains queued while @submit runs.
+ * This is needed when command submission and the peer response are separate
+ * state machines and the peer may answer before local submission completes.
+ */
+struct tb_cfg_result
+tb_cfg_request_sync_receive(struct tb_ctl *ctl, struct tb_cfg_request *req,
+			    int timeout_msec, tb_cfg_submit_fn submit,
+			    void *submit_data)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_msec);
+	struct tb_cfg_result res = { 0 };
+	DECLARE_COMPLETION_ONSTACK(done);
+	unsigned long now;
+	unsigned long remaining;
+	bool completed;
+	int ret;
+
+	ret = tb_cfg_request_receive(ctl, req, tb_cfg_request_complete, &done);
+	if (ret) {
+		res.err = ret;
+		return res;
+	}
+
+	ret = submit(submit_data);
+	if (ret) {
+		tb_cfg_request_cancel(req, ret);
+		flush_work(&req->work);
+		res = req->result;
+		res.err = ret;
+		return res;
+	}
+
+	now = jiffies;
+	remaining = tb_cfg_deadline_remaining(now, deadline);
+	completed = try_wait_for_completion(&done);
+	if (!completed && remaining)
+		completed = wait_for_completion_timeout(&done, remaining);
+	if (!completed) {
+		tb_cfg_request_update_state(req,
+					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+		atomic_inc(&ctl->consec_timeouts);
+		tb_cfg_request_cancel(req, -ETIMEDOUT);
+	}
+
+	flush_work(&req->work);
+	res = req->result;
+	res.tx_state = tb_cfg_request_read_state(req).tx;
+	return res;
 }
 
 /**
@@ -618,22 +1015,216 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 					 int timeout_msec)
 {
 	unsigned long timeout = msecs_to_jiffies(timeout_msec);
+	unsigned long local_deadline = 0;
+	struct tb_cfg_request_state state;
 	struct tb_cfg_result res = { 0 };
 	DECLARE_COMPLETION_ONSTACK(done);
+	bool hold_command, hold_local;
 	int ret;
+
+	hold_local = req->state.local != TB_CFG_LOCAL_DISABLED;
+	hold_command = tb_cfg_request_owns_command_slot(req->request_type);
+	if (hold_command) {
+		/* Account before sleeping so control teardown cannot free ctl
+		 * while this request is queued behind another firmware command.
+		 */
+		atomic_inc(&ctl->req_works);
+		down(&ctl->command_sem);
+	}
+	if (hold_local) {
+		WARN_ON(!tb_cfg_local_slot_may_claim(READ_ONCE(ctl->xdomain_tx_occupied)));
+		WRITE_ONCE(ctl->xdomain_tx_occupied, true);
+		set_bit(TB_CFG_REQUEST_LOCAL_SLOT, &req->flags);
+		local_deadline = jiffies +
+			msecs_to_jiffies(TB_CTL_XDOMAIN_TX_TIMEOUT_MS);
+	}
 
 	ret = tb_cfg_request(ctl, req, tb_cfg_request_complete, &done);
 	if (ret) {
 		res.err = ret;
+		res.tx_state = tb_cfg_request_read_state(req).tx;
+		if (hold_local)
+			tb_cfg_request_release_local_slot(req);
+		if (hold_command) {
+			up(&ctl->command_sem);
+			tb_ctl_req_work_put(ctl);
+		}
 		return res;
 	}
 
-	if (!wait_for_completion_timeout(&done, timeout))
-		tb_cfg_request_cancel(req, -ETIMEDOUT);
+	if (!wait_for_completion_timeout(&done, timeout)) {
+		struct tb_ring_snapshot tx_snapshot;
+		int snapshot_ret;
+		int process_ret;
+
+		tb_cfg_request_update_state(req,
+					    TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+		snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
+		state = tb_cfg_request_read_state(req);
+		if (!snapshot_ret && state.tx == TB_CFG_TX_QUEUED &&
+		    tb_nhi_tx_descriptor_completed(&tx_snapshot)) {
+			process_ret = tb_ring_process_completions(ctl->tx);
+			if (process_ret)
+				tb_ctl_warn_ratelimited(ctl,
+							"ring0 TX completion processing failed: %d\n",
+							process_ret);
+			state = tb_cfg_request_read_state(req);
+			snapshot_ret = tb_ring_snapshot(ctl->tx, &tx_snapshot);
+		}
+		/*
+		 * Say which of the three "no answer" faults this actually is.
+		 * tx_done advancing but rx_total flat means we transmitted and
+		 * the far side produced nothing -- the firmware really is not
+		 * executing. rx_total advancing with rx_unmatched climbing
+		 * means replies ARE arriving and being discarded, which is a
+		 * matching/sequence bug on our side, not dead firmware.
+		 * tx_done flat means we never got the packet onto the ring at
+		 * all. Rate-limited: a wedged handshake retries forever.
+		 */
+		{
+			const u32 *rdw = req->request;
+
+			tb_ctl_warn_ratelimited(ctl,
+						"request timed out: send eof=%#x want eof=%#x route=%#llx req_dw0=%#010x size=%zu\n",
+						req->request_type,
+						req->response_type,
+						tb_cfg_request_route(req->request_type,
+								     req->request,
+								     req->request_size),
+						req->request_size >= 4 ? rdw[0] : 0,
+						req->request_size);
+		}
+		tb_ctl_warn_ratelimited(ctl,
+					"request timed out after %d ms; tx_state=%u local_state=%u peer_state=%u ring0 tx_done=%d tx_canceled=%d rx_total=%d rx_matched=%d rx_unmatched=%d rx_xdomain_tx_status=%d rx_dropped=%d\n",
+					timeout_msec,
+					state.tx, state.local, state.peer,
+					atomic_read(&ctl->tx_done),
+					atomic_read(&ctl->tx_canceled),
+					atomic_read(&ctl->rx_total),
+					atomic_read(&ctl->rx_matched),
+					atomic_read(&ctl->rx_unmatched),
+					atomic_read(&ctl->rx_xdomain_tx_status),
+					atomic_read(&ctl->rx_dropped));
+		if (!snapshot_ret)
+			tb_ctl_warn_ratelimited(ctl,
+						"ring0 TX snapshot: running=%u size=%u sw_head=%u sw_tail=%u queued=%u in_flight=%u tail_attr=%#010x tail_complete=%u index=%#010x hw_prod=%u hw_cons=%u indices_valid=%u full=%u options=%#010x\n",
+					tx_snapshot.running, tx_snapshot.size,
+					tx_snapshot.sw_head, tx_snapshot.sw_tail,
+					tx_snapshot.queued, tx_snapshot.in_flight,
+					tx_snapshot.tail_attributes,
+					tb_nhi_tx_descriptor_completed(&tx_snapshot),
+					tx_snapshot.index_raw,
+					tx_snapshot.hw_producer,
+					tx_snapshot.hw_consumer,
+					tx_snapshot.indices_valid,
+					tx_snapshot.full, tx_snapshot.options);
+		else
+			tb_ctl_warn_ratelimited(ctl,
+						"ring0 TX snapshot unavailable: %d\n",
+				snapshot_ret);
+		if (state.local == TB_CFG_LOCAL_ACCEPTED)
+			tb_ctl_warn_ratelimited(ctl,
+						"peer response timed out after local XDomain transmit acceptance\n");
+		atomic_inc(&ctl->consec_timeouts);
+		if (hold_local) {
+			set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
+			req->result.err = -ETIMEDOUT;
+		} else {
+			tb_cfg_request_cancel(req, -ETIMEDOUT);
+		}
+	}
 
 	flush_work(&req->work);
+	if (hold_local) {
+		unsigned long remaining = time_before(jiffies, local_deadline) ?
+			local_deadline - jiffies : 0;
 
-	return req->result;
+		state = tb_cfg_request_read_state(req);
+		if (state.local == TB_CFG_LOCAL_WAITING && remaining) {
+			wait_event_timeout(tb_cfg_request_local_queue,
+					   tb_cfg_request_read_state(req).local !=
+						TB_CFG_LOCAL_WAITING,
+					   remaining);
+		}
+		state = tb_cfg_request_read_state(req);
+		if (state.local == TB_CFG_LOCAL_WAITING) {
+			tb_cfg_request_update_state(req,
+						    TB_CFG_REQUEST_EVENT_LOCAL_TIMED_OUT);
+			tb_ctl_warn_ratelimited(ctl,
+						"local XDomain transmit completion timed out after %d ms\n",
+						TB_CTL_XDOMAIN_TX_TIMEOUT_MS);
+		}
+
+		clear_bit(TB_CFG_REQUEST_HOLD_LOCAL, &req->flags);
+		tb_cfg_request_dequeue(req);
+		tb_cfg_request_release_local_slot(req);
+		tb_cfg_request_put(req);
+	}
+
+	res = req->result;
+	if (hold_local && state.peer == TB_CFG_PEER_DISABLED)
+		res.err = tb_cfg_local_only_result(state.local, res.err);
+	res.tx_state = tb_cfg_request_read_state(req).tx;
+	res.local_failed = hold_local && state.local == TB_CFG_LOCAL_FAILED;
+	res.local_timed_out = hold_local &&
+		state.local == TB_CFG_LOCAL_TIMED_OUT;
+	if (hold_command) {
+		up(&ctl->command_sem);
+		/* Last touch of @ctl: tb_ctl_free() may proceed after this. */
+		tb_ctl_req_work_put(ctl);
+	}
+	return res;
+}
+
+/**
+ * tb_ctl_is_responsive() - Is the control channel still answering?
+ * @ctl: Control channel
+ *
+ * Reports whether ring 0 has produced a MATCHED reply recently enough to be
+ * worth talking to. Intended for paths that are about to issue config space
+ * I/O they do not strictly need -- above all teardown, which otherwise fires
+ * a burst of writes at a controller that has stopped answering and can push a
+ * merely degraded CIO into a permanent hang (appmana-019, see consec_timeouts).
+ *
+ * This is deliberately one-directional: it may report a live channel as dead
+ * for a few requests after a transient stall, which only costs some skipped
+ * cleanup on a controller that is being torn down anyway. It must never report
+ * a dead channel as live, so the counter is cleared ONLY by a matched reply.
+ *
+ * Return: %true when the channel is worth using, %false when it has failed
+ * %TB_CTL_DEAD_TIMEOUTS requests in a row without a matched reply.
+ */
+bool tb_ctl_is_responsive(struct tb_ctl *ctl)
+{
+	bool responsive;
+
+	if (!ctl)
+		return false;
+
+	mutex_lock(&ctl->request_queue_lock);
+	responsive = ctl->teardown ?
+		tb_ctl_request_may_start(ctl->running, true,
+					 atomic_read(&ctl->consec_timeouts)) :
+		!tb_ctl_timeouts_indicate_dead(atomic_read(&ctl->consec_timeouts));
+	mutex_unlock(&ctl->request_queue_lock);
+
+	return responsive;
+}
+
+/**
+ * tb_ctl_enter_teardown() - Select fail-fast request admission
+ * @ctl: Control channel
+ *
+ * Hardware cleanup is optional and must not turn a single unanswered request
+ * into a long sequence of retries. Once this phase starts, the first timeout
+ * opens the request circuit. Normal runtime keeps its separate, more tolerant
+ * liveness policy.
+ */
+void tb_ctl_enter_teardown(struct tb_ctl *ctl)
+{
+	mutex_lock(&ctl->request_queue_lock);
+	ctl->teardown = true;
+	mutex_unlock(&ctl->request_queue_lock);
 }
 
 /* public interface, alloc/start/stop/free */
@@ -665,6 +1256,8 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 	ctl->callback_data = cb_data;
 
 	mutex_init(&ctl->request_queue_lock);
+	sema_init(&ctl->command_sem, 1);
+	init_waitqueue_head(&ctl->req_work_wait);
 	INIT_LIST_HEAD(&ctl->request_queue);
 	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", &nhi->pdev->dev,
 					 TB_FRAME_SIZE, 4, 0);
@@ -709,6 +1302,14 @@ void tb_ctl_free(struct tb_ctl *ctl)
 	if (!ctl)
 		return;
 
+	/*
+	 * Request work dereferences this object after its callback. Control stop
+	 * has already terminated both request state machines and released the
+	 * firmware command slot, so this is a local workqueue drain, not a wait
+	 * for firmware or a peer. It runs without the domain lock.
+	 */
+	wait_event(ctl->req_work_wait, !atomic_read(&ctl->req_works));
+
 	if (ctl->rx)
 		tb_ring_free(ctl->rx);
 	if (ctl->tx)
@@ -736,7 +1337,10 @@ void tb_ctl_start(struct tb_ctl *ctl)
 	for (i = 0; i < TB_CTL_RX_PKG_COUNT; i++)
 		tb_ctl_rx_submit(ctl->rx_packets[i]);
 
+	mutex_lock(&ctl->request_queue_lock);
+	ctl->teardown = false;
 	ctl->running = true;
+	mutex_unlock(&ctl->request_queue_lock);
 }
 
 /**
@@ -750,6 +1354,8 @@ void tb_ctl_start(struct tb_ctl *ctl)
  */
 void tb_ctl_stop(struct tb_ctl *ctl)
 {
+	struct tb_cfg_request *req;
+
 	mutex_lock(&ctl->request_queue_lock);
 	ctl->running = false;
 	mutex_unlock(&ctl->request_queue_lock);
@@ -757,9 +1363,31 @@ void tb_ctl_stop(struct tb_ctl *ctl)
 	tb_ring_stop(ctl->rx);
 	tb_ring_stop(ctl->tx);
 
-	if (!list_empty(&ctl->request_queue))
+	/*
+	 * Fail every outstanding request through its normal completion work.
+	 * Synchronous callers must wake immediately, including local XDomain
+	 * commands whose independent completion otherwise has a 25-second
+	 * deadline. Work owns the dequeue so no request is left linked through
+	 * stale neighbours, and tb_ctl_free() can fence it through req_works.
+	 */
+	mutex_lock(&ctl->request_queue_lock);
+	if (!list_empty(&ctl->request_queue)) {
 		tb_ctl_WARN(ctl, "dangling request in request_queue\n");
-	INIT_LIST_HEAD(&ctl->request_queue);
+		list_for_each_entry(req, &ctl->request_queue, list) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&req->state_lock, flags);
+			tb_cfg_request_stop_state(&req->state);
+			spin_unlock_irqrestore(&req->state_lock, flags);
+			req->result.err = -ESHUTDOWN;
+			set_bit(TB_CFG_REQUEST_CANCELED, &req->flags);
+			set_bit(TB_CFG_REQUEST_STOPPED, &req->flags);
+			tb_cfg_request_release_local_slot(req);
+			tb_ctl_schedule_req_work(req);
+		}
+		wake_up_all(&tb_cfg_request_local_queue);
+	}
+	mutex_unlock(&ctl->request_queue_lock);
 	tb_ctl_dbg(ctl, "control channel stopped\n");
 }
 
@@ -825,7 +1453,7 @@ int tb_cfg_ack_notification(struct tb_ctl *ctl, u64 route,
 	tb_ctl_dbg(ctl, "acking %s (%#x) notification on %llx\n", name,
 		   error->error, route);
 
-	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_NOTIFY_ACK);
+	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_NOTIFY_ACK, NULL);
 }
 
 /**
@@ -850,7 +1478,7 @@ int tb_cfg_ack_plug(struct tb_ctl *ctl, u64 route, u32 port, bool unplug)
 	};
 	tb_ctl_dbg(ctl, "acking hot %splug event on %llx:%u\n",
 		   unplug ? "un" : "", route, port);
-	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_ERROR);
+	return tb_ctl_tx(ctl, &pkg, sizeof(pkg), TB_CFG_PKG_ERROR, NULL);
 }
 
 static bool tb_cfg_match(const struct tb_cfg_request *req,
@@ -873,7 +1501,7 @@ static bool tb_cfg_match(const struct tb_cfg_request *req,
 		const struct cfg_read_pkg *req_hdr = req->request;
 		const struct cfg_read_pkg *res_hdr = pkg->buffer;
 
-		if (req_hdr->addr.seq != res_hdr->addr.seq)
+		if (!tb_cfg_address_matches(&req_hdr->addr, &res_hdr->addr))
 			return false;
 	}
 
@@ -953,24 +1581,20 @@ struct tb_cfg_result tb_cfg_reset(struct tb_ctl *ctl, u64 route)
  * Return: &struct tb_cfg_result with non-zero @err field if error
  * has occurred.
  */
-struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
-		u64 route, u32 port, enum tb_cfg_space space,
-		u32 offset, u32 length, int timeout_msec)
+static struct tb_cfg_result
+tb_cfg_read_raw_retries(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+			enum tb_cfg_space space, u32 offset, u32 length,
+			int timeout_msec, unsigned int first_attempt,
+			unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_read_pkg request = {
 		.header = tb_cfg_make_header(route),
-		.addr = {
-			.port = port,
-			.space = space,
-			.offset = offset,
-			.length = length,
-		},
 	};
 	struct cfg_write_pkg reply;
 	int retries = 0;
 
-	while (retries < TB_CTL_RETRIES) {
+	while (retries < max_retries) {
 		struct tb_cfg_request *req;
 
 		req = tb_cfg_request_alloc();
@@ -979,7 +1603,8 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 			return res;
 		}
 
-		request.addr.seq = retries++;
+		request.addr = tb_cfg_make_address(port, space, offset, length,
+						   first_attempt + retries++);
 
 		req->match = tb_cfg_match;
 		req->copy = tb_cfg_copy;
@@ -1011,6 +1636,39 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
 	return res;
 }
 
+struct tb_cfg_result
+tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+		enum tb_cfg_space space, u32 offset, u32 length, int timeout_msec)
+{
+	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
+				       length, timeout_msec, 0, TB_CTL_RETRIES);
+}
+
+/**
+ * tb_cfg_read_raw_once() - issue one config-space read in a request stream
+ * @ctl: Pointer to the control channel
+ * @buffer: Buffer where the data is read
+ * @route: Route string of the router
+ * @port: Port number when reading from %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword offset of the register to start reading
+ * @length: Number of dwords to read
+ * @timeout_msec: Timeout in ms how long to wait for the response
+ * @attempt: Attempt identity in the caller-owned request stream
+ *
+ * Readiness polling owns its retry policy. Keep each observation to one
+ * physical request while advancing the two-bit protocol sequence across
+ * calls, instead of restarting at sequence zero or nesting retry loops.
+ */
+struct tb_cfg_result
+tb_cfg_read_raw_once(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
+		     enum tb_cfg_space space, u32 offset, u32 length,
+		     int timeout_msec, unsigned int attempt)
+{
+	return tb_cfg_read_raw_retries(ctl, buffer, route, port, space, offset,
+				       length, timeout_msec, attempt, 1);
+}
+
 /**
  * tb_cfg_write_raw() - write from buffer into config space
  * @ctl: Pointer to the control channel
@@ -1027,26 +1685,23 @@ struct tb_cfg_result tb_cfg_read_raw(struct tb_ctl *ctl, void *buffer,
  * Return: &struct tb_cfg_result with non-zero @err field if error
  * has occurred.
  */
-struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
-		u64 route, u32 port, enum tb_cfg_space space,
-		u32 offset, u32 length, int timeout_msec)
+static struct tb_cfg_result
+tb_cfg_write_raw_retries(struct tb_ctl *ctl, const void *buffer, u64 route,
+			 u32 port, enum tb_cfg_space space, u32 offset,
+			 u32 length, int timeout_msec,
+			 unsigned int first_attempt,
+			 unsigned int max_retries)
 {
 	struct tb_cfg_result res = { 0 };
 	struct cfg_write_pkg request = {
 		.header = tb_cfg_make_header(route),
-		.addr = {
-			.port = port,
-			.space = space,
-			.offset = offset,
-			.length = length,
-		},
 	};
 	struct cfg_read_pkg reply;
 	int retries = 0;
 
 	memcpy(&request.data, buffer, length * 4);
 
-	while (retries < TB_CTL_RETRIES) {
+	while (retries < max_retries) {
 		struct tb_cfg_request *req;
 
 		req = tb_cfg_request_alloc();
@@ -1055,7 +1710,8 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 			return res;
 		}
 
-		request.addr.seq = retries++;
+		request.addr = tb_cfg_make_address(port, space, offset, length,
+						   first_attempt + retries++);
 
 		req->match = tb_cfg_match;
 		req->copy = tb_cfg_copy;
@@ -1085,9 +1741,59 @@ struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
 	return res;
 }
 
-static int tb_cfg_get_error(struct tb_ctl *ctl, enum tb_cfg_space space,
-			    const struct tb_cfg_result *res)
+struct tb_cfg_result tb_cfg_write_raw(struct tb_ctl *ctl, const void *buffer,
+		u64 route, u32 port, enum tb_cfg_space space,
+		u32 offset, u32 length, int timeout_msec)
 {
+	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
+					length, timeout_msec, 0, TB_CTL_RETRIES);
+}
+
+/**
+ * tb_cfg_write_raw_once() - issue one config-space write in a request stream
+ * @ctl: Pointer to the control channel
+ * @buffer: Data to write
+ * @route: Route string of the router
+ * @port: Port number when writing to %TB_CFG_PORT, %0 otherwise
+ * @space: Config space selector
+ * @offset: Dword offset of the register to start writing
+ * @length: Number of dwords to write
+ * @timeout_msec: Timeout in ms how long to wait for the response
+ * @attempt: Attempt identity in the caller-owned request stream
+ *
+ * Controller-specific command streams may require a particular sequence
+ * identity on their first and only request. Keep that choice separate from
+ * the generic write helper, which starts at sequence zero and retries only
+ * requests that time out.
+ */
+struct tb_cfg_result
+tb_cfg_write_raw_once(struct tb_ctl *ctl, const void *buffer, u64 route,
+			      u32 port, enum tb_cfg_space space, u32 offset,
+			      u32 length, int timeout_msec,
+			      unsigned int attempt)
+{
+	return tb_cfg_write_raw_retries(ctl, buffer, route, port, space, offset,
+					length, timeout_msec, attempt, 1);
+}
+
+/**
+ * tb_cfg_result_to_errno() - translate a raw configuration-space result
+ * @ctl: Pointer to the control channel
+ * @space: Configuration space used by the request
+ * @res: Raw result returned by a configuration-space helper
+ *
+ * Callers that need the protocol error and request-local TX state for their
+ * own diagnostics can log the raw result first and use this helper for the
+ * conventional Linux errno mapping.
+ */
+int tb_cfg_result_to_errno(struct tb_ctl *ctl, enum tb_cfg_space space,
+			   const struct tb_cfg_result *res)
+{
+	if (res->err <= 0)
+		return res->err;
+	if (res->err != 1)
+		return -EIO;
+
 	/*
 	 * For unimplemented ports access to port config space may return
 	 * TB_CFG_ERROR_INVALID_CONFIG_SPACE (alternatively their type is
@@ -1120,11 +1826,14 @@ int tb_cfg_read(struct tb_ctl *ctl, void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		return tb_cfg_get_error(ctl, space, &res);
+		return tb_cfg_result_to_errno(ctl, space, &res);
 
 	case -ETIMEDOUT:
 		tb_ctl_warn(ctl, "%llx: timeout reading config space %u from %#x\n",
 			    route, space, offset);
+		break;
+
+	case -ESHUTDOWN:
 		break;
 
 	default:
@@ -1146,11 +1855,14 @@ int tb_cfg_write(struct tb_ctl *ctl, const void *buffer, u64 route, u32 port,
 
 	case 1:
 		/* Thunderbolt error, tb_error holds the actual number */
-		return tb_cfg_get_error(ctl, space, &res);
+		return tb_cfg_result_to_errno(ctl, space, &res);
 
 	case -ETIMEDOUT:
 		tb_ctl_warn(ctl, "%llx: timeout writing config space %u to %#x\n",
 			    route, space, offset);
+		break;
+
+	case -ESHUTDOWN:
 		break;
 
 	default:

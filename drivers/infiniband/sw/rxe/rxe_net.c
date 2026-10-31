@@ -278,7 +278,12 @@ static struct socket *rxe_setup_udp_tunnel(struct net *net, __be16 port,
 	tnl_cfg.encap_rcv = rxe_udp_encap_recv;
 
 	/* Setup UDP tunnel */
-	setup_udp_tunnel_sock(net, sock, &tnl_cfg);
+	setup_udp_tunnel_sock(net,
+			      _Generic(setup_udp_tunnel_sock,
+				       void (*)(struct net *, struct sock *,
+						struct udp_tunnel_sock_cfg *): sock->sk,
+				       default: sock),
+			      &tnl_cfg);
 
 	return sock;
 }

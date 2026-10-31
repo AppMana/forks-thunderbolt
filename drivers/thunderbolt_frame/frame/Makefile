@@ -57,6 +57,8 @@ thunderbolt_frame-$(CONFIG_KUNIT) += tests/window_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/teardown_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/lifecycle_test.o
 thunderbolt_frame-$(CONFIG_KUNIT) += tests/selfloop_test.o
+thunderbolt_frame-$(CONFIG_KUNIT) += tests/datapath_test.o
+thunderbolt_frame-$(CONFIG_KUNIT) += tests/unload_test.o
 
 ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 
@@ -67,6 +69,10 @@ ccflags-y := -Wall -Wextra -Wno-unused-parameter -I$(src)
 ccflags-y += -DDYNAMIC_DEBUG_MODULE
 ifeq ($(DEBUG),1)
 ccflags-y += -DDEBUG
+endif
+
+ifneq ($(TBV_PKG_VERSION),)
+ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
 endif
 
 .PHONY: all clean modules modules_install

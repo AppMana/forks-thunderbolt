@@ -138,4 +138,17 @@ void rxe_rcv(struct sk_buff *skb);
 void rxe_port_up(struct rxe_dev *rxe);
 void rxe_port_down(struct rxe_dev *rxe);
 
+/* Report the Thunderbolt link's real rate through the IB port attributes.
+ * Consumers size their cost model from active_speed x active_width -- NCCL
+ * literally computes ncclIbSpeed(active_speed) * ncclIbWidth(active_width)
+ * -- so leaving these at the scaffold's SDR/1X advertises 2.5 Gb/s for a
+ * 20 Gb/s rail and ranks it below stock rxe_lan, which reports a nominal
+ * 10 Gb/s over a 2.5GbE NIC. Measured 2026-08-25: every PP hop, including
+ * ones with a healthy 1472-1695 MB/s rail, was placed on rxe_lan.
+ */
+void tbrxe_link_ib_rate(u8 tb_speed_gbps, u8 tb_lanes,
+			u8 *active_speed, u8 *active_width);
+void tbrxe_rxe_set_link_rate(struct rxe_dev *rxe, u8 tb_speed_gbps,
+			     u8 tb_lanes);
+
 #endif /* RXE_H */

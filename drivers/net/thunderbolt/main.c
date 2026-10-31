@@ -11,6 +11,9 @@
 
 #include <linux/atomic.h>
 #include <linux/ethtool.h>
+#ifndef SPEED_80000
+#define SPEED_80000		80000
+#endif
 #include <linux/highmem.h>
 #include <linux/if_vlan.h>
 #include <linux/jhash.h>
@@ -19,6 +22,7 @@
 #include <linux/etherdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/sizes.h>
+#include <linux/slab.h>
 #include <linux/thunderbolt.h>
 
 #include "../../thunderbolt/thunderbolt_negotiation.h"
@@ -28,6 +32,10 @@
 #include <net/ip6_checksum.h>
 
 #include "trace.h"
+
+#if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
+#include "tests/tbnet_test.h"
+#endif
 
 /* Protocol timeouts in ms */
 #define TBNET_LOGIN_DELAY	4500
@@ -40,6 +48,8 @@
 #define TBNET_DEFAULT_INT_COALESCE_USECS 128
 #define TBNET_LOGIN_RETRIES	60
 #define TBNET_LOGOUT_RETRIES	10
+#define TBNET_DISCONNECT_RETRY_DELAY	1000
+#define TBNET_DISCONNECT_RELOGIN	0
 #define TBNET_E2E		BIT(0)
 #define TBNET_MATCH_FRAGS_ID	BIT(1)
 #define TBNET_64K_FRAMES	BIT(2)
@@ -171,6 +181,10 @@ struct tbnet_ring {
  *	      same way the core and the RDMA stack do)
  * @local_transmit_path: HopID we are using to send out packets
  * @remote_transmit_path: HopID the other end is using to send packets to us
+ * @session_active: DMA paths were enabled for the committed session
+ * @paths_owned: the core still owns the path tuple, active or quarantined
+ * @resources_owned: input HopID and started rings require local teardown
+ * @active_remote_transmit_path: input HopID owned by the active session
  * @connection_lock: Lock serializing access to @login_hs and @transmit_path.
  * @login_retries: Number of login retries currently done
  * @login_work: Worker to send ThunderboltIP login packets
@@ -197,6 +211,12 @@ struct tbnet {
 	const struct tb_service *svc;
 	struct tb_xdomain *xd;
 	struct tb_protocol_handler handler;
+	/*
+	 * Both the shutdown and the unbind path fence inbound dispatch before
+	 * touching the data path, and shutdown is followed by unbind on a
+	 * driver unload, so the unregister must be idempotent and observable.
+	 */
+	bool handler_registered;
 	struct net_device *dev;
 	struct napi_struct napi;
 	struct tbnet_stats stats;
@@ -205,12 +225,17 @@ struct tbnet {
 	struct tb_xdomain_handshake login_hs;
 	int local_transmit_path;
 	int remote_transmit_path;
+	bool session_active;
+	bool paths_owned;
+	bool resources_owned;
+	int active_remote_transmit_path;
 	struct mutex connection_lock;
 	int login_retries;
 	struct delayed_work login_work;
 	struct work_struct connected_work;
 	struct delayed_work verify_work;
-	struct work_struct disconnect_work;
+	struct delayed_work disconnect_work;
+	unsigned long disconnect_flags;
 	struct thunderbolt_ip_frame_header rx_hdr;
 	struct tbnet_ring rx_ring;
 	unsigned int rx_ring_size;
@@ -229,6 +254,9 @@ static const uuid_t tbnet_dir_uuid =
 static const uuid_t tbnet_svc_uuid =
 	UUID_INIT(0x798f589e, 0x3616, 0x8a47,
 		  0x97, 0xc6, 0x56, 0x64, 0xa9, 0x20, 0xc8, 0xdd);
+
+static void tbnet_fence_handler(struct tbnet *net);
+static void tbnet_cancel_all_work(struct tbnet *net);
 
 static struct tb_property_dir *tbnet_dir;
 
@@ -251,6 +279,19 @@ static uint tbnet_session_verify_ms = 5000;
 module_param_named(session_verify_ms, tbnet_session_verify_ms, uint, 0644);
 MODULE_PARM_DESC(session_verify_ms,
 		 "Re-check the DMA tunnel behind an established ThunderboltIP session every N ms; re-login when it died (0 disables)");
+
+/*
+ * Hard deadline for the orderly LOGOUT handshake in tbnet_tear_down(). The
+ * retry count alone (TBNET_LOGOUT_RETRIES * TBNET_LOGOUT_TIMEOUT = 10 s) is a
+ * bound in name only for the paths that matter: ndo_stop holds RTNL across it,
+ * and device_shutdown() runs it once per link while the machine is trying to
+ * reboot. On expiry the teardown proceeds unchanged; only the courtesy notice
+ * to the peer is skipped.
+ */
+static uint tbnet_logout_budget_ms = 3000;
+module_param_named(logout_budget_ms, tbnet_logout_budget_ms, uint, 0644);
+MODULE_PARM_DESC(logout_budget_ms,
+		 "Hard deadline (ms) for the LOGOUT handshake during teardown; on expiry the teardown proceeds without it");
 
 static void tbnet_fill_header(struct thunderbolt_ip_header *hdr, u64 route,
 	u8 sequence, const uuid_t *initiator_uuid, const uuid_t *target_uuid,
@@ -403,8 +444,28 @@ static void tbnet_free_buffers(struct tbnet_ring *ring)
 	ring->prod = 0;
 }
 
-static void tbnet_tear_down(struct tbnet *net, bool send_logout)
+static bool tbnet_session_needs_teardown(bool session_active, bool paths_owned,
+					 bool resources_owned)
 {
+	return session_active || paths_owned || resources_owned;
+}
+
+#if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
+bool tbnet_test_session_needs_teardown(bool handshake_complete,
+				       bool session_active,
+				       bool resources_owned)
+{
+	(void)handshake_complete;
+	return tbnet_session_needs_teardown(session_active, false,
+					    resources_owned);
+}
+
+#endif
+
+static int tbnet_tear_down(struct tbnet *net, bool send_logout)
+{
+	int ret = 0;
+
 	netif_carrier_off(net->dev);
 	netif_stop_queue(net->dev);
 
@@ -419,31 +480,82 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	mutex_lock(&net->connection_lock);
 
-	if (tb_xdomain_handshake_complete(&net->login_hs)) {
-		int ret, retries = TBNET_LOGOUT_RETRIES;
+	if (tbnet_session_needs_teardown(net->session_active,
+					 net->paths_owned,
+					 net->resources_owned)) {
+		int retries = TBNET_LOGOUT_RETRIES;
+		int logout_ret;
+		unsigned long deadline;
+		int remote_transmit_path = net->active_remote_transmit_path;
 
-		while (send_logout && retries-- > 0) {
+		/*
+		 * Hard deadline on the peer wait, on top of the retry count.
+		 * TBNET_LOGOUT_RETRIES * TBNET_LOGOUT_TIMEOUT is 10 s against a
+		 * peer that never answers, and this runs from ndo_stop (under
+		 * RTNL, so every rtnl_lock() user on the box stalls with it),
+		 * from device_shutdown() during a reboot, and once per link on
+		 * a chain node. A peer that is powered off or wedged must not
+		 * be able to buy that much of a shutdown. Defined failure
+		 * action on expiry: log once and proceed with the local
+		 * teardown exactly as if the logout had been refused -- the
+		 * peer's own session verify collects the stale session.
+		 */
+		deadline = jiffies +
+			   msecs_to_jiffies(READ_ONCE(tbnet_logout_budget_ms));
+
+		while (send_logout && net->session_active && retries-- > 0) {
 			netdev_dbg(net->dev, "sending logout request %u\n",
 				   retries);
-			ret = tbnet_logout_request(net);
-			if (ret != -ETIMEDOUT)
+			logout_ret = tbnet_logout_request(net);
+			if (logout_ret != -ETIMEDOUT)
 				break;
+			if (time_after_eq(jiffies, deadline)) {
+				netdev_warn(net->dev,
+					    "logout unacknowledged within %u ms; proceeding with teardown\n",
+					    READ_ONCE(tbnet_logout_budget_ms));
+				break;
+			}
 		}
 
-		tb_ring_stop(net->rx_ring.ring);
-		tb_ring_stop(net->tx_ring.ring);
-		tbnet_free_buffers(&net->rx_ring);
-		tbnet_free_buffers(&net->tx_ring);
+		if (net->paths_owned) {
+			/*
+			 * Keep both descriptor sinks alive while in-flight fabric
+			 * traffic drains. Bring-up enables paths last; teardown must
+			 * disable them first, before ring_stop() clears descriptor
+			 * bases and the buffers are unmapped.
+			 */
+			ret = tb_xdomain_disable_paths(net->xd,
+						       net->local_transmit_path,
+						       net->tx_ring.ring->hop,
+						       remote_transmit_path,
+						       net->rx_ring.ring->hop);
+			if (ret) {
+				netdev_warn(net->dev,
+					    "failed to disable DMA paths; retaining ring and HopID ownership\n");
+				/* Fence callbacks while the unresolved hardware is quarantined. */
+				if (net->resources_owned) {
+					tb_ring_stop(net->rx_ring.ring);
+					tb_ring_stop(net->tx_ring.ring);
+				}
+				goto out_unlock;
+			}
+			net->paths_owned = false;
+		}
 
-		ret = tb_xdomain_disable_paths(net->xd,
-					       net->local_transmit_path,
-					       net->tx_ring.ring->hop,
-					       net->remote_transmit_path,
-					       net->rx_ring.ring->hop);
-		if (ret)
-			netdev_warn(net->dev, "failed to disable DMA paths\n");
+		if (net->resources_owned) {
+			tb_ring_stop(net->rx_ring.ring);
+			tb_ring_stop(net->tx_ring.ring);
+			tbnet_free_buffers(&net->rx_ring);
+			tbnet_free_buffers(&net->tx_ring);
+		}
 
-		tb_xdomain_release_in_hopid(net->xd, net->remote_transmit_path);
+		if (net->resources_owned)
+			tb_xdomain_release_in_hopid(net->xd,
+						    remote_transmit_path);
+		net->session_active = false;
+		net->paths_owned = false;
+		net->resources_owned = false;
+		net->active_remote_transmit_path = 0;
 		net->remote_transmit_path = 0;
 	}
 
@@ -452,7 +564,9 @@ static void tbnet_tear_down(struct tbnet *net, bool send_logout)
 
 	netdev_dbg(net->dev, "network traffic stopped\n");
 
+out_unlock:
 	mutex_unlock(&net->connection_lock);
+	return ret;
 }
 
 static void tbnet_queue_verify(struct tbnet *net)
@@ -464,6 +578,14 @@ static void tbnet_queue_verify(struct tbnet *net)
 
 	queue_delayed_work(system_long_wq, &net->verify_work,
 			   msecs_to_jiffies(ms));
+}
+
+static void tbnet_queue_disconnect(struct tbnet *net, bool relogin,
+				   unsigned long delay)
+{
+	if (relogin)
+		set_bit(TBNET_DISCONNECT_RELOGIN, &net->disconnect_flags);
+	mod_delayed_work(system_long_wq, &net->disconnect_work, delay);
 }
 
 static void tbnet_verify_work(struct work_struct *work)
@@ -479,12 +601,12 @@ static void tbnet_verify_work(struct work_struct *work)
 		return;
 
 	mutex_lock(&net->connection_lock);
-	established = tb_xdomain_handshake_complete(&net->login_hs) &&
-		      net->tx_ring.ring && net->rx_ring.ring;
+	established = net->session_active && net->tx_ring.ring &&
+		      net->rx_ring.ring;
 	if (established) {
 		transmit_path = net->local_transmit_path;
 		transmit_ring = net->tx_ring.ring->hop;
-		receive_path = net->remote_transmit_path;
+		receive_path = net->active_remote_transmit_path;
 		receive_ring = net->rx_ring.ring->hop;
 	}
 	mutex_unlock(&net->connection_lock);
@@ -512,8 +634,8 @@ static void tbnet_verify_work(struct work_struct *work)
 	 */
 	netdev_warn(net->dev,
 		    "ThunderboltIP session lost its DMA tunnel; tearing down and re-logging in\n");
-	tbnet_tear_down(net, false);
-	start_login(net);
+	if (!tbnet_tear_down(net, false))
+		start_login(net);
 #endif /* TB_XDOMAIN_HAS_PATHS_ACTIVE */
 }
 
@@ -567,7 +689,7 @@ static int tbnet_handle_packet(const void *buf, size_t size, void *data)
 				mutex_unlock(&net->connection_lock);
 				netdev_dbg(net->dev,
 					   "peer re-login: tearing down stale session\n");
-				queue_work(system_long_wq, &net->disconnect_work);
+				tbnet_queue_disconnect(net, true, 0);
 				break;
 			}
 			net->login_hs.peer_seen = true;
@@ -594,7 +716,7 @@ static int tbnet_handle_packet(const void *buf, size_t size, void *data)
 		ret = tbnet_logout_response(net, route, sequence, command_id);
 		if (!ret) {
 			netdev_dbg(net->dev, "remote logout response sent\n");
-			queue_work(system_long_wq, &net->disconnect_work);
+			tbnet_queue_disconnect(net, false, 0);
 		}
 		break;
 
@@ -740,6 +862,7 @@ static void tbnet_connected_work(struct work_struct *work)
 {
 	struct tbnet *net = container_of(work, typeof(*net), connected_work);
 	bool connected;
+	int remote_transmit_path;
 	int ret;
 
 	if (netif_carrier_ok(net->dev))
@@ -747,18 +870,22 @@ static void tbnet_connected_work(struct work_struct *work)
 
 	mutex_lock(&net->connection_lock);
 	connected = tb_xdomain_handshake_complete(&net->login_hs);
-	mutex_unlock(&net->connection_lock);
+	remote_transmit_path = net->remote_transmit_path;
 
-	if (!connected)
+	if (!connected) {
+		mutex_unlock(&net->connection_lock);
 		return;
+	}
 
 	netdev_dbg(net->dev, "login successful, enabling paths\n");
 
-	ret = tb_xdomain_alloc_in_hopid(net->xd, net->remote_transmit_path);
-	if (ret != net->remote_transmit_path) {
+	ret = tb_xdomain_alloc_in_hopid(net->xd, remote_transmit_path);
+	if (ret != remote_transmit_path) {
 		netdev_err(net->dev, "failed to allocate Rx HopID\n");
+		mutex_unlock(&net->connection_lock);
 		return;
 	}
+	net->active_remote_transmit_path = remote_transmit_path;
 
 	/* Both logins successful so enable the rings, high-speed DMA
 	 * paths and start the network device queue.
@@ -769,6 +896,7 @@ static void tbnet_connected_work(struct work_struct *work)
 	 */
 	tb_ring_start(net->tx_ring.ring);
 	tb_ring_start(net->rx_ring.ring);
+	net->resources_owned = true;
 
 	ret = tbnet_alloc_rx_buffers(net, net->rx_ring.size);
 	if (ret)
@@ -780,15 +908,28 @@ static void tbnet_connected_work(struct work_struct *work)
 
 	ret = tb_xdomain_enable_paths(net->xd, net->local_transmit_path,
 				      net->tx_ring.ring->hop,
-				      net->remote_transmit_path,
+				      remote_transmit_path,
 				      net->rx_ring.ring->hop);
 	if (ret) {
 		netdev_err(net->dev, "failed to enable DMA paths\n");
+		if (ret == -EUCLEAN) {
+			net->paths_owned = true;
+			/* Fence callbacks, but retain every object named by the path. */
+			tb_ring_stop(net->rx_ring.ring);
+			tb_ring_stop(net->tx_ring.ring);
+			mutex_unlock(&net->connection_lock);
+			tbnet_queue_disconnect(net, true, 0);
+			return;
+		}
 		goto err_free_tx_buffers;
 	}
 
+	net->paths_owned = true;
+	net->session_active = true;
+
 	netif_carrier_on(net->dev);
 	netif_start_queue(net->dev);
+	mutex_unlock(&net->connection_lock);
 
 	/* Level-triggered zombie detection while the session is established. */
 	tbnet_queue_verify(net);
@@ -803,7 +944,10 @@ err_free_rx_buffers:
 err_stop_rings:
 	tb_ring_stop(net->rx_ring.ring);
 	tb_ring_stop(net->tx_ring.ring);
-	tb_xdomain_release_in_hopid(net->xd, net->remote_transmit_path);
+	tb_xdomain_release_in_hopid(net->xd, remote_transmit_path);
+	net->resources_owned = false;
+	net->active_remote_transmit_path = 0;
+	mutex_unlock(&net->connection_lock);
 }
 
 static void tbnet_login_work(struct work_struct *work)
@@ -841,12 +985,109 @@ static void tbnet_login_work(struct work_struct *work)
 	}
 }
 
+struct tbnet_disconnect_ops {
+	int (*tear_down)(struct tbnet *net, void *data);
+	void (*retry)(struct tbnet *net, bool relogin, void *data);
+	void (*start_login)(struct tbnet *net, void *data);
+	void *data;
+};
+
+static int tbnet_disconnect_tear_down(struct tbnet *net, void *data)
+{
+	return tbnet_tear_down(net, false);
+}
+
+static void tbnet_disconnect_retry(struct tbnet *net, bool relogin, void *data)
+{
+	tbnet_queue_disconnect(net, relogin,
+			       msecs_to_jiffies(TBNET_DISCONNECT_RETRY_DELAY));
+}
+
+static void tbnet_disconnect_start_login(struct tbnet *net, void *data)
+{
+	if (net->handler_registered && netif_running(net->dev))
+		start_login(net);
+}
+
+static const struct tbnet_disconnect_ops tbnet_disconnect_real_ops = {
+	.tear_down = tbnet_disconnect_tear_down,
+	.retry = tbnet_disconnect_retry,
+	.start_login = tbnet_disconnect_start_login,
+};
+
+/* Shared by the real worker and KUnit so recovery sequencing cannot diverge. */
+static void tbnet_run_disconnect(struct tbnet *net, bool recovery,
+				 const struct tbnet_disconnect_ops *ops)
+{
+	int ret;
+
+	ret = ops->tear_down(net, ops->data);
+	if (ret) {
+		ops->retry(net, recovery, ops->data);
+		return;
+	}
+
+	if (recovery)
+		ops->start_login(net, ops->data);
+}
+
 static void tbnet_disconnect_work(struct work_struct *work)
 {
-	struct tbnet *net = container_of(work, typeof(*net), disconnect_work);
+	struct tbnet *net = container_of(to_delayed_work(work), typeof(*net),
+					 disconnect_work);
+	bool recovery;
 
-	tbnet_tear_down(net, false);
+	recovery = test_and_clear_bit(TBNET_DISCONNECT_RELOGIN,
+				      &net->disconnect_flags);
+	tbnet_run_disconnect(net, recovery, &tbnet_disconnect_real_ops);
 }
+
+#if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
+struct tbnet_disconnect_test_ctx {
+	int teardown_ret;
+	struct tbnet_test_disconnect_result *result;
+};
+
+static int tbnet_test_disconnect_tear_down(struct tbnet *net, void *data)
+{
+	struct tbnet_disconnect_test_ctx *ctx = data;
+
+	ctx->result->teardown_calls++;
+	return ctx->teardown_ret;
+}
+
+static void tbnet_test_disconnect_retry(struct tbnet *net, bool relogin,
+					void *data)
+{
+	struct tbnet_disconnect_test_ctx *ctx = data;
+
+	ctx->result->retry_calls++;
+}
+
+static void tbnet_test_disconnect_login(struct tbnet *net, void *data)
+{
+	struct tbnet_disconnect_test_ctx *ctx = data;
+
+	ctx->result->login_calls++;
+}
+
+void tbnet_test_recovery_disconnect(int teardown_ret,
+				    struct tbnet_test_disconnect_result *result)
+{
+	struct tbnet_disconnect_test_ctx ctx = {
+		.teardown_ret = teardown_ret,
+		.result = result,
+	};
+	const struct tbnet_disconnect_ops ops = {
+		.tear_down = tbnet_test_disconnect_tear_down,
+		.retry = tbnet_test_disconnect_retry,
+		.start_login = tbnet_test_disconnect_login,
+		.data = &ctx,
+	};
+
+	tbnet_run_disconnect(NULL, true, &ops);
+}
+#endif
 
 static bool tbnet_check_frame(struct tbnet *net, const struct tbnet_frame *tf,
 			      const struct thunderbolt_ip_frame_header *hdr)
@@ -1047,6 +1288,11 @@ static int tbnet_open(struct net_device *dev)
 	int hopid;
 	int ret;
 
+	if (tbnet_session_needs_teardown(net->session_active,
+					 net->paths_owned,
+					 net->resources_owned))
+		return -EBUSY;
+
 	netif_carrier_off(dev);
 	net->tx_ring.size = net->tx_ring_size;
 	net->rx_ring.size = net->rx_ring_size;
@@ -1136,12 +1382,15 @@ err_free_tx_frames:
 static int tbnet_stop(struct net_device *dev)
 {
 	struct tbnet *net = netdev_priv(dev);
+	int ret;
 
 	napi_disable(&net->napi);
 
 	cancel_delayed_work_sync(&net->verify_work);
-	cancel_work_sync(&net->disconnect_work);
-	tbnet_tear_down(net, true);
+	cancel_delayed_work_sync(&net->disconnect_work);
+	ret = tbnet_tear_down(net, true);
+	if (ret)
+		return ret;
 
 	tb_ring_free(net->rx_ring.ring);
 	net->rx_ring.ring = NULL;
@@ -1624,7 +1873,7 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	INIT_DELAYED_WORK(&net->login_work, tbnet_login_work);
 	INIT_WORK(&net->connected_work, tbnet_connected_work);
 	INIT_DELAYED_WORK(&net->verify_work, tbnet_verify_work);
-	INIT_WORK(&net->disconnect_work, tbnet_disconnect_work);
+	INIT_DELAYED_WORK(&net->disconnect_work, tbnet_disconnect_work);
 	mutex_init(&net->connection_lock);
 	atomic_set(&net->command_id, 0);
 	atomic_set(&net->frame_id, 0);
@@ -1668,13 +1917,14 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	net->rx_ring_size = TBNET_DEFAULT_RING_SIZE;
 	net->tx_ring_size = TBNET_DEFAULT_RING_SIZE;
 	net->int_coalesce_usecs = TBNET_DEFAULT_INT_COALESCE_USECS;
-	tb_register_protocol_handler(&net->handler);
+	if (!tb_register_protocol_handler(&net->handler))
+		net->handler_registered = true;
 
 	tb_service_set_drvdata(svc, net);
 
 	ret = register_netdev(dev);
 	if (ret) {
-		tb_unregister_protocol_handler(&net->handler);
+		tbnet_fence_handler(net);
 		free_netdev(dev);
 		return ret;
 	}
@@ -1682,34 +1932,329 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	return 0;
 }
 
+/*
+ * Cancel every work item this instance can own. Only meaningful once the
+ * protocol handler is gone: tbnet_handle_packet() queues login_work,
+ * connected_work and disconnect_work from the XDomain dispatch context, so a
+ * cancel that races a still-registered handler proves nothing.
+ */
+/*
+ * Fence inbound XDomain dispatch for this instance. Idempotent: shutdown runs
+ * before unbind on a driver unload and both need the fence.
+ *
+ * tb_unregister_protocol_handler() takes the core's xdomain_dispatch_lock,
+ * which tb_xdomain_handle_request() holds across the handler callbacks, so on
+ * return tbnet_handle_packet() is neither running nor startable. That is the
+ * only thing that makes a subsequent work cancel meaningful.
+ */
+static void tbnet_fence_handler(struct tbnet *net)
+{
+	if (!net->handler_registered)
+		return;
+	net->handler_registered = false;
+	tb_unregister_protocol_handler(&net->handler);
+}
+
+static void tbnet_cancel_all_work(struct tbnet *net)
+{
+	cancel_delayed_work_sync(&net->login_work);
+	cancel_work_sync(&net->connected_work);
+	cancel_delayed_work_sync(&net->verify_work);
+	cancel_delayed_work_sync(&net->disconnect_work);
+}
+
+struct tbnet_terminal_ops {
+	int (*quarantine_paths)(struct tbnet *net, void *data);
+	void (*quarantine_ring)(struct tb_ring *ring, void *data);
+	void (*free_buffers)(struct tbnet_ring *ring, void *data);
+	void *data;
+};
+
+static int tbnet_quarantine_paths(struct tbnet *net, void *data)
+{
+#ifdef TB_XDOMAIN_HAS_PATH_QUARANTINE
+	return tb_xdomain_quarantine_paths(net->xd,
+			net->local_transmit_path, net->tx_ring.ring->hop,
+			net->tx_ring.ring,
+			net->active_remote_transmit_path, net->rx_ring.ring->hop,
+			net->rx_ring.ring);
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+static void tbnet_release_buffers(struct tbnet_ring *ring, void *data)
+{
+	tbnet_free_buffers(ring);
+}
+
+static void tbnet_quarantine_ring(struct tb_ring *ring, void *data)
+{
+	tb_ring_quarantine(ring);
+}
+
+static const struct tbnet_terminal_ops tbnet_terminal_real_ops = {
+	.quarantine_paths = tbnet_quarantine_paths,
+	.quarantine_ring = tbnet_quarantine_ring,
+	.free_buffers = tbnet_release_buffers,
+};
+
+/*
+ * remove() cannot refuse an unbind.  Once disable_paths() has failed, keep
+ * every hardware identifier that the unresolved tunnel can still target in
+ * the Thunderbolt core, but sever all callbacks and allocations owned by this
+ * module.  The core may reap the quarantined rings only after a controller
+ * reset has proved that no stale DMA path can reach them.
+ */
+static int tbnet_terminal_handoff(struct tbnet *net,
+				  const struct tbnet_terminal_ops *ops)
+{
+	int ret;
+
+	if (!net->rx_ring.ring || !net->tx_ring.ring)
+		return -EINVAL;
+
+	ret = ops->quarantine_paths(net, ops->data);
+	if (ret) {
+		/* Preserve IRQ/work safety even if tuple-record creation is broken. */
+		ops->quarantine_ring(net->rx_ring.ring, ops->data);
+		ops->quarantine_ring(net->tx_ring.ring, ops->data);
+	}
+
+	if (net->rx_ring.ring) {
+		ops->free_buffers(&net->rx_ring, ops->data);
+		net->rx_ring.ring = NULL;
+	}
+	if (net->tx_ring.ring) {
+		ops->free_buffers(&net->tx_ring, ops->data);
+		net->tx_ring.ring = NULL;
+	}
+
+	dev_kfree_skb_any(net->skb);
+	net->skb = NULL;
+	kfree(net->rx_ring.frames);
+	net->rx_ring.frames = NULL;
+	net->rx_ring.size = 0;
+	kfree(net->tx_ring.frames);
+	net->tx_ring.frames = NULL;
+	net->tx_ring.size = 0;
+
+	/* HopIDs and path tuples remain core-owned until the reset boundary. */
+	net->session_active = false;
+	net->paths_owned = false;
+	net->resources_owned = false;
+	net->active_remote_transmit_path = 0;
+	net->remote_transmit_path = 0;
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_USB4_NET_KUNIT_TEST)
+struct tbnet_terminal_test_ctx {
+	struct tbnet_test_handoff_result *result;
+	unsigned int buffers_freed;
+	int quarantine_ret;
+};
+
+static int tbnet_test_record_quarantine(struct tbnet *net, void *data)
+{
+	struct tbnet_terminal_test_ctx *ctx = data;
+
+	ctx->result->quarantine_requests++;
+	if (!ctx->quarantine_ret)
+		ctx->result->quarantined += 2;
+	ctx->result->transmit_path = net->local_transmit_path;
+	ctx->result->transmit_ring = net->tx_ring.ring->hop;
+	ctx->result->receive_path = net->active_remote_transmit_path;
+	ctx->result->receive_ring = net->rx_ring.ring->hop;
+	return ctx->quarantine_ret;
+}
+
+static void tbnet_test_count_buffer_free(struct tbnet_ring *ring, void *data)
+{
+	struct tbnet_terminal_test_ctx *ctx = data;
+
+	ctx->buffers_freed++;
+}
+
+static void tbnet_test_unexpected_ring_fallback(struct tb_ring *ring, void *data)
+{
+	struct tbnet_terminal_test_ctx *ctx = data;
+
+	ctx->result->quarantined++;
+}
+
+void tbnet_test_terminal_handoff(int quarantine_ret,
+				 struct tbnet_test_handoff_result *result)
+{
+	struct tbnet_terminal_test_ctx ctx = {
+		.result = result,
+		.quarantine_ret = quarantine_ret,
+	};
+	const struct tbnet_terminal_ops ops = {
+		.quarantine_paths = tbnet_test_record_quarantine,
+		.quarantine_ring = tbnet_test_unexpected_ring_fallback,
+		.free_buffers = tbnet_test_count_buffer_free,
+		.data = &ctx,
+	};
+	struct tb_ring *tx_ring;
+	struct tb_ring *rx_ring;
+	struct tbnet *net;
+
+	net = kzalloc(sizeof(*net), GFP_KERNEL);
+	tx_ring = kzalloc(sizeof(*tx_ring), GFP_KERNEL);
+	rx_ring = kzalloc(sizeof(*rx_ring), GFP_KERNEL);
+	if (!net || !tx_ring || !rx_ring) {
+		result->handoff_ret = -ENOMEM;
+		goto out;
+	}
+
+	tx_ring->hop = 3;
+	tx_ring->is_tx = true;
+	rx_ring->hop = 4;
+	net->rx_ring.ring = rx_ring;
+	net->tx_ring.ring = tx_ring;
+	net->local_transmit_path = 8;
+	net->active_remote_transmit_path = 9;
+	net->session_active = true;
+	net->paths_owned = true;
+	net->resources_owned = true;
+
+	result->handoff_ret = tbnet_terminal_handoff(net, &ops);
+	result->buffers_freed = ctx.buffers_freed;
+	result->rings_freed = 0;
+	result->hopids_released = 0;
+	result->ring_pointers_cleared = !net->rx_ring.ring &&
+		!net->tx_ring.ring;
+	result->leaf_ownership_cleared = !net->session_active &&
+		!net->paths_owned && !net->resources_owned;
+
+out:
+	kfree(rx_ring);
+	kfree(tx_ring);
+	kfree(net);
+}
+#endif
+
+/*
+ * Unbind order is NOT the mirror of probe, deliberately -- the same rule
+ * thunderbolt_frame's service.c documents and for the same reason.
+ *
+ * The protocol handler goes FIRST. tb_unregister_protocol_handler() takes the
+ * core's xdomain_dispatch_lock, which tb_xdomain_handle_request() holds across
+ * the handler callbacks (drivers/thunderbolt/xdomain.c), so its return is a
+ * hard guarantee that tbnet_handle_packet() is not running and can never run
+ * again. Everything after it therefore runs with inbound XDomain requests
+ * structurally excluded.
+ *
+ * The old order (unregister_netdev() first) left the handler live across the
+ * whole of ndo_stop. That path is long: tbnet_stop() -> tbnet_tear_down(true)
+ * sends up to TBNET_LOGOUT_RETRIES (10) logout requests at TBNET_LOGOUT_TIMEOUT
+ * (1000 ms) each, all under RTNL. tbnet_stop() cancels verify_work and
+ * disconnect_work at the START of that window; an inbound LOGIN or LOGOUT
+ * arriving any time afterwards re-queued login_work / connected_work /
+ * disconnect_work on system_long_wq, and nothing cancelled them again before
+ * free_netdev() freed the netdev that netdev_priv() hands those handlers.
+ * tbnet_connected_work() then calls tb_ring_start(net->tx_ring.ring) and
+ * tbnet_disconnect_work() -> tbnet_tear_down() calls tb_ring_stop() on freed
+ * struct tbnet state, i.e. NHI MMIO writes derived from freed ring pointers --
+ * a use-after-free that presents as a hard, unrecoverable machine hang rather
+ * than a clean oops, and only when a peer happens to be mid-handshake during
+ * the unload. That is the appmana-019 2026-08-24 signature (hang on
+ * `modprobe -r thunderbolt_net` with both chain links live, while the same
+ * sequence on appmana-021 completed cleanly).
+ *
+ * Unregistering the handler first is safe for our own in-flight requests: an
+ * XDomain RESPONSE is matched by tb_cfg_request_find() in ctl.c, which runs
+ * only when no protocol handler CONSUMED the packet (tb_ctl_rx_callback() ->
+ * tb_ctl_handle_event() -> tb_domain_event_cb() -> tb_xdomain_handle_request()).
+ * With no handler registered the walk consumes nothing, so the logout response
+ * still completes tbnet_logout_request(). The only cost is that a peer
+ * mid-handshake sees one retry interval of unanswered requests, which its own
+ * retry budget already absorbs.
+ */
 static void tbnet_remove(struct tb_service *svc)
 {
 	struct tbnet *net = tb_service_get_drvdata(svc);
+	int ret;
+
+	tbnet_fence_handler(net);
 
 	unregister_netdev(net->dev);
-	tb_unregister_protocol_handler(&net->handler);
+
+	/*
+	 * Hard fence before the netdev (and with it struct tbnet) is freed.
+	 * unregister_netdev() only runs ndo_stop for an interface that was UP,
+	 * and even then tbnet_stop() cancels just two of the four work items;
+	 * with the handler gone nothing can re-queue, so this sweep is final.
+	 */
+	tbnet_cancel_all_work(net);
+
+	if (net->paths_owned || net->resources_owned) {
+		ret = tbnet_terminal_handoff(net, &tbnet_terminal_real_ops);
+		if (ret)
+			netdev_err(net->dev,
+				   "exact DMA tuple quarantine failed (%d); forcing ring-only reset quarantine\n",
+				   ret);
+	}
+
+	tb_service_set_drvdata(svc, NULL);
 	free_netdev(net->dev);
 }
 
+/*
+ * System shutdown / reboot (device_shutdown()), NOT a driver unbind.
+ *
+ * Refusing is not an option here -- the machine is going down either way -- so
+ * the rule is bounded-and-proceed: every peer wait must have a deadline and a
+ * defined failure action, and nothing may be left able to re-arm the data path
+ * behind us.
+ *
+ * The fence is the whole point. The old shutdown left the protocol handler
+ * registered across tbnet_tear_down(), and a peer that is HELLO-ing/LOGIN-ing
+ * at us (the appmana-008 2026-08-24 configuration: peer had been powered off
+ * at boot, came back, and was retrying the login endlessly) re-queues
+ * connected_work on system_long_wq as fast as tear_down's stop_login() cancels
+ * it. tbnet_connected_work() then re-runs tb_ring_start() and
+ * tb_xdomain_enable_paths(), re-arming DMA into rings that the shutdown
+ * sequence is about to take away underneath nhi_shutdown() -- which then walks
+ * every hop and dev_WARNs "ring is still active" before disabling interrupts.
+ * Fencing first makes the tear-down monotonic: nothing can put the data path
+ * back after it has been taken down.
+ */
 static void tbnet_shutdown(struct tb_service *svc)
 {
-	tbnet_tear_down(tb_service_get_drvdata(svc), true);
+	struct tbnet *net = tb_service_get_drvdata(svc);
+
+	if (!net)
+		return;
+
+	tbnet_fence_handler(net);
+	tbnet_tear_down(net, true);
+	tbnet_cancel_all_work(net);
 }
 
 static int tbnet_suspend(struct device *dev)
 {
 	struct tb_service *svc = tb_to_service(dev);
 	struct tbnet *net = tb_service_get_drvdata(svc);
+	int ret = 0;
+
+	/*
+	 * Fence first, same rule as shutdown/unbind: an inbound LOGIN during
+	 * the tear-down re-queues connected_work, which would re-enable the
+	 * paths we just disabled and leave a live DMA tunnel across a suspend.
+	 */
+	tbnet_fence_handler(net);
 
 	stop_login(net);
 	cancel_delayed_work_sync(&net->verify_work);
 	if (netif_running(net->dev)) {
 		netif_device_detach(net->dev);
-		tbnet_tear_down(net, true);
+		ret = tbnet_tear_down(net, true);
 	}
+	tbnet_cancel_all_work(net);
 
-	tb_unregister_protocol_handler(&net->handler);
-	return 0;
+	return ret;
 }
 
 static int tbnet_resume(struct device *dev)
@@ -1717,7 +2262,8 @@ static int tbnet_resume(struct device *dev)
 	struct tb_service *svc = tb_to_service(dev);
 	struct tbnet *net = tb_service_get_drvdata(svc);
 
-	tb_register_protocol_handler(&net->handler);
+	if (!tb_register_protocol_handler(&net->handler))
+		net->handler_registered = true;
 
 	netif_carrier_off(net->dev);
 	if (netif_running(net->dev)) {

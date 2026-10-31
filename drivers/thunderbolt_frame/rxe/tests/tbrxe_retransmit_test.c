@@ -387,7 +387,6 @@ static void tbrxe_retransmit_progress_defers_rewind(struct kunit *test)
 	struct ib_cq *cq;
 	struct ib_qp *qp;
 	u8 *src;
-	int sent;
 
 	/* Wide interval so the 1x-vs-2x deadline discrimination survives
 	 * qemu scheduling noise.

@@ -110,13 +110,22 @@ static void tbrxe_perlink_device_per_link(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test,
 			  strstarts(dev_name(&rxe_b->ib_dev.dev), "usb4_rdma"));
 
-	/* Each device is bound to its own GID-anchor netdev: u4r* kernel
-	 * name (the udev helpers rename to tbr-<peer>), NOARP, and the MAC
-	 * behind the advertised local EUI-64 identity.
+	/*
+	 * Each device is bound to its own GID-anchor netdev: named tbr-<peer>
+	 * AT CREATION, NOARP, and the MAC behind the advertised local EUI-64
+	 * identity.
+	 *
+	 * The name is the driver's, not udev's, on purpose. Renaming after
+	 * the fact raced the previous session's asynchronous teardown, which
+	 * still owned the peer name: the rename failed EEXIST, udev abandoned
+	 * the whole uevent, and the rail never got the ULA assigned by the
+	 * separate address rule -- leaving an ACTIVE ib_device with a zero
+	 * GID that could not carry RDMA (appmana-027 -> appmana-019,
+	 * 2026-08-25).
 	 */
 	ndev = ib_device_get_netdev(&rxe_a->ib_dev, 1);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ndev);
-	KUNIT_EXPECT_TRUE(test, strstarts(netdev_name(ndev), "u4r"));
+	KUNIT_EXPECT_TRUE(test, strstarts(netdev_name(ndev), "tbr-"));
 	KUNIT_EXPECT_TRUE(test, !!(ndev->flags & IFF_NOARP));
 	mac[0] = (u8)((TBRXE_TEST_LOCAL_EUI64 >> 56) & 0xff) ^ 0x02;
 	mac[1] = (u8)(TBRXE_TEST_LOCAL_EUI64 >> 48);

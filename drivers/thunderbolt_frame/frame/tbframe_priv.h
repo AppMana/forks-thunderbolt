@@ -19,6 +19,7 @@
 #include <linux/thunderbolt.h>
 #include <linux/workqueue.h>
 
+#include "../../thunderbolt/nhi.h"
 #include "../../thunderbolt/thunderbolt_negotiation.h"
 #include "tbframe.h"
 #include "tbframe_wire.h"
@@ -33,7 +34,7 @@
 #define TBFRAME_RETRY_DELAY_MS		200
 #define TBFRAME_HELLO_RETRIES		5
 #define TBFRAME_READY_RETRIES		10
-#define TBFRAME_KEEPALIVE_LEN		8
+#define TBFRAME_KEEPALIVE_LEN		TBFRAME_WIRE_KEEPALIVE_SIZE
 #define TBFRAME_BYE_TIMEOUT_MS		1000
 #define TBFRAME_BYE_RETRIES		4
 /* LOGOUT re-handshake settle: outlast the peer's whole BYE budget. */
@@ -41,10 +42,94 @@
 /* Min spacing between property re-announces (control-channel thrash guard). */
 #define TBFRAME_REANNOUNCE_MIN_MS	10000
 
+/*
+ * Data-path proof (the appmana 2026-08-23/24 "dead bulk datapath" class).
+ *
+ * Everything the driver reported about a link was derived from the CONTROL
+ * plane (XDomain ring 0) or from reading hop-entry enable bits back out of the
+ * routers. Neither observes a single byte crossing the DMA data rings, so a
+ * link whose data path is dead reports link up, PORT_ACTIVE, populated GIDs
+ * and "READY confirmed" while ib_send_bw moves 0.00 MB/s. These constants
+ * bound an explicit proof: after READY (which certifies BOTH ends' paths are
+ * enabled) the session refuses to declare itself UP until authenticated
+ * keepalives prove both receive and transmit directions. The budget is sized
+ * to outlast a peer verify interval comfortably: 30 * 500 ms = 15 s vs a 5 s
+ * default.
+ */
+#define TBFRAME_PROBE_INTERVAL_MS	500
+#define TBFRAME_PROBE_RETRIES		30
+/*
+ * A missing receive direction does not identify the faulty controller: the
+ * local receiver, remote transmitter, or cable may be responsible.  Give the
+ * peer's directional transmitter detector time to act before the symmetric
+ * last-resort recovery.
+ */
+#define TBFRAME_AMBIGUOUS_RECOVERY_FAILURES	4
+/* Bound the grace for authenticated frames retained from an older session. */
+#define TBFRAME_STALE_DRAIN_RETRIES	TBFRAME_PROBE_RETRIES
+/*
+ * Level-triggered silence detector for an ESTABLISHED session: with keepalive
+ * negotiated a healthy link delivers at least one frame per verify interval,
+ * so N consecutive silent intervals is conclusive evidence of a dead data
+ * path even though the hop entries still read back enabled.
+ */
+#define TBFRAME_DATA_SILENCE_TICKS	3
+/*
+ * A failed proof cycles the session hardware (rings, paths, in-HopID) and
+ * retries. If the fabric is genuinely wedged that must not become a hot loop,
+ * so consecutive failures back off exponentially to this cap.
+ */
+#define TBFRAME_PROBE_BACKOFF_MAX_MS	30000
+
+/*
+ * Hard ceiling on the teardown refs wait. teardown_force_ms=0 used to mean
+ * "wait forever", which is an unbounded wait by configuration: a client (or
+ * dead hardware that never cancels a frame) holding one reference wedges an
+ * rmmod, and the same code runs from the shutdown path where wedging strands a
+ * node that an operator believed they were rebooting. 0 now means "use this
+ * ceiling"; on expiry teardown force-proceeds with the documented deliberate
+ * leak, which is strictly better than not returning.
+ */
+#define TBFRAME_TEARDOWN_FORCE_MAX_MS	10000
+/*
+ * Shutdown-mode budgets. On a reboot the machine is going down either way, so
+ * refusal is not available and every peer wait collapses: no BYE at all (the
+ * peer's own session verify collects the stale session), a short publisher
+ * drain, and a short refs wait before the forced leak. Bounded-and-proceed.
+ */
+#define TBFRAME_SHUTDOWN_DRAIN_MS	200
+#define TBFRAME_SHUTDOWN_FORCE_MS	500
+
 enum tbframe_link_state {
 	TBFRAME_STATE_INIT,		/* handshake not complete */
 	TBFRAME_STATE_UP,		/* established, data admitted */
 	TBFRAME_STATE_DEAD,		/* DEAD_HW poisoned, terminal */
+};
+
+enum tbframe_ready_responder_state {
+	TBFRAME_READY_RESPONDER_WAITING,
+	TBFRAME_READY_RESPONDER_PENDING_PATHS,
+	TBFRAME_READY_RESPONDER_PENDING_SEND,
+	TBFRAME_READY_RESPONDER_ACKED,
+};
+
+struct tbframe_ready_responder {
+	enum tbframe_ready_responder_state state;
+	u32 seq;
+	u8 xdomain_sequence;
+	struct tbframe_wire_hello peer;
+};
+
+/*
+ * Inbound HELLO responder state is independent from the correlated outbound
+ * HELLO requester.  The control dispatch path can observe a peer's next
+ * lifetime while the requester is still waiting for an ACK from its previous
+ * lifetime; keeping this snapshot separate prevents the older reply from
+ * silently replacing the newer observation.
+ */
+struct tbframe_hello_responder {
+	bool seen;
+	struct tbframe_wire_hello peer;
 };
 
 struct tbframe_frame_priv {
@@ -56,6 +141,8 @@ struct tbframe_frame_priv {
 	bool			charged_data;
 	/* counted against tx_ring_budget (posted to the hardware ring) */
 	bool			hw_posted;
+	/* session that owned this RX descriptor when it was posted */
+	u64			rx_generation;
 	refcount_t		rx_refs;
 	/* hardware backend fields (unused by the mock) */
 	struct ring_frame	rf;
@@ -96,6 +183,10 @@ struct tbframe_hw_ops {
 	int	(*disable_paths)(void *hw, int local_hopid, int remote_hopid);
 	/* level-triggered: 1 programmed, 0 gone, <0 unknown (not dead) */
 	int	(*paths_active)(void *hw, int local_hopid, int remote_hopid);
+	int	(*tx_snapshot)(void *hw, struct tb_ring_snapshot *snapshot);
+	/* Transfer the exact unresolved path/ring/HopID tuple to core ownership. */
+	int	(*quarantine_paths)(void *hw, int local_hopid,
+				    int remote_hopid);
 	int	(*control_request)(void *hw, const void *req, size_t req_len,
 				   void *resp, size_t resp_len,
 				   unsigned int timeout_ms);
@@ -123,6 +214,19 @@ struct tbframe {
 	unsigned int		xmit_drain_ms;
 	unsigned int		teardown_warn_ms;
 	unsigned int		teardown_force_ms;
+	/*
+	 * The machine is going down (reboot notifier). Refusal is not an
+	 * option on this path, so every peer wait collapses to its shutdown
+	 * budget and teardown proceeds regardless of the outcome.
+	 */
+	bool			shutdown_mode;
+	/*
+	 * Refuse to declare a session UP until at least one good frame has
+	 * actually been received on the data ring (see TBFRAME_PROBE_*).
+	 * Default on; a peer that does not negotiate keepalive cannot supply
+	 * the evidence, and that case is logged rather than silently skipped.
+	 */
+	bool			data_proof;
 	/*
 	 * Max frames resident in the hardware TX ring per link; the excess
 	 * waits in the link's software queues where ctrl frames (rxe ACKs,
@@ -159,8 +263,14 @@ struct tbframe_link {
 	 */
 	bool			parked;
 	bool			hello_done;
+	/* DMA storage outlives recoverable protocol sessions. */
+	bool			rings_allocated;
 	bool			rings_up;
 	bool			paths_enabled;
+	/* The core still owns the exact path tuple, active or quarantined. */
+	bool			paths_owned;
+	/* An unresolved path transferred rings/HopIDs to core quarantine. */
+	bool			terminal_handoff;
 	bool			in_hopid_held;
 	/*
 	 * True once this side's TX ring has been drained/cancelled for the
@@ -183,7 +293,6 @@ struct tbframe_link {
 	 * kicked by the returning peer's HELLO -- immediately before the
 	 * aligned rebuild.
 	 */
-	bool			hw_stale;
 	/*
 	 * The remote HopID the CURRENT session actually allocated its in-HopID
 	 * with and enabled its paths on. An inbound HELLO rewrites
@@ -191,9 +300,67 @@ struct tbframe_link {
 	 * must undo what it did, not what the peer most recently said.
 	 */
 	u16			active_remote_hopid;
-	struct tb_xdomain_handshake hs;	/* READY handshake + zombie predicate */
+	/* Outbound READY requester and inbound READY responder are independent. */
+	struct tb_xdomain_handshake hs;	/* requester + zombie predicate */
+	struct tbframe_hello_responder hello_responder;
+	struct tbframe_ready_responder ready_responder;
+	bool			hello_selection_pending;
+	u32			hello_selection_caps;
+	u32			request_seq;
 	unsigned int		hello_attempts;
 	unsigned long		last_reannounce;
+
+	/*
+	 * Data-path proof state. ->data_rx counts GOOD frames the hardware
+	 * actually delivered on this session's RX ring (keepalives included,
+	 * cancellations and CRC-flagged frames excluded); it is the only
+	 * signal in this driver that observes the bulk path rather than the
+	 * control plane or the routers' hop-entry enable bits.
+	 *
+	 * ->data_proven latches once ->data_rx moves and gates the transition
+	 * to UP, so a session over a dead data path never reaches the client
+	 * and never publishes an HCA. ->silent_ticks is the level-triggered
+	 * detector for a path that dies AFTER it was proven.
+	 */
+	u64			data_rx;
+	u64			data_rx_tick_mark;
+	bool			data_rx_proven;
+	bool			data_tx_proven;
+	u64			keepalive_tx_seq;
+	u64			keepalive_tx_acked;
+	u64			keepalive_tx_ack_mark;
+	u64			keepalive_peer_seq;
+	/*
+	 * Diagnostic only -- never gate anything on these. A dead data path
+	 * says nothing about WHY it is dead, and the distinction matters:
+	 * frames arriving corrupt (->data_rx_bad moving) means the wire moves
+	 * and signal integrity is the fault, while nothing arriving at all
+	 * (every counter flat) means frames never leave or are dropped in the
+	 * fabric. rx_complete() discards bad frames before ->data_rx, so
+	 * without a separate counter that evidence is thrown away and both
+	 * cases look identical in the DATA PATH DEAD diagnostic.
+	 */
+	u64			data_rx_bad;
+	u64			data_rx_oversize;
+	u64			data_rx_stale;
+	u64			data_rx_bad_cookie;
+	u64			data_rx_prior_cookie;
+	u64			data_tx_done;
+	u64			data_tx_submitted;
+	u64			data_tx_refused;
+	u64			data_tx_ring_err;
+	u64			data_tx_canceled;
+	bool			data_proven;
+	bool			data_proof_unavailable_warned;
+	u64			data_generation;
+	unsigned int		probe_attempts;
+	unsigned int		probe_failures;
+	bool			stale_drain_active;
+	unsigned int		stale_drain_budget;
+	unsigned int		silent_ticks;
+	unsigned int		tx_silent_ticks;
+	struct tb_ring_snapshot	data_path_sample;
+	bool			data_path_sample_valid;
 
 	bool			needs_down;
 	enum tbframe_down_reason down_reason;
@@ -219,6 +386,7 @@ struct tbframe_link {
 	u16			remote_rx_entries;
 	u32			remote_caps;
 	u64			remote_cookie;
+	u64			previous_remote_cookie;
 	u64			remote_gid_eui64;
 
 	/* Mode A admission (spec §6) */
@@ -261,6 +429,12 @@ struct tbframe_link *tbframe_link_create(struct tbframe *tf,
 					 bool autostart);
 int tbframe_link_destroy(struct tbframe_link *link,
 			 enum tbframe_down_reason reason);
+/*
+ * System-shutdown quiesce: park the session and tear its hardware down with
+ * every peer wait collapsed, leaving the link object alive. Never refuses,
+ * never waits on the peer, always returns.
+ */
+void tbframe_link_shutdown(struct tbframe_link *link);
 void tbframe_link_session_step(struct tbframe_link *link);
 void tbframe_link_verify_step(struct tbframe_link *link);
 int tbframe_link_handle_packet(struct tbframe_link *link, const void *buf,
@@ -271,6 +445,8 @@ int tbframe_handle_packet(struct tbframe *tf, const void *token,
 int tbframe_register_client_tf(struct tbframe *tf,
 			       const struct tbframe_client_ops *ops, void *ctx);
 void tbframe_unregister_client_tf(struct tbframe *tf);
+void tbframe_prepare_stop(struct tbframe *tf);
+void tbframe_prepare_shutdown(struct tbframe *tf);
 void tbframe_core_tx_complete(struct tbframe_frame_priv *f, bool canceled);
 void tbframe_core_rx_complete(struct tbframe_frame_priv *f, bool canceled,
 			      u16 len, u8 pdf, bool bad);
@@ -283,5 +459,4 @@ struct tbframe_hw;
 struct tbframe_hw *tbframe_hw_create(struct tbframe *tf, struct tb_xdomain *xd);
 void tbframe_hw_destroy(struct tbframe_hw *hw);
 extern const struct tbframe_hw_ops tbframe_hw_real_ops;
-
 #endif /* TBFRAME_PRIV_H */

@@ -16,6 +16,7 @@
 #include <kunit/test.h>
 
 #include "../../../thunderbolt/thunderbolt_negotiation.h"
+#include "tbnet_test.h"
 
 static void tbnet_test_login_connect(struct kunit *test)
 {
@@ -64,6 +65,53 @@ static void tbnet_test_login_reconnect(struct kunit *test)
 	hs.request_sent = true;
 	hs.peer_seen = true;
 	KUNIT_EXPECT_TRUE(test, tb_xdomain_handshake_complete(&hs));
+}
+
+static void tbnet_test_supersede_still_tears_down_owned_session(struct kunit *test)
+{
+	struct tb_xdomain_handshake hs = {
+		.request_sent = true,
+		.peer_seen = true,
+	};
+	bool session_active = true;
+	bool needs_teardown;
+
+	KUNIT_ASSERT_TRUE(test, tb_xdomain_handshake_supersede(&hs));
+	KUNIT_ASSERT_FALSE(test, tb_xdomain_handshake_complete(&hs));
+
+	/* Resource ownership survives the control-state reset. */
+	needs_teardown = tbnet_test_session_needs_teardown(false, session_active,
+							   true);
+	KUNIT_EXPECT_TRUE(test, needs_teardown);
+}
+
+static void tbnet_test_partial_session_resources_are_torn_down(struct kunit *test)
+{
+	/* Ring start precedes the final active-session commit. */
+	KUNIT_EXPECT_TRUE(test,
+			  tbnet_test_session_needs_teardown(false, false, true));
+}
+
+/*
+ * Activation recovery owns the responsibility for a fresh handshake. A
+ * successful teardown cannot merely leave carrier down and hope that the peer
+ * happens to send another LOGIN, while an unresolved teardown must not start
+ * a replacement session over the retained tuple.
+ */
+static void tbnet_test_recovery_disconnect_retries_then_relogs(struct kunit *test)
+{
+	struct tbnet_test_disconnect_result result = { };
+
+	tbnet_test_recovery_disconnect(-EUCLEAN, &result);
+	KUNIT_EXPECT_EQ(test, 1u, result.teardown_calls);
+	KUNIT_EXPECT_EQ(test, 1u, result.retry_calls);
+	KUNIT_EXPECT_EQ(test, 0u, result.login_calls);
+
+	memset(&result, 0, sizeof(result));
+	tbnet_test_recovery_disconnect(0, &result);
+	KUNIT_EXPECT_EQ(test, 1u, result.teardown_calls);
+	KUNIT_EXPECT_EQ(test, 0u, result.retry_calls);
+	KUNIT_EXPECT_EQ(test, 1u, result.login_calls);
 }
 
 /*
@@ -204,6 +252,9 @@ static struct kunit_case tbnet_login_test_cases[] = {
 	KUNIT_CASE(tbnet_test_login_connect),
 	KUNIT_CASE(tbnet_test_login_supersede_on_relogin),
 	KUNIT_CASE(tbnet_test_login_reconnect),
+	KUNIT_CASE(tbnet_test_supersede_still_tears_down_owned_session),
+	KUNIT_CASE(tbnet_test_partial_session_resources_are_torn_down),
+	KUNIT_CASE(tbnet_test_recovery_disconnect_retries_then_relogs),
 	KUNIT_CASE(tbnet_test_session_zombie_recovers),
 	KUNIT_CASE(tbnet_test_session_verify_healthy_noop),
 	{}

@@ -14,8 +14,6 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
-	struct tbframe_wire_hello ack;
-	struct tbframe_wire_info info;
 
 	tbframe_mock_link_up(test, fx);
 
@@ -28,14 +26,8 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 1,
 			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
 
-	/* The handler acks the HELLO with our current session parameters. */
-	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
-	KUNIT_ASSERT_EQ(test, 0,
-			tbframe_wire_parse_hello(fx->mock.last_response,
-						 sizeof(fx->mock.last_response),
-						 &ack, &info));
-	KUNIT_EXPECT_EQ(test, TBFRAME_WIRE_OP_HELLO_ACK, info.op);
-	KUNIT_EXPECT_EQ(test, (u16)TBFRAME_MOCK_RING, ack.rx_ring_entries);
+	/* The old lifetime is fenced before a retry receives HELLO_ACK. */
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
 
 	/* Session work runs the supersede: down, then full re-handshake. */
 	flush_workqueue(fx->tf.wq);
@@ -51,6 +43,54 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
 }
 
 /*
+ * A HELLO for a new peer lifetime is not merely a control-plane update.  The
+ * old data rings, hop entries and HopID still name the previous lifetime until
+ * session work has drained the paths and stopped those rings. An early ACK
+ * lets the peer install its replacement path against that stale hardware.
+ * The peer already retries HELLO, so withhold the reply until the old hardware
+ * lifetime has crossed the disable/drain -> stop -> release fence.
+ */
+static void
+tbframe_supersede_hello_ack_waits_for_old_hw_fence(struct kunit *test)
+{
+	struct tbframe_mock_fixture *fx = test->priv;
+	u8 msg[TBFRAME_WIRE_HELLO_MSG_SIZE];
+	int stop, disable, release;
+
+	tbframe_mock_link_up(test, fx);
+	fx->mock.have_response = false;
+
+	/* Keep session work behind us while dispatch sees the new lifetime. */
+	mutex_lock(&fx->link->session_lock);
+	fx->mock.peer.session_cookie = 0x5a5a5a5a5a5a5a5aull;
+	fx->mock.peer.transmit_hopid = 13;
+	KUNIT_ASSERT_GE(test,
+			tbframe_mock_build_peer_msg(fx, TBFRAME_WIRE_OP_HELLO,
+						    msg, sizeof(msg)), 0);
+	KUNIT_EXPECT_EQ(test, 1,
+			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
+
+	/* No reply may certify replacement paths while the old paths remain. */
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
+	KUNIT_EXPECT_TRUE(test, fx->mock.rings_started);
+	KUNIT_EXPECT_TRUE(test, fx->mock.paths_on);
+
+	mutex_unlock(&fx->link->session_lock);
+	flush_workqueue(fx->tf.wq);
+
+	stop = tbframe_mock_hw_call_pos(&fx->mock, TBFRAME_HW_STOP_RINGS, 0);
+	disable = tbframe_mock_hw_call_pos(&fx->mock,
+					   TBFRAME_HW_DISABLE_PATHS, 0);
+	release = tbframe_mock_hw_call_pos(&fx->mock,
+					   TBFRAME_HW_RELEASE_IN_HOPID, 0);
+	KUNIT_ASSERT_GE(test, stop, 0);
+	KUNIT_ASSERT_GE(test, disable, 0);
+	KUNIT_ASSERT_GE(test, release, 0);
+	KUNIT_EXPECT_LT(test, disable, stop);
+	KUNIT_EXPECT_LT(test, stop, release);
+}
+
+/*
  * READY certification vs a pending supersede teardown.
  *
  * The reload race: a peer whose client bounced re-HELLOs (queueing our
@@ -59,11 +99,10 @@ static void tbframe_supersede_on_rehello(struct kunit *test)
  * ->paths_enabled -- still true for the OLD session's paths, which the queued
  * down_session() is about to rip out -- and certified mutual readiness with
  * READY_ACK. The peer then went UP and streamed a full TX ring into a hop
- * entry we were disabling; on the 023/025 canaries that wedged the peer's
- * egress HopID at the router level (TX ring enabled, 2047 posted, zero
- * consumed) until a reboot. The ack must be withheld while a down is
- * pending, exactly as it is withheld before the paths first come up; the
- * peer's READY retry budget absorbs the delay.
+ * entry being disabled, wedging the peer's router egress until a reset. The
+ * ack must be withheld while a down is pending, exactly as it is withheld
+ * before the paths first come up; the peer's READY retry budget absorbs the
+ * delay.
  */
 static void tbframe_ready_ack_withheld_during_pending_supersede(struct kunit *test)
 {
@@ -88,7 +127,7 @@ static void tbframe_ready_ack_withheld_during_pending_supersede(struct kunit *te
 						    msg, sizeof(msg)), 0);
 	KUNIT_EXPECT_EQ(test, 1,
 			tbframe_link_handle_packet(fx->link, msg, sizeof(msg)));
-	KUNIT_ASSERT_TRUE(test, fx->mock.have_response);
+	KUNIT_EXPECT_FALSE(test, fx->mock.have_response);
 	fx->mock.have_response = false;
 
 	/* Peer's READY lands while our down is still queued: refused
@@ -139,7 +178,9 @@ static void tbframe_cookie_mismatch_zombie(struct kunit *test)
 	/* A keepalive echoing the negotiated cookie is benign. */
 	f = tbframe_mock_pop_rx(fx);
 	KUNIT_ASSERT_NOT_NULL(test, f);
-	tbframe_wire_put_le64(f->frame.data, fx->mock.peer.session_cookie);
+	tbframe_mock_fill_keepalive(f, fx->mock.peer.session_cookie, 1,
+				fx->link->local_cookie,
+				fx->link->keepalive_tx_seq);
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	flush_workqueue(fx->tf.wq);
@@ -153,7 +194,7 @@ static void tbframe_cookie_mismatch_zombie(struct kunit *test)
 	 */
 	f = tbframe_mock_pop_rx(fx);
 	KUNIT_ASSERT_NOT_NULL(test, f);
-	tbframe_wire_put_le64(f->frame.data, ~fx->mock.peer.session_cookie);
+	tbframe_mock_fill_keepalive(f, ~fx->mock.peer.session_cookie, 2, 0, 0);
 	tbframe_core_rx_complete(f, false, TBFRAME_KEEPALIVE_LEN,
 				 TBFRAME_PDF_KEEPALIVE, false);
 	flush_workqueue(fx->tf.wq);
@@ -174,6 +215,9 @@ static void tbframe_verify_sends_keepalive(struct kunit *test)
 
 	tbframe_mock_link_up(test, fx);
 
+	/* Keep the keepalive in the ring so its contents can be inspected. */
+	fx->mock.hold_keepalives = true;
+
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_queued);
 	tbframe_link_verify_step(fx->link);
 	KUNIT_ASSERT_EQ(test, 1u, fx->mock.tx_queued);
@@ -190,14 +234,14 @@ static void tbframe_verify_sends_keepalive(struct kunit *test)
 	tbframe_mock_complete_tx(fx);
 }
 
-static void tbframe_no_keepalive_without_capability(struct kunit *test)
+static void tbframe_no_keepalive_capability_stays_private(struct kunit *test)
 {
 	struct tbframe_mock_fixture *fx = test->priv;
 
-	/* Peer did not advertise capability bit 1: never send keepalives. */
+	/* Without capability bit 1 there is no session-bound data proof. */
 	fx->mock.peer.capabilities = 0;
-	tbframe_mock_link_up(test, fx);
-	tbframe_link_verify_step(fx->link);
+	tbframe_link_session_step(fx->link);
+	KUNIT_EXPECT_EQ(test, 0u, fx->client.up_count);
 	KUNIT_EXPECT_EQ(test, 0u, fx->mock.tx_queued);
 }
 
@@ -223,10 +267,11 @@ static void tbframe_supersede_test_exit(struct kunit *test)
 
 static struct kunit_case tbframe_supersede_cases[] = {
 	KUNIT_CASE(tbframe_supersede_on_rehello),
+	KUNIT_CASE(tbframe_supersede_hello_ack_waits_for_old_hw_fence),
 	KUNIT_CASE(tbframe_ready_ack_withheld_during_pending_supersede),
 	KUNIT_CASE(tbframe_cookie_mismatch_zombie),
 	KUNIT_CASE(tbframe_verify_sends_keepalive),
-	KUNIT_CASE(tbframe_no_keepalive_without_capability),
+	KUNIT_CASE(tbframe_no_keepalive_capability_stays_private),
 	{}
 };
 

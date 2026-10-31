@@ -2,7 +2,7 @@
 
 # The fork replaces the whole thunderbolt subsystem and owns its public header:
 # the vendored .c reference struct members the stock <linux/thunderbolt.h>
-# lacks (tb_nhi::domain_released, tb_protocol_handler::callback_xd). The tbfix
+# lacks (tb_protocol_handler::callback_xd). The tbfix
 # build generates a patched copy from the kernel's own header and passes its
 # directory here; prepending it to LINUXINCLUDE shadows the kernel's copy for
 # a <linux/...> include (verified: LINUXINCLUDE is searched before the stock
@@ -18,6 +18,13 @@ ccflags-y := -I$(src)
 # in-tree / under KUnit, where MODULE_VERSION compiles out.
 ifneq ($(TBV_PKG_VERSION),)
 ccflags-y += -DTBV_PKG_VERSION=\"$(TBV_PKG_VERSION)\"
+endif
+
+# Experiment builds only (TBV_DEBUGFS_WRITE=1 in the environment): compile in
+# the upstream debugfs register-write support so live register experiments can
+# run without bespoke driver code. Never set for released packages.
+ifneq ($(TBV_DEBUGFS_WRITE),)
+ccflags-y += -DCONFIG_USB4_DEBUGFS_WRITE=1
 endif
 
 obj-${CONFIG_USB4} := thunderbolt.o

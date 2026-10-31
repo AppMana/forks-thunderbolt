@@ -151,6 +151,10 @@ struct tbframe_link_info {
  *               context in bounded batches, never with tbframe locks held.
  *               The frame is only valid during the call (see
  *               struct tbframe_frame).
+ * @rx_bad:      optional diagnostic-only view of a frame rejected by the NHI
+ *               RX descriptor status. It is synchronous and read-only, and
+ *               the frame is recycled immediately afterwards. A bad frame is
+ *               never also delivered through @rx.
  * @tx_released: the admission window reopened (completions drained below
  *               the watermark). The client's send machinery should
  *               reschedule. May coalesce many completions into one call.
@@ -167,6 +171,8 @@ struct tbframe_link_info {
 struct tbframe_client_ops {
 	void (*rx)(void *ctx, struct tbframe_link *link,
 		   struct tbframe_frame *frame);
+	void (*rx_bad)(void *ctx, struct tbframe_link *link,
+		       struct tbframe_frame *frame);
 	void (*tx_released)(void *ctx, struct tbframe_link *link);
 	void (*link_up)(void *ctx, struct tbframe_link *link,
 			const struct tbframe_link_info *info);

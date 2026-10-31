@@ -15,6 +15,7 @@
 #include <crypto/sha2.h>
 #include <crypto/utils.h>
 
+#include "dma_port.h"
 #include "tb.h"
 
 static DEFINE_IDA(tb_domain_ida);
@@ -316,18 +317,34 @@ const struct bus_type tb_bus_type = {
 	.shutdown = tb_service_shutdown,
 };
 
+static void tb_domain_release_resources(struct tb *tb)
+{
+	/*
+	 * destroy_workqueue() BEFORE tb_ctl_free(): work items on tb->wq
+	 * (icm_handle_notification, the xdomain state/properties works) reach
+	 * tb->ctl through tb_cfg_request_sync(), so freeing the ctl first left
+	 * them dereferencing freed memory. The old order was only survivable
+	 * because tb_domain_remove() flushes the queue first -- a one-shot
+	 * flush that does not disarm an armed delayed_work timer.
+	 */
+	if (tb->wq) {
+		destroy_workqueue(tb->wq);
+		tb->wq = NULL;
+	}
+	if (tb->ctl) {
+		tb_ctl_free(tb->ctl);
+		tb->ctl = NULL;
+	}
+}
+
 static void tb_domain_release(struct device *dev)
 {
 	struct tb *tb = container_of(dev, struct tb, dev);
-	struct tb_nhi *nhi = tb->nhi;
 
-	tb_ctl_free(tb->ctl);
-	destroy_workqueue(tb->wq);
+	tb_domain_release_resources(tb);
 	ida_free(&tb_domain_ida, tb->index);
 	mutex_destroy(&tb->lock);
 	kfree(tb);
-
-	complete(&nhi->domain_released);
 }
 
 const struct device_type tb_domain_type = {
@@ -436,6 +453,40 @@ err_free:
  *
  * Return: %0 on success, negative errno otherwise.
  */
+/*
+ * Stop the control channel. MUST NOT be called with tb->lock held.
+ *
+ * appmana-008, kdump 202608241850 (kernel 6.17.0-42), a wedged-ICM board whose
+ * tb_domain_add() failed at driver_ready:
+ *
+ *   (udev-worker):365   nhi_probe -> tb_domain_add -> tb_ctl_stop
+ *                       -> tb_ring_stop -> flush_work -> wait_for_completion  [D]
+ *   kworker/u128:0:12   process_one_work -> icm_handle_notification
+ *                       -> mutex_lock(&tb->lock)                              [D]
+ *   INFO: task kworker/u128:0:12 is blocked on a mutex likely owned by
+ *         task (udev-worker):365
+ *   Kernel panic - not syncing: hung_task: blocked tasks
+ *
+ * tb_domain_add() takes tb->lock, starts the control channel (which starts
+ * event processing: icm_handle_event() queues icm_handle_notification onto
+ * tb->wq and that work takes tb->lock), and then, on failure, called
+ * tb_ctl_stop() -- which schedules and FLUSHES the ring work -- with tb->lock
+ * still held. Making a tb->lock-taking work item runnable and then waiting on
+ * it while holding tb->lock is an AB-BA that nothing can break; hung_task
+ * fired at 122 s and panic_on_hung_task took the node down. tb_domain_remove()
+ * had the identical shape, which is why unload hung too, and it is the same
+ * helper both use -- so the rule is enforced here rather than at each caller.
+ *
+ * The lockdep assertion is the actual guarantee: a future caller that
+ * reintroduces the inversion splats under the fork's lockdep KUnit run instead
+ * of wedging a production node.
+ */
+void tb_domain_ctl_stop(struct tb *tb)
+{
+	lockdep_assert_not_held(&tb->lock);
+	tb_ctl_stop(tb->ctl);
+}
+
 int tb_domain_add(struct tb *tb, bool reset)
 {
 	int ret;
@@ -487,8 +538,25 @@ int tb_domain_add(struct tb *tb, bool reset)
 err_domain_del:
 	device_del(&tb->dev);
 err_ctl_stop:
-	tb_ctl_stop(tb->ctl);
+	/*
+	 * Drop the lock BEFORE stopping the control channel. This is the
+	 * appmana-008 panic path: everything between tb_ctl_start() above and
+	 * here runs with event processing live, so a notification work item
+	 * that takes tb->lock can already be queued and blocked on us, and
+	 * tb_ctl_stop() flushes ring work. See tb_domain_ctl_stop().
+	 */
 	mutex_unlock(&tb->lock);
+	tb_domain_ctl_stop(tb);
+
+	/*
+	 * ...and drain what the live window queued, with the lock dropped, so
+	 * no work item survives to touch the domain the caller is about to
+	 * release. This is the failure path a wedged-ICM board takes on every
+	 * probe, and the v2.44 software-CM takeover deliberately routes
+	 * through it twice.
+	 */
+	flush_workqueue(tb->wq);
+	tb_domain_release_resources(tb);
 
 	return ret;
 }
@@ -500,30 +568,215 @@ err_ctl_stop:
  * Stops the domain, removes it from the system and releases all
  * resources once the last reference has been released.
  */
-void tb_domain_remove(struct tb *tb)
+static struct tb_domain_reset_result
+tb_domain_terminal_reset(struct tb *tb, void *data)
+{
+	struct tb_domain_reset_result result = {};
+
+	result.error = tb_nhi_reset_host(tb->nhi);
+	if (!result.error)
+		result.state = TB_DOMAIN_RESET_PROVEN;
+	return result;
+}
+
+static int tb_domain_remove_stop(struct tb *tb, void *data)
 {
 	mutex_lock(&tb->lock);
-	if (tb->cm_ops->stop)
-		tb->cm_ops->stop(tb);
-	/* Stop the domain control traffic */
-	tb_ctl_stop(tb->ctl);
+	if (tb->cm_ops->stop) {
+		int ret = tb->cm_ops->stop(tb);
+
+		mutex_unlock(&tb->lock);
+		return ret;
+	}
 	mutex_unlock(&tb->lock);
+	return 0;
+}
 
+static void tb_domain_prepare_xdomains(struct tb_switch *sw,
+				       bool ownership_unresolved)
+{
+	struct tb_port *port;
+
+	sw->is_unplugged = true;
+	tb_switch_for_each_port(sw, port) {
+		if (tb_port_has_remote(port)) {
+			tb_domain_prepare_xdomains(port->remote->sw, ownership_unresolved);
+		} else if (port->xdomain) {
+			struct tb_xdomain *xd = port->xdomain;
+
+			if (ownership_unresolved && !xd->path_teardown_err)
+				xd->path_teardown_err = -EUCLEAN;
+			xd->is_unplugged = true;
+			tb_xdomain_remove(xd);
+			port->xdomain = NULL;
+		}
+	}
+}
+
+static void tb_domain_remove_prepare_xdomains(struct tb *tb, void *data,
+					      bool ownership_unresolved)
+{
+	mutex_lock(&tb->lock);
+	if (tb->root_switch)
+		tb_domain_prepare_xdomains(tb->root_switch, ownership_unresolved);
+	mutex_unlock(&tb->lock);
+}
+
+static bool tb_domain_has_quarantined_rings(struct tb *tb, void *data)
+{
+	return tb_nhi_has_quarantined_rings(tb->nhi);
+}
+
+static void tb_domain_remove_finalize(struct tb *tb, void *data,
+				      enum tb_domain_reset_state reset_state,
+				      bool ownership_unresolved)
+{
+	if (!tb->cm_ops->finalize_stop)
+		return;
+
+	mutex_lock(&tb->lock);
+	tb->cm_ops->finalize_stop(tb, reset_state, ownership_unresolved);
+	mutex_unlock(&tb->lock);
+}
+
+static void tb_domain_remove_ctl_stop(struct tb *tb, void *data)
+{
+	tb_domain_ctl_stop(tb);
+}
+
+static void tb_domain_remove_flush(struct tb *tb, void *data)
+{
 	flush_workqueue(tb->wq);
+}
 
-	/*
-	 * tbfix addition (not in mainline a8937f35cf39): cm_ops->stop
-	 * marked every remaining XDomain unplugged under tb->lock but no
-	 * longer unregisters the device from the bus. Unregister them
-	 * here, outside the lock, so service driver remove callbacks run
-	 * before the domain goes away on driver unload.
-	 */
+static void tb_domain_remove_unregister_xdomains(struct tb *tb, void *data)
+{
 	tb_domain_unregister_unplugged_xdomains(tb);
+}
 
+static void tb_domain_remove_deinit(struct tb *tb, void *data)
+{
 	if (tb->cm_ops->deinit)
 		tb->cm_ops->deinit(tb);
+}
 
+static void
+tb_domain_finalize_quarantined_rings(struct tb *tb, void *data,
+				     bool controller_reset_proven)
+{
+	tb_nhi_finalize_quarantined_rings(tb->nhi, controller_reset_proven);
+}
+
+static void tb_domain_abandon_quarantined_rings(struct tb *tb, void *data)
+{
+	tb_nhi_abandon_quarantined_rings(tb->nhi);
+}
+
+static void tb_domain_remove_release(struct tb *tb, void *data)
+{
+	tb_domain_release_resources(tb);
+}
+
+static void tb_domain_remove_unregister(struct tb *tb, void *data)
+{
 	device_unregister(&tb->dev);
+}
+
+static const struct tb_domain_remove_ops tb_domain_remove_ops = {
+	.stop = tb_domain_remove_stop,
+	.prepare_xdomains = tb_domain_remove_prepare_xdomains,
+	.has_quarantined_rings = tb_domain_has_quarantined_rings,
+	.terminal_reset = tb_domain_terminal_reset,
+	.finalize = tb_domain_remove_finalize,
+	.ctl_stop = tb_domain_remove_ctl_stop,
+	.flush = tb_domain_remove_flush,
+	.unregister_xdomains = tb_domain_remove_unregister_xdomains,
+	.deinit = tb_domain_remove_deinit,
+	.finalize_quarantined_rings = tb_domain_finalize_quarantined_rings,
+	.abandon_quarantined_rings = tb_domain_abandon_quarantined_rings,
+	.release = tb_domain_remove_release,
+	.unregister_domain = tb_domain_remove_unregister,
+};
+
+static int __tb_domain_remove(struct tb *tb,
+			      const struct tb_domain_remove_ops *ops, void *data)
+{
+	struct tb_domain_reset_result reset = {};
+	enum tb_domain_reset_state finalize_state = TB_DOMAIN_RESET_NONE;
+	bool ownership_unresolved;
+	bool rings_quarantined;
+	int stop_ret;
+
+	stop_ret = ops->stop(tb, data);
+	/* Join every callback that may still name topology before reset/free. */
+	ops->deinit(tb, data);
+	/*
+	 * Detach leaves while their parent topology and the control channel are
+	 * still available, then run service remove callbacks without tb->lock.
+	 * Those callbacks are the final producers of exact-path and ring
+	 * quarantines, so they must complete before the single reset boundary.
+	 */
+	ops->prepare_xdomains(tb, data, stop_ret != 0);
+	ops->unregister_xdomains(tb, data);
+	/* Stop core-owned leaf handoff retries before reset changes ownership. */
+	tb_xdomain_quarantine_prepare_reset(tb);
+	rings_quarantined = ops->has_quarantined_rings(tb, data);
+	ownership_unresolved = stop_ret || rings_quarantined;
+
+	/*
+	 * Service removal quiesces the data paths while ring 0 is still
+	 * alive.  The host-router power-cycle mailbox is carried by ring 0, so
+	 * it must be dispatched before tb_domain_ctl_stop().  A fresh PCI probe,
+	 * followed by real data-path proof, is the only success criterion.
+	 */
+	if (ownership_unresolved) {
+		reset = ops->terminal_reset(tb, data);
+		if (!reset.error)
+			finalize_state = reset.state;
+		else
+			finalize_state = TB_DOMAIN_RESET_FAILED;
+	}
+
+	tb_xdomain_quarantine_finalize_reset(tb, finalize_state);
+	if (ops->finalize)
+		ops->finalize(tb, data, finalize_state, ownership_unresolved);
+	ops->finalize_quarantined_rings(tb, data,
+					 finalize_state == TB_DOMAIN_RESET_PROVEN);
+	if (finalize_state != TB_DOMAIN_RESET_PROVEN &&
+	    ops->has_quarantined_rings(tb, data))
+		ops->abandon_quarantined_rings(tb, data);
+	/*
+	 * An unproven reset can never return these allocations to an allocator,
+	 * but their work records must not outlive the domain/NHI they reference.
+	 */
+	tb_xdomain_quarantine_discard_domain(tb);
+
+	/* Stop the domain control traffic; see tb_domain_ctl_stop(). */
+	ops->ctl_stop(tb, data);
+	ops->flush(tb, data);
+
+	/*
+	 * Release everything backed by the NHI before PCI remove can unmap its
+	 * BAR and free device-managed storage. The domain device itself may stay
+	 * referenced by userspace after device_unregister().
+	 */
+	ops->release(tb, data);
+	ops->unregister_domain(tb, data);
+	return reset.error;
+}
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_domain_remove_sequence(struct tb *tb,
+				   const struct tb_domain_remove_ops *ops,
+				   void *data)
+{
+	return __tb_domain_remove(tb, ops, data);
+}
+#endif
+
+int tb_domain_remove(struct tb *tb)
+{
+	return __tb_domain_remove(tb, &tb_domain_remove_ops, NULL);
 }
 
 /**
@@ -825,6 +1078,23 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 		return -ENOTSUPP;
 
 	return tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
+			transmit_ring, receive_path, receive_ring);
+}
+
+/*
+ * The ordinary service-facing operation may refuse hardware I/O after an
+ * XDomain is marked unplugged. A core quarantine record still owns the exact
+ * tunnel and its topology reference, so it uses this separate callback to
+ * retry that retained object without reopening the leaf-facing path.
+ */
+int tb_domain_retry_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+				  int transmit_path, int transmit_ring,
+				  int receive_path, int receive_ring)
+{
+	if (!tb->cm_ops->retry_xdomain_paths)
+		return -EOPNOTSUPP;
+
+	return tb->cm_ops->retry_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
 }
 

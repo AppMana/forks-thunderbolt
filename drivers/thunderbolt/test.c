@@ -13,6 +13,8 @@
 
 #include "tb.h"
 #include "tunnel.h"
+#include "dma_port.h"
+#include "nhi.h"
 #include "nhi_regs.h"
 #include "tests/negotiation_model.h"
 
@@ -1333,6 +1335,1756 @@ static void tb_test_path_mixed_chain_reverse(struct kunit *test)
 				test_data[i].out_type);
 	}
 	tb_path_free(path);
+}
+
+struct path_deactivate_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hop;
+	bool any_dma_hopid;
+	unsigned int reads;
+	unsigned int writes;
+	unsigned int enable_writes;
+};
+
+static int path_deactivate_test_read(void *data, struct tb_port *port,
+				     void *buffer, enum tb_cfg_space space,
+				     u32 offset, u32 length)
+{
+	struct path_deactivate_test_io *io = data;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	if (io->any_dma_hopid)
+		KUNIT_EXPECT_EQ(io->test, offset & 1, 0u);
+	else
+		KUNIT_EXPECT_EQ(io->test, offset, 2 * TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	io->reads++;
+	memcpy(buffer, &io->hop, sizeof(io->hop));
+	return 0;
+}
+
+static int path_deactivate_test_write(void *data, struct tb_port *port,
+				      const void *buffer,
+				      enum tb_cfg_space space, u32 offset,
+				      u32 length)
+{
+	struct path_deactivate_test_io *io = data;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	if (io->any_dma_hopid)
+		KUNIT_EXPECT_EQ(io->test, offset & 1, 0u);
+	else
+		KUNIT_EXPECT_EQ(io->test, offset, 2 * TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	io->writes++;
+	memcpy(&io->hop, buffer, sizeof(io->hop));
+	if (io->hop.enable)
+		io->enable_writes++;
+	return 0;
+}
+
+static const struct tb_path_test_io path_deactivate_test_ops = {
+	.read = path_deactivate_test_read,
+	.write = path_deactivate_test_write,
+};
+
+static void path_deactivate_test_reset_io(void *data)
+{
+	tb_test_path_set_io(NULL, NULL);
+}
+
+/*
+ * A timed-out disable leaves enable clear while pending remains set. A retry
+ * must continue polling that pending bit instead of reporting that the hop is
+ * already drained. Once hardware clears pending, the same retry may succeed.
+ */
+static void tb_test_path_deactivate_disabled_pending_retries(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_switch *host = alloc_host(test);
+	unsigned int reads;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_deactivate_hop(&host->ports[1], TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_GT(test, io.reads, 1u);
+	KUNIT_EXPECT_EQ(test, io.writes, 0u);
+
+	reads = io.reads;
+	io.hop.pending = false;
+	ret = tb_path_deactivate_hop(&host->ports[1], TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_GT(test, io.reads, reads);
+}
+
+/*
+ * A disabled first hop is no path at all. Returning an ACTIVE zero-hop object
+ * makes discovery callers treat an uninitialized destination as topology and
+ * later makes activation/deactivation index hops[0] and hops[-1].
+ */
+static void tb_test_path_discover_rejects_zero_hop(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = false,
+		},
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_port *last = (struct tb_port *)1;
+	struct tb_path *path;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	path = tb_path_discover(&host->ports[1], TB_PATH_MIN_HOPID, NULL,
+				-1, &last, "KUnit zero-hop", false);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, path);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, last);
+	if (path)
+		tb_path_free(path);
+}
+
+static void tb_test_zero_hop_path_operations_are_rejected(struct kunit *test)
+{
+	struct tb_path path = {
+		.name = "KUnit zero-hop",
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	path.tb = tb;
+
+	KUNIT_EXPECT_EQ(test, -EINVAL, tb_path_deactivate(&path));
+	path.state = TB_PATH_INACTIVE;
+	KUNIT_EXPECT_EQ(test, -EINVAL, tb_path_activate(&path));
+}
+
+/*
+ * The path object owns its routing and credit resources until every hop is
+ * confirmed disabled and drained. A failed first pass must therefore remain
+ * retryable; the later drained readback is the point ownership may be dropped.
+ */
+static void tb_test_path_deactivate_pending_retains_ownership(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit path",
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	tb_path_deactivate(&path);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_GT(test, io.reads, 1u);
+
+	/* On GREEN, retry the same still-owned path after hardware drains. */
+	if (path.state == TB_PATH_TEARDOWN_FAILED) {
+		io.hop.pending = false;
+		tb_path_deactivate(&path);
+		KUNIT_EXPECT_EQ(test, path.state, TB_PATH_INACTIVE);
+	}
+}
+
+/*
+ * A disabled hop can still own buffered fabric traffic while pending is set.
+ * Activation must prove that state drained before replacing the hop tuple;
+ * otherwise the enable write silently assigns a new lifetime to old traffic.
+ */
+static void tb_test_path_activate_refuses_disabled_pending_hop(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+		.in_counter_index = -1,
+		.next_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit activation path",
+		.weight = 1,
+		.hops = &hop,
+		.path_length = 1,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_activate(&path);
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, io.enable_writes, 0u);
+}
+
+#define PATH_ROLLBACK_TEST_HOPS 3
+
+struct path_rollback_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hops[PATH_ROLLBACK_TEST_HOPS];
+	unsigned int enable_writes[PATH_ROLLBACK_TEST_HOPS];
+	unsigned int disable_writes[PATH_ROLLBACK_TEST_HOPS];
+	int fail_readback_hop;
+	bool readback_failed;
+};
+
+static int path_rollback_test_index(struct path_rollback_test_io *io,
+				    enum tb_cfg_space space, u32 offset,
+				    u32 length)
+{
+	int index = offset / 2 - TB_PATH_MIN_HOPID;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	KUNIT_EXPECT_GE(io->test, index, 0);
+	KUNIT_EXPECT_LT(io->test, index, PATH_ROLLBACK_TEST_HOPS);
+	return index;
+}
+
+static int path_rollback_test_read(void *data, struct tb_port *port,
+				   void *buffer, enum tb_cfg_space space,
+				   u32 offset, u32 length)
+{
+	struct path_rollback_test_io *io = data;
+	int index = path_rollback_test_index(io, space, offset, length);
+
+	if (index == io->fail_readback_hop && io->hops[index].enable &&
+	    !io->readback_failed) {
+		io->readback_failed = true;
+		return -EIO;
+	}
+	memcpy(buffer, &io->hops[index], sizeof(io->hops[index]));
+	return 0;
+}
+
+static int path_rollback_test_write(void *data, struct tb_port *port,
+				    const void *buffer,
+				    enum tb_cfg_space space, u32 offset,
+				    u32 length)
+{
+	struct path_rollback_test_io *io = data;
+	const struct tb_regs_hop *hop = buffer;
+	int index = path_rollback_test_index(io, space, offset, length);
+
+	if (hop->enable)
+		io->enable_writes[index]++;
+	else
+		io->disable_writes[index]++;
+	memcpy(&io->hops[index], hop, sizeof(io->hops[index]));
+	return 0;
+}
+
+static const struct tb_path_test_io path_rollback_test_ops = {
+	.read = path_rollback_test_read,
+	.write = path_rollback_test_write,
+};
+
+/*
+ * Hops are enabled from destination to source. If a later readback fails,
+ * rollback must disable both the just-written hop and every destination-side
+ * hop enabled earlier in the loop. This guards the array/activation-order
+ * distinction without assuming the opposite traversal direction.
+ */
+static void tb_test_path_activation_rollback_covers_enabled_hops(struct kunit *test)
+{
+	struct path_rollback_test_io io = {
+		.test = test,
+		.fail_readback_hop = 1,
+	};
+	struct tb_path_hop hops[PATH_ROLLBACK_TEST_HOPS] = {};
+	struct tb_path path = {
+		.name = "KUnit rollback path",
+		.weight = 1,
+		.hops = hops,
+		.path_length = ARRAY_SIZE(hops),
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int i, ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	path.tb = tb;
+
+	for (i = 0; i < ARRAY_SIZE(hops); i++) {
+		hops[i].in_port = &host->ports[1];
+		hops[i].out_port = &host->ports[1];
+		hops[i].in_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].next_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].in_counter_index = -1;
+	}
+
+	tb_test_path_set_io(&path_rollback_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_path_activate(&path);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	KUNIT_EXPECT_TRUE(test, io.readback_failed);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[0], 0u);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[1], 1u);
+	KUNIT_EXPECT_EQ(test, io.enable_writes[2], 1u);
+	KUNIT_EXPECT_FALSE(test, io.hops[1].enable);
+	KUNIT_EXPECT_FALSE(test, io.hops[2].enable);
+	KUNIT_EXPECT_GT(test, io.disable_writes[1], 0u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[2], 0u);
+}
+
+#define RESUME_ACTIVATION_TEST_TUNNELS 3
+
+struct resume_activation_test_io {
+	struct kunit *test;
+	struct tb_regs_hop hops[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int enable_writes[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int disable_writes[RESUME_ACTIVATION_TEST_TUNNELS];
+	unsigned int cleanup_schedules;
+	int activation_fail_index;
+	int rollback_fail_index;
+	bool activation_failed;
+	bool rollback_failed;
+};
+
+static int resume_activation_test_index(struct resume_activation_test_io *io,
+					enum tb_cfg_space space, u32 offset,
+					u32 length)
+{
+	int index = offset / 2 - TB_PATH_MIN_HOPID;
+
+	KUNIT_EXPECT_EQ(io->test, space, TB_CFG_HOPS);
+	KUNIT_EXPECT_EQ(io->test, length, 2u);
+	KUNIT_EXPECT_GE(io->test, index, 0);
+	KUNIT_EXPECT_LT(io->test, index, RESUME_ACTIVATION_TEST_TUNNELS);
+	return index;
+}
+
+static int resume_activation_test_read(void *data, struct tb_port *port,
+				       void *buffer, enum tb_cfg_space space,
+				       u32 offset, u32 length)
+{
+	struct resume_activation_test_io *io = data;
+	int index = resume_activation_test_index(io, space, offset, length);
+
+	if (index == io->activation_fail_index && io->hops[index].enable &&
+	    !io->activation_failed) {
+		io->activation_failed = true;
+		return -EIO;
+	}
+	if (index == io->rollback_fail_index && io->hops[index].enable &&
+	    io->activation_failed && !io->rollback_failed) {
+		io->rollback_failed = true;
+		return -ETIMEDOUT;
+	}
+	memcpy(buffer, &io->hops[index], sizeof(io->hops[index]));
+	return 0;
+}
+
+static int resume_activation_test_write(void *data, struct tb_port *port,
+					const void *buffer,
+					enum tb_cfg_space space, u32 offset,
+					u32 length)
+{
+	struct resume_activation_test_io *io = data;
+	const struct tb_regs_hop *hop = buffer;
+	int index = resume_activation_test_index(io, space, offset, length);
+
+	if (hop->enable)
+		io->enable_writes[index]++;
+	else
+		io->disable_writes[index]++;
+	memcpy(&io->hops[index], hop, sizeof(io->hops[index]));
+	return 0;
+}
+
+static const struct tb_path_test_io resume_activation_test_ops = {
+	.read = resume_activation_test_read,
+	.write = resume_activation_test_write,
+};
+
+static void resume_activation_test_schedule_cleanup(struct tb *tb, void *data)
+{
+	struct resume_activation_test_io *io = data;
+
+	io->cleanup_schedules++;
+}
+
+static void
+tb_test_resume_activation_is_transactional_and_schedules_cleanup(struct kunit *test)
+{
+	struct resume_activation_test_io io = {
+		.test = test,
+		.activation_fail_index = 2,
+		.rollback_fail_index = 1,
+	};
+	struct tb_path_hop hops[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_path paths[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_path *tunnel_paths[RESUME_ACTIVATION_TEST_TUNNELS][1];
+	struct tb_tunnel tunnels[RESUME_ACTIVATION_TEST_TUNNELS] = {};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	LIST_HEAD(tunnel_list);
+	int i, ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+
+	for (i = 0; i < RESUME_ACTIVATION_TEST_TUNNELS; i++) {
+		hops[i].in_port = &host->ports[1];
+		hops[i].out_port = &host->ports[1];
+		hops[i].in_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].next_hop_index = TB_PATH_MIN_HOPID + i;
+		hops[i].in_counter_index = -1;
+
+		paths[i].tb = tb;
+		paths[i].name = "KUnit resume path";
+		paths[i].weight = 1;
+		paths[i].hops = &hops[i];
+		paths[i].path_length = 1;
+		paths[i].state = TB_PATH_INACTIVE;
+
+		tunnel_paths[i][0] = &paths[i];
+		tunnels[i].tb = tb;
+		tunnels[i].src_port = hops[i].in_port;
+		tunnels[i].dst_port = hops[i].out_port;
+		tunnels[i].paths = tunnel_paths[i];
+		tunnels[i].npaths = 1;
+		tunnels[i].type = TB_TUNNEL_PCI;
+		tunnels[i].state = TB_TUNNEL_INACTIVE;
+		INIT_LIST_HEAD(&tunnels[i].list);
+		list_add_tail(&tunnels[i].list, &tunnel_list);
+	}
+
+	tb_test_path_set_io(&resume_activation_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_test_resume_activate_tunnels(tb, &tunnel_list, 0,
+					      resume_activation_test_schedule_cleanup,
+					      &io);
+
+	KUNIT_EXPECT_EQ(test, ret, -EUCLEAN);
+	KUNIT_EXPECT_TRUE(test, io.activation_failed);
+	KUNIT_EXPECT_TRUE(test, io.rollback_failed);
+	KUNIT_EXPECT_EQ(test, tunnels[0].state, TB_TUNNEL_INACTIVE);
+	KUNIT_EXPECT_EQ(test, paths[0].state, TB_PATH_INACTIVE);
+	KUNIT_EXPECT_EQ(test, tunnels[1].state, TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, paths[1].state, TB_PATH_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, tunnels[2].state, TB_TUNNEL_INACTIVE);
+	KUNIT_EXPECT_EQ(test, paths[2].state, TB_PATH_INACTIVE);
+	for (i = 0; i < RESUME_ACTIVATION_TEST_TUNNELS; i++)
+		KUNIT_EXPECT_EQ(test, io.enable_writes[i], 1u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[0], 0u);
+	KUNIT_EXPECT_EQ(test, io.disable_writes[1], 0u);
+	KUNIT_EXPECT_GT(test, io.disable_writes[2], 0u);
+	KUNIT_EXPECT_EQ(test, io.cleanup_schedules, 1u);
+}
+
+/*
+ * Path ownership and tunnel availability are separate state machines. A
+ * tunnel whose path did not drain is unavailable, but it is not inactive:
+ * its routing resources must remain owned and retryable.
+ */
+static void tb_test_tunnel_deactivate_preserves_failed_teardown(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit path",
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_ACTIVE,
+	};
+	struct tb_path *paths[] = { &path };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_ACTIVE,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+	tunnel.tb = tb;
+	tunnel.src_port = hop.in_port;
+	tunnel.dst_port = hop.out_port;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	tb_tunnel_deactivate(&tunnel);
+	KUNIT_EXPECT_EQ(test, tunnel.state, TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_EXPECT_EQ(test, path.state, TB_PATH_TEARDOWN_FAILED);
+}
+
+/*
+ * A tunnel discovered solely for cleanup has no activation ownership. This is
+ * especially important for resume discovery, which deliberately does not
+ * reserve the HopIDs it reads. Even after a later read proves the old hop has
+ * drained, activation must not turn that foreign tuple into a managed tunnel.
+ */
+static void tb_test_tunnel_cleanup_only_cannot_activate(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = false,
+		},
+	};
+	struct tb_path_hop hop = {
+		.in_hop_index = TB_PATH_MIN_HOPID,
+		.in_counter_index = -1,
+		.next_hop_index = TB_PATH_MIN_HOPID,
+	};
+	struct tb_path path = {
+		.name = "KUnit cleanup-only path",
+		.weight = 1,
+		.hops = &hop,
+		.path_length = 1,
+		.state = TB_PATH_INACTIVE,
+	};
+	struct tb_path *paths[] = { &path };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_TEARDOWN_FAILED,
+		.cleanup_only = true,
+	};
+	struct tb_switch *host = alloc_host(test);
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb *tb;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, host);
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	nhi = kunit_kzalloc(test, sizeof(*nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = nhi;
+	nhi->pdev = pdev;
+	host->tb = tb;
+	hop.in_port = &host->ports[1];
+	hop.out_port = &host->ports[1];
+	path.tb = tb;
+	tunnel.tb = tb;
+	tunnel.src_port = hop.in_port;
+	tunnel.dst_port = hop.out_port;
+
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+
+	ret = tb_tunnel_activate(&tunnel);
+	KUNIT_EXPECT_EQ(test, ret, -EUCLEAN);
+	KUNIT_EXPECT_EQ(test, io.enable_writes, 0u);
+	KUNIT_EXPECT_EQ(test, tunnel.state, TB_TUNNEL_TEARDOWN_FAILED);
+}
+
+/* Incomplete discovered tunnels legitimately contain NULL path slots. */
+static void tb_test_tunnel_incomplete_cleanup_invalid_safe(struct kunit *test)
+{
+	struct tb_path *paths[] = { NULL };
+	struct tb_tunnel tunnel = {
+		.paths = paths,
+		.npaths = ARRAY_SIZE(paths),
+		.state = TB_TUNNEL_TEARDOWN_FAILED,
+		.cleanup_only = true,
+	};
+
+	KUNIT_EXPECT_FALSE(test, tb_tunnel_is_invalid(&tunnel));
+}
+
+struct tunnel_final_release_fixture {
+	struct tb_switch *host;
+	struct tb_nhi *nhi;
+	struct tb_tunnel *tunnel;
+	struct tb_port *owned_port;
+	unsigned int owned_credits;
+};
+
+static void
+tb_test_tunnel_final_release_fixture_init(struct kunit *test,
+					  struct tunnel_final_release_fixture *fx)
+{
+	struct pci_dev *pdev;
+	struct tb *tb;
+
+	memset(fx, 0, sizeof(*fx));
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	tb->nhi = fx->nhi;
+	fx->nhi->pdev = pdev;
+	fx->host->tb = tb;
+
+	fx->owned_port = &fx->host->ports[1];
+	fx->tunnel = tb_tunnel_alloc_dma(tb, &fx->host->ports[7],
+					 fx->owned_port, TB_PATH_MIN_HOPID, 1,
+					 TB_PATH_MIN_HOPID, 1);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tunnel);
+	fx->owned_credits = fx->owned_port->dma_credits;
+	KUNIT_ASSERT_GT(test, fx->owned_credits, 0u);
+}
+
+static void
+tb_test_tunnel_final_put_retains_failed_ownership(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+
+	/* Drive the real path and tunnel teardown machines to their failure state. */
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, fx.tunnel->state,
+			TB_TUNNEL_TEARDOWN_FAILED);
+	KUNIT_ASSERT_EQ(test, fx.tunnel->paths[0]->state,
+			TB_PATH_TEARDOWN_FAILED);
+
+	/*
+	 * Ordinary final release must not convert unresolved fabric ownership
+	 * into free allocator entries.  Both observations are external ledgers
+	 * owned by production code, so the test does not depend on freed memory.
+	 */
+	tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits,
+			fx.owned_credits);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_LT(test, ret, 0);
+}
+
+static void
+tb_test_tunnel_terminal_release_requires_revocation_proof(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+
+	/*
+	 * These are only local observations: callback/MMIO fencing and a later
+	 * disabled readback do not revoke the controller's ownership of traffic
+	 * that already made the disable time out.
+	 */
+	WRITE_ONCE(fx.nhi->going_away, true);
+	io.hop.pending = false;
+
+	tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits,
+			fx.owned_credits);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_LT(test, ret, 0);
+}
+
+static void
+tb_test_tunnel_terminal_release_after_revocation(struct kunit *test)
+{
+	struct path_deactivate_test_io io = {
+		.test = test,
+		.hop = {
+			.enable = false,
+			.pending = true,
+		},
+	};
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	tb_test_path_set_io(&path_deactivate_test_ops, &io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+
+	/* Models the successful whole-controller reset proof in tb_stop(). */
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+	ret = tb_port_alloc_in_hopid(fx.owned_port,
+				     TB_PATH_MIN_HOPID,
+				     TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+}
+
+/*
+ * A canceled asynchronous worker may still own a reference when controller
+ * revocation retires the CM's reference. The worker's later ordinary put must
+ * observe the revoked ownership state and complete the final release.
+ */
+static void
+tb_test_tunnel_revocation_survives_deferred_reference(struct kunit *test)
+{
+	struct tunnel_final_release_fixture fx;
+	int ret;
+
+	tb_test_tunnel_final_release_fixture_init(test, &fx);
+	fx.tunnel->paths[0]->state = TB_PATH_TEARDOWN_FAILED;
+	fx.tunnel->state = TB_TUNNEL_TEARDOWN_FAILED;
+	tb_test_tunnel_get(fx.tunnel);
+
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, fx.owned_credits);
+
+	ret = tb_tunnel_put(fx.tunnel);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+}
+
+#define CM_TERMINAL_TUNNELS 2
+
+struct cm_terminal_release_fixture {
+	struct tb_switch *host;
+	struct tb_nhi *nhi;
+	struct tb *tb;
+	struct tb_tunnel *tunnels[CM_TERMINAL_TUNNELS];
+	struct tb_port *owned_port;
+	unsigned int owned_credits;
+	struct list_head tunnel_list;
+};
+
+static void
+tb_test_cm_terminal_release_fixture_init(struct kunit *test,
+					 struct cm_terminal_release_fixture *fx)
+{
+	struct pci_dev *pdev;
+	int i;
+
+	memset(fx, 0, sizeof(*fx));
+	INIT_LIST_HEAD(&fx->tunnel_list);
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+	fx->tb = kunit_kzalloc(test, sizeof(*fx->tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	fx->tb->nhi = fx->nhi;
+	fx->nhi->pdev = pdev;
+	fx->host->tb = fx->tb;
+	fx->owned_port = &fx->host->ports[1];
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+		int ring = i + 1;
+
+		fx->tunnels[i] =
+			tb_tunnel_alloc_dma(fx->tb, &fx->host->ports[7],
+					    fx->owned_port, hopid, ring,
+					    hopid, ring);
+		KUNIT_ASSERT_NOT_NULL(test, fx->tunnels[i]);
+		fx->tunnels[i]->state = TB_TUNNEL_TEARDOWN_FAILED;
+		fx->tunnels[i]->paths[0]->state = TB_PATH_TEARDOWN_FAILED;
+		list_add_tail(&fx->tunnels[i]->list, &fx->tunnel_list);
+	}
+
+	fx->owned_credits = fx->owned_port->dma_credits;
+	KUNIT_ASSERT_GT(test, fx->owned_credits, 0u);
+}
+
+static unsigned int
+tb_test_tunnel_list_count(const struct list_head *tunnels)
+{
+	const struct tb_tunnel *tunnel;
+	unsigned int count = 0;
+
+	list_for_each_entry(tunnel, tunnels, list)
+		count++;
+	return count;
+}
+
+static void
+tb_test_cm_reset_failure_retains_all_unresolved_dma(struct kunit *test)
+{
+	struct cm_terminal_release_fixture fx;
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &fx);
+	KUNIT_ASSERT_EQ(test, tb_test_tunnel_list_count(&fx.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, false);
+
+	KUNIT_EXPECT_EQ(test, tb_test_tunnel_list_count(&fx.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, fx.owned_credits);
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(fx.owned_port, hopid, hopid);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		list_del_init(&fx.tunnels[i]->list);
+		tb_tunnel_put_after_revoke(fx.tunnels[i]);
+	}
+}
+
+static void
+tb_test_cm_reset_success_revokes_all_unresolved_dma_once(struct kunit *test)
+{
+	struct cm_terminal_release_fixture fx;
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &fx);
+
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, true);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx.tunnel_list));
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+
+	/* Re-running the terminal policy must not release stale list entries. */
+	tb_test_cm_finalize_stopped_tunnels(fx.tb, &fx.tunnel_list, true);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fx.tunnel_list));
+	KUNIT_EXPECT_EQ(test, fx.owned_port->dma_credits, 0u);
+
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(fx.owned_port, hopid, hopid);
+		KUNIT_EXPECT_EQ(test, ret, hopid);
+	}
+}
+
+enum domain_remove_test_event {
+	DOMAIN_REMOVE_STOP,
+	DOMAIN_REMOVE_PREPARE_XDOMAINS,
+	DOMAIN_REMOVE_TERMINAL_RESET,
+	DOMAIN_REMOVE_FINALIZE,
+	DOMAIN_REMOVE_FINALIZE_RINGS,
+	DOMAIN_REMOVE_ABANDON_RINGS,
+	DOMAIN_REMOVE_CTL_STOP,
+	DOMAIN_REMOVE_FLUSH,
+	DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+	DOMAIN_REMOVE_DEINIT,
+	DOMAIN_REMOVE_RELEASE,
+	DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+};
+
+struct domain_remove_test_context {
+	struct cm_terminal_release_fixture *release;
+	struct tb_xdomain *xd;
+	enum domain_remove_test_event events[13];
+	enum tb_domain_reset_state finalize_state;
+	enum tb_domain_reset_state terminal_reset_state;
+	int terminal_reset_error;
+	int stop_ret;
+	bool has_quarantined_rings;
+	bool rings_finalized_proven;
+	bool rings_abandoned;
+	int service_disconnect_ret;
+	unsigned int nevents;
+};
+
+static void domain_remove_test_record(struct domain_remove_test_context *ctx,
+				      enum domain_remove_test_event event)
+{
+	ctx->events[ctx->nevents++] = event;
+}
+
+static int domain_remove_test_stop(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_STOP);
+	return ctx->stop_ret;
+}
+
+static struct tb_domain_reset_result
+domain_remove_test_terminal_reset(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_TERMINAL_RESET);
+	return (struct tb_domain_reset_result) {
+		.state = ctx->terminal_reset_state,
+		.error = ctx->terminal_reset_error,
+	};
+}
+
+static bool domain_remove_test_has_quarantined_rings(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	return ctx->has_quarantined_rings;
+}
+
+static void domain_remove_test_finalize_rings(struct tb *tb, void *data,
+					      bool controller_reset_proven)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_FINALIZE_RINGS);
+	ctx->rings_finalized_proven = controller_reset_proven;
+}
+
+static void domain_remove_test_abandon_rings(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_ABANDON_RINGS);
+	ctx->rings_abandoned = true;
+}
+
+static void domain_remove_test_finalize(struct tb *tb, void *data,
+					enum tb_domain_reset_state reset_state,
+					bool ownership_unresolved)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_FINALIZE);
+	ctx->finalize_state = reset_state;
+	tb_test_cm_finalize_stopped_tunnels(tb, &ctx->release->tunnel_list,
+					    reset_state == TB_DOMAIN_RESET_PROVEN);
+}
+
+static void domain_remove_test_prepare_xdomains(struct tb *tb, void *data,
+						bool ownership_unresolved)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_PREPARE_XDOMAINS);
+	if (ctx->xd)
+		tb_test_cm_mark_topology_unplugged(ctx->release->host, false,
+						   ownership_unresolved);
+}
+
+#define DOMAIN_REMOVE_TEST_OP(_name, _event) \
+static void domain_remove_test_##_name(struct tb *tb, void *data) \
+{ \
+	struct domain_remove_test_context *ctx = data; \
+	domain_remove_test_record(ctx, _event); \
+}
+
+DOMAIN_REMOVE_TEST_OP(ctl_stop, DOMAIN_REMOVE_CTL_STOP)
+DOMAIN_REMOVE_TEST_OP(flush, DOMAIN_REMOVE_FLUSH)
+DOMAIN_REMOVE_TEST_OP(deinit, DOMAIN_REMOVE_DEINIT)
+DOMAIN_REMOVE_TEST_OP(release, DOMAIN_REMOVE_RELEASE)
+DOMAIN_REMOVE_TEST_OP(unregister_domain, DOMAIN_REMOVE_UNREGISTER_DOMAIN)
+
+static void domain_remove_test_unregister_xdomains(struct tb *tb, void *data)
+{
+	struct domain_remove_test_context *ctx = data;
+
+	domain_remove_test_record(ctx, DOMAIN_REMOVE_UNREGISTER_XDOMAINS);
+	if (ctx->xd)
+		ctx->service_disconnect_ret =
+			tb_test_disconnect_xdomain_paths(tb, ctx->xd);
+}
+
+static const struct tb_domain_remove_ops domain_remove_test_ops = {
+	.stop = domain_remove_test_stop,
+	.prepare_xdomains = domain_remove_test_prepare_xdomains,
+	.has_quarantined_rings = domain_remove_test_has_quarantined_rings,
+	.terminal_reset = domain_remove_test_terminal_reset,
+	.finalize = domain_remove_test_finalize,
+	.ctl_stop = domain_remove_test_ctl_stop,
+	.flush = domain_remove_test_flush,
+	.unregister_xdomains = domain_remove_test_unregister_xdomains,
+	.deinit = domain_remove_test_deinit,
+	.finalize_quarantined_rings = domain_remove_test_finalize_rings,
+	.abandon_quarantined_rings = domain_remove_test_abandon_rings,
+	.release = domain_remove_test_release,
+	.unregister_domain = domain_remove_test_unregister_domain,
+};
+
+static void
+tb_test_domain_remove_dispatch_is_not_revocation_proof(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.stop_ret = -EUCLEAN,
+		.terminal_reset_state = TB_DOMAIN_RESET_DISPATCHED,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_DISPATCHED);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_abandoned);
+	KUNIT_EXPECT_EQ(test, tb_test_tunnel_list_count(&release.tunnel_list),
+			CM_TERMINAL_TUNNELS);
+	KUNIT_EXPECT_EQ(test, release.owned_port->dma_credits,
+			release.owned_credits);
+	for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+		int hopid = TB_PATH_MIN_HOPID + i;
+
+		ret = tb_port_alloc_in_hopid(release.owned_port, hopid, hopid);
+		KUNIT_EXPECT_LT(test, ret, 0);
+	}
+
+	if (!list_empty(&release.tunnel_list)) {
+		for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+			list_del_init(&release.tunnels[i]->list);
+			tb_tunnel_put_after_revoke(release.tunnels[i]);
+		}
+	}
+}
+
+static void
+tb_test_domain_remove_quarantine_requires_proven_terminal_reset(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.has_quarantined_rings = true,
+		.terminal_reset_state = TB_DOMAIN_RESET_PROVEN,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_PROVEN);
+	KUNIT_EXPECT_TRUE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_abandoned);
+}
+
+static void
+tb_test_domain_remove_failed_reset_detaches_quarantined_rings(struct kunit *test)
+{
+	static const enum domain_remove_test_event expected[] = {
+		DOMAIN_REMOVE_STOP,
+		DOMAIN_REMOVE_DEINIT,
+		DOMAIN_REMOVE_PREPARE_XDOMAINS,
+		DOMAIN_REMOVE_UNREGISTER_XDOMAINS,
+		DOMAIN_REMOVE_TERMINAL_RESET,
+		DOMAIN_REMOVE_FINALIZE,
+		DOMAIN_REMOVE_FINALIZE_RINGS,
+		DOMAIN_REMOVE_ABANDON_RINGS,
+		DOMAIN_REMOVE_CTL_STOP,
+		DOMAIN_REMOVE_FLUSH,
+		DOMAIN_REMOVE_RELEASE,
+		DOMAIN_REMOVE_UNREGISTER_DOMAIN,
+	};
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.has_quarantined_rings = true,
+		.terminal_reset_error = -ETIMEDOUT,
+	};
+	int i, ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	ret = tb_test_domain_remove_sequence(release.tb,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, ctx.nevents, ARRAY_SIZE(expected));
+	for (i = 0; i < ARRAY_SIZE(expected); i++)
+		KUNIT_EXPECT_EQ(test, ctx.events[i], expected[i]);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_FAILED);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_finalized_proven);
+	KUNIT_EXPECT_TRUE(test, ctx.rings_abandoned);
+}
+
+/*
+ * A native-CM stop failure means at least one DMA tunnel still owns its
+ * hardware tuple. If the terminal reset then fails, marking the XDomain
+ * unplugged must preserve that ownership failure for the later service-remove
+ * callback. Otherwise the service-facing disconnect reports success and the
+ * leaf is allowed to free rings and HopIDs still named by the retained tunnel.
+ */
+static void
+tb_test_domain_failed_reset_reaches_service_disconnect(struct kunit *test)
+{
+	struct cm_terminal_release_fixture release;
+	struct domain_remove_test_context ctx = {
+		.release = &release,
+		.stop_ret = -EUCLEAN,
+		.terminal_reset_error = -ETIMEDOUT,
+	};
+	struct tb_xdomain *xd;
+	int ret;
+
+	tb_test_cm_terminal_release_fixture_init(test, &release);
+	xd = kunit_kzalloc(test, sizeof(*xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, xd);
+	xd->tb = release.tb;
+	release.host->ports[1].xdomain = xd;
+	ctx.xd = xd;
+
+	ret = tb_test_domain_remove_sequence(release.tb,
+					     &domain_remove_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_EXPECT_TRUE(test, xd->is_unplugged);
+	KUNIT_EXPECT_EQ(test, ctx.finalize_state, TB_DOMAIN_RESET_FAILED);
+	KUNIT_EXPECT_EQ(test, ctx.service_disconnect_ret, -EUCLEAN);
+
+	release.host->ports[1].xdomain = NULL;
+	if (!list_empty(&release.tunnel_list)) {
+		int i;
+
+		for (i = 0; i < CM_TERMINAL_TUNNELS; i++) {
+			list_del_init(&release.tunnels[i]->list);
+			tb_tunnel_put_after_revoke(release.tunnels[i]);
+		}
+	}
+}
+
+static void
+tb_test_unplugged_xdomain_preserves_teardown_error(struct kunit *test)
+{
+	struct tb_xdomain *xd;
+	struct tb *tb;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tb);
+	xd = kunit_kzalloc(test, sizeof(*xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, xd);
+	xd->is_unplugged = true;
+	xd->path_teardown_err = -ETIMEDOUT;
+
+	KUNIT_EXPECT_EQ(test, tb_test_disconnect_xdomain_paths(tb, xd),
+			-EUCLEAN);
+}
+
+struct xdomain_quarantine_test_context {
+	struct kunit *test;
+	struct path_deactivate_test_io io;
+	struct tb_tunnel *tunnel;
+	struct tb_nhi *nhi;
+	unsigned int freed_rings;
+};
+
+struct xdomain_quarantine_test_fixture {
+	struct tb_switch *host;
+	struct tb *tb;
+	struct tb_nhi *nhi;
+	struct pci_dev *pdev;
+	struct tb_xdomain *xd;
+	struct tb_tunnel *tunnel;
+	struct tb_ring *tx_ring;
+	struct tb_ring *rx_ring;
+	struct xdomain_quarantine_test_context ctx;
+};
+
+static void xdomain_quarantine_test_device_release(struct device *dev)
+{
+}
+
+static const struct device_type xdomain_quarantine_test_device_type = {
+	.name = "thunderbolt_xdomain_quarantine_test",
+	.release = xdomain_quarantine_test_device_release,
+};
+
+static void xdomain_quarantine_test_ring_work(struct work_struct *work)
+{
+}
+
+static int
+xdomain_quarantine_test_disconnect(void *data, struct tb_xdomain *xd,
+				   int transmit_path, int transmit_ring,
+				   int receive_path, int receive_ring)
+{
+	struct xdomain_quarantine_test_context *ctx = data;
+
+	KUNIT_EXPECT_EQ(ctx->test, transmit_path, TB_PATH_MIN_HOPID);
+	KUNIT_EXPECT_EQ(ctx->test, transmit_ring, 1);
+	KUNIT_EXPECT_EQ(ctx->test, receive_path, TB_PATH_MIN_HOPID + 1);
+	KUNIT_EXPECT_EQ(ctx->test, receive_ring, 2);
+	return tb_tunnel_deactivate(ctx->tunnel);
+}
+
+static void xdomain_quarantine_test_free_ring(void *data,
+					      struct tb_ring *ring)
+{
+	struct xdomain_quarantine_test_context *ctx = data;
+
+	spin_lock_irq(&ring->nhi->lock);
+	if (ring->is_tx)
+		ring->nhi->tx_rings[ring->hop] = NULL;
+	else
+		ring->nhi->rx_rings[ring->hop] = NULL;
+	spin_unlock_irq(&ring->nhi->lock);
+	ctx->freed_rings++;
+}
+
+static void xdomain_quarantine_test_reset_ops(void *data)
+{
+	tb_test_xdomain_quarantine_fail_alloc(false);
+	tb_test_xdomain_quarantine_set_ops(NULL);
+}
+
+static void
+xdomain_quarantine_test_fixture_init(struct kunit *test,
+				     struct xdomain_quarantine_test_fixture *fx)
+{
+	struct tb_xdomain_quarantine_test_ops ops;
+	int ret;
+
+	memset(fx, 0, sizeof(*fx));
+	fx->host = alloc_host_usb4(test);
+	KUNIT_ASSERT_NOT_NULL(test, fx->host);
+	fx->tb = kunit_kzalloc(test, sizeof(*fx->tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb);
+	fx->nhi = kunit_kzalloc(test, sizeof(*fx->nhi), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi);
+	fx->pdev = kunit_kzalloc(test, sizeof(*fx->pdev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->pdev);
+	fx->xd = kunit_kzalloc(test, sizeof(*fx->xd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->xd);
+
+	fx->tb->nhi = fx->nhi;
+	device_initialize(&fx->tb->dev);
+	fx->tb->dev.type = &xdomain_quarantine_test_device_type;
+	fx->tb->wq = alloc_ordered_workqueue("tb-q-kunit", 0);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tb->wq);
+	fx->host->tb = fx->tb;
+	spin_lock_init(&fx->nhi->lock);
+	fx->nhi->pdev = fx->pdev;
+	device_initialize(&fx->pdev->dev);
+	fx->pdev->dev.type = &xdomain_quarantine_test_device_type;
+	fx->nhi->hop_count = 4;
+	fx->nhi->tx_rings = kunit_kcalloc(test, fx->nhi->hop_count,
+					  sizeof(*fx->nhi->tx_rings), GFP_KERNEL);
+	fx->nhi->rx_rings = kunit_kcalloc(test, fx->nhi->hop_count,
+					  sizeof(*fx->nhi->rx_rings), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi->tx_rings);
+	KUNIT_ASSERT_NOT_NULL(test, fx->nhi->rx_rings);
+
+	device_initialize(&fx->xd->dev);
+	fx->xd->dev.type = &xdomain_quarantine_test_device_type;
+	fx->xd->tb = fx->tb;
+	fx->xd->route = 1;
+	fx->xd->local_max_hopid = 19;
+	fx->xd->remote_max_hopid = 19;
+	kunit_ida_init(test, &fx->xd->in_hopids);
+	kunit_ida_init(test, &fx->xd->out_hopids);
+	ret = tb_xdomain_alloc_out_hopid(fx->xd, TB_PATH_MIN_HOPID);
+	KUNIT_ASSERT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = tb_xdomain_alloc_in_hopid(fx->xd, TB_PATH_MIN_HOPID + 1);
+	KUNIT_ASSERT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+
+	fx->tx_ring = kunit_kzalloc(test, sizeof(*fx->tx_ring), GFP_KERNEL);
+	fx->rx_ring = kunit_kzalloc(test, sizeof(*fx->rx_ring), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tx_ring);
+	KUNIT_ASSERT_NOT_NULL(test, fx->rx_ring);
+	spin_lock_init(&fx->tx_ring->lock);
+	spin_lock_init(&fx->rx_ring->lock);
+	INIT_LIST_HEAD(&fx->tx_ring->queue);
+	INIT_LIST_HEAD(&fx->tx_ring->in_flight);
+	INIT_LIST_HEAD(&fx->rx_ring->queue);
+	INIT_LIST_HEAD(&fx->rx_ring->in_flight);
+	INIT_WORK(&fx->tx_ring->work, xdomain_quarantine_test_ring_work);
+	INIT_WORK(&fx->rx_ring->work, xdomain_quarantine_test_ring_work);
+	init_waitqueue_head(&fx->tx_ring->wait);
+	init_waitqueue_head(&fx->rx_ring->wait);
+	fx->tx_ring->nhi = fx->nhi;
+	fx->tx_ring->hop = 1;
+	fx->tx_ring->is_tx = true;
+	fx->rx_ring->nhi = fx->nhi;
+	fx->rx_ring->hop = 2;
+	fx->nhi->tx_rings[1] = fx->tx_ring;
+	fx->nhi->rx_rings[2] = fx->rx_ring;
+
+	fx->tunnel = tb_tunnel_alloc_dma(fx->tb, &fx->host->ports[7],
+					 fx->host ? &fx->host->ports[1] : NULL,
+					 TB_PATH_MIN_HOPID, 1,
+					 TB_PATH_MIN_HOPID + 1, 2);
+	KUNIT_ASSERT_NOT_NULL(test, fx->tunnel);
+	fx->tunnel->state = TB_TUNNEL_ACTIVE;
+	fx->tunnel->paths[0]->state = TB_PATH_ACTIVE;
+	fx->tunnel->paths[1]->state = TB_PATH_ACTIVE;
+
+	fx->ctx.test = test;
+	fx->ctx.tunnel = fx->tunnel;
+	fx->ctx.nhi = fx->nhi;
+	fx->ctx.io.test = test;
+	fx->ctx.io.any_dma_hopid = true;
+	fx->ctx.io.hop.enable = false;
+	fx->ctx.io.hop.pending = true;
+	ops.disconnect = xdomain_quarantine_test_disconnect;
+	ops.free_ring = xdomain_quarantine_test_free_ring;
+	ops.data = &fx->ctx;
+	tb_test_xdomain_quarantine_set_ops(&ops);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  xdomain_quarantine_test_reset_ops,
+						  NULL), 0);
+	tb_test_path_set_io(&path_deactivate_test_ops, &fx->ctx.io);
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  path_deactivate_test_reset_io,
+						  NULL), 0);
+}
+
+static int
+xdomain_quarantine_test_handoff(struct xdomain_quarantine_test_fixture *fx)
+{
+	return tb_xdomain_quarantine_paths(fx->xd,
+			TB_PATH_MIN_HOPID, fx->tx_ring->hop, fx->tx_ring,
+			TB_PATH_MIN_HOPID + 1, fx->rx_ring->hop, fx->rx_ring);
+}
+
+struct domain_late_handoff_test_context {
+	struct xdomain_quarantine_test_fixture *fx;
+	unsigned int terminal_reset_calls;
+	unsigned int quarantine_count_at_release;
+	int handoff_ret;
+	bool unregister_called;
+	bool reset_saw_handoff;
+	bool rings_quarantined_at_release;
+};
+
+static int domain_late_handoff_test_stop(struct tb *tb, void *data)
+{
+	return 0;
+}
+
+static bool domain_late_handoff_test_has_rings(struct tb *tb, void *data)
+{
+	return tb_nhi_has_quarantined_rings(tb->nhi);
+}
+
+static struct tb_domain_reset_result
+domain_late_handoff_test_terminal_reset(struct tb *tb, void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->terminal_reset_calls++;
+	ctx->reset_saw_handoff = ctx->unregister_called;
+	return (struct tb_domain_reset_result) {
+		.state = TB_DOMAIN_RESET_PROVEN,
+	};
+}
+
+static void domain_late_handoff_test_finalize(struct tb *tb, void *data,
+					      enum tb_domain_reset_state reset_state,
+					      bool ownership_unresolved)
+{
+}
+
+static void domain_late_handoff_test_finalize_rings(struct tb *tb, void *data,
+						    bool reset_proven)
+{
+	tb_nhi_finalize_quarantined_rings(tb->nhi, reset_proven);
+}
+
+static void domain_late_handoff_test_abandon_rings(struct tb *tb, void *data)
+{
+	tb_nhi_abandon_quarantined_rings(tb->nhi);
+}
+
+static void domain_late_handoff_test_unregister_xdomains(struct tb *tb,
+							 void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->unregister_called = true;
+	ctx->handoff_ret = xdomain_quarantine_test_handoff(ctx->fx);
+}
+
+static void domain_late_handoff_test_release(struct tb *tb, void *data)
+{
+	struct domain_late_handoff_test_context *ctx = data;
+
+	ctx->quarantine_count_at_release =
+		tb_test_xdomain_quarantine_count(ctx->fx->xd);
+	ctx->rings_quarantined_at_release =
+		tb_nhi_has_quarantined_rings(ctx->fx->nhi);
+}
+
+static void domain_late_handoff_test_noop(struct tb *tb, void *data)
+{
+}
+
+static void domain_late_handoff_test_prepare(struct tb *tb, void *data,
+					     bool ownership_unresolved)
+{
+}
+
+static const struct tb_domain_remove_ops domain_late_handoff_test_ops = {
+	.stop = domain_late_handoff_test_stop,
+	.prepare_xdomains = domain_late_handoff_test_prepare,
+	.has_quarantined_rings = domain_late_handoff_test_has_rings,
+	.terminal_reset = domain_late_handoff_test_terminal_reset,
+	.finalize = domain_late_handoff_test_finalize,
+	.ctl_stop = domain_late_handoff_test_noop,
+	.flush = domain_late_handoff_test_noop,
+	.unregister_xdomains = domain_late_handoff_test_unregister_xdomains,
+	.deinit = domain_late_handoff_test_noop,
+	.finalize_quarantined_rings = domain_late_handoff_test_finalize_rings,
+	.abandon_quarantined_rings = domain_late_handoff_test_abandon_rings,
+	.release = domain_late_handoff_test_release,
+	.unregister_domain = domain_late_handoff_test_noop,
+};
+
+/*
+ * Service unbind is the last producer of core-owned quarantine records. It
+ * must run before the domain samples ownership and crosses its one reset and
+ * discard boundary; otherwise remove can destroy the workqueue underneath a
+ * retry that the same remove call created.
+ */
+static void
+tb_test_domain_remove_collects_late_service_handoff(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	struct domain_late_handoff_test_context ctx = {};
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ctx.fx = &fx;
+
+	ret = tb_test_domain_remove_sequence(fx.tb,
+					     &domain_late_handoff_test_ops, &ctx);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.handoff_ret, 0);
+	KUNIT_EXPECT_EQ(test, ctx.terminal_reset_calls, 1U);
+	KUNIT_EXPECT_TRUE(test, ctx.reset_saw_handoff);
+	KUNIT_EXPECT_EQ(test, ctx.quarantine_count_at_release, 0U);
+	KUNIT_EXPECT_FALSE(test, ctx.rings_quarantined_at_release);
+	KUNIT_EXPECT_EQ(test, fx.ctx.freed_rings, 2U);
+
+	/* RED cleanup: the old order leaves the newly queued retry behind. */
+	tb_xdomain_quarantine_discard_domain(fx.tb);
+	if (tb_nhi_has_quarantined_rings(fx.nhi))
+		tb_nhi_abandon_quarantined_rings(fx.nhi);
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+static void
+tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, xdomain_quarantine_test_handoff(&fx), 0);
+	KUNIT_EXPECT_TRUE(test, fx.tx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, fx.rx_ring->quarantined);
+	KUNIT_EXPECT_EQ(test, 1u, tb_test_xdomain_quarantine_count(fx.xd));
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->out_hopids,
+					      TB_PATH_MIN_HOPID,
+					      TB_PATH_MIN_HOPID, GFP_KERNEL), 0);
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->in_hopids,
+					      TB_PATH_MIN_HOPID + 1,
+					      TB_PATH_MIN_HOPID + 1,
+					      GFP_KERNEL), 0);
+
+	/* A real path readback now proves both directions drained. */
+	fx.ctx.io.hop.pending = false;
+	KUNIT_ASSERT_EQ(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_EQ(test, 0u, tb_test_xdomain_quarantine_count(fx.xd));
+	KUNIT_EXPECT_EQ(test, 2u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, fx.nhi->tx_rings[1]);
+	KUNIT_EXPECT_PTR_EQ(test, NULL, fx.nhi->rx_rings[2]);
+	ret = ida_alloc_range(&fx.xd->out_hopids, TB_PATH_MIN_HOPID,
+			      TB_PATH_MIN_HOPID, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = ida_alloc_range(&fx.xd->in_hopids, TB_PATH_MIN_HOPID + 1,
+			      TB_PATH_MIN_HOPID + 1, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+
+	WARN_ON(tb_tunnel_put(fx.tunnel));
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+static void
+tb_test_xdomain_quarantine_retries_then_requires_proven_reset(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	ret = tb_tunnel_deactivate(fx.tunnel);
+	KUNIT_ASSERT_EQ(test, ret, -ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test, xdomain_quarantine_test_handoff(&fx), 0);
+
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_LT(test, tb_test_xdomain_quarantine_retry(fx.xd), 0);
+	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, -EUCLEAN, fx.xd->path_teardown_err);
+
+	/* Dispatch or timeout is not proof and must not release anything. */
+	tb_test_xdomain_quarantine_finalize(fx.tb,
+					    TB_DOMAIN_RESET_DISPATCHED);
+	KUNIT_EXPECT_EQ(test, 0u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, -EUCLEAN, fx.xd->path_teardown_err);
+	KUNIT_EXPECT_LT(test, ida_alloc_range(&fx.xd->out_hopids,
+					      TB_PATH_MIN_HOPID,
+					      TB_PATH_MIN_HOPID, GFP_KERNEL), 0);
+
+	/* Only synchronous reset completion revokes the tuple. */
+	tb_test_xdomain_quarantine_finalize(fx.tb, TB_DOMAIN_RESET_PROVEN);
+	KUNIT_EXPECT_EQ(test, 2u, fx.ctx.freed_rings);
+	KUNIT_EXPECT_EQ(test, 0, fx.xd->path_teardown_err);
+	ret = ida_alloc_range(&fx.xd->out_hopids, TB_PATH_MIN_HOPID,
+			      TB_PATH_MIN_HOPID, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID);
+	ret = ida_alloc_range(&fx.xd->in_hopids, TB_PATH_MIN_HOPID + 1,
+			      TB_PATH_MIN_HOPID + 1, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, TB_PATH_MIN_HOPID + 1);
+
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
+}
+
+/*
+ * A failed exact-record allocation cannot authorize leaf-owned ring objects
+ * to survive module removal with live IRQ/work callbacks. Even though the
+ * tuple is unavailable for path retry, both real rings must enter the generic
+ * reset quarantine so domain removal can detach them safely.
+ */
+static void
+tb_test_xdomain_quarantine_alloc_failure_still_fences_rings(struct kunit *test)
+{
+	struct xdomain_quarantine_test_fixture fx;
+	int ret;
+
+	xdomain_quarantine_test_fixture_init(test, &fx);
+	tb_test_xdomain_quarantine_fail_alloc(true);
+
+	ret = xdomain_quarantine_test_handoff(&fx);
+
+	KUNIT_EXPECT_EQ(test, ret, -ENOMEM);
+	KUNIT_EXPECT_TRUE(test, fx.tx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, fx.rx_ring->quarantined);
+	KUNIT_EXPECT_TRUE(test, tb_nhi_has_quarantined_rings(fx.nhi));
+	KUNIT_EXPECT_EQ(test, 0u, tb_test_xdomain_quarantine_count(fx.xd));
+
+	tb_nhi_abandon_quarantined_rings(fx.nhi);
+	tb_tunnel_put_after_revoke(fx.tunnel);
+	destroy_workqueue(fx.tb->wq);
+	put_device(&fx.xd->dev);
+	put_device(&fx.tb->dev);
+	put_device(&fx.pdev->dev);
 }
 
 static void tb_test_tunnel_pcie(struct kunit *test)
@@ -3004,18 +4756,15 @@ static void tb_test_xdomain_late_second_link(struct kunit *test)
  * kernel's icm_firmware_reset() (ICM_EN_CPU) is a warm CPU restart that
  * re-enters the application image, which reads READ-ONLY reset-cause registers
  * (CA41/CB5E), sees "warm", and skips re-init -- so on Alpine/Titan Ridge it
- * NEVER re-authenticates. Maple Ridge has a real reset vector and re-auths on a
- * warm restart. This is why a live rmmod+modprobe on AR/TR is terminal until a
- * board power cycle, and why icm_stop() does NOT attempt a runtime reset.
- *
- * ar_tr below is the genuine controller property (Alpine/Titan Ridge vs USB4/
- * Maple Ridge), not a toggle: the outcome follows from the modelled firmware.
+ * never re-authenticates. Other families are deliberately not assigned an
+ * outcome without a documented reset contract and direct hardware evidence.
  */
 struct icm_fw_model {
 	bool icm_en;	/* REG_FW_STS_ICM_EN: firmware running */
 	bool authed;	/* REG_FW_STS_NVM_AUTH_DONE (set only by the mask ROM) */
 	bool responsive; /* ICM message loop alive (a wedged ICM keeps ICM_EN) */
 	bool cfg_open;	/* config space served (only after DRIVER_READY) */
+	unsigned int warm_restarts; /* ICM_EN_CPU/ARC restarts since cold boot */
 };
 
 /* Cold boot / board power cycle: the mask ROM runs, authenticates, hands off. */
@@ -3025,6 +4774,7 @@ static void icm_fw_cold_boot(struct icm_fw_model *fw)
 	fw->authed = true;
 	fw->responsive = true;
 	fw->cfg_open = false;
+	fw->warm_restarts = 0;
 }
 
 /*
@@ -3039,16 +4789,15 @@ static void icm_fw_wedge(struct icm_fw_model *fw)
 }
 
 /*
- * Warm CPU restart (the driver's icm_firmware_reset / ICM_EN_CPU). The mask ROM
- * is NOT re-entered. AR/TR: the application image's read-only reset-cause gate
- * makes it skip re-init -> stays de-authenticated, forever, until a cold boot.
- * Maple Ridge: a real reset vector re-runs init -> re-authenticates.
+ * Alpine/Titan Ridge warm CPU restart. The mask ROM is not re-entered, so the
+ * application image's reset-cause gate leaves the controller unauthenticated.
  */
-static void icm_fw_warm_restart(struct icm_fw_model *fw, bool ar_tr)
+static void icm_fw_warm_restart(struct icm_fw_model *fw)
 {
 	fw->icm_en = true;
-	fw->authed = !ar_tr;
+	fw->authed = false;
 	fw->responsive = true;
+	fw->warm_restarts++;
 }
 
 /* ICM_DRIVER_READY succeeds only if running AND authenticated AND alive. */
@@ -3065,13 +4814,20 @@ static bool icm_fw_driver_ready(struct icm_fw_model *fw)
  * Can the host read router config space over ring 0? With no firmware
  * resident the routers answer directly; a resident ICM serves (proxies)
  * config access only after it has seen DRIVER_READY.
+ *
+ * A WEDGED firmware is the exception: interception requires a live message
+ * loop. A firmware whose loop is dead (DRIVER_READY times out) answers
+ * nothing on ring 0 -- it neither serves nor blocks config space, so the
+ * routers answer directly, exactly as if no firmware were resident. ICM_EN
+ * alone is a latched status bit, not an active gate (appmana-009: a live
+ * module reload latched ICM_EN with nothing behind it).
  */
 static bool icm_fw_cfg_space_open(struct icm_fw_model *fw)
 {
-	return !fw->icm_en || fw->cfg_open;
+	return !fw->icm_en || !fw->responsive || fw->cfg_open;
 }
 
-static void tb_test_icm_warm_restart_reauth(struct kunit *test)
+static void tb_test_icm_warm_restart_loses_auth(struct kunit *test)
 {
 	struct icm_fw_model fw;
 
@@ -3087,23 +4843,13 @@ static void tb_test_icm_warm_restart_reauth(struct kunit *test)
 	 * until a board power cycle.
 	 */
 	icm_fw_cold_boot(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
+	icm_fw_warm_restart(&fw);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
 
 	/* Only a cold boot (reboot / power cycle) re-authenticates AR/TR. */
 	icm_fw_cold_boot(&fw);
 	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
-	/*
-	 * Maple Ridge (e.g. appmana-019/020) has a real reset vector -> re-auths
-	 * on a warm restart. A module reload therefore does NOT wedge the ICM on
-	 * these nodes; a hang seen while (un)loading the module on a Maple Ridge
-	 * host is a driver-software fault (e.g. a lock taken in the load path),
-	 * not a firmware-terminal state.
-	 */
-	icm_fw_cold_boot(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
-	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 }
 
 /*
@@ -3134,18 +4880,8 @@ static void tb_test_icm_wedged_running(struct kunit *test)
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_wedge(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/true);
+	icm_fw_warm_restart(&fw);
 	KUNIT_EXPECT_FALSE(test, icm_fw_driver_ready(&fw));
-
-	/*
-	 * Maple Ridge would recover from the same forced reset (real reset
-	 * vector re-authenticates) -- relevant only if a Maple Ridge cio_reset
-	 * path is ever wired up; icm_probe() does not set one today.
-	 */
-	icm_fw_cold_boot(&fw);
-	icm_fw_wedge(&fw);
-	icm_fw_warm_restart(&fw, /*ar_tr=*/false);
-	KUNIT_EXPECT_TRUE(test, icm_fw_driver_ready(&fw));
 
 	/*
 	 * Dead NHI: MMIO reads all-ones, so REG_FW_STS spuriously asserts
@@ -3271,14 +5007,919 @@ static void tb_test_cm_forced_takeover_unlocks_config(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
 
 	/*
-	 * Wedged resident ICM: DRIVER_READY fails and the config space
-	 * stays shut -- the takeover must report the error (probe fails
-	 * loudly) instead of reading into a timeout per dword.
+	 * A failed DRIVER_READY cannot establish exclusive ownership. Even if
+	 * direct config reads happen to work, firmware may still consume another
+	 * ring-0 protocol, so the forced takeover must fail.
 	 */
 	icm_fw_cold_boot(&fw);
 	icm_fw_wedge(&fw);
 	KUNIT_EXPECT_FALSE(test, cm_model_forced_takeover(&fw));
-	KUNIT_EXPECT_FALSE(test, icm_fw_cfg_space_open(&fw));
+	KUNIT_EXPECT_TRUE(test, icm_fw_cfg_space_open(&fw));
+}
+
+/*
+ * Model of the whole probe pipeline as nhi_probe() runs it: CM selection
+ * (nhi_select_cm(), built on the same shared predicates as
+ * cm_model_selects_software) followed by tb_domain_add() ->
+ * cm_ops->driver_ready. Kept in lockstep with the driver on the wedged
+ * branch (icm_driver_ready() + nhi_probe()).
+ */
+struct cm_probe_model_result {
+	bool ok;		/* nhi_probe() succeeded */
+	bool software;		/* the domain ended up with the software CM */
+	bool wedged_diag;	/* the wedged-firmware diagnostic was emitted */
+};
+
+static struct cm_probe_model_result
+cm_model_probe(struct icm_fw_model *fw, bool force_sw_cm, bool acpi_native)
+{
+	u32 fw_sts = fw->icm_en ? REG_FW_STS_ICM_EN : 0;
+	struct cm_probe_model_result r = { };
+
+	/* nhi_select_cm(): forced/native goes straight to the software CM. */
+	if (tb_nhi_use_software_cm(force_sw_cm, acpi_native)) {
+		r.software = true;
+		r.ok = cm_model_forced_takeover(fw);
+		return r;
+	}
+
+	/* icm_probe()'s is_supported gate (start_icm=N fleet-wide). */
+	if (!tb_icm_fw_sts_running(fw_sts)) {
+		r.software = true;
+		r.ok = icm_fw_cfg_space_open(fw);
+		return r;
+	}
+
+	/* Firmware CM selected: tb_domain_add() -> icm_driver_ready(). */
+	if (icm_fw_driver_ready(fw)) {
+		r.software = false;
+		r.ok = true;
+		return r;
+	}
+
+	/*
+	 * DRIVER_READY failed with ICM_EN still latched. This diagnoses the
+	 * firmware failure, but cannot prove that every ring-0 path has released
+	 * ownership. Keep the firmware domain selected and fail the probe.
+	 */
+	r.wedged_diag = tb_icm_wedged(-ETIMEDOUT, fw_sts);
+	return r;
+}
+
+/*
+ * A DRIVER_READY timeout does not prove that the resident connection manager
+ * is wholly dead. A partially responsive firmware can stop serving config
+ * requests while it continues to accept local XDomain commands and consume
+ * peer responses. Software takeover would then create two owners for ring 0
+ * and leave a misleading, unusable domain behind. Refuse the takeover unless
+ * exclusive ownership can be established.
+ */
+static void tb_test_icm_partial_wedge_refuses_software_takeover(struct kunit *test)
+{
+	struct cm_probe_model_result r;
+	struct icm_fw_model fw;
+
+	/* ICM_EN remains set after the firmware stops answering DRIVER_READY. */
+	icm_fw_cold_boot(&fw);
+	icm_fw_wedge(&fw);
+
+	r = cm_model_probe(&fw, false, false);
+
+	/* A timeout alone cannot establish exclusive software-CM ownership. */
+	KUNIT_EXPECT_FALSE(test, r.ok);
+	KUNIT_EXPECT_FALSE(test, r.software);
+	/* The wedged-firmware diagnosis must still reach the operator. */
+	KUNIT_EXPECT_TRUE(test, r.wedged_diag);
+	/* The warm-reset refusal stays: no ARC/ICM restart was attempted... */
+	KUNIT_EXPECT_EQ(test, fw.warm_restarts, 0u);
+	/* ...so the NVM authentication was never thrown away. */
+	KUNIT_EXPECT_TRUE(test, fw.authed);
+}
+
+/*
+ * Firmware status, mailbox mode, DriverReady completion, and router config
+ * access are independent startup proofs. In particular, a ready-looking
+ * status register must not skip the later control-path checks.
+ */
+static void tb_test_icm_startup_proofs_are_separate(struct kunit *test)
+{
+	struct tb_icm_startup_proof proof;
+
+	proof = tb_icm_startup_proof_begin(0x800001a1, NHI_FW_CM_MODE);
+	KUNIT_EXPECT_TRUE(test, proof.firmware_ready);
+	KUNIT_EXPECT_TRUE(test, proof.mailbox_ready);
+	KUNIT_EXPECT_FALSE(test, proof.driver_ready);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	/* A config response cannot complete a startup whose command did not. */
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_DRIVER_READY);
+	KUNIT_EXPECT_TRUE(test, proof.driver_ready);
+	KUNIT_EXPECT_FALSE(test, proof.root_config_ready);
+
+	tb_icm_startup_proof_advance(&proof, TB_ICM_PROOF_ROOT_CONFIG);
+	KUNIT_EXPECT_TRUE(test, proof.root_config_ready);
+}
+
+static void
+tb_test_icm_xdomain_path_responses_settle_before_reuse(struct kunit *test)
+{
+	struct tb_icm_xdomain_path_transition next;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
+
+	state = TB_ICM_XDOMAIN_PATH_INACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_ACTIVATE);
+	KUNIT_ASSERT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_ACTIVE);
+
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE;
+	next = tb_icm_xdomain_path_next(next.state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_ASSERT_EQ(test, next.action,
+			TB_ICM_XDOMAIN_PATH_SEND_STAGE2);
+	KUNIT_ASSERT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY);
+
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	next = tb_icm_xdomain_path_next(next.state, event);
+	KUNIT_ASSERT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_SETTLE);
+	KUNIT_EXPECT_GE(test, next.settle_min_us, 2000u);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING);
+	next = tb_icm_xdomain_path_next(next.state,
+					TB_ICM_XDOMAIN_PATH_SETTLED);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_DEACTIVATE);
+	KUNIT_EXPECT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_INACTIVE);
+}
+
+static void tb_test_icm_xdomain_path_rejects_crossed_stages(struct kunit *test)
+{
+	struct tb_icm_xdomain_path_transition next;
+	enum tb_icm_xdomain_path_event event;
+	enum tb_icm_xdomain_path_state state;
+
+	state = TB_ICM_XDOMAIN_PATH_ACTIVE;
+	event = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state, TB_ICM_XDOMAIN_PATH_ACTIVE);
+
+	state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING);
+
+	state = TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING;
+	event = TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE;
+	next = tb_icm_xdomain_path_next(state, event);
+	KUNIT_EXPECT_EQ(test, next.action, TB_ICM_XDOMAIN_PATH_REJECT);
+	KUNIT_EXPECT_EQ(test, next.state,
+			TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING);
+}
+
+/*
+ * Readiness polling owns one physical request stream. Nesting the generic
+ * four-request retry helper multiplies both the configured observation count
+ * and its timeout budget, even when the controller produces no new evidence.
+ */
+static void tb_test_icm_root_config_probe_has_no_nested_retries(struct kunit *test)
+{
+	/*
+	 * Sequence identity must advance in that single stream; it must not be
+	 * obtained by turning each observation into a second retry loop.
+	 */
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_count(50), 50u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_request_budget(50), 50u);
+	KUNIT_EXPECT_EQ(test, tb_icm_root_config_budget_ms(50), 7500u);
+
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(0), 0);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(1), 1);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(2), 2);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(3), 3);
+	KUNIT_EXPECT_EQ(test, tb_cfg_request_sequence(4), 0);
+}
+
+/* A response for another config address must remain unmatched. */
+static void tb_test_cfg_response_matches_full_address(struct kunit *test)
+{
+	const struct tb_cfg_address request = {
+		.offset = 0x20,
+		.length = 2,
+		.port = 3,
+		.space = TB_CFG_PORT,
+		.seq = 2,
+	};
+	struct tb_cfg_address response = request;
+
+	KUNIT_EXPECT_TRUE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.offset++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.length++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.port++;
+	/* Responses carry the sender's upstream port, not the requested port. */
+	KUNIT_EXPECT_TRUE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.space = TB_CFG_SWITCH;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+
+	response = request;
+	response.seq++;
+	KUNIT_EXPECT_FALSE(test, tb_cfg_address_matches(&request, &response));
+}
+
+/*
+ * Recovery is a second state machine, not another startup-proof transition.
+ * Only the proven post-DriverReady root-config timeout may request one cycle;
+ * every other failure and every failure after the retry is terminal.
+ */
+static void tb_test_icm_root_recovery_is_separate_and_bounded(struct kunit *test)
+{
+	enum tb_icm_root_recovery_state state = TB_ICM_ROOT_RECOVERY_IDLE;
+	enum tb_icm_root_recovery_state next;
+
+	next = tb_icm_root_recovery_next(
+		state, TB_ICM_ROOT_RECOVERY_OTHER_FAILURE);
+	KUNIT_EXPECT_EQ(test, next, TB_ICM_ROOT_RECOVERY_TERMINAL);
+	next = tb_icm_root_recovery_next(state,
+					 TB_ICM_ROOT_RECOVERY_DRIVER_READY_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING);
+
+	state = tb_icm_root_recovery_next(
+		state, TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_ASSERT_EQ(test, state,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING);
+	state = tb_icm_root_recovery_next(
+		state, TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED);
+	KUNIT_ASSERT_EQ(test, state, TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED);
+	next = tb_icm_root_recovery_next(
+		state, TB_ICM_ROOT_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_ICM_ROOT_RECOVERY_REPROBE_REQUIRED);
+}
+
+static void tb_test_nhi_recovery_is_exact_and_one_shot(struct kunit *test)
+{
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_IDLE;
+	enum tb_nhi_recovery_state next;
+
+	next = tb_nhi_recovery_next(state, TB_NHI_RECOVERY_OTHER_FAILURE);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_ROOT_POWER_CYCLE_DISPATCHED);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_REPROBE_PENDING);
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_DISPATCHED);
+	KUNIT_ASSERT_EQ(test, state, TB_NHI_RECOVERY_RETRYING);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+	KUNIT_EXPECT_TRUE(test,
+		tb_nhi_startup_recovery_may_dispatch(TB_NHI_RECOVERY_IDLE));
+	KUNIT_EXPECT_FALSE(test,
+		tb_nhi_startup_recovery_may_dispatch(TB_NHI_RECOVERY_RETRYING));
+}
+
+static void tb_test_nhi_recovery_command_failure_is_terminal(struct kunit *test)
+{
+	enum tb_icm_root_recovery_state root =
+		TB_ICM_ROOT_RECOVERY_POWER_CYCLE_PENDING;
+	enum tb_nhi_recovery_state state;
+	enum tb_nhi_recovery_state next;
+
+	root = tb_icm_root_recovery_next(
+		root, TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
+	KUNIT_EXPECT_EQ(test, root, TB_ICM_ROOT_RECOVERY_TERMINAL);
+
+	state = tb_nhi_recovery_next(
+		TB_NHI_RECOVERY_IDLE,
+		TB_NHI_RECOVERY_ROOT_POWER_CYCLE_FAILED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_EXHAUSTED);
+
+	state = TB_NHI_RECOVERY_REPROBE_PENDING;
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_REPROBE_QUEUE_FAILED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+}
+
+/*
+ * A response timeout does not say whether the controller consumed the command.
+ * Recovery may schedule a proof reprobe only when either the response arrived
+ * or the command's own TX descriptor completed. Keeping those observations
+ * separate prevents a queued-but-stuck write from masquerading as recovery.
+ */
+static void tb_test_root_power_cycle_timeout_requires_consumption(struct kunit *test)
+{
+	enum tb_icm_root_recovery_event event;
+
+	/* Probe recovery must not pin module load behind a long mailbox wait. */
+	KUNIT_EXPECT_LE(test, DMA_PORT_POWER_CYCLE_RAW_TIMEOUT_MS, 1000);
+
+	event = tb_icm_root_recovery_command_event(-ETIMEDOUT, false);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_FAILED);
+
+	event = tb_icm_root_recovery_command_event(-ETIMEDOUT, true);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED);
+
+	/* A matched response independently proves command delivery. */
+	event = tb_icm_root_recovery_command_event(0, false);
+	KUNIT_EXPECT_EQ(test, event,
+			TB_ICM_ROOT_RECOVERY_POWER_CYCLE_DISPATCHED);
+}
+
+static void tb_test_cfg_tx_consumption_is_independent_and_monotonic(struct kunit *test)
+{
+	struct tb_cfg_request_state state = { 0 };
+
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_QUEUED);
+	KUNIT_ASSERT_EQ(test, state.tx, TB_CFG_TX_QUEUED);
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_CONSUMED);
+	KUNIT_ASSERT_EQ(test, state.tx, TB_CFG_TX_CONSUMED);
+
+	/* A later cancellation cannot erase observed hardware consumption. */
+	tb_cfg_request_tx_step(&state, TB_CFG_TX_EVENT_CANCELED);
+	KUNIT_EXPECT_EQ(test, state.tx, TB_CFG_TX_CONSUMED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_DISABLED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_DISABLED);
+}
+
+static void tb_test_tx_index_progress_is_not_descriptor_completion(struct kunit *test)
+{
+	struct tb_ring_snapshot snapshot = {
+		.running = true,
+		.indices_valid = true,
+		.in_flight = 1,
+		.hw_producer = 3,
+		.hw_consumer = 3,
+	};
+
+	KUNIT_EXPECT_FALSE(test, tb_nhi_tx_descriptor_completed(&snapshot));
+
+	snapshot.tail_attributes = (u32)RING_DESC_COMPLETED << 20;
+	KUNIT_EXPECT_TRUE(test, tb_nhi_tx_descriptor_completed(&snapshot));
+}
+
+static void tb_test_nhi_startup_recovery_requires_power_cycle_dispatch(struct kunit *test)
+{
+	enum tb_nhi_recovery_action action;
+	enum tb_nhi_recovery_state state;
+
+	action = tb_nhi_recovery_action(TB_NHI_RECOVERY_REPROBE_PENDING);
+	KUNIT_EXPECT_EQ(test, action, TB_NHI_RECOVERY_ACTION_REPROBE);
+
+	state = tb_nhi_recovery_next(TB_NHI_RECOVERY_IDLE,
+				     TB_NHI_RECOVERY_DRIVER_READY_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+	state = tb_nhi_recovery_next(TB_NHI_RECOVERY_IDLE,
+				     TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_EXHAUSTED);
+}
+
+static void tb_test_maple_root_power_cycle_encoding(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, DMA_PORT_MAIL_IN, 0x4fu);
+	KUNIT_EXPECT_EQ(test, DMA_PORT_POWER_CYCLE_REQUEST, 0x40000001u);
+	/* DMA mailbox accesses use their own sequence convention. */
+	KUNIT_EXPECT_EQ(test, dma_port_config_sequence(), 1);
+	KUNIT_EXPECT_EQ(test,
+			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
+				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI), 0xb);
+	KUNIT_EXPECT_EQ(test,
+			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
+				PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI), 0xb);
+	KUNIT_EXPECT_LT(test,
+			dma_port_for_nhi(PCI_VENDOR_ID_INTEL,
+				PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI), 0);
+}
+
+static void tb_test_pcie2cio_completion_states(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			tb_pcie2cio_completion_state(PCIE2CIO_CMD_START),
+			TB_PCIE2CIO_COMPLETION_BUSY);
+	KUNIT_EXPECT_EQ(test, tb_pcie2cio_completion_state(0),
+			TB_PCIE2CIO_COMPLETION_COMPLETE);
+	KUNIT_EXPECT_EQ(test,
+			tb_pcie2cio_completion_state(PCIE2CIO_CMD_TIMEOUT),
+			TB_PCIE2CIO_COMPLETION_TARGET_TIMEOUT);
+}
+
+static void tb_test_nhi_recovery_success_completes_episode(struct kunit *test)
+{
+	enum tb_nhi_recovery_state state = TB_NHI_RECOVERY_RETRYING;
+	enum tb_nhi_recovery_state next;
+
+	state = tb_nhi_recovery_next(state,
+				     TB_NHI_RECOVERY_PROBE_SUCCEEDED);
+	KUNIT_EXPECT_EQ(test, state, TB_NHI_RECOVERY_COMPLETE);
+	next = tb_nhi_recovery_next(state,
+				    TB_NHI_RECOVERY_ROOT_CONFIG_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, next, TB_NHI_RECOVERY_COMPLETE);
+}
+
+static void tb_test_nhi_recovery_is_limited_to_proven_hardware(struct kunit *test)
+{
+	u16 vendor = PCI_VENDOR_ID_INTEL;
+	u16 device;
+	bool supported;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_TRUE(test, supported);
+	KUNIT_EXPECT_FALSE(test,
+		tb_nhi_arc_cio_recovery_supported(vendor, device));
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_TRUE(test, supported);
+	KUNIT_EXPECT_FALSE(test,
+		tb_nhi_arc_cio_recovery_supported(vendor, device));
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_FALSE(test, supported);
+	vendor = PCI_VENDOR_ID_AMD;
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	supported = tb_nhi_recovery_supported(vendor, device);
+	KUNIT_EXPECT_FALSE(test, supported);
+}
+
+static void tb_test_nhi_recovery_does_not_claim_reclaim_safety(struct kunit *test)
+{
+	unsigned int flags = tb_test_nhi_probe_recovery_wq_flags();
+
+	KUNIT_EXPECT_EQ(test, flags & WQ_MEM_RECLAIM, 0u);
+}
+
+static void tb_test_nhi_dma_misc_policy_selects_requested_mode(struct kunit *test)
+{
+	u32 both = REG_DMA_MISC_INT_AUTO_CLEAR |
+		   REG_DMA_MISC_DISABLE_AUTO_CLEAR;
+	u32 unrelated = BIT(3) | BIT(27);
+	u32 value;
+
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_AUTO_STATUS_CLEAR);
+	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
+	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
+
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_EXPLICIT_W1C);
+	KUNIT_EXPECT_FALSE(test, value & REG_DMA_MISC_INT_AUTO_CLEAR);
+	KUNIT_EXPECT_TRUE(test, value & REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	KUNIT_EXPECT_EQ(test, value & unrelated, unrelated);
+
+	value = tb_nhi_dma_misc_interrupt_policy(0,
+						 TB_NHI_IRQ_AUTO_STATUS_CLEAR);
+	KUNIT_EXPECT_EQ(test, value, (u32)REG_DMA_MISC_INT_AUTO_CLEAR);
+	value = tb_nhi_dma_misc_interrupt_policy(0,
+						 TB_NHI_IRQ_EXPLICIT_W1C);
+	KUNIT_EXPECT_EQ(test, value,
+			(u32)REG_DMA_MISC_DISABLE_AUTO_CLEAR);
+	value = tb_nhi_dma_misc_interrupt_policy(both | unrelated,
+						 TB_NHI_IRQ_CLEAR_ON_READ);
+	KUNIT_EXPECT_EQ(test, value, unrelated);
+}
+
+static void tb_test_maple_ridge_uses_interrupt_status_auto_clear(struct kunit *test)
+{
+	u16 device;
+	bool auto_clear;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	auto_clear = tb_nhi_uses_auto_clear(PCI_VENDOR_ID_INTEL, device);
+	KUNIT_EXPECT_TRUE(test, auto_clear);
+}
+
+static void tb_test_nhi_interrupt_modes_are_distinct(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_INT_AUTO_CLEAR),
+			TB_NHI_IRQ_AUTO_STATUS_CLEAR);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(0),
+			TB_NHI_IRQ_CLEAR_ON_READ);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_DISABLE_AUTO_CLEAR),
+			TB_NHI_IRQ_EXPLICIT_W1C);
+	KUNIT_EXPECT_EQ(test,
+			tb_nhi_dma_misc_interrupt_mode(REG_DMA_MISC_INT_AUTO_CLEAR |
+						       REG_DMA_MISC_DISABLE_AUTO_CLEAR),
+			TB_NHI_IRQ_INVALID);
+}
+
+static void tb_test_nhi_interrupt_setup_orders_global_policy(struct kunit *test)
+{
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_RESET;
+
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_MASK_ALL);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_MASKED);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_DRAIN_STATUS);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_STATUS_DRAINED);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+	KUNIT_ASSERT_EQ(test, phase, TB_NHI_IRQ_SETUP_MODE_SET);
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_FLUSH_MODE);
+	KUNIT_EXPECT_EQ(test, phase, TB_NHI_IRQ_SETUP_READY);
+}
+
+static void tb_test_nhi_interrupt_setup_rejects_late_mode_change(struct kunit *test)
+{
+	enum tb_nhi_irq_setup_phase phase = TB_NHI_IRQ_SETUP_READY;
+
+	phase = tb_nhi_irq_setup_next(phase, TB_NHI_IRQ_SETUP_SET_MODE);
+	KUNIT_EXPECT_EQ(test, phase, TB_NHI_IRQ_SETUP_INVALID);
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Domain teardown lock order (appmana-008, kdump 202608241850, 6.17.0-42).
+ *
+ * A wedged-ICM board failed tb_domain_add() at driver_ready, and the FAILURE
+ * CLEANUP deadlocked:
+ *
+ *   (udev-worker):365   nhi_probe -> tb_domain_add -> tb_ctl_stop
+ *                       -> tb_ring_stop -> flush_work -> wait_for_completion [D]
+ *   kworker/u128:0:12   process_one_work -> icm_handle_notification
+ *                       -> mutex_lock(&tb->lock)                            [D]
+ *   INFO: task kworker/u128:0:12 is blocked on a mutex likely owned by
+ *         task (udev-worker):365
+ *   Kernel panic - not syncing: hung_task: blocked tasks
+ *
+ * tb_domain_add() takes tb->lock, then tb_ctl_start() opens event processing:
+ * icm_handle_event() queues icm_handle_notification onto tb->wq, and that work
+ * takes tb->lock. The failure path then called tb_ctl_stop() -- which
+ * schedules AND FLUSHES ring work -- with tb->lock still held. Making a
+ * tb->lock-taking work item runnable and then waiting on it while holding
+ * tb->lock is an AB-BA nothing can break. tb_domain_remove() had the same
+ * shape, which is why unload hung too, and tb_stop()/icm_stop() both ran their
+ * only cancels under the same lock.
+ *
+ * This models the ORDER as observable state rather than trying to reproduce a
+ * real deadlock: a wait-for-work while holding a lock that the work takes is
+ * recorded as a violation. Lever TB_DOMAIN_TEARDOWN_UNLOCKED=0 models the
+ * pre-2.46 driver and makes every case below fail.
+ * ---------------------------------------------------------------------------
+ */
+#ifndef TB_DOMAIN_TEARDOWN_UNLOCKED
+#define TB_DOMAIN_TEARDOWN_UNLOCKED 1
+#endif
+
+struct tb_lockorder_model {
+	bool		lock_held;
+	bool		ctl_running;
+	/* a tb->lock-taking work item is queued on tb->wq */
+	bool		notif_queued;
+	bool		notif_ran;
+	bool		wq_destroyed;
+	/* armed delayed_work that flush_workqueue() does not wait for */
+	bool		timer_armed;
+	bool		hotplug_active;
+
+	unsigned int	deadlocks;	/* waited on lock-taking work under lock */
+	unsigned int	uaf;		/* work ran after the domain went away */
+	unsigned int	queue_after_destroy;
+};
+
+static void lo_lock(struct tb_lockorder_model *m) { m->lock_held = true; }
+static void lo_unlock(struct tb_lockorder_model *m) { m->lock_held = false; }
+
+/* Control channel live: the peer/ICM can queue a tb->lock-taking work item. */
+static void lo_ctl_event(struct tb_lockorder_model *m)
+{
+	if (m->ctl_running)
+		m->notif_queued = true;
+}
+
+/* tb_ctl_stop() -> tb_ring_stop() -> flush_work(): a WAIT. */
+static void lo_ctl_stop(struct tb_lockorder_model *m)
+{
+	if (m->lock_held && m->notif_queued)
+		m->deadlocks++;
+	m->ctl_running = false;
+}
+
+/* tb_handle_event() re-arming reconcile_work while hotplug is still active. */
+static void lo_maybe_rearm(struct tb_lockorder_model *m)
+{
+	if (m->hotplug_active && m->ctl_running)
+		m->timer_armed = true;
+}
+
+static void lo_flush_wq(struct tb_lockorder_model *m)
+{
+	/* Runs queued work; does NOT disarm an armed delayed_work timer. */
+	if (m->notif_queued) {
+		m->notif_queued = false;
+		m->notif_ran = true;
+	}
+}
+
+/* ->deinit, called with the lock dropped: the only place a sync cancel fits. */
+static void lo_deinit(struct tb_lockorder_model *m)
+{
+	if (!TB_DOMAIN_TEARDOWN_UNLOCKED)
+		return;		/* pre-2.46: nothing sync-cancelled these at all */
+	if (m->lock_held && m->timer_armed) {
+		m->deadlocks++;
+		return;
+	}
+	m->timer_armed = false;
+}
+
+static void lo_destroy_wq(struct tb_lockorder_model *m)
+{
+	m->wq_destroyed = true;
+	if (m->timer_armed) {
+		/* __queue_work() on a destroyed wq, with tb already freed. */
+		m->queue_after_destroy++;
+		m->uaf++;
+	}
+	if (m->notif_queued)
+		m->uaf++;
+}
+
+/* tb_domain_add() up to and including its failure cleanup. */
+static void lo_domain_add_fails(struct tb_lockorder_model *m)
+{
+	memset(m, 0, sizeof(*m));
+	lo_lock(m);
+	m->ctl_running = true;		/* tb_ctl_start() */
+	m->hotplug_active = true;
+	lo_ctl_event(m);		/* driver_ready window: ICM notification */
+	/* driver_ready() fails -> err_ctl_stop */
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		lo_unlock(m);
+		lo_ctl_stop(m);
+		lo_flush_wq(m);
+	} else {
+		lo_ctl_stop(m);
+		lo_unlock(m);
+	}
+	m->hotplug_active = false;
+	lo_deinit(m);
+	lo_destroy_wq(m);
+}
+
+/* tb_domain_remove(): cm_ops->stop under the lock, ctl stop outside it. */
+static void lo_domain_remove(struct tb_lockorder_model *m, bool peer_active)
+{
+	lo_lock(m);
+	/* cm_ops->stop(): close the re-arm gate FIRST, then non-sync cancel. */
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		m->hotplug_active = false;
+		lo_maybe_rearm(m);	/* gate closed: cannot re-arm */
+	} else {
+		lo_maybe_rearm(m);	/* gate still open: re-arms behind us */
+		m->hotplug_active = false;
+	}
+	if (peer_active)
+		lo_ctl_event(m);
+
+	if (TB_DOMAIN_TEARDOWN_UNLOCKED) {
+		lo_unlock(m);
+		lo_ctl_stop(m);
+	} else {
+		lo_ctl_stop(m);
+		lo_unlock(m);
+	}
+	lo_flush_wq(m);
+	lo_deinit(m);			/* lock dropped: sync cancel is safe */
+	lo_destroy_wq(m);
+}
+
+/*
+ * The exact appmana-008 panic: probe failure cleanup with an ICM notification
+ * in flight.
+ */
+static void tb_test_domain_add_failure_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	lo_domain_add_fails(&m);
+
+	KUNIT_EXPECT_EQ(test, 0u, m.deadlocks);
+	/* The in-flight notification must have been drained, not abandoned. */
+	KUNIT_EXPECT_TRUE(test, m.notif_ran);
+	KUNIT_EXPECT_EQ(test, 0u, m.uaf);
+	KUNIT_EXPECT_FALSE(test, m.lock_held);
+}
+
+/* The same cleanup reached through module unload, peer still talking. */
+static void tb_test_domain_remove_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	memset(&m, 0, sizeof(m));
+	m.ctl_running = true;
+	m.hotplug_active = true;
+	lo_domain_remove(&m, true);
+
+	KUNIT_EXPECT_EQ(test, 0u, m.deadlocks);
+	KUNIT_EXPECT_EQ(test, 0u, m.uaf);
+	KUNIT_EXPECT_EQ(test, 0u, m.queue_after_destroy);
+	KUNIT_EXPECT_FALSE(test, m.lock_held);
+}
+
+/*
+ * An armed delayed_work timer survives flush_workqueue(). Closing the re-arm
+ * gate before the cancels, and sync-cancelling from ->deinit with the lock
+ * dropped, is what stops it firing after destroy_workqueue() and kfree(tb).
+ */
+static void tb_test_domain_remove_no_work_after_destroy(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+
+	memset(&m, 0, sizeof(m));
+	m.ctl_running = true;
+	m.hotplug_active = true;
+	lo_domain_remove(&m, false);
+
+	KUNIT_EXPECT_FALSE(test, m.timer_armed);
+	KUNIT_EXPECT_EQ(test, 0u, m.queue_after_destroy);
+}
+
+/*
+ * The v2.44 wedged-ICM takeover routes a wedged board through the
+ * tb_domain_add() failure cleanup TWICE (ICM attempt, then software CM), so it
+ * multiplies exposure to this path rather than avoiding it. Both passes must
+ * be clean.
+ */
+static void tb_test_icm_takeover_teardown_no_deadlock(struct kunit *test)
+{
+	struct tb_lockorder_model m;
+	unsigned int deadlocks = 0, uaf = 0;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		lo_domain_add_fails(&m);
+		deadlocks += m.deadlocks;
+		uaf += m.uaf;
+	}
+
+	KUNIT_EXPECT_EQ(test, 0u, deadlocks);
+	KUNIT_EXPECT_EQ(test, 0u, uaf);
+}
+
+/*
+ * Runtime-resume cleanup has two state machines: topology mutation must run
+ * while the domain lock owns a live root, while device unregistration must
+ * run after the lock is dropped. Model a stop landing between those phases.
+ */
+struct tb_remove_work_model {
+	bool lock_held;
+	bool root_present;
+	bool xdomain_removed;
+	bool xdomain_removed_under_lock;
+	unsigned int root_deref_after_stop;
+};
+
+static void remove_work_stop_between_phases(struct tb_remove_work_model *m)
+{
+	m->lock_held = true;
+	if (m->root_present) {
+		m->xdomain_removed = true;
+		m->xdomain_removed_under_lock = m->lock_held;
+	}
+	m->lock_held = false;
+
+	/* Domain stop may remove and clear the root before unregistration. */
+	m->root_present = false;
+}
+
+static void tb_test_remove_work_stop_between_phases(struct kunit *test)
+{
+	struct tb_remove_work_model m = {
+		.root_present = true,
+	};
+
+	remove_work_stop_between_phases(&m);
+
+	KUNIT_EXPECT_TRUE(test, m.xdomain_removed);
+	KUNIT_EXPECT_TRUE(test, m.xdomain_removed_under_lock);
+	KUNIT_EXPECT_EQ(test, 0u, m.root_deref_after_stop);
+}
+
+/*
+ * A domain device reference may outlive PCI-driver remove. Hardware-backed
+ * resources therefore have to be released before device-managed NHI storage
+ * disappears; the eventual domain release callback cannot touch the NHI.
+ */
+struct tb_domain_release_model {
+	bool resources_released;
+	bool nhi_alive;
+	unsigned int late_nhi_touches;
+};
+
+static void domain_remove_then_late_release(struct tb_domain_release_model *m)
+{
+	/* Hardware-backed workqueues and rings are released by remove itself. */
+	m->resources_released = true;
+
+	/* PCI remove returns and device-managed NHI storage disappears. */
+	m->nhi_alive = false;
+
+	/* A delayed domain reference frees only hardware-independent storage. */
+}
+
+static void tb_test_domain_resources_precede_nhi_release(struct kunit *test)
+{
+	struct tb_domain_release_model m = {
+		.nhi_alive = true,
+	};
+
+	domain_remove_then_late_release(&m);
+
+	KUNIT_EXPECT_TRUE(test, m.resources_released);
+	KUNIT_EXPECT_EQ(test, 0u, m.late_nhi_touches);
+}
+
+struct tb_ctl_free_model {
+	bool request_work_active;
+	bool nhi_alive;
+	unsigned int late_work_uaf;
+};
+
+static void ctl_free_then_nhi_remove(struct tb_ctl_free_model *m)
+{
+	/* Control free joins local request work before NHI ownership ends. */
+	m->request_work_active = false;
+	m->nhi_alive = false;
+	if (m->request_work_active && !m->nhi_alive)
+		m->late_work_uaf++;
+}
+
+static void tb_test_ctl_free_drains_work_before_nhi_remove(struct kunit *test)
+{
+	struct tb_ctl_free_model m = {
+		.request_work_active = true,
+		.nhi_alive = true,
+	};
+
+	ctl_free_then_nhi_remove(&m);
+
+	KUNIT_EXPECT_FALSE(test, m.request_work_active);
+	KUNIT_EXPECT_EQ(test, 0u, m.late_work_uaf);
+}
+
+/*
+ * The takeover fallback must NOT trigger for a healthy responding ICM
+ * (that one really does answer ring 0 itself) nor rewrite the plain
+ * no-firmware software path.
+ */
+static void tb_test_icm_healthy_keeps_firmware_cm(struct kunit *test)
+{
+	struct cm_probe_model_result r;
+	struct icm_fw_model fw;
+
+	/* Healthy responsive ICM: firmware CM, no wedge diagnosis. */
+	icm_fw_cold_boot(&fw);
+	r = cm_model_probe(&fw, false, false);
+	KUNIT_EXPECT_TRUE(test, r.ok);
+	KUNIT_EXPECT_FALSE(test, r.software);
+	KUNIT_EXPECT_FALSE(test, r.wedged_diag);
+	KUNIT_EXPECT_EQ(test, fw.warm_restarts, 0u);
+
+	/* No firmware at all (cold boot on 009): plain software CM. */
+	icm_fw_cold_boot(&fw);
+	fw.icm_en = false;
+	r = cm_model_probe(&fw, false, false);
+	KUNIT_EXPECT_TRUE(test, r.ok);
+	KUNIT_EXPECT_TRUE(test, r.software);
+	KUNIT_EXPECT_FALSE(test, r.wedged_diag);
 }
 
 /*
@@ -3391,6 +6032,392 @@ static void tb_test_cm_reconcile_perturbed_lane_keeps_live_link(struct kunit *te
 }
 
 /*
+ * Reproduces the 2026-08-22 appmana-001 enclosure freeze: under force_sw_cm
+ * (resident Titan Ridge ICM) an ASMedia 246x NVMe enclosure was surprise-
+ * removed; pciehp tore the tunneled PCIe subtree down cleanly, the
+ * reconcile correctly synthesized the lost unplug ("router present but
+ * lane state 7") and the teardown completed -- and then the post-teardown
+ * PHY kick (tb_port_kick_detection) bounced the root port's lanes. Three
+ * seconds later the machine froze silently (journal stops mid-line, no
+ * hung-task output, mouse alive, all disk I/O wedged): the resident ICM
+ * consumed the host-generated lane edge and wedged the NHI in the known
+ * MMIO-stall class. Same firmware failure as the 2026-08-20 live-link
+ * kick, now proven for a genuinely empty port too.
+ *
+ * Contract: a synthesized unplug must still converge the topology on every
+ * host, but the detection re-arm kick is issued ONLY where no resident
+ * firmware coexists (chain segments, where the 019<->008 latch-off it
+ * exists for was observed). Under a resident ICM the kick must never be
+ * issued: the enumerated child is the reconcile's to tear down, the lane
+ * edge is the firmware's to own.
+ */
+static void tb_test_cm_reconcile_no_kick_under_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	/* Resident-ICM host (force_sw_cm) with an enumerated child. */
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	/* Real surprise removal; the hot event is lost. */
+	cm_link_down_lost(&h, 0);
+	KUNIT_EXPECT_FALSE(test, cm_peer_probe(&h, 0));
+	cm_reconcile(&h);
+
+	/* The unplug is still synthesized... */
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	/* ...but no lane edge is generated: the resident ICM stays sane. */
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_FALSE(test, h.port[0].detection_rearmed);
+
+	/* Chain host (no resident firmware): the 019<->008 re-arm stays. */
+	memset(&h, 0, sizeof(h));
+	h.port[1].link_up = true;
+	cm_scan_port(&h, 1);
+	cm_arm_hotplug(&h);
+	cm_link_down_lost(&h, 1);
+	cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[1].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[1].detection_rearmed);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+static void cm_run_reconcile(struct cm_host *h, int passes)
+{
+	while (passes-- > 0)
+		cm_reconcile(h);
+}
+
+/*
+ * The live appmana-001 port 0:4 failure (2026-08-22): an ASM246x NVMe
+ * enclosure's link half-trains and parks at CONNECTING ("failed to reach
+ * state TB_PORT_UP. Ignoring port...", LANE_ADP_CS_1 state 1). CONNECTING
+ * is neither present nor gone, so without a retrain the reconcile ignores
+ * the port FOREVER -- and with the blind kick correctly gated out under the
+ * resident ICM (05d1e4c) nothing else ever gives the lane a fresh training
+ * edge. The same disk enumerated cleanly earlier the same morning: only a
+ * new edge is missing.
+ *
+ * Contract: an enclosure attached to a resident-ICM host must eventually
+ * enumerate via the bounded plug-directed retrain, and the retrain must
+ * never wedge the firmware (it waits out the ICM's transition window).
+ */
+static void tb_test_cm_plug_retrain_half_trained_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_marginal(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 12);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 1);
+
+	/* The same recovery must work on a chain host (no firmware). */
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_enclosure_attach_marginal(&h, 1, /*dead=*/false);
+	cm_run_reconcile(&h, 12);
+	KUNIT_EXPECT_TRUE(test, h.port[1].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+/*
+ * Detection latched off under a resident ICM: the lane samples UNPLUGGED
+ * forever despite the powered enclosure on the cable, so the lane itself
+ * carries NO plug signal -- but the resident firmware still watches the
+ * port and emits its ICM-protocol notification (the live "unexpected event
+ * 0xa"). That notification is the connect request that directs the
+ * retrain. On a chain host no such notification exists and an UNPLUGGED
+ * lane must never be bounced by the reconcile (the blind start-time kick
+ * owns that case); this is what keeps the state-7 retrain plug-DIRECTED
+ * rather than a periodic blind bounce.
+ */
+static void tb_test_cm_plug_retrain_latched_port_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	/* Idle for a while first: no hint, no edges on the empty port. */
+	cm_run_reconcile(&h, 10);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+
+	cm_enclosure_attach_latched(&h, 0);
+	cm_run_reconcile(&h, 12);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 1);
+
+	/* Chain host: no notification -> the reconcile never bounces a
+	 * bare UNPLUGGED lane, no matter how long it sits. */
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_enclosure_attach_latched(&h, 0);
+	cm_run_reconcile(&h, 40);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+}
+
+/*
+ * Electrically dead (or hopelessly marginal) hardware: every fresh edge
+ * ends parked at CONNECTING again. The retrain must be BOUNDED -- a fixed
+ * number of spaced attempts per episode, then leave the port alone -- and
+ * must never wedge the resident firmware while doing so (each host edge
+ * makes the firmware busy again; the attempt spacing must outlast that).
+ */
+static void tb_test_cm_plug_retrain_bounded_dead_hardware(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_marginal(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, CM_RETRAIN_MAX_ATTEMPTS);
+}
+
+/*
+ * The 05d1e4c regression guard, restated for the retrain: a REAL surprise
+ * unplug of an enumerated enclosure under the resident ICM raises the
+ * firmware's own notification AND leaves the firmware mid-transition. The
+ * reconcile must synthesize the unplug, and the retrain must sit out both
+ * the teardown cooldown and the firmware's busy window before it touches
+ * the (now empty) port -- an early edge is exactly the 2026-08-22 silent
+ * freeze. The single late edge it does issue is the harmless re-arm that
+ * readies the latched-off port for the NEXT plug.
+ */
+static void tb_test_cm_plug_retrain_post_unplug_cooldown(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;
+	cm_scan_port(&h, 0);
+	cm_arm_hotplug(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+
+	cm_link_down_lost(&h, 0);
+
+	/* Inside the firmware's transition window: teardown only, no edge. */
+	cm_run_reconcile(&h, 3);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+
+	/* After the quiet window: at most one directed re-arm, no wedge. */
+	cm_run_reconcile(&h, 30);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_LE(test, h.port[0].lane_edges, 1);
+}
+
+/*
+ * The ACTUAL live appmana-001 topology decoded 2026-08-22: the two
+ * "ports" 0:3/0:4 are the two LANES of one connector (dual pair (3,4),
+ * primaries iterate; "0:4 failed to reach state TB_PORT_UP" is
+ * tb_switch_lane_bonding_enable() waiting on the dual_link_port). The
+ * KIOXIA enclosure's router (0-3) enumerates on lane 0, but lane 1 parks
+ * at CONNECTING, bonding fails once at enumeration and is NEVER retried,
+ * and the degraded x1 link's PCIe payload stays dead ("Slot(4): No
+ * link"). Contract: the reconcile retrains the half-trained SECONDARY
+ * lane only (the primary, carrying the router, is never bounced -- a
+ * full-connector bounce of a live link is the 2026-08-20 ICM wedge), and
+ * once the secondary lane is up it re-runs lane bonding, which upstream
+ * only ever attempts at enumeration.
+ */
+static void tb_test_cm_lane1_bonding_recovery_resident_icm(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 20);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, 1);
+	/* The primary lane was never bounced. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+
+	/*
+	 * Secondary lane already up but the link runs x1 (bonding raced or
+	 * failed at enumeration): late bonding needs no lane edge at all.
+	 */
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[1].link_up = true;
+	h.port[1].lane1_sample = CM_SAMPLE_UP;
+	cm_scan_port(&h, 1);
+	cm_arm_hotplug(&h);
+	cm_run_reconcile(&h, 12);
+	KUNIT_EXPECT_TRUE(test, h.port[1].bonded);
+	KUNIT_EXPECT_EQ(test, h.port[1].lane1_edges, 0);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+}
+
+/*
+ * A secondary lane that can never train: bounded lane-directed attempts
+ * (and, since the connector-replug escalation, bounded full-connector
+ * episodes -- see the replug tests), then the link is left alone at x1
+ * -- degraded but working, clean logs, no wedge. Exactly the "prove
+ * driver-side behavior correct on dead hardware" contract.
+ */
+static void tb_test_cm_lane1_retrain_bounded_dead_lane(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* x1 still works */
+	KUNIT_EXPECT_FALSE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, CM_RETRAIN_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
+/*
+ * The live 2026-08-23 appmana-001 recovery: the ASM246x enclosure's
+ * secondary lane never wakes on single-lane edges (host lane 1 parked
+ * CONNECTING, device lane 1 UNPLUGGED -- its receiver arms only during
+ * the connector handshake), but a full-connector software replug (both
+ * lanes disabled together, held past the firmware's busy window, enabled
+ * together, then a fresh enumeration) trains the link to bonded x2.
+ * Contract: once the bounded single-lane attempts are exhausted the
+ * reconcile escalates to a bounded connector replug -- tearing the
+ * software topology down FIRST (a bounce of an enumerated primary is the
+ * 2026-08-20 wedge), holding both lanes down together, re-enabling
+ * together, and re-enumerating through the normal synthesized-plug path,
+ * where bonding-at-enumeration finds both lanes up.
+ */
+static void tb_test_cm_connector_replug_recovers_full_train_only_lane(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/false);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	/* Single-lane attempts exhaust first, then ONE connector replug. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, CM_RETRAIN_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, 1);
+	/* No single-lane glitch edge ever touched the primary. */
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
+/*
+ * A secondary lane that not even a full-connector train recovers: the
+ * replug episodes are bounded, and -- critically -- each failed episode
+ * still brings the ROUTER back (the primary lane is not dead, so the
+ * fresh enumeration lands at x1). The port must never be left torn down
+ * or with its lanes held.
+ */
+static void tb_test_cm_connector_replug_bounded_when_lane1_dead(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/true);
+	cm_run_reconcile(&h, CM_REPLUG_IDLE_RESET_PASSES - 50);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);	/* x1 still works */
+	KUNIT_EXPECT_FALSE(test, h.port[0].bonded);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_FALSE(test, h.port[0].lanes_held);
+	KUNIT_EXPECT_EQ(test, h.port[0].replug_phase, CM_REPLUG_IDLE);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, CM_REPLUG_MAX_ATTEMPTS);
+}
+
+/*
+ * A firmware notification lands while the lanes are held down (another
+ * physical event on the domain): the re-enable edge must NOT be issued
+ * into the firmware's busy window -- the hold extends until the
+ * notification has aged, and the episode still completes. Enabling on
+ * the raw hold expiry regardless is the 2026-08-22 wedge recipe (an edge
+ * 3 s after a real unplug).
+ */
+static void tb_test_cm_connector_replug_defers_to_fresh_icm_event(struct kunit *test)
+{
+	struct cm_host h;
+	int guard = 0;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	cm_arm_hotplug(&h);
+
+	cm_enclosure_attach_bonding_stuck_full_train(&h, 0, /*dead=*/false);
+	while (h.port[0].replug_phase != CM_REPLUG_HELD && guard++ < 60)
+		cm_reconcile(&h);
+	KUNIT_ASSERT_EQ(test, h.port[0].replug_phase, CM_REPLUG_HELD);
+
+	cm_icm_notices_edge(&h, 0);
+	cm_run_reconcile(&h, 100);
+
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_TRUE(test, h.port[0].bonded);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+/*
+ * A single-lane cable (no secondary lane modelled) enumerates x1 and is
+ * left completely alone: the connector replug keys on a secondary lane
+ * parked at CONNECTING -- hardware provably present on lane 1 -- never on
+ * a lane that simply is not there.
+ */
+static void tb_test_cm_connector_replug_leaves_single_lane_cable(struct kunit *test)
+{
+	struct cm_host h;
+
+	memset(&h, 0, sizeof(h));
+	h.resident_icm = true;
+	h.port[0].link_up = true;	/* lane1_sample stays 0 */
+	cm_arm_hotplug(&h);
+
+	cm_run_reconcile(&h, 200);
+
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+	KUNIT_EXPECT_FALSE(test, h.icm_wedged);
+	KUNIT_EXPECT_EQ(test, h.port[0].connector_edges, 0);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane1_edges, 0);
+	KUNIT_EXPECT_EQ(test, h.port[0].lane_edges, 0);
+}
+
+/*
  * Reproduces the 2026-07-09 appmana-008 port-1 loop: an XDomain whose cached
  * remote UUID is corrupt (66518780-00e3-212c-ffff-ffffffffffff, an all-ones
  * tail from a half-trained-link read) fails every property read -- the healthy
@@ -3469,6 +6496,537 @@ static void tb_test_xdomain_silent_stale_identity_recovery(struct kunit *test)
 }
 
 /*
+ * Live 2026-08-24, appmana-008 <-> appmana-019 (Maple Ridge AM5 chain nodes):
+ * 008 booted while 019 was POWERED OFF. The port facing 019 enumerated an
+ * XDomain (0-3) whose remote UUID was the all-ones-tail placeholder a link with
+ * no powered peer behind it reads back (385a8780-0004-402c-ffff-ffffffffffff).
+ * That placeholder was latched as the XDomain's final identity, so:
+ *
+ *   - every property read failed (XDP requests carry dst_uuid), and
+ *   - when 019 finally powered on and answered with its REAL UUID,
+ *     tb_xdomain_get_uuid() read the difference as "another domain connected",
+ *     set is_unplugged and drove the XDomain terminal.
+ *
+ * Under a resident ICM no tb.c reconcile pass runs to replace the condemned
+ * object, so 0-3 never registered, no tbframe service ever bound, and 019 sent
+ * unanswered HELLOs until 008 was rebooted with 019 already up.
+ *
+ * A chain neighbour powering on later is normal operation. Lockstep with
+ * tb_xdomain_get_uuid(): while the driver treats a placeholder as an identity,
+ * ident_tick() must too, and these expectations go red.
+ */
+static void tb_test_xdomain_late_peer_powered_on_after_boot(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = {
+		.cached_uuid = IDENT_UUID_PLACEHOLDER,
+		.cached_properties = false,	/* first boot: never enumerated */
+	};
+
+	/*
+	 * Neighbour powered off at boot: the handshake keeps re-verifying and
+	 * must not condemn itself (the f876653 co-reset contract).
+	 */
+	KUNIT_EXPECT_FALSE(test, ident_run(&xd, &peer, 16,
+					   /*cm_reconciles=*/false));
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+
+	/*
+	 * Neighbour powers on. The XDomain must adopt the real identity and
+	 * enumerate WITHOUT a connection-manager replacement: a Maple Ridge
+	 * chain node runs a resident ICM and never executes the tb.c reconcile
+	 * that would replace a condemned object.
+	 */
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+}
+
+/*
+ * The placeholder is not a peer identity, so it can never be the identity a
+ * mismatch is judged against: the first REAL answer replaces it. A genuine
+ * cached UUID keeps the existing condemn-and-replace behaviour, which is what
+ * distinguishes this from the 2026-07-09 stale-identity case above.
+ */
+static void tb_test_xdomain_placeholder_uuid_never_final_identity(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x66518780u, .answers = true };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+
+	ident_tick(&xd, &peer);		/* PROPERTIES: dst_uuid mismatch */
+	KUNIT_EXPECT_EQ(test, xd.state, IDENT_STATE_UUID);
+
+	ident_tick(&xd, &peer);		/* UUID: adopt, do not condemn */
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+
+	/* The port is not poisoned: the adopted identity reads properties. */
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+
+	/* A real identity that genuinely changed is still condemned. */
+	memset(&xd, 0, sizeof(xd));
+	xd.cached_uuid = 0x11111111u;
+	xd.uuid_verified = true;
+	xd.state = IDENT_STATE_UUID;
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.unplugged);
+}
+
+/*
+ * The responsive-peer path must not pay for any of the above: a peer whose
+ * identity we already hold enumerates on the first PROPERTIES tick, with no
+ * UUID detour and no re-verification churn.
+ */
+static void tb_test_xdomain_responsive_peer_registers_promptly(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = true };
+	struct ident_xd xd = {
+		.cached_uuid = 0x385a8780u,
+		.uuid_verified = true,
+	};
+
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+	KUNIT_EXPECT_EQ(test, xd.state, IDENT_STATE_PROPERTIES);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+}
+
+static void tb_test_xdomain_event_uuid_requires_peer_verification(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x12345678u, .answers = true };
+	struct ident_xd xd = { .cached_uuid = peer.true_uuid };
+
+	/*
+	 * A firmware topology UUID is an address claim, not authentication.
+	 * Firmware-managed controllers own UUID discovery, so prove the claim
+	 * with the first route-local properties response instead of issuing a
+	 * host UUID request the resident ICM consumes locally.
+	 */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_initial_needs_uuid(true));
+	ident_tick(&xd, &peer);
+	KUNIT_EXPECT_TRUE(test, xd.uuid_verified);
+	KUNIT_EXPECT_TRUE(test, xd.enumerated);
+}
+
+/*
+ * Discovery and announcement are independent state machines. A UUID supplied
+ * by firmware is only an address claim, so INIT may begin route-local
+ * discovery but must not start announcing until a response proves the peer.
+ */
+static void tb_test_xdomain_discovery_precedes_announcement(struct kunit *test)
+{
+	/* No claimed identity: UUID discovery runs by itself. */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_announce_ready(true, false));
+	/* Firmware claim present, but no route-local peer proof yet. */
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_announce_ready(false, false));
+	/* The independent announcement machine may start after proof. */
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_announce_ready(false, true));
+}
+
+static void tb_test_xdomain_properties_response_proves_both_identities(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_properties_identity(true, true));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(false, true));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(true, false));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_properties_identity(false, false));
+}
+
+/*
+ * A Titan Ridge peer can deliver a valid properties response about four
+ * seconds after Maple Ridge submitted the request. The discovery waiter must
+ * still own that response; a one-second deadline turns the whole valid burst
+ * into unmatched traffic and leaves an empty XDomain behind.
+ */
+static void tb_test_xdomain_properties_wait_covers_delayed_peer(struct kunit *test)
+{
+	KUNIT_EXPECT_GT(test, tb_test_xdomain_properties_timeout_ms(), 4000u);
+}
+
+/*
+ * The two-bit XDP sequence wraps while discovery retries. A delayed response
+ * for an earlier properties chunk can therefore share route and sequence with
+ * the current request. Offset is the remaining transaction identity and must
+ * participate in matching, rather than failing the active request after copy.
+ */
+static void tb_test_xdomain_properties_reply_requires_current_offset(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  tb_test_xdomain_properties_response_pkg_matches(0, 0));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_test_xdomain_properties_response_pkg_matches(53, 0));
+}
+
+static void tb_test_xdomain_unverified_uuid_cannot_alias_route(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_uuid_globally_matchable(false, true));
+	KUNIT_EXPECT_TRUE(test, tb_test_xdomain_uuid_globally_matchable(true, true));
+	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_uuid_globally_matchable(true, false));
+}
+
+/*
+ * The other half of the 008 strand: the properties-changed announcement gave up
+ * after XDOMAIN_RETRIES and was never queued again, so 008 stopped announcing
+ * its property directory ~10 s into a boot whose neighbour was powered off.
+ * The announce must outlive an arbitrarily long absence, and must do so without
+ * a control packet per second or a log line per attempt.
+ */
+static void tb_test_xdomain_announce_survives_absent_peer(struct kunit *test)
+{
+	struct announce_state a = {};
+
+	announce_arm(&a);
+
+	/* Neighbour powered off for an hour. */
+	announce_run(&a, /*peer_present=*/false, 3600u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_LT(test, a.attempts, 100u);
+	KUNIT_EXPECT_LE(test, a.errs, 8u);
+
+	/* Neighbour powers on: the next scheduled attempt delivers. */
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+static void tb_test_xdomain_uuid_absence_backs_off(struct kunit *test)
+{
+	unsigned int actual_attempts = 0;
+	unsigned int model_attempts = 0;
+	unsigned int actual_ms = 0;
+	unsigned int model_ms = 0;
+	unsigned int failures;
+
+	/* Compare the implementation with an independent state-policy oracle. */
+	for (failures = 0; failures < 10; failures++)
+		KUNIT_EXPECT_EQ(test,
+				tb_test_xdomain_uuid_retry_delay_ms(failures),
+				identity_model_retry_delay_ms(failures));
+
+	/* An hour-long absence must remain discoverable without a probe storm. */
+	for (failures = 0; actual_ms < 3600u * 1000u; failures++) {
+		actual_ms += tb_test_xdomain_uuid_retry_delay_ms(failures);
+		actual_attempts++;
+	}
+	for (failures = 0; model_ms < 3600u * 1000u; failures++) {
+		model_ms += identity_model_retry_delay_ms(failures);
+		model_attempts++;
+	}
+
+	KUNIT_EXPECT_EQ(test, actual_attempts, model_attempts);
+	KUNIT_EXPECT_LT(test, actual_attempts, 100u);
+}
+
+/*
+ * A neighbour that NEVER powers on. Nothing may accumulate: the spacing must
+ * saturate at the ceiling rather than grow the attempt rate, the diagnostics
+ * must stop entirely, and the XDomain must sit in a well-defined
+ * not-registered, not-condemned state -- no latch that would block the
+ * negotiation if the neighbour were powered on afterwards.
+ */
+static void tb_test_xdomain_peer_never_answers_leaves_no_latch(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+	struct announce_state a = {};
+	unsigned int day_ms = 24u * 3600u * 1000u;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, day_ms);
+
+	/* Still trying, at the ceiling, in silence. */
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_FALSE(test, a.delivered);
+	KUNIT_EXPECT_FALSE(test, a.recovery_requested);
+	KUNIT_EXPECT_LE(test, a.errs, TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1u);
+	KUNIT_EXPECT_EQ(test, tb_xdomain_announce_delay_ms(a.failures),
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				TB_XDOMAIN_ANNOUNCE_MAX_SHIFT);
+	/* A day of absence costs one packet per ceiling period, no more. */
+	KUNIT_EXPECT_LE(test, a.attempts,
+			day_ms / (TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				  TB_XDOMAIN_ANNOUNCE_MAX_SHIFT) + 8u);
+
+	/* The XDomain is unregistered but not condemned and not terminal. */
+	KUNIT_EXPECT_FALSE(test, ident_run(&xd, &peer, 512,
+					   /*cm_reconciles=*/false));
+	KUNIT_EXPECT_FALSE(test, xd.enumerated);
+	KUNIT_EXPECT_FALSE(test, xd.unplugged);
+
+	/* And none of that absence latched anything: the peer arriving works. */
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * The field case as it actually happened: the neighbour was powered on hours
+ * after the local host booted. Both halves must still converge.
+ */
+static void tb_test_xdomain_peer_answers_after_many_attempts(struct kunit *test)
+{
+	struct ident_peer peer = { .true_uuid = 0x385a8780u, .answers = false };
+	struct ident_xd xd = { .cached_uuid = IDENT_UUID_PLACEHOLDER };
+	struct announce_state a = {};
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 6u * 3600u * 1000u);
+	ident_run(&xd, &peer, 2048, /*cm_reconciles=*/false);
+	KUNIT_EXPECT_FALSE(test, xd.enumerated);
+
+	peer.answers = true;
+	KUNIT_EXPECT_TRUE(test, ident_run(&xd, &peer, 8,
+					  /*cm_reconciles=*/false));
+	KUNIT_EXPECT_EQ(test, xd.cached_uuid, peer.true_uuid);
+
+	announce_run(&a, /*peer_present=*/true, 5u * 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * A link/peer-present event arriving mid-backoff must restore the fast cadence
+ * rather than leave the announcement parked at the 64 s ceiling: the peer that
+ * just appeared should not wait a minute to hear from us.
+ */
+static void tb_test_xdomain_announce_rearms_mid_backoff(struct kunit *test)
+{
+	struct announce_state a = {};
+	unsigned int before;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 30u * 60u * 1000u);
+	KUNIT_EXPECT_EQ(test, tb_xdomain_announce_delay_ms(a.failures),
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS <<
+				TB_XDOMAIN_ANNOUNCE_MAX_SHIFT);
+
+	/* tb_xdomain_queue_properties_changed() on the peer-present event. */
+	announce_arm(&a);
+	KUNIT_EXPECT_EQ(test, a.failures, 0u);
+
+	before = a.now_ms;
+	announce_tick(&a, /*peer_present=*/true);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+	KUNIT_EXPECT_EQ(test, a.now_ms - before,
+			(unsigned int)TB_XDOMAIN_ANNOUNCE_BASE_MS);
+}
+
+/*
+ * An announcement that never gives up re-queues its own delayed work, so it
+ * must still stop DETERMINISTICALLY: __stop_handshake() publishes the stop
+ * marker before cancel_delayed_work_sync(), and an attempt already inside its
+ * bounded wire wait re-reads that marker instead of re-arming past the cancel.
+ * Otherwise a delayed work outlives suspend or module unload.
+ */
+static void tb_test_xdomain_announce_stops_deterministically(struct kunit *test)
+{
+	struct announce_state a = {};
+	unsigned int attempts;
+
+	announce_arm(&a);
+	announce_run(&a, /*peer_present=*/false, 60u * 1000u);
+	KUNIT_EXPECT_TRUE(test, a.armed);
+
+	/* Stop lands while an attempt is in flight: the stop wins. */
+	announce_tick_stopped_midflight(&a);
+	KUNIT_EXPECT_FALSE(test, a.armed);
+
+	/* Nothing runs afterwards, however long the domain lives. */
+	attempts = a.attempts;
+	announce_run(&a, /*peer_present=*/false, 24u * 3600u * 1000u);
+	KUNIT_EXPECT_EQ(test, a.attempts, attempts);
+	KUNIT_EXPECT_FALSE(test, a.armed);
+
+	/* Resume re-arms it (tb_xdomain_resume -> start_handshake). */
+	announce_arm(&a);
+	KUNIT_EXPECT_FALSE(test, a.stopped);
+	announce_tick(&a, /*peer_present=*/true);
+	KUNIT_EXPECT_TRUE(test, a.delivered);
+}
+
+/*
+ * Discovery and property announcement are separate state machines, but the
+ * announcement machine currently treats every missing response as an absent
+ * peer. That is false when the same, previously proven route is still sending
+ * us control requests: receive progress proves the peer is present while the
+ * repeated announcement timeouts prove that the opposite direction is stuck.
+ * Infinite backoff preserves the broken one-way state forever.
+ *
+ * Keep this as an independent behavioural model. It intentionally goes RED
+ * until the production announcement state machine gains a bounded recovery
+ * transition; merely making the retry timer run forever must not satisfy it.
+ */
+static void
+tb_test_xdomain_one_way_control_failure_requests_recovery(struct kunit *test)
+{
+	struct announce_state a = {
+		.peer_previously_proven = true,
+		.control_state = TB_XDOMAIN_CONTROL_QUIET,
+	};
+	unsigned int i;
+
+	announce_arm(&a);
+	/* Exhaust the fast attempts and reach the saturated backoff state. */
+	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++) {
+		announce_note_concurrent_inbound_peer_control(&a);
+		announce_tick(&a, /*peer_present=*/false);
+	}
+
+	KUNIT_EXPECT_TRUE(test, a.armed);
+	KUNIT_EXPECT_FALSE(test, a.delivered);
+	KUNIT_EXPECT_TRUE(test, a.peer_previously_proven);
+	KUNIT_EXPECT_TRUE(test, a.inbound_peer_control);
+	KUNIT_EXPECT_TRUE(test, a.recovery_requested);
+}
+
+static void tb_test_xdomain_control_recovery_is_bounded(struct kunit *test)
+{
+	enum tb_xdomain_control_state state = TB_XDOMAIN_CONTROL_UNPROVEN;
+
+	/* Discovery proof alone never resets a controller. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_PEER_PROVEN);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_QUIET);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_QUIET);
+
+	/* Inbound progress supplies the independent opposite-direction proof. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_INBOUND_PROGRESS);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_PEER_ACTIVE);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUIRED);
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_RECOVERY_DISPATCHED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED);
+
+	/* Repeated failures cannot dispatch a second recovery episode. */
+	state = tb_xdomain_control_next(state,
+					TB_XDOMAIN_CONTROL_OUTBOUND_SATURATED);
+	KUNIT_EXPECT_EQ(test, state,
+			TB_XDOMAIN_CONTROL_RECOVERY_REQUESTED);
+	state = tb_xdomain_control_next(state, TB_XDOMAIN_CONTROL_STOPPED);
+	KUNIT_EXPECT_EQ(test, state, TB_XDOMAIN_CONTROL_UNPROVEN);
+}
+
+static void
+tb_test_xdomain_stale_inbound_does_not_request_control_recovery(struct kunit *test)
+{
+	struct announce_state a = {
+		.peer_previously_proven = true,
+		.control_state = TB_XDOMAIN_CONTROL_QUIET,
+	};
+	unsigned int i;
+
+	announce_arm(&a);
+	/* The peer spoke before this sequence of outbound failures began. */
+	announce_note_inbound_peer_control(&a);
+	for (i = 0; i <= TB_XDOMAIN_ANNOUNCE_MAX_SHIFT + 1; i++)
+		announce_tick(&a, /*peer_present=*/false);
+
+	KUNIT_EXPECT_FALSE(test, a.recovery_requested);
+	KUNIT_EXPECT_FALSE(test,
+			   tb_xdomain_control_inbound_since(200, 199));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_xdomain_control_inbound_since(200, 200));
+}
+
+/*
+ * A sysfs/CM reader may hold tb->lock while synchronously waiting for an ICM
+ * reply.  Ring 0 RX must therefore not perform the source-XDomain lookup or a
+ * service callback inline: if it blocks on tb->lock, it is also the only worker
+ * capable of delivering the reply that releases tb->lock.  This is the exact
+ * three-party stall observed after a coordinated reload (lock owner, ring 0
+ * worker, and frame requester), expressed as a dispatch policy rather than a
+ * timing-dependent mutex test.
+ */
+static void
+tb_test_xdomain_request_and_response_dispatch_are_separate(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_rx_dispatch_mode(TB_XDOMAIN_RX_DISCOVERY_REQUEST),
+		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_service_dispatch_mode(false),
+		TB_XDOMAIN_RX_DISPATCH_DEFERRED);
+
+	/*
+	 * A response is owned by the already-armed peer waiter.  Reporting it
+	 * consumed merely because handler dispatch was queued loses the reply
+	 * before tb_cfg_request_find() can complete that waiter.
+	 */
+	KUNIT_EXPECT_EQ(test,
+		tb_xdomain_service_dispatch_mode(true),
+		TB_XDOMAIN_RX_DISPATCH_INLINE);
+}
+
+/*
+ * The placeholder predicate, against the identities actually read off the
+ * fleet on 2026-08-25. Only an ALL-ones UUID is the absence of a peer: with no
+ * powered router behind the link every config dword reads back all-ones, so
+ * all 16 bytes are 0xff.
+ *
+ * The low half alone is NOT a placeholder signal on this hardware. Maple Ridge
+ * controllers genuinely report an all-ones low half and distinguish themselves
+ * in the high half. Testing the low half classified every one of them as "no
+ * peer", which folded a successful UUID read into -ENODATA and left the
+ * XDomain looping in state UUID forever -- appmana-019 against appmana-027,
+ * while 027's announcements were arriving normally the whole time.
+ */
+static void tb_test_xdomain_placeholder_uuid_predicate(struct kunit *test)
+{
+	/* No powered router behind the link: every dword reads all-ones. */
+	static const u8 absent_peer[16] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* appmana-019's OWN root switch: 385a8780-0004-402c-ffff-ffffffffffff */
+	static const u8 real_019[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x04, 0x40, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* appmana-027: 5bdf8780-004d-b184-ffff-ffffffffffff */
+	static const u8 real_027[16] = {
+		0x5b, 0xdf, 0x87, 0x80, 0x00, 0x4d, 0xb1, 0x84,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* appmana-008: 385a8780-0025-7a2c-ffff-ffffffffffff */
+	static const u8 real_008[16] = {
+		0x38, 0x5a, 0x87, 0x80, 0x00, 0x25, 0x7a, 0x2c,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+	/* appmana-004 (Titan Ridge, no all-ones tail at all). */
+	static const u8 real_004[16] = {
+		0xcc, 0x03, 0x00, 0x00, 0x00, 0x70, 0x7c, 0x0e,
+		0x83, 0xa2, 0xd8, 0x22, 0x06, 0xa4, 0x89, 0x24,
+	};
+	/* One byte short of all-ones: still an answer, not an absence. */
+	static const u8 nearly[16] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+	};
+
+	KUNIT_EXPECT_TRUE(test, tb_xdomain_uuid_is_placeholder(absent_peer));
+
+	/* Every one of these is a live peer that must be reachable. */
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_019));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_027));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_008));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(real_004));
+	KUNIT_EXPECT_FALSE(test, tb_xdomain_uuid_is_placeholder(nearly));
+
+	/* Distinct boards must not collapse to the same "identity". */
+	KUNIT_EXPECT_NE(test, 0, memcmp(real_019, real_027, 16));
+	KUNIT_EXPECT_NE(test, 0, memcmp(real_019, real_008, 16));
+}
+
+/*
  * NHI ring callbacks can consume an entire completed descriptor batch. The
  * 32-QP USB4 RDMA reproducer observed ring_work monopolizing a bound worker
  * for >10 ms before the first transport loss. Keep that potentially long
@@ -3490,6 +7048,17 @@ static void tb_test_ring_descriptor_is_one_complete_word(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			tb_test_ring_descriptor_word(0xabc, 3, 1, 0xc),
 			(u32)0x00c13abc);
+}
+
+/*
+ * Stopping a ring transfers descriptor ownership back to software.  Posted
+ * disable/clear writes alone do not complete that transfer: freeing or
+ * reusing the coherent ring before a readback and engine-settle interval can
+ * replay the old descriptor state through the replacement ring.
+ */
+static void tb_test_ring_stop_flushes_before_descriptor_reuse(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, tb_nhi_ring_stop_reuse_safe());
 }
 
 /*
@@ -3697,6 +7266,28 @@ static void tb_test_xdomain_bonding_rearm_predicates(struct kunit *test)
 }
 
 /*
+ * A peer that explicitly rejects link-state negotiation has supplied a
+ * capability result, not a transient failure.  Once direct bonding is no
+ * longer eligible, the enumerated-state re-arm must remember that result and
+ * must not resurrect the unsupported request.
+ */
+static void tb_test_xdomain_unsupported_bonding_is_not_rearmed(struct kunit *test)
+{
+	bool possible;
+
+	possible = tb_test_xdomain_bonding_after(true, -EOPNOTSUPP, false);
+	KUNIT_EXPECT_FALSE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, -EOPNOTSUPP, true);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, -ETIMEDOUT, false);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(true, 0, false);
+	KUNIT_EXPECT_TRUE(test, possible);
+	possible = tb_test_xdomain_bonding_after(false, 0, false);
+	KUNIT_EXPECT_FALSE(test, possible);
+}
+
+/*
  * ICM owns physical-lane cleanup.  On appmana-025, module removal received an
  * ICM XDomain-disconnected notification after the NHI had stopped answering.
  * Link exit tried tb_port_lane_bonding_disable(), blocked in a config read,
@@ -3707,6 +7298,12 @@ static void tb_test_xdomain_icm_teardown_never_touches_lane_hardware(struct kuni
 	KUNIT_EXPECT_FALSE_MSG(test,
 		tb_test_xdomain_link_exit_touches_lane_hardware(true, 3),
 		"firmware-CM teardown must not issue synchronous lane register I/O after an XDomain disconnect");
+}
+
+static void tb_test_xdomain_unplugged_teardown_never_touches_lane_hardware(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+			   tb_test_xdomain_unplugged_link_exit_touches_lane_hardware());
 }
 
 /*
@@ -3826,8 +7423,8 @@ static void tb_test_xdomain_handler_dispatch_source_blind_registrant(struct kuni
 	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(handler), 0);
 
 	KUNIT_EXPECT_TRUE(test,
-		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
-					  &ctx->pkt, sizeof(ctx->pkt)));
+		tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt,
+						 sizeof(ctx->pkt)));
 
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->stock_calls), 1);
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->wrong_calls), 0);
@@ -3859,8 +7456,7 @@ static int tb_test_handler_dispatch_thread(void *arg)
 {
 	struct handler_test_ctx *ctx = arg;
 
-	tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ, &ctx->pkt,
-				  sizeof(ctx->pkt));
+	tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt, sizeof(ctx->pkt));
 	complete(&ctx->dispatch_done);
 	return 0;
 }
@@ -3941,8 +7537,8 @@ static void tb_test_xdomain_handler_unregister_waits_for_dispatch(struct kunit *
 	KUNIT_ASSERT_EQ(test, tb_register_protocol_handler(new_inst), 0);
 
 	KUNIT_EXPECT_TRUE(test,
-		tb_xdomain_handle_request(ctx->tb, TB_CFG_PKG_XDOMAIN_REQ,
-					  &ctx->pkt, sizeof(ctx->pkt)));
+		tb_test_xdomain_dispatch_service(ctx->tb, &ctx->pkt,
+						 sizeof(ctx->pkt)));
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->xd_calls), 1);
 	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->blocking_calls), 1);
 
@@ -3971,8 +7567,823 @@ static void tb_test_xdomain_error_match_is_route_checked(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, tb_test_xdomain_error_pkg_matches(0x3, 0x1));
 }
 
+/*
+ * A domain whose root switch failed to initialise still has a live ring 0,
+ * so an inbound XDomain request can reach the lookup with tb->root_switch
+ * still NULL. Field crash (appmana-023, 2026-08-24, stack 2.46):
+ *   thunderbolt 0-0: failed to initialize port 1
+ *   BUG: kernel NULL pointer dereference at switch_find_xdomain+0x11
+ *   tb_xdomain_handle_request <- tb_domain_event_cb <- tb_ctl_rx_callback
+ * The lookup must answer "no such XDomain" instead of dereferencing.
+ */
+static void tb_test_xdomain_lookup_without_root_switch(struct kunit *test)
+{
+	struct tb *tb;
+	uuid_t uuid;
+
+	tb = kunit_kzalloc(test, sizeof(*tb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, tb);
+	tb->root_switch = NULL;
+	uuid_gen(&uuid);
+
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_uuid(tb, &uuid), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_link_depth(tb, 1, 1), NULL);
+	/*
+	 * The route lookup is the one the appmana-023 oops actually came
+	 * through: tb_xdomain_handle_request -> tb_xdomain_find_by_route_locked
+	 * -> tb_xdomain_find_by_route. Cover the reported path, not just its
+	 * siblings.
+	 */
+	KUNIT_EXPECT_PTR_EQ(test, tb_xdomain_find_by_route(tb, 0x301), NULL);
+}
+
+/*
+ * A firmware image having a reset vector does not establish a supported live
+ * recovery contract. The reference driver uses the ARC bits only for startup
+ * and never attempts this reset after an ICM timeout, so every family must
+ * fail closed unless a documented and independently tested sequence exists.
+ */
+static void tb_test_icm_maple_skips_legacy_allow_all(struct kunit *test)
+{
+	u16 device;
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI;
+	KUNIT_EXPECT_FALSE(test, tb_icm_uses_legacy_allow_all(device));
+
+	device = PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI;
+	KUNIT_EXPECT_FALSE(test, tb_icm_uses_legacy_allow_all(device));
+
+	device = PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI;
+	KUNIT_EXPECT_TRUE(test, tb_icm_uses_legacy_allow_all(device));
+}
+
+static void tb_test_icm_warm_restart_is_unsupported(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI));
+
+	/* Titan/Alpine Ridge: mask-ROM-only re-auth, warm restart is terminal. */
+	KUNIT_EXPECT_FALSE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI));
+	KUNIT_EXPECT_FALSE(test,
+		tb_icm_warm_restart_supported(PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_4C_NHI));
+
+	/* Anything unexamined stays refused: the default must be the safe one. */
+	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0x0000));
+	KUNIT_EXPECT_FALSE(test, tb_icm_warm_restart_supported(0xffff));
+}
+
+/* A trained lane whose peer router does not answer must remain retryable. */
+static void tb_test_cm_plug_synth_scan_fails_keeps_retrying(struct kunit *test)
+{
+	struct cm_host h;
+	int i;
+
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_peer_attach_router_mute(&h, 0);
+
+	for (i = 0; i < 200; i++)
+		cm_reconcile(&h);
+
+	/* Nothing can enumerate behind a mute router. */
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+	/*
+	 * But the port must not be abandoned after one attempt: the peer can
+	 * start answering at any time (a neighbour finishing its boot), and
+	 * only a retry discovers that.
+	 */
+	KUNIT_EXPECT_GT(test, h.port[0].plug_synth_failed, 1);
+	/* Bounded, not a hot loop: one attempt per quiet window at most. */
+	KUNIT_EXPECT_LE(test, h.port[0].plug_synth_failed,
+			200 / CM_RETRAIN_QUIET_PASSES + 1);
+}
+
+/* A later response must let the bounded retry enumerate without a new edge. */
+static void tb_test_cm_plug_synth_recovers_when_router_answers(struct kunit *test)
+{
+	struct cm_host h;
+	int i;
+
+	memset(&h, 0, sizeof(h));
+	cm_arm_hotplug(&h);
+	cm_peer_attach_router_mute(&h, 0);
+
+	for (i = 0; i < 60; i++)
+		cm_reconcile(&h);
+	KUNIT_EXPECT_FALSE(test, h.port[0].xdomain);
+
+	/* The neighbour finishes booting; its router answers config space. */
+	h.port[0].router_mute = false;
+
+	for (i = 0; i < 60; i++)
+		cm_reconcile(&h);
+	KUNIT_EXPECT_TRUE(test, h.port[0].xdomain);
+}
+
+static void tb_test_xdomain_response_match_follows_protocol_model(struct kunit *test)
+{
+	const u32 protocol = 0x584450;
+	struct xdp_match_model_request request = {
+		.route = 0x3,
+		.type = UUID_REQUEST,
+		.sequence = 2,
+		.response_capacity = sizeof(struct tb_xdp_uuid_response),
+		.protocol = protocol,
+	};
+	struct xdp_match_model_response response = {
+		.route = 0x3,
+		.type = UUID_RESPONSE,
+		.sequence = 2,
+		.size = sizeof(struct tb_xdp_uuid_response),
+		.declared_size = sizeof(struct tb_xdp_uuid_response),
+		.protocol = protocol,
+	};
+#define EXPECT_MATCH_MODEL() do { \
+	bool expected = xdp_match_model_matches(&request, &response); \
+	bool actual = tb_test_xdomain_response_pkg_matches( \
+		request.route, request.type, request.sequence, \
+		request.response_capacity, response.route, response.type, \
+		response.sequence, response.size, response.declared_size, \
+		response.protocol == request.protocol); \
+	KUNIT_EXPECT_EQ(test, actual, expected); \
+} while (0)
+
+	/* Control: a complete response to the active request is accepted. */
+	EXPECT_MATCH_MODEL();
+
+	/* A late response from the previous sequence cannot complete this one. */
+	response.sequence = 1;
+	EXPECT_MATCH_MODEL();
+	response.sequence = request.sequence;
+
+	/* A response to another operation on the same route is not interchangeable. */
+	response.type = PROPERTIES_CHANGED_RESPONSE;
+	response.size = sizeof(struct tb_xdp_properties_changed_response);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.type = UUID_RESPONSE;
+
+	/* Lengths are bytes: reject both truncation and capacity overflow. */
+	response.size = sizeof(struct tb_xdp_header);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.size = request.response_capacity + sizeof(u32);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+	response.size = sizeof(struct tb_xdp_uuid_response);
+	response.declared_size = response.size;
+
+	/* The header and received frame must agree on the packet length. */
+	response.declared_size -= sizeof(u32);
+	EXPECT_MATCH_MODEL();
+	response.declared_size = response.size;
+
+	response.route = 0x1;
+	EXPECT_MATCH_MODEL();
+	response.route = request.route;
+	response.protocol ^= 1;
+	EXPECT_MATCH_MODEL();
+
+	/* Properties replies are variable length and need not fill capacity. */
+	request.type = PROPERTIES_REQUEST;
+	request.response_capacity = sizeof(struct tb_xdp_properties_response) +
+				    16 * sizeof(u32);
+	response.type = PROPERTIES_RESPONSE;
+	response.size = sizeof(struct tb_xdp_properties_response);
+	response.declared_size = response.size;
+	response.protocol = request.protocol;
+	EXPECT_MATCH_MODEL();
+
+	/* A protocol error is a valid completion for the active request. */
+	response.type = ERROR_RESPONSE;
+	response.size = sizeof(struct tb_xdp_error_response);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+
+	/*
+	 * The successful properties-changed response contains exactly the
+	 * common XDP envelope.  Do not derive this wire size from the Linux
+	 * success/error union: its larger error arm is not present here.
+	 */
+	request.type = PROPERTIES_CHANGED_REQUEST;
+	request.response_capacity =
+		sizeof(struct tb_xdp_properties_changed_response);
+	response.type = PROPERTIES_CHANGED_RESPONSE;
+	response.size = sizeof(struct tb_xdp_header);
+	response.declared_size = response.size;
+	EXPECT_MATCH_MODEL();
+
+#undef EXPECT_MATCH_MODEL
+}
+
+static void tb_test_xdomain_service_response_payload_is_opaque(struct kunit *test)
+{
+	const size_t request_size = 92;
+	const size_t response_size = 100;
+	bool matches;
+
+	/*
+	 * A service protocol owns everything after the common route/length/UUID
+	 * prefix. Its request and response need not use native XDP opcodes there.
+	 */
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_TRUE(test, matches);
+
+	/* The common XDomain envelope remains part of request ownership. */
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x3, 0, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 1, response_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, response_size,
+							     response_size, false);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0, response_size,
+							     0x1, 0, request_size,
+							     response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+	matches =
+		tb_test_xdomain_service_response_pkg_matches(0x1, 0,
+							     response_size - sizeof(u32), 0x1, 0,
+							     response_size, response_size, true);
+	KUNIT_EXPECT_FALSE(test, matches);
+}
+
+static void tb_test_xdomain_native_error_fails_request(struct kunit *test)
+{
+	/* Native control errors complete the request, but never as success. */
+	KUNIT_EXPECT_EQ(test, tb_test_xdomain_native_error_result(), 1);
+}
+
+/*
+ * Control-channel liveness (ctl.h). These gate whether tb_stop() is allowed to
+ * push config space I/O at the controller during teardown -- see the
+ * appmana-019 CIO hang recorded there.
+ */
+static void tb_test_ctl_liveness_threshold(struct kunit *test)
+{
+	/* A quiet channel and short stalls are not "dead". */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(0));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(1));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(2));
+
+	/* Three in a row is the verdict, and it stays put above it. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(3));
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(4));
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(9999));
+}
+
+static void tb_test_ctl_xdomain_tx_status_classification(struct kunit *test)
+{
+	struct icm_tr_pkg_xdomain_packet_response status = {
+		.hdr = {
+			.code = ICM_XDOMAIN_PACKET,
+			.packet_id = 0,
+			.total_packets = 1,
+		},
+	};
+	struct ctl_rx_packet_model packet = {
+		.eof = TB_CFG_PKG_ICM_RESP,
+		.size = sizeof(status),
+		.code = status.hdr.code,
+		.flags = status.hdr.flags,
+		.packet_id = status.hdr.packet_id,
+		.total_packets = status.hdr.total_packets,
+	};
+#define EXPECT_TX_STATUS() do { \
+	bool expected = ctl_model_is_xdomain_tx_status(&packet); \
+	bool actual = tb_ctl_is_xdomain_tx_status(packet.eof, &status, \
+						     packet.size); \
+	KUNIT_EXPECT_EQ(test, actual, expected); \
+} while (0)
+
+	/* Success and error completions are both local transmit status. */
+	EXPECT_TX_STATUS();
+	status.hdr.flags = ICM_FLAGS_ERROR;
+	packet.flags = status.hdr.flags;
+	EXPECT_TX_STATUS();
+	status.hdr.flags = 0;
+	packet.flags = 0;
+
+	/* The peer's end-to-end response remains a separate packet. */
+	packet.eof = TB_CFG_PKG_XDOMAIN_RESP;
+	EXPECT_TX_STATUS();
+	packet.eof = TB_CFG_PKG_ICM_RESP;
+
+	status.hdr.code = ICM_DISCONNECT_XDOMAIN;
+	packet.code = status.hdr.code;
+	EXPECT_TX_STATUS();
+	status.hdr.code = ICM_XDOMAIN_PACKET;
+	packet.code = status.hdr.code;
+
+	status.hdr.packet_id = 1;
+	packet.packet_id = status.hdr.packet_id;
+	EXPECT_TX_STATUS();
+	status.hdr.packet_id = 0;
+	packet.packet_id = 0;
+
+	status.hdr.total_packets = 2;
+	packet.total_packets = status.hdr.total_packets;
+	EXPECT_TX_STATUS();
+	status.hdr.total_packets = 1;
+	packet.total_packets = 1;
+
+	packet.size = sizeof(status) - sizeof(u32);
+	EXPECT_TX_STATUS();
+	packet.size = sizeof(status) + sizeof(u32);
+	EXPECT_TX_STATUS();
+
+#undef EXPECT_TX_STATUS
+}
+
+static void tb_test_ctl_split_state_records_local_acceptance(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_WAITING);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+/*
+ * Submission can consume nearly the whole response budget. If the deadline
+ * passes between checking it and subtracting the current tick, unsigned
+ * underflow must not turn a millisecond-scale timeout into an unbounded wait.
+ */
+static void tb_test_ctl_response_deadline_cannot_underflow(struct kunit *test)
+{
+	unsigned long deadline = 100;
+	unsigned long now = deadline + 1;
+
+	KUNIT_EXPECT_EQ(test, 0ul,
+			tb_cfg_deadline_remaining(now, deadline));
+}
+
+static void tb_test_ctl_split_state_preserves_accept_on_peer_timeout(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
+}
+
+static void tb_test_ctl_peer_timeout_keeps_local_command_waiting(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+
+	/* The peer deadline cannot stand in for the independent local deadline. */
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_WAITING);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_FAIL);
+	KUNIT_EXPECT_TRUE(test, tb_cfg_local_slot_is_owned(state.local));
+}
+
+static void tb_test_ctl_stop_releases_both_request_machines(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	unsigned long flags = BIT(TB_CFG_REQUEST_CANCELED) |
+			      BIT(TB_CFG_REQUEST_STOPPED);
+
+	tb_cfg_request_stop_state(&state);
+
+	KUNIT_EXPECT_FALSE(test, tb_cfg_local_slot_is_owned(state.local));
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_CANCELED);
+	KUNIT_EXPECT_TRUE(test, tb_cfg_request_work_runs_callback(flags));
+}
+
+static void tb_test_ctl_local_status_slot_blocks_reuse(struct kunit *test)
+{
+	/* The first command can claim an empty completion slot. */
+	KUNIT_EXPECT_TRUE(test, tb_cfg_local_slot_may_claim(false));
+	/* An unsequenced completion makes reuse while occupied unsafe. */
+	KUNIT_EXPECT_FALSE(test, tb_cfg_local_slot_may_claim(true));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_WAITING));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_ACCEPTED));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_FAILED));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_local_slot_is_owned(TB_CFG_LOCAL_TIMED_OUT));
+}
+
+static void
+tb_test_ctl_icm_and_xdomain_commands_do_not_overlap(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_request_owns_command_slot(TB_CFG_PKG_XDOMAIN_REQ));
+	KUNIT_EXPECT_TRUE(test,
+			  tb_cfg_request_owns_command_slot(TB_CFG_PKG_ICM_CMD));
+	KUNIT_EXPECT_FALSE(test,
+			   tb_cfg_request_owns_command_slot(TB_CFG_PKG_WRITE));
+}
+
+static void tb_test_ctl_all_xdomain_packets_own_local_completion(struct kunit *test)
+{
+	const bool expects_peer_response[] = { true, false };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(expects_peer_response); i++) {
+		struct ctl_xdomain_packet_model model;
+		struct tb_cfg_request_state actual;
+		bool has_local_classifier;
+
+		model = ctl_model_xdomain_packet(expects_peer_response[i]);
+		actual = tb_test_xdomain_packet_state(expects_peer_response[i],
+						      &has_local_classifier);
+
+		KUNIT_EXPECT_EQ(test, has_local_classifier,
+				model.owns_local_completion);
+		KUNIT_EXPECT_EQ(test,
+				tb_cfg_local_slot_is_owned(actual.local),
+				model.owns_local_completion);
+		KUNIT_EXPECT_EQ(test, actual.peer == TB_CFG_PEER_WAITING,
+				model.waits_for_peer);
+	}
+}
+
+static void tb_test_ctl_local_only_packet_reaches_terminal_state(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_DISABLED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_service_response_does_not_wait_in_rx_dispatch(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, tb_test_xdomain_response_should_defer(),
+			ctl_model_service_response_deferred());
+}
+
+static void tb_test_ctl_local_only_result_matches_command_status(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_ACCEPTED, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_ACCEPTED, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_FAILED, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_FAILED, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_TIMED_OUT, 0),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_TIMED_OUT, 0));
+	KUNIT_EXPECT_EQ(test,
+		tb_cfg_local_only_result(TB_CFG_LOCAL_TIMED_OUT, -ESHUTDOWN),
+		ctl_model_local_only_result(CTL_SUBMIT_MODEL_TIMED_OUT,
+					    -ESHUTDOWN));
+}
+
+static void tb_test_ctl_response_retries_only_firmware_rejection(struct kunit *test)
+{
+#define EXPECT_RETRY(_failed, _timed_out, _result, _attempt) \
+	KUNIT_EXPECT_EQ(test, \
+		tb_test_xdomain_response_should_retry((_failed), (_timed_out), \
+						       (_result), (_attempt)), \
+		ctl_model_response_should_retry((_failed), (_timed_out), \
+						(_result), (_attempt)))
+
+	EXPECT_RETRY(true, false, -EIO, 0);
+	EXPECT_RETRY(true, false, -EIO, 8);
+	EXPECT_RETRY(true, false, -EIO, 9);
+	EXPECT_RETRY(false, true, -ETIMEDOUT, 0);
+	EXPECT_RETRY(false, false, -EIO, 0);
+	EXPECT_RETRY(false, false, -ESHUTDOWN, 0);
+
+#undef EXPECT_RETRY
+}
+
+static void
+tb_test_ctl_request_retries_only_firmware_rejection(struct kunit *test)
+{
+	const struct {
+		bool failed;
+		bool timed_out;
+		int result;
+		unsigned int attempt;
+	} cases[] = {
+		{ true, false, -EIO, 0 },
+		{ true, false, -EIO, 8 },
+		{ true, false, -EIO, 9 },
+		{ false, true, -ETIMEDOUT, 0 },
+		{ false, false, -EIO, 0 },
+		{ false, false, -ESHUTDOWN, 0 },
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		const typeof(cases[0]) *c = &cases[i];
+		unsigned int attempt = c->attempt;
+		bool failed = c->failed;
+		bool timed_out = c->timed_out;
+		int result = c->result;
+		bool actual, expected;
+
+		actual = tb_test_xdomain_request_should_retry(failed, timed_out, result, attempt);
+		expected = ctl_model_response_should_retry(failed, timed_out, result, attempt);
+		KUNIT_EXPECT_EQ(test, actual, expected);
+	}
+}
+
+static void
+tb_test_ctl_peer_waiter_is_independent_of_local_sender(struct kunit *test)
+{
+	struct tb_cfg_request_state peer_only = {
+		.local = TB_CFG_LOCAL_DISABLED,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	struct tb_cfg_request_state local_only = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+	struct tb_cfg_request_state generic = {
+		.local = TB_CFG_LOCAL_DISABLED,
+		.peer = TB_CFG_PEER_DISABLED,
+	};
+
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&peer_only),
+			(int)ctl_model_request_match_owner(false, true));
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&local_only),
+			(int)ctl_model_request_match_owner(true, false));
+	KUNIT_EXPECT_EQ(test, (int)tb_cfg_request_match_owner(&generic),
+			(int)ctl_model_request_match_owner(false, false));
+}
+
+static void tb_test_ctl_local_status_error_does_not_abort_peer(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_WAITING);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+
+	/* Only the independently identifiable peer response is terminal. */
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_FAILED);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_COMPLETE);
+}
+
+static void tb_test_ctl_split_state_peer_response_is_independent(struct kunit *test)
+{
+	struct tb_cfg_request_state state = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	enum tb_cfg_request_action action;
+
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, state.local, TB_CFG_LOCAL_WAITING);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_COMPLETE);
+
+	/* The peer terminal state is first-wins. */
+	action = tb_cfg_request_state_step(&state,
+					   TB_CFG_REQUEST_EVENT_PEER_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, state.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, action, TB_CFG_REQUEST_ACTION_NONE);
+}
+
+static void tb_test_ctl_xdomain_tx_status_route_correlation(struct kunit *test)
+{
+	enum tb_cfg_request_event event;
+
+	event = tb_test_xdomain_intermediate_event(0x3, 0x3, false);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	event = tb_test_xdomain_intermediate_event(0x3, 0x3, true);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	event = tb_test_xdomain_intermediate_event(0x3, 0x1, false);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_NONE);
+	event = tb_test_xdomain_intermediate_event(0x1, 0x3, true);
+	KUNIT_EXPECT_EQ(test, event, TB_CFG_REQUEST_EVENT_NONE);
+}
+
+static void tb_test_ctl_timeout_route_decode(struct kunit *test)
+{
+	struct tb_xdomain_header xdomain = {
+		.route_hi = 0x12,
+		.route_lo = 0x3456789a,
+	};
+	struct tb_cfg_header config = tb_cfg_make_header(0x123456789aULL);
+
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_REQ, &xdomain,
+					     sizeof(xdomain)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_RESP, &xdomain,
+					     sizeof(xdomain)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_READ, &config,
+					     sizeof(config)),
+			0x123456789aULL);
+	KUNIT_EXPECT_EQ(test,
+			tb_cfg_request_route(TB_CFG_PKG_XDOMAIN_REQ, &xdomain,
+					     sizeof(xdomain) - 1),
+			0ULL);
+}
+
+static void tb_test_ctl_split_state_matches_independent_model(struct kunit *test)
+{
+	struct ctl_transaction_model model = {
+		.submit = CTL_SUBMIT_MODEL_WAITING,
+		.peer = CTL_PEER_MODEL_WAITING,
+	};
+	struct tb_cfg_request_state actual = {
+		.local = TB_CFG_LOCAL_WAITING,
+		.peer = TB_CFG_PEER_WAITING,
+	};
+	struct ctl_transaction_model failed_model = model;
+	struct tb_cfg_request_state failed_actual = actual;
+	enum ctl_transaction_model_action model_action;
+	enum tb_cfg_request_action actual_action;
+
+	model_action = ctl_model_transaction_step(&model, CTL_TRANSACTION_MODEL_LOCAL_ACCEPTED);
+	actual_action = tb_cfg_request_state_step(&actual, TB_CFG_REQUEST_EVENT_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, model.submit, CTL_SUBMIT_MODEL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, model.peer, CTL_PEER_MODEL_WAITING);
+	KUNIT_ASSERT_EQ(test, model_action, CTL_TRANSACTION_MODEL_NONE);
+	KUNIT_ASSERT_EQ(test, actual.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_ASSERT_EQ(test, actual.peer, TB_CFG_PEER_WAITING);
+	KUNIT_ASSERT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_NONE);
+
+	model_action = ctl_model_transaction_step(&model, CTL_TRANSACTION_MODEL_PEER_MATCHED);
+	actual_action = tb_cfg_request_state_step(&actual, TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, model.submit, CTL_SUBMIT_MODEL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, model.peer, CTL_PEER_MODEL_MATCHED);
+	KUNIT_EXPECT_EQ(test, model_action, CTL_TRANSACTION_MODEL_COMPLETE);
+	KUNIT_EXPECT_EQ(test, actual.local, TB_CFG_LOCAL_ACCEPTED);
+	KUNIT_EXPECT_EQ(test, actual.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_COMPLETE);
+
+	model_action =
+		ctl_model_transaction_step(&failed_model,
+					   CTL_TRANSACTION_MODEL_LOCAL_FAILED);
+	actual_action =
+		tb_cfg_request_state_step(&failed_actual,
+					  TB_CFG_REQUEST_EVENT_LOCAL_FAILED);
+	KUNIT_ASSERT_EQ(test, failed_model.submit, CTL_SUBMIT_MODEL_FAILED);
+	KUNIT_ASSERT_EQ(test, failed_model.peer, CTL_PEER_MODEL_WAITING);
+	KUNIT_ASSERT_EQ(test, model_action, CTL_TRANSACTION_MODEL_NONE);
+	KUNIT_ASSERT_EQ(test, failed_actual.local, TB_CFG_LOCAL_FAILED);
+	KUNIT_ASSERT_EQ(test, failed_actual.peer, TB_CFG_PEER_WAITING);
+	KUNIT_ASSERT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_NONE);
+
+	model_action =
+		ctl_model_transaction_step(&failed_model,
+					   CTL_TRANSACTION_MODEL_PEER_MATCHED);
+	actual_action =
+		tb_cfg_request_state_step(&failed_actual,
+					  TB_CFG_REQUEST_EVENT_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, failed_model.peer, CTL_PEER_MODEL_MATCHED);
+	KUNIT_EXPECT_EQ(test, model_action, CTL_TRANSACTION_MODEL_COMPLETE);
+	KUNIT_EXPECT_EQ(test, failed_actual.peer, TB_CFG_PEER_MATCHED);
+	KUNIT_EXPECT_EQ(test, actual_action, TB_CFG_REQUEST_ACTION_COMPLETE);
+}
+
+static void tb_test_ctl_liveness_matched_reply_clears(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	for (i = 0; i < 5; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+	KUNIT_EXPECT_EQ(test, n, 5);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/* One reply we actually asked for and the channel is live again. */
+	n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_MATCHED);
+	KUNIT_EXPECT_EQ(test, n, 0);
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
+static void tb_test_ctl_liveness_unmatched_reply_does_not_clear(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	for (i = 0; i < TB_CTL_DEAD_TIMEOUTS; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/*
+	 * Ring 0 still moves packets, but they pair with nothing. That is the
+	 * degraded state, not recovery: the verdict must NOT be cleared, or
+	 * teardown resumes writing into a controller that is already going.
+	 */
+	for (i = 0; i < 20; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_UNMATCHED);
+	KUNIT_EXPECT_EQ(test, n, TB_CTL_DEAD_TIMEOUTS);
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
+static void tb_test_ctl_teardown_timeout_opens_request_circuit(struct kunit *test)
+{
+	/* Normal operation tolerates a transient timeout. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_request_may_start(true, false, 1));
+
+	/* Best-effort teardown may make one attempt while the channel is clean. */
+	KUNIT_EXPECT_TRUE(test, tb_ctl_request_may_start(true, true, 0));
+
+	/* Its first unanswered request must prevent a second hardware request. */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(true, true, 1));
+
+	/* A stopped control channel never accepts work in either phase. */
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(false, false, 0));
+	KUNIT_EXPECT_FALSE(test, tb_ctl_request_may_start(false, true, 0));
+}
+
+static void tb_test_ctl_liveness_appmana_019_sequence(struct kunit *test)
+{
+	int n = 0;
+	int i;
+
+	/* 16:26 -- software CM healthy, matched replies flowing. */
+	for (i = 0; i < 900; i++)
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_MATCHED);
+	KUNIT_EXPECT_FALSE(test, tb_ctl_timeouts_indicate_dead(n));
+
+	/*
+	 * 17:21..17:30 -- rx_matched frozen, rx_unmatched climbing, every
+	 * request timing out. This is where the old code would still have run
+	 * a full config space teardown on rmmod.
+	 */
+	for (i = 0; i < 112; i++) {
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_TIMEOUT);
+		n = tb_ctl_liveness_next(n, TB_CTL_EVENT_REPLY_UNMATCHED);
+	}
+	KUNIT_EXPECT_TRUE(test, tb_ctl_timeouts_indicate_dead(n));
+}
+
+static void tb_test_icm_phy_reset_covers_single_lane_links(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, tb_icm_phy_port_needs_reset(false, false));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(true, false));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(false, true));
+	KUNIT_EXPECT_TRUE(test, tb_icm_phy_port_needs_reset(true, true));
+}
+
 static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_ring_descriptor_is_one_complete_word),
+	KUNIT_CASE(tb_test_ring_stop_flushes_before_descriptor_reuse),
 	KUNIT_CASE(tb_test_ring_work_uses_unbound_queue),
 	KUNIT_CASE(tb_test_xdomain_gen4_single_lane_negotiates_bonding),
 	KUNIT_CASE(tb_test_xdomain_icm_still_initializes_link),
@@ -3985,8 +8396,10 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_recovers_boot_skew),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_bounded_and_safe),
 	KUNIT_CASE(tb_test_xdomain_bonding_rearm_predicates),
+	KUNIT_CASE(tb_test_xdomain_unsupported_bonding_is_not_rearmed),
 	KUNIT_CASE(tb_test_xdomain_error_match_is_route_checked),
 	KUNIT_CASE(tb_test_xdomain_icm_teardown_never_touches_lane_hardware),
+	KUNIT_CASE(tb_test_xdomain_unplugged_teardown_never_touches_lane_hardware),
 	KUNIT_CASE(tb_test_xdomain_handler_abi_stock_offsets),
 	KUNIT_CASE(tb_test_xdomain_handler_dispatch_source_blind_registrant),
 	KUNIT_CASE(tb_test_xdomain_handler_unregister_waits_for_dispatch),
@@ -3996,13 +8409,78 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_xdomain_late_second_link),
 	KUNIT_CASE(tb_test_xdomain_stale_identity_recovery),
 	KUNIT_CASE(tb_test_xdomain_silent_stale_identity_recovery),
+	KUNIT_CASE(tb_test_xdomain_late_peer_powered_on_after_boot),
+	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_never_final_identity),
+	KUNIT_CASE(tb_test_xdomain_responsive_peer_registers_promptly),
+	KUNIT_CASE(tb_test_xdomain_event_uuid_requires_peer_verification),
+	KUNIT_CASE(tb_test_xdomain_discovery_precedes_announcement),
+	KUNIT_CASE(tb_test_xdomain_properties_response_proves_both_identities),
+	KUNIT_CASE(tb_test_xdomain_properties_wait_covers_delayed_peer),
+	KUNIT_CASE(tb_test_xdomain_properties_reply_requires_current_offset),
+	KUNIT_CASE(tb_test_xdomain_unverified_uuid_cannot_alias_route),
+	KUNIT_CASE(tb_test_xdomain_announce_survives_absent_peer),
+	KUNIT_CASE(tb_test_xdomain_uuid_absence_backs_off),
+	KUNIT_CASE(tb_test_xdomain_peer_never_answers_leaves_no_latch),
+	KUNIT_CASE(tb_test_xdomain_peer_answers_after_many_attempts),
+	KUNIT_CASE(tb_test_xdomain_announce_rearms_mid_backoff),
+	KUNIT_CASE(tb_test_xdomain_announce_stops_deterministically),
+	KUNIT_CASE(tb_test_xdomain_one_way_control_failure_requests_recovery),
+	KUNIT_CASE(tb_test_xdomain_control_recovery_is_bounded),
+	KUNIT_CASE(tb_test_xdomain_stale_inbound_does_not_request_control_recovery),
+	KUNIT_CASE(tb_test_xdomain_request_and_response_dispatch_are_separate),
+	KUNIT_CASE(tb_test_xdomain_placeholder_uuid_predicate),
+	KUNIT_CASE(tb_test_xdomain_lookup_without_root_switch),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_unplug),
 	KUNIT_CASE(tb_test_cm_reconcile_lost_plug),
 	KUNIT_CASE(tb_test_cm_reconcile_perturbed_lane_keeps_live_link),
-	KUNIT_CASE(tb_test_icm_warm_restart_reauth),
+	KUNIT_CASE(tb_test_cm_reconcile_no_kick_under_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_half_trained_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_latched_port_resident_icm),
+	KUNIT_CASE(tb_test_cm_plug_retrain_bounded_dead_hardware),
+	KUNIT_CASE(tb_test_cm_plug_retrain_post_unplug_cooldown),
+	KUNIT_CASE(tb_test_cm_lane1_bonding_recovery_resident_icm),
+	KUNIT_CASE(tb_test_cm_lane1_retrain_bounded_dead_lane),
+	KUNIT_CASE(tb_test_cm_connector_replug_recovers_full_train_only_lane),
+	KUNIT_CASE(tb_test_cm_connector_replug_bounded_when_lane1_dead),
+	KUNIT_CASE(tb_test_cm_connector_replug_defers_to_fresh_icm_event),
+	KUNIT_CASE(tb_test_cm_connector_replug_leaves_single_lane_cable),
+	KUNIT_CASE(tb_test_icm_warm_restart_loses_auth),
 	KUNIT_CASE(tb_test_icm_wedged_running),
 	KUNIT_CASE(tb_test_cm_select_forced_software),
 	KUNIT_CASE(tb_test_cm_forced_takeover_unlocks_config),
+	KUNIT_CASE(tb_test_icm_partial_wedge_refuses_software_takeover),
+	KUNIT_CASE(tb_test_icm_startup_proofs_are_separate),
+	KUNIT_CASE(tb_test_icm_xdomain_path_responses_settle_before_reuse),
+	KUNIT_CASE(tb_test_icm_xdomain_path_rejects_crossed_stages),
+	KUNIT_CASE(tb_test_icm_root_config_probe_has_no_nested_retries),
+	KUNIT_CASE(tb_test_cfg_response_matches_full_address),
+	KUNIT_CASE(tb_test_icm_root_recovery_is_separate_and_bounded),
+	KUNIT_CASE(tb_test_nhi_recovery_is_exact_and_one_shot),
+	KUNIT_CASE(tb_test_nhi_recovery_command_failure_is_terminal),
+	KUNIT_CASE(tb_test_root_power_cycle_timeout_requires_consumption),
+	KUNIT_CASE(tb_test_cfg_tx_consumption_is_independent_and_monotonic),
+	KUNIT_CASE(tb_test_tx_index_progress_is_not_descriptor_completion),
+	KUNIT_CASE(tb_test_nhi_startup_recovery_requires_power_cycle_dispatch),
+	KUNIT_CASE(tb_test_maple_root_power_cycle_encoding),
+	KUNIT_CASE(tb_test_pcie2cio_completion_states),
+	KUNIT_CASE(tb_test_nhi_recovery_success_completes_episode),
+	KUNIT_CASE(tb_test_nhi_recovery_is_limited_to_proven_hardware),
+	KUNIT_CASE(tb_test_nhi_recovery_does_not_claim_reclaim_safety),
+	KUNIT_CASE(tb_test_nhi_dma_misc_policy_selects_requested_mode),
+	KUNIT_CASE(tb_test_maple_ridge_uses_interrupt_status_auto_clear),
+	KUNIT_CASE(tb_test_nhi_interrupt_modes_are_distinct),
+	KUNIT_CASE(tb_test_nhi_interrupt_setup_orders_global_policy),
+	KUNIT_CASE(tb_test_nhi_interrupt_setup_rejects_late_mode_change),
+	KUNIT_CASE(tb_test_icm_maple_skips_legacy_allow_all),
+	KUNIT_CASE(tb_test_icm_warm_restart_is_unsupported),
+	KUNIT_CASE(tb_test_domain_add_failure_no_deadlock),
+	KUNIT_CASE(tb_test_domain_remove_no_deadlock),
+	KUNIT_CASE(tb_test_domain_remove_no_work_after_destroy),
+	KUNIT_CASE(tb_test_icm_takeover_teardown_no_deadlock),
+	KUNIT_CASE(tb_test_remove_work_stop_between_phases),
+	KUNIT_CASE(tb_test_domain_resources_precede_nhi_release),
+	KUNIT_CASE(tb_test_ctl_free_drains_work_before_nhi_remove),
+	KUNIT_CASE(tb_test_icm_healthy_keeps_firmware_cm),
 	KUNIT_CASE(tb_test_path_basic),
 	KUNIT_CASE(tb_test_path_not_connected_walk),
 	KUNIT_CASE(tb_test_path_single_hop_walk),
@@ -4017,6 +8495,31 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_path_not_bonded_lane1_chain_reverse),
 	KUNIT_CASE(tb_test_path_mixed_chain),
 	KUNIT_CASE(tb_test_path_mixed_chain_reverse),
+	KUNIT_CASE(tb_test_path_deactivate_disabled_pending_retries),
+	KUNIT_CASE(tb_test_path_discover_rejects_zero_hop),
+	KUNIT_CASE(tb_test_zero_hop_path_operations_are_rejected),
+	KUNIT_CASE(tb_test_path_deactivate_pending_retains_ownership),
+	KUNIT_CASE(tb_test_path_activate_refuses_disabled_pending_hop),
+	KUNIT_CASE(tb_test_path_activation_rollback_covers_enabled_hops),
+	KUNIT_CASE(tb_test_resume_activation_is_transactional_and_schedules_cleanup),
+	KUNIT_CASE(tb_test_tunnel_deactivate_preserves_failed_teardown),
+	KUNIT_CASE(tb_test_tunnel_cleanup_only_cannot_activate),
+	KUNIT_CASE(tb_test_tunnel_incomplete_cleanup_invalid_safe),
+	KUNIT_CASE(tb_test_tunnel_final_put_retains_failed_ownership),
+	KUNIT_CASE(tb_test_tunnel_terminal_release_requires_revocation_proof),
+	KUNIT_CASE(tb_test_tunnel_terminal_release_after_revocation),
+	KUNIT_CASE(tb_test_tunnel_revocation_survives_deferred_reference),
+	KUNIT_CASE(tb_test_cm_reset_failure_retains_all_unresolved_dma),
+	KUNIT_CASE(tb_test_cm_reset_success_revokes_all_unresolved_dma_once),
+	KUNIT_CASE(tb_test_domain_remove_dispatch_is_not_revocation_proof),
+	KUNIT_CASE(tb_test_domain_remove_quarantine_requires_proven_terminal_reset),
+	KUNIT_CASE(tb_test_domain_remove_failed_reset_detaches_quarantined_rings),
+	KUNIT_CASE(tb_test_domain_failed_reset_reaches_service_disconnect),
+	KUNIT_CASE(tb_test_unplugged_xdomain_preserves_teardown_error),
+	KUNIT_CASE(tb_test_domain_remove_collects_late_service_handoff),
+	KUNIT_CASE(tb_test_xdomain_quarantine_reclaims_exact_tuple_after_drain),
+	KUNIT_CASE(tb_test_xdomain_quarantine_retries_then_requires_proven_reset),
+	KUNIT_CASE(tb_test_xdomain_quarantine_alloc_failure_still_fences_rings),
 	KUNIT_CASE(tb_test_tunnel_pcie),
 	KUNIT_CASE(tb_test_tunnel_dp),
 	KUNIT_CASE(tb_test_tunnel_dp_chain),
@@ -4042,6 +8545,37 @@ static struct kunit_case tb_test_cases[] = {
 	KUNIT_CASE(tb_test_property_parse),
 	KUNIT_CASE(tb_test_property_format),
 	KUNIT_CASE(tb_test_property_copy),
+	KUNIT_CASE(tb_test_cm_plug_synth_scan_fails_keeps_retrying),
+	KUNIT_CASE(tb_test_cm_plug_synth_recovers_when_router_answers),
+	KUNIT_CASE(tb_test_xdomain_response_match_follows_protocol_model),
+	KUNIT_CASE(tb_test_xdomain_service_response_payload_is_opaque),
+	KUNIT_CASE(tb_test_xdomain_native_error_fails_request),
+	KUNIT_CASE(tb_test_ctl_liveness_threshold),
+	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_classification),
+	KUNIT_CASE(tb_test_ctl_response_deadline_cannot_underflow),
+	KUNIT_CASE(tb_test_ctl_split_state_records_local_acceptance),
+	KUNIT_CASE(tb_test_ctl_split_state_preserves_accept_on_peer_timeout),
+	KUNIT_CASE(tb_test_ctl_peer_timeout_keeps_local_command_waiting),
+	KUNIT_CASE(tb_test_ctl_stop_releases_both_request_machines),
+	KUNIT_CASE(tb_test_ctl_local_status_slot_blocks_reuse),
+	KUNIT_CASE(tb_test_ctl_icm_and_xdomain_commands_do_not_overlap),
+	KUNIT_CASE(tb_test_ctl_all_xdomain_packets_own_local_completion),
+	KUNIT_CASE(tb_test_ctl_local_only_packet_reaches_terminal_state),
+	KUNIT_CASE(tb_test_ctl_service_response_does_not_wait_in_rx_dispatch),
+	KUNIT_CASE(tb_test_ctl_local_only_result_matches_command_status),
+	KUNIT_CASE(tb_test_ctl_response_retries_only_firmware_rejection),
+	KUNIT_CASE(tb_test_ctl_request_retries_only_firmware_rejection),
+	KUNIT_CASE(tb_test_ctl_peer_waiter_is_independent_of_local_sender),
+	KUNIT_CASE(tb_test_ctl_local_status_error_does_not_abort_peer),
+	KUNIT_CASE(tb_test_ctl_split_state_peer_response_is_independent),
+	KUNIT_CASE(tb_test_ctl_xdomain_tx_status_route_correlation),
+	KUNIT_CASE(tb_test_ctl_timeout_route_decode),
+	KUNIT_CASE(tb_test_ctl_split_state_matches_independent_model),
+	KUNIT_CASE(tb_test_ctl_liveness_matched_reply_clears),
+	KUNIT_CASE(tb_test_ctl_liveness_unmatched_reply_does_not_clear),
+	KUNIT_CASE(tb_test_ctl_teardown_timeout_opens_request_circuit),
+	KUNIT_CASE(tb_test_ctl_liveness_appmana_019_sequence),
+	KUNIT_CASE(tb_test_icm_phy_reset_covers_single_lane_links),
 	{ }
 };
 

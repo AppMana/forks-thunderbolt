@@ -5,7 +5,6 @@
 # The fork vendors the ENTIRE drivers/thunderbolt/ subsystem and rebuilds it
 # out-of-tree as a complete replacement, so it must own the subsystem's PUBLIC
 # header too. The vendored .c files reference members the stock header lacks:
-#   - struct tb_nhi::domain_released   (nhi.c, domain.c: unconditional)
 #   - struct tb_protocol_handler::callback_xd + TB_PROTOCOL_HANDLER_HAS_XDOMAIN
 #     (xdomain.c: unconditional; thunderbolt_frame: source-aware handler)
 #
@@ -41,10 +40,9 @@ mkdir -p "$out/linux"
 dst="$out/linux/thunderbolt.h"
 
 # Idempotency: only apply a change the stock header does not already carry.
-add_completion=1; grep -q '#include <linux/completion.h>' "$src" && add_completion=0
 add_handler=1;    grep -q 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' "$src" && add_handler=0
-add_nhi=1;        grep -q 'domain_released' "$src" && add_nhi=0
 add_paths_active=1; grep -q 'TB_XDOMAIN_HAS_PATHS_ACTIVE' "$src" && add_paths_active=0
+add_path_quarantine=1; grep -q 'TB_XDOMAIN_HAS_PATH_QUARANTINE' "$src" && add_path_quarantine=0
 add_reannounce=1; grep -q 'TB_XDOMAIN_HAS_REANNOUNCE' "$src" && add_reannounce=0
 # struct tb_xdomain::removing (xdomain.c: mainline 2c5d2d3c3f70 backport --
 # tb_xdomain_remove() sets it under xd->lock; every external
@@ -54,26 +52,76 @@ add_removing=1;   grep -q 'bool removing;' "$src" && add_removing=0
 # backport -- lets service drivers wait for in-flight frames to complete
 # before stopping a ring)
 add_ring_flush=1; grep -q 'tb_ring_flush' "$src" && add_ring_flush=0
+# A terminal service-driver teardown may have to hand a stopped ring to the
+# core when the fabric path cannot be proven drained. The ring stays allocated
+# and non-reusable until the domain has obtained real controller-reset proof.
+add_ring_quarantine=1; grep -q 'tb_ring_quarantine' "$src" && add_ring_quarantine=0
+# Per-ring private completion-correlation storage. The object is allocated and
+# owned by the forked NHI core; service drivers only retrieve the public,
+# immutable evidence through tb_ring_completion_evidence().
+add_completion_records=1; grep -q 'void \*completion_records;' "$src" && add_completion_records=0
 # struct tb_xdomain::bonding_rearm_attempts (xdomain.c: bounded lane-bonding
 # re-arm from ENUMERATED; appended at the END of the struct so every stock
 # member keeps its stock offset for stock-header consumers)
 add_rearm=1;      grep -q 'bonding_rearm_attempts' "$src" && add_rearm=0
+# A firmware topology-event UUID is only a candidate until the peer answers a
+# route-local UUID request.
+add_uuid_verified=1; grep -q 'bool uuid_verified;' "$src" && add_uuid_verified=0
+# Separate failure history for unverified-peer discovery. This must not share
+# the properties-announcement counter because both delayed works run at once.
+add_uuid_retry=1; grep -q 'uuid_retry_failures' "$src" && add_uuid_retry=0
+# Preserve a failed core path teardown across the later is_unplugged service
+# unbind phase; consumers must not turn an unresolved tuple into success.
+add_path_teardown_err=1; grep -q 'path_teardown_err' "$src" && add_path_teardown_err=0
+# Independent XDomain control-health state. The timestamp is refreshed only by
+# route-correlated inbound service traffic; the state prevents repeated reset
+# dispatch from an announcement worker that deliberately retries forever.
+add_control_health=1; grep -q 'control_rx_jiffies' "$src" && add_control_health=0
 
 # Struct-scoped transformation. Anchors:
-#   1. after "#include <linux/workqueue.h>"           -> add completion.h
-#   2. inside struct tb_protocol_handler, after the
+#   1. inside struct tb_protocol_handler, after the
 #      "int (*callback)(...)" line, BEFORE ->data     -> insert macro+callback_xd
-#   3. inside struct tb_nhi, before its closing "};"   -> append domain_released
-#   4. after the tb_xdomain_disable_paths() declaration (first line matched,
+#   2. after the tb_xdomain_disable_paths() declaration (first line matched,
 #      insertion after its closing ");")               -> add paths_active decl
-awk -v add_completion="$add_completion" \
-    -v add_handler="$add_handler" \
-    -v add_nhi="$add_nhi" \
+awk -v add_handler="$add_handler" \
     -v add_paths_active="$add_paths_active" \
+    -v add_path_quarantine="$add_path_quarantine" \
     -v add_reannounce="$add_reannounce" \
     -v add_removing="$add_removing" \
     -v add_ring_flush="$add_ring_flush" \
-    -v add_rearm="$add_rearm" '
+    -v add_ring_quarantine="$add_ring_quarantine" \
+    -v add_completion_records="$add_completion_records" \
+    -v add_rearm="$add_rearm" \
+    -v add_uuid_verified="$add_uuid_verified" \
+    -v add_uuid_retry="$add_uuid_retry" \
+    -v add_path_teardown_err="$add_path_teardown_err" \
+    -v add_control_health="$add_control_health" '
+
+
+	$0 == "#include <linux/workqueue.h>" {
+		print
+		print "#include <linux/slab.h>"
+		print "#ifndef default_gfp"
+		print "#define __default_gfp(a, b, ...) b"
+		print "#define default_gfp(...) __default_gfp(, ##__VA_ARGS__, GFP_KERNEL)"
+		print "#endif"
+		print "#ifndef kmalloc_obj"
+		print "#define __alloc_objs(KMALLOC, GFP, TYPE, COUNT) \\"
+		print "({ \\"
+		print "\tconst size_t __obj_size = size_mul(sizeof(TYPE), COUNT); \\"
+		print "\t(TYPE *)KMALLOC(__obj_size, GFP); \\"
+		print "})"
+		print "#define kmalloc_obj(VAR_OR_TYPE, ...) \\"
+		print "\t__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), 1)"
+		print "#define kmalloc_objs(VAR_OR_TYPE, COUNT, ...) \\"
+		print "\t__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof(VAR_OR_TYPE), COUNT)"
+		print "#define kzalloc_obj(P, ...) \\"
+		print "\t__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), 1)"
+		print "#define kzalloc_objs(P, COUNT, ...) \\"
+		print "\t__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof(P), COUNT)"
+		print "#endif"
+		next
+	}
 	add_reannounce == 1 && \
 	    $0 == "void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);" {
 		print
@@ -81,38 +129,57 @@ awk -v add_completion="$add_completion" \
 		print "void tb_reannounce_property_dirs(void);"
 		next
 	}
-	add_completion == 1 && $0 == "#include <linux/workqueue.h>" {
-		print
-		print "#include <linux/completion.h>"
-		next
-	}
 	/^struct tb_protocol_handler \{/ { in_ph = 1 }
-	/^struct tb_nhi \{/            { in_nhi = 1 }
 	/^struct tb_xdomain \{/        { in_xd = 1 }
 	add_removing == 1 && in_xd == 1 && $0 == "\tbool is_unplugged;" {
 		print
 		print "\tbool removing;"
 		next
 	}
-	add_rearm == 1 && in_xd == 1 && $0 == "};" {
-		print "\tunsigned int bonding_rearm_attempts;"
+	in_xd == 1 && $0 == "};" {
+		if (add_rearm == 1)
+			print "\tunsigned int bonding_rearm_attempts;"
+		if (add_uuid_verified == 1)
+			print "\tbool uuid_verified;"
+		if (add_uuid_retry == 1)
+			print "\tunsigned int uuid_retry_failures;"
+		if (add_path_teardown_err == 1)
+			print "\tint path_teardown_err;"
+		if (add_control_health == 1) {
+			print "\tunsigned long control_rx_jiffies;"
+			print "\tu8 control_health_state;"
+		}
 		print "};"
 		in_xd = 0
 		next
 	}
-	in_xd == 1 && $0 == "};" { in_xd = 0 }
 	/^struct tb_ring \{/           { in_ring = 1 }
-	add_ring_flush == 1 && in_ring == 1 && $0 == "};" {
-		print "\twait_queue_head_t wait;"
-		print
+	in_ring == 1 && $0 == "};" {
+		if (add_ring_flush == 1)
+			print "\twait_queue_head_t wait;"
+		if (add_ring_quarantine == 1)
+			print "\tbool quarantined;"
+		if (add_completion_records == 1)
+			print "\tvoid *completion_records;"
+		print "};"
 		in_ring = 0
 		next
 	}
-	in_ring == 1 && $0 == "};" { in_ring = 0 }
 	add_ring_flush == 1 && $0 == "void tb_ring_start(struct tb_ring *ring);" {
 		print
 		print "#define TB_RING_HAS_FLUSH 1"
 		print "bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec);"
+		if (add_ring_quarantine == 1) {
+			print "#define TB_RING_HAS_QUARANTINE 1"
+			print "void tb_ring_quarantine(struct tb_ring *ring);"
+		}
+		next
+	}
+	add_ring_flush == 0 && add_ring_quarantine == 1 && \
+	    $0 == "void tb_ring_start(struct tb_ring *ring);" {
+		print
+		print "#define TB_RING_HAS_QUARANTINE 1"
+		print "void tb_ring_quarantine(struct tb_ring *ring);"
 		next
 	}
 	# ->callback_xd is APPENDED after ->list, never inserted mid-struct: a
@@ -120,9 +187,8 @@ awk -v add_completion="$add_completion" \
 	# tbfix Module.symvers loads cleanly (CRCs come from the symvers file)
 	# yet lays out uuid/callback/data/list at the stock offsets and its
 	# storage ends at ->list. A mid-struct insertion shifted ->data onto the
-	# offset the core reads as ->callback_xd, and the dispatch walk jumped
-	# through the registrant data pointer (appmana-025 NX-execute panic,
-	# kdump 202608031305). With the member appended, every stock field keeps
+	# offset the core reads as ->callback_xd, and the dispatch walk can jump
+	# through the registrant data pointer. With the member appended, every stock field keeps
 	# its stock offset and the core only reads ->callback_xd for registrants
 	# that left ->callback NULL (which therefore provide the extended
 	# struct). NOTE: this awk program lives in a single-quoted sh string;
@@ -135,35 +201,57 @@ awk -v add_completion="$add_completion" \
 		in_ph = 0
 		next
 	}
-	add_nhi == 1 && in_nhi == 1 && $0 == "};" {
-		print "\tstruct completion domain_released;"
-		print
-		in_nhi = 0
-		next
-	}
 	in_ph == 1 && $0 == "};" { in_ph = 0 }
-	add_paths_active == 1 && \
+	(add_paths_active == 1 || add_path_quarantine == 1) && \
 	    $0 ~ /^int tb_xdomain_disable_paths\(struct tb_xdomain \*xd, int transmit_path,/ {
 		in_disable = 1
 	}
-	add_paths_active == 1 && in_disable == 1 && $0 ~ /\);$/ {
+	in_disable == 1 && $0 ~ /\);$/ {
 		print
-		print "#define TB_XDOMAIN_HAS_PATHS_ACTIVE 1"
-		print "int tb_xdomain_paths_active(struct tb_xdomain *xd, int transmit_path,"
-		print "\t\t\t    int transmit_ring, int receive_path,"
-		print "\t\t\t    int receive_ring);"
+		if (add_paths_active == 1) {
+			print "#define TB_XDOMAIN_HAS_PATHS_ACTIVE 1"
+			print "int tb_xdomain_paths_active(struct tb_xdomain *xd,"
+			print "\t\t\t    int transmit_path, int transmit_ring,"
+			print "\t\t\t    int receive_path,"
+			print "\t\t\t    int receive_ring);"
+		}
+		if (add_path_quarantine == 1) {
+			print "#define TB_XDOMAIN_HAS_PATH_QUARANTINE 1"
+			print "struct tb_ring;"
+			print "int tb_xdomain_quarantine_paths(struct tb_xdomain *xd,"
+			print "\t\t\t\tint transmit_path, int transmit_ring,"
+			print "\t\t\t\tstruct tb_ring *transmit_dma_ring,"
+			print "\t\t\t\tint receive_path, int receive_ring,"
+			print "\t\t\t\tstruct tb_ring *receive_dma_ring);"
+		}
 		in_disable = 0
 		next
 	}
 	{ print }
 ' "$src" > "$dst"
 
-# Post-condition: the generated header MUST carry all three additions, whether
+# Post-condition: the generated header MUST carry every addition, whether
 # they were already present or just inserted. A miss means an anchor did not
 # match (upstream header reshaped) -- fail loudly rather than emit a header that
 # compiles the vendored subsystem to a broken layout.
 fail=0
-for tok in '#include <linux/completion.h>' 'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' 'domain_released' 'TB_XDOMAIN_HAS_PATHS_ACTIVE' 'TB_XDOMAIN_HAS_REANNOUNCE' 'bool removing;' 'TB_RING_HAS_FLUSH' 'bonding_rearm_attempts'; do
+for tok in \
+	'TB_PROTOCOL_HANDLER_HAS_XDOMAIN' \
+	'TB_XDOMAIN_HAS_PATHS_ACTIVE' \
+	'TB_XDOMAIN_HAS_PATH_QUARANTINE' \
+	'TB_XDOMAIN_HAS_REANNOUNCE' \
+	'bool removing;' \
+	'TB_RING_HAS_FLUSH' \
+	'TB_RING_HAS_QUARANTINE' \
+	'bool quarantined;' \
+	'void \*completion_records;' \
+	'bonding_rearm_attempts' \
+	'bool uuid_verified;' \
+	'uuid_retry_failures' \
+	'path_teardown_err' \
+	'control_rx_jiffies' \
+	'control_health_state'
+do
 	if ! grep -q "$tok" "$dst"; then
 		echo "tbfix header shim: anchor for '$tok' not found in $src" >&2
 		fail=1

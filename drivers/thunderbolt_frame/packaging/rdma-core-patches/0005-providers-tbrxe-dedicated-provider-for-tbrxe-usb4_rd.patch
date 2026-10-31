@@ -1,6 +1,6 @@
-From 233861d2618966687de148f8fc349843c25d9e7a Mon Sep 17 00:00:00 2001
+From 7bb615718c0f5f9c3bb1f9a489cc4a4594b30293 Mon Sep 17 00:00:00 2001
 From: forks-thunderbolt <ci@forks-thunderbolt>
-Date: Tue, 18 Aug 2026 14:21:28 -0700
+Date: Wed, 26 Aug 2026 13:01:13 -0700
 Subject: [PATCH] providers/tbrxe: dedicated provider for tbrxe (usb4_rdma*)
  devices
 
@@ -19,19 +19,19 @@ driver id.
  providers/tbrxe/CMakeLists.txt | 16 +++++++++
  providers/tbrxe/tbrxe.c        | 63 ++++++++++++++++++++++++++++++++++
  providers/tbrxe/tbrxe.driver   |  1 +
- 4 files changed, 80 insertions(+)
+ 4 files changed, 81 insertions(+)
  create mode 100644 providers/tbrxe/CMakeLists.txt
  create mode 100644 providers/tbrxe/tbrxe.c
  create mode 100644 providers/tbrxe/tbrxe.driver
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b2b9f0c..4de4e4b 100644
+index 718b7d2..48a1188 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -759,6 +759,7 @@ add_subdirectory(providers/rxe)
+@@ -758,6 +758,7 @@ add_subdirectory(providers/ipathverbs)
+ add_subdirectory(providers/rxe)
  add_subdirectory(providers/rxe/man)
  add_subdirectory(providers/siw)
- add_subdirectory(providers/usb4_rdma)
 +add_subdirectory(providers/tbrxe)
  
  add_subdirectory(libibmad)
@@ -60,7 +60,7 @@ index 0000000..29fc441
 +endif()
 diff --git a/providers/tbrxe/tbrxe.c b/providers/tbrxe/tbrxe.c
 new file mode 100644
-index 0000000..9ed97f4
+index 0000000..b973719
 --- /dev/null
 +++ b/providers/tbrxe/tbrxe.c
 @@ -0,0 +1,63 @@

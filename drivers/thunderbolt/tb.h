@@ -18,15 +18,59 @@
 
 #include "tb_regs.h"
 
+enum tb_icm_xdomain_path_state {
+	TB_ICM_XDOMAIN_PATH_INACTIVE,
+	TB_ICM_XDOMAIN_PATH_APPROVE_SETTLING,
+	TB_ICM_XDOMAIN_PATH_ACTIVE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_SETTLING,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_READY,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_SETTLING,
+};
+
+enum tb_icm_xdomain_path_event {
+	TB_ICM_XDOMAIN_PATH_APPROVE_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE1_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_DISCONNECT_STAGE2_RESPONSE,
+	TB_ICM_XDOMAIN_PATH_SETTLED,
+};
+
+enum tb_icm_xdomain_path_action {
+	TB_ICM_XDOMAIN_PATH_REJECT,
+	TB_ICM_XDOMAIN_PATH_SETTLE,
+	TB_ICM_XDOMAIN_PATH_ACTIVATE,
+	TB_ICM_XDOMAIN_PATH_SEND_STAGE2,
+	TB_ICM_XDOMAIN_PATH_DEACTIVATE,
+};
+
+struct tb_icm_xdomain_path_transition {
+	enum tb_icm_xdomain_path_state state;
+	enum tb_icm_xdomain_path_action action;
+	unsigned int settle_min_us;
+	unsigned int settle_max_us;
+};
+
+struct tb_icm_xdomain_path_transition
+tb_icm_xdomain_path_next(enum tb_icm_xdomain_path_state state,
+			 enum tb_icm_xdomain_path_event event);
+
 #if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
 struct workqueue_struct *tb_test_ring_workqueue(void);
 u32 tb_test_ring_descriptor_word(u16 length, u8 eof, u8 sof, u16 flags);
+unsigned int tb_test_nhi_probe_recovery_wq_flags(void);
 bool tb_test_xdomain_should_negotiate_bonding(bool has_dual_link,
 					       unsigned int generation,
 					       enum tb_link_width width);
 bool tb_test_xdomain_should_initialize_link(bool remote_uuid_known);
 bool tb_test_xdomain_initial_state_needs_link_status(bool needs_uuid,
 						      bool bonding_possible);
+bool tb_test_xdomain_initial_needs_uuid(bool remote_uuid_known);
+bool tb_test_xdomain_announce_ready(bool needs_uuid, bool uuid_verified);
+bool tb_test_xdomain_uuid_globally_matchable(bool verified, bool equal);
+bool tb_test_xdomain_properties_identity(bool source_matches,
+					 bool destination_matches);
+bool tb_test_xdomain_properties_response_pkg_matches(u16 request_offset,
+						     u16 response_offset);
+unsigned int tb_test_xdomain_properties_timeout_ms(void);
 bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 							bool services_published,
 							int link_status_ret,
@@ -34,18 +78,133 @@ bool tb_test_xdomain_should_fallback_to_direct_bonding(bool bonding_possible,
 bool tb_test_xdomain_direct_bonding_blocks_controller(void);
 bool tb_test_xdomain_bonding_rearm_allowed(bool bonding_possible, bool bonded,
 					   unsigned int attempts);
+bool tb_test_xdomain_bonding_after(bool possible, int ret, bool fallback);
 bool tb_test_xdomain_accepts_link_state_change(bool in_bonding_uuid_high,
 					       bool enumerated,
 					       bool bonding_possible,
 					       bool bonded);
 bool tb_test_xdomain_bonding_rearm_touches_lanes_on_failure(void);
+struct tb_cfg_request_state
+tb_test_xdomain_packet_state(bool expects_peer_response,
+			     bool *has_local_classifier);
+bool tb_test_xdomain_response_should_defer(void);
+bool tb_test_xdomain_response_should_retry(bool local_failed,
+					   bool local_timed_out,
+					   int result,
+					   unsigned int attempt);
+bool tb_test_xdomain_request_should_retry(bool local_failed,
+					  bool local_timed_out,
+					  int result,
+					  unsigned int attempt);
 bool tb_test_xdomain_error_pkg_matches(u64 req_route, u64 err_route);
+enum tb_cfg_request_event
+tb_test_xdomain_intermediate_event(u64 req_route, u64 status_route,
+				   bool error);
+bool tb_test_xdomain_response_pkg_matches(u64 req_route,
+					  u32 req_type,
+					  u8 req_sequence,
+					  size_t response_capacity,
+					  u64 response_route,
+					  u32 response_type,
+					  u8 response_sequence,
+					  size_t response_size,
+					  size_t response_declared_size,
+					  bool same_protocol);
+bool tb_test_xdomain_service_response_pkg_matches(u64 req_route,
+						  u8 req_sequence,
+						  size_t response_capacity,
+						  u64 response_route,
+						  u8 response_sequence,
+						  size_t response_size,
+						  size_t response_declared_size,
+						  bool same_protocol);
+int tb_test_xdomain_native_error_result(void);
 bool tb_test_xdomain_direct_bonding_abort_disables_lane(void);
 bool tb_test_xdomain_link_exit_touches_lane_hardware(bool firmware_cm,
 						      unsigned int generation);
+bool tb_test_xdomain_unplugged_link_exit_touches_lane_hardware(void);
+bool tb_test_xdomain_dispatch_service(struct tb *tb, const void *buf,
+				      size_t size);
+unsigned int tb_test_xdomain_uuid_retry_delay_ms(unsigned int failures);
 #endif
 #include "ctl.h"
 #include "dma_port.h"
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+struct tb_port;
+
+struct tb_path_test_io {
+	int (*read)(void *data, struct tb_port *port, void *buffer,
+		    enum tb_cfg_space space, u32 offset, u32 length);
+	int (*write)(void *data, struct tb_port *port, const void *buffer,
+		     enum tb_cfg_space space, u32 offset, u32 length);
+};
+
+void tb_test_path_set_io(const struct tb_path_test_io *io, void *data);
+void tb_test_cm_finalize_stopped_tunnels(struct tb *tb,
+					 struct list_head *tunnels,
+					 bool controller_revoked);
+void tb_test_cm_mark_topology_unplugged(struct tb_switch *sw, bool revoked,
+					bool ownership_unresolved);
+int tb_test_resume_activate_tunnels(struct tb *tb, struct list_head *tunnels,
+				    unsigned int usb3_delay,
+				    void (*schedule_cleanup)(struct tb *tb,
+							     void *data),
+				    void *data);
+#endif
+
+enum tb_domain_reset_state {
+	TB_DOMAIN_RESET_NONE,
+	TB_DOMAIN_RESET_DISPATCHED,
+	TB_DOMAIN_RESET_FAILED,
+	TB_DOMAIN_RESET_PROVEN,
+};
+
+struct tb_domain_reset_result {
+	enum tb_domain_reset_state state;
+	int error;
+};
+
+struct tb_domain_remove_ops {
+	int (*stop)(struct tb *tb, void *data);
+	void (*prepare_xdomains)(struct tb *tb, void *data,
+				 bool ownership_unresolved);
+	bool (*has_quarantined_rings)(struct tb *tb, void *data);
+	struct tb_domain_reset_result (*terminal_reset)(struct tb *tb, void *data);
+	void (*finalize)(struct tb *tb, void *data,
+			 enum tb_domain_reset_state reset_state,
+			 bool ownership_unresolved);
+	void (*ctl_stop)(struct tb *tb, void *data);
+	void (*flush)(struct tb *tb, void *data);
+	void (*unregister_xdomains)(struct tb *tb, void *data);
+	void (*deinit)(struct tb *tb, void *data);
+	void (*finalize_quarantined_rings)(struct tb *tb, void *data,
+					   bool controller_reset_proven);
+	void (*abandon_quarantined_rings)(struct tb *tb, void *data);
+	void (*release)(struct tb *tb, void *data);
+	void (*unregister_domain)(struct tb *tb, void *data);
+};
+
+#if IS_ENABLED(CONFIG_USB4_KUNIT_TEST)
+int tb_test_domain_remove_sequence(struct tb *tb,
+				   const struct tb_domain_remove_ops *ops,
+				   void *data);
+int tb_test_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd);
+struct tb_xdomain_quarantine_test_ops {
+	int (*disconnect)(void *data, struct tb_xdomain *xd,
+			  int transmit_path, int transmit_ring,
+			  int receive_path, int receive_ring);
+	void (*free_ring)(void *data, struct tb_ring *ring);
+	void *data;
+};
+
+void tb_test_xdomain_quarantine_set_ops(const struct tb_xdomain_quarantine_test_ops *ops);
+void tb_test_xdomain_quarantine_fail_alloc(bool fail);
+int tb_test_xdomain_quarantine_retry(struct tb_xdomain *xd);
+void tb_test_xdomain_quarantine_finalize(struct tb *tb,
+					 enum tb_domain_reset_state reset_state);
+unsigned int tb_test_xdomain_quarantine_count(struct tb_xdomain *xd);
+#endif
 
 /* Keep link controller awake during update */
 #define QUIRK_FORCE_POWER_LINK_CONTROLLER		BIT(0)
@@ -303,6 +462,25 @@ struct tb_bandwidth_group {
  * @reconcile_synth: Which synthetic hotplug edge (%TB_RECONCILE_*) the
  *		     reconciliation worker already sent for the port's
  *		     CURRENT divergence, so it is sent once, not every pass.
+ * @retrain_last_state: Lane state the reconcile worker sampled on its
+ *			previous pass (stability tracking for the
+ *			plug-directed retrain).
+ * @retrain_state_since: jiffies the current lane state was first sampled.
+ * @retrain_teardown: jiffies of the last unplug teardown on this port
+ *		      (real or synthesized); the retrain quiet window is
+ *		      measured from it.
+ * @retrain_last_attempt: jiffies of the last plug-directed retrain.
+ * @plug_synth_at: jiffies the last plug was synthesized for this port, so
+ *		   a synthesized plug whose scan failed on a marginal link
+ *		   is retried at a bounded rate instead of never.
+ * @retrain_attempts: Plug-directed retrain attempts in the current episode.
+ * @replug_phase: %TB_REPLUG_* phase of a full-connector software replug
+ *		  in flight on this (primary) lane adapter.
+ * @replug_attempts: Connector replug episodes since the budget last
+ *		     re-armed (bonding success or a long idle window).
+ * @replug_hold_since: jiffies both lane adapters were disabled together.
+ * @replug_last_attempt: jiffies the last replug episode started or its
+ *			 lanes were re-enabled (spacing and idle re-arm).
  *
  * In USB4 terminology this structure represents an adapter (protocol or
  * lane adapter).
@@ -333,12 +511,27 @@ struct tb_port {
 	unsigned int max_bw;
 	bool redrive;
 	u8 reconcile_synth;
+	int retrain_last_state;
+	unsigned long retrain_state_since;
+	unsigned long retrain_teardown;
+	unsigned long retrain_last_attempt;
+	unsigned long plug_synth_at;
+	u8 retrain_attempts;
+	u8 replug_phase;
+	u8 replug_attempts;
+	unsigned long replug_hold_since;
+	unsigned long replug_last_attempt;
 };
 
 /* Values for tb_port.reconcile_synth */
 #define TB_RECONCILE_NONE	0
 #define TB_RECONCILE_UNPLUG	1
 #define TB_RECONCILE_PLUG	2
+
+/* Values for tb_port.replug_phase */
+#define TB_REPLUG_IDLE		0
+#define TB_REPLUG_TEARDOWN	1
+#define TB_REPLUG_HELD		2
 
 /**
  * struct usb4_port - USB4 port device
@@ -442,6 +635,19 @@ enum tb_path_port {
 };
 
 /**
+ * enum tb_path_state - Software ownership state of a path
+ * @TB_PATH_INACTIVE: No programmed hop or credit ownership remains
+ * @TB_PATH_ACTIVE: The path is programmed and available
+ * @TB_PATH_TEARDOWN_FAILED: The path is unavailable but its hardware
+ *	ownership could not be retired
+ */
+enum tb_path_state {
+	TB_PATH_INACTIVE,
+	TB_PATH_ACTIVE,
+	TB_PATH_TEARDOWN_FAILED,
+};
+
+/**
  * struct tb_path - a unidirectional path between two ports
  * @tb: Pointer to the domain structure
  * @name: Name of the path (used for debugging)
@@ -452,7 +658,7 @@ enum tb_path_port {
  * @priority: Priority group if the path
  * @weight: Weight of the path inside the priority group
  * @drop_packages: Drop packages from queue tail or head
- * @activated: Is the path active
+ * @state: Availability and hardware ownership state
  * @clear_fc: Clear all flow control from the path config space entries
  *	      when deactivating this path
  * @hops: Path hops
@@ -474,7 +680,7 @@ struct tb_path {
 	unsigned int priority:3;
 	int weight:4;
 	bool drop_packages;
-	bool activated;
+	enum tb_path_state state;
 	bool clear_fc;
 	struct tb_path_hop *hops;
 	int path_length;
@@ -507,9 +713,15 @@ struct tb_path {
  * @driver_ready: Called right after control channel is started. Used by
  *		  ICM to send driver ready message to the firmware.
  * @start: Starts the domain
- * @stop: Stops the domain
+ * @stop: Stops the domain and reports unresolved hardware ownership
+ * @finalize_stop: Releases the stopped topology after deferred work is joined;
+ *		   its ownership argument indicates teardown did not prove DMA
+ *		   ownership ended
  * @deinit: Perform any cleanup after the domain is stopped but before
  *	     it is unregistered. Called without @tb->lock taken. Optional.
+ * @quiesced_reset: Reset controller firmware after the control channel and
+ *		    asynchronous work have been quiesced. Used for both failed
+ *		    startup and runtime recovery. Optional.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -530,6 +742,8 @@ struct tb_path {
  * @disconnect_pcie_paths: Disconnects PCIe paths before NVM update
  * @approve_xdomain_paths: Approve (establish) XDomain DMA paths
  * @disconnect_xdomain_paths: Disconnect XDomain DMA paths
+ * @retry_xdomain_paths: Retry an exact core-owned XDomain DMA tuple after
+ *			 service removal severed the normal XDomain path
  * @xdomain_paths_active: Read back whether previously approved XDomain DMA
  *			  paths are still programmed (hop entries enabled).
  *			  Level-triggered zombie detection for service
@@ -546,8 +760,12 @@ struct tb_path {
 struct tb_cm_ops {
 	int (*driver_ready)(struct tb *tb);
 	int (*start)(struct tb *tb, bool reset);
-	void (*stop)(struct tb *tb);
+	int (*stop)(struct tb *tb);
+	void (*finalize_stop)(struct tb *tb,
+			      enum tb_domain_reset_state reset_state,
+			      bool ownership_unresolved);
 	void (*deinit)(struct tb *tb);
+	int (*quiesced_reset)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);
@@ -574,6 +792,9 @@ struct tb_cm_ops {
 	int (*disconnect_xdomain_paths)(struct tb *tb, struct tb_xdomain *xd,
 					int transmit_path, int transmit_ring,
 					int receive_path, int receive_ring);
+	int (*retry_xdomain_paths)(struct tb *tb, struct tb_xdomain *xd,
+				   int transmit_path, int transmit_ring,
+				   int receive_path, int receive_ring);
 	int (*xdomain_paths_active)(struct tb *tb, struct tb_xdomain *xd,
 				    int transmit_path, int transmit_ring,
 				    int receive_path, int receive_ring);
@@ -805,6 +1026,10 @@ struct tb *tb_probe(struct tb_nhi *nhi);
 /* Set by the force_sw_cm module parameter (nhi.c) */
 extern bool tb_force_sw_cm;
 int icm_unlock_config_space(struct tb *tb);
+bool icm_driver_ready_timed_out(struct tb *tb);
+bool icm_root_config_timed_out(struct tb *tb);
+bool icm_root_power_cycle_dispatched(struct tb *tb);
+int tb_nhi_reset_host(struct tb_nhi *nhi);
 
 extern const struct device_type tb_domain_type;
 extern const struct device_type tb_retimer_type;
@@ -815,10 +1040,16 @@ int tb_domain_init(void);
 void tb_domain_exit(void);
 int tb_xdomain_init(void);
 void tb_xdomain_exit(void);
+void tb_xdomain_quarantine_prepare_reset(struct tb *tb);
+void tb_xdomain_quarantine_finalize_reset(struct tb *tb,
+					  enum tb_domain_reset_state reset_state);
+void tb_xdomain_quarantine_discard_domain(struct tb *tb);
 
 struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize);
 int tb_domain_add(struct tb *tb, bool reset);
-void tb_domain_remove(struct tb *tb);
+int tb_domain_remove(struct tb *tb);
+/* Must be called with tb->lock NOT held; asserts it under lockdep. */
+void tb_domain_ctl_stop(struct tb *tb);
 int tb_domain_suspend_noirq(struct tb *tb);
 int tb_domain_resume_noirq(struct tb *tb);
 int tb_domain_suspend(struct tb *tb);
@@ -838,6 +1069,9 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring);
+int tb_domain_retry_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
+				  int transmit_path, int transmit_ring,
+				  int receive_path, int receive_ring);
 int tb_domain_xdomain_paths_active(struct tb *tb, struct tb_xdomain *xd,
 				   int transmit_path, int transmit_ring,
 				   int receive_path, int receive_ring);
@@ -1246,7 +1480,7 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 			      const char *name);
 void tb_path_free(struct tb_path *path);
 int tb_path_activate(struct tb_path *path);
-void tb_path_deactivate(struct tb_path *path);
+int tb_path_deactivate(struct tb_path *path);
 int tb_path_deactivate_hop(struct tb_port *port, int hop_index);
 bool tb_path_is_invalid(struct tb_path *path);
 bool tb_path_port_on_path(const struct tb_path *path,

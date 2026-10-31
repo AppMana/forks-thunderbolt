@@ -158,6 +158,21 @@ static int tbframe_hw_alloc_rings(void *data, u16 tx_entries, u16 rx_entries,
 	unsigned int flags = RING_FLAG_FRAME | (e2e ? RING_FLAG_E2E : 0);
 	int e2e_tx_hop = 0;
 
+	/*
+	 * The protocol session may restart while the device-facing DMA storage
+	 * remains the same. Keeping the allocation makes every address cached by
+	 * the ring engine valid until the service itself is removed.
+	 */
+	if (hw->tx_ring || hw->rx_ring) {
+		if (!hw->tx_ring || !hw->rx_ring)
+			return -EUCLEAN;
+		if (hw->tx_ring->size != tx_entries ||
+		    hw->rx_ring->size != rx_entries ||
+		    hw->tx_ring->flags != flags || hw->rx_ring->flags != flags)
+			return -EINVAL;
+		return 0;
+	}
+
 	hw->tx_ring = tb_ring_alloc_tx(hw->xd->tb->nhi, -1, tx_entries, flags);
 	if (!hw->tx_ring)
 		return -ENOMEM;
@@ -230,6 +245,29 @@ static void tbframe_hw_free_rings(void *data)
 	}
 }
 
+static int tbframe_hw_quarantine_paths(void *data, int local_hopid,
+				       int remote_hopid)
+{
+	struct tbframe_hw *hw = data;
+	int ret;
+
+	if (!hw->tx_ring || !hw->rx_ring)
+		return -EINVAL;
+#ifdef TB_XDOMAIN_HAS_PATH_QUARANTINE
+	ret = tb_xdomain_quarantine_paths(hw->xd,
+					  local_hopid, hw->tx_ring->hop,
+					  hw->tx_ring, remote_hopid,
+					  hw->rx_ring->hop, hw->rx_ring);
+#else
+	ret = -EOPNOTSUPP;
+#endif
+	if (ret)
+		return ret;
+	hw->rx_ring = NULL;
+	hw->tx_ring = NULL;
+	return 0;
+}
+
 static int tbframe_hw_map_frame(void *data, struct tbframe_frame_priv *f,
 				bool tx)
 {
@@ -271,6 +309,36 @@ static void tbframe_hw_rx_callback(struct tb_ring *ring,
 						    struct tbframe_frame_priv,
 						    rf);
 	bool bad = rf->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN);
+	struct tb_ring_completion_evidence evidence;
+	struct tb_ring_snapshot snapshot;
+
+	if (!canceled && bad &&
+	    !tb_ring_completion_evidence(ring, rf, &evidence))
+		pr_warn_ratelimited("%s: RX descriptor evidence slot=%u generation=%llu anomalies=%#x posted_attr=%#010x completed_attr=%#010x flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x posted_dma=%pad completed_dma=%pad frame_dma=%pad desc_time=%#x ring_index=%#x sw_head=%u sw_tail=%u prev_attr=%#010x next_attr=%#010x\n",
+				    f->link->name, evidence.slot,
+				    evidence.generation, evidence.anomalies,
+				    evidence.posted_attributes,
+				    evidence.completed_attributes,
+				    evidence.flags,
+				    !!(evidence.flags & RING_DESC_CRC_ERROR),
+				    !!(evidence.flags & RING_DESC_BUFFER_OVERRUN),
+				    evidence.length, evidence.sof,
+				    evidence.eof, &evidence.posted_phys,
+				    &evidence.completed_phys, &evidence.frame_phys,
+				    evidence.descriptor_time, evidence.index_raw,
+				    evidence.sw_head, evidence.sw_tail,
+				    evidence.prev_attributes,
+				    evidence.next_attributes);
+	else if (!canceled && bad && !tb_ring_snapshot(ring, &snapshot))
+		pr_warn_ratelimited("%s: RX descriptor error without exact evidence flags=%#x crc=%u overrun=%u size=%u sof=%#x eof=%#x ring_index=%#x sw_head=%u sw_tail=%u hw_prod=%u hw_cons=%u queued=%u in_flight=%u\n",
+				    f->link->name, rf->flags,
+				    !!(rf->flags & RING_DESC_CRC_ERROR),
+				    !!(rf->flags & RING_DESC_BUFFER_OVERRUN),
+				    rf->size, rf->sof, rf->eof,
+				    snapshot.index_raw, snapshot.sw_head,
+				    snapshot.sw_tail, snapshot.hw_producer,
+				    snapshot.hw_consumer, snapshot.queued,
+				    snapshot.in_flight);
 
 	if (!canceled)
 		dma_sync_single_for_cpu(tb_ring_dma_device(ring), f->dma,
@@ -349,6 +417,16 @@ static int tbframe_hw_paths_active(void *data, int local_hopid,
 	/* Unknown, not dead: without the fork core the verify never fires. */
 	return -EOPNOTSUPP;
 #endif
+}
+
+static int tbframe_hw_tx_snapshot(void *data,
+				  struct tb_ring_snapshot *snapshot)
+{
+	struct tbframe_hw *hw = data;
+
+	if (!hw->tx_ring)
+		return -ESHUTDOWN;
+	return tb_ring_snapshot(hw->tx_ring, snapshot);
 }
 
 static int tbframe_hw_loop_control_request(struct tbframe_hw *hw,
@@ -491,6 +569,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.quiesce_tx		= tbframe_hw_quiesce_tx,
 	.stop_rings		= tbframe_hw_stop_rings,
 	.free_rings		= tbframe_hw_free_rings,
+	.quarantine_paths	= tbframe_hw_quarantine_paths,
 	.map_frame		= tbframe_hw_map_frame,
 	.unmap_frame		= tbframe_hw_unmap_frame,
 	.post_rx		= tbframe_hw_post_rx,
@@ -498,6 +577,7 @@ const struct tbframe_hw_ops tbframe_hw_real_ops = {
 	.enable_paths		= tbframe_hw_enable_paths,
 	.disable_paths		= tbframe_hw_disable_paths,
 	.paths_active		= tbframe_hw_paths_active,
+	.tx_snapshot		= tbframe_hw_tx_snapshot,
 	.control_request	= tbframe_hw_control_request,
 	.control_response	= tbframe_hw_control_response,
 	.reannounce		= tbframe_hw_reannounce,

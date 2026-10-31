@@ -23,6 +23,7 @@
  * NAK every FIRST/MIDDLE packet ("not mtu"), a stalemate rather than a
  * clean refusal, so mixed versions refuse the session at HELLO.
  */
+/* Directional keepalive acknowledgements are negotiated as a capability. */
 #define TBFRAME_WIRE_VERSION		3u
 #define TBFRAME_WIRE_XDOMAIN_HDR_SIZE	32u
 #define TBFRAME_WIRE_HDR_SIZE		16u
@@ -30,6 +31,21 @@
 #define TBFRAME_WIRE_HELLO_MSG_SIZE \
 	(TBFRAME_WIRE_XDOMAIN_HDR_SIZE + TBFRAME_WIRE_HDR_SIZE + \
 	 TBFRAME_WIRE_HELLO_SIZE)
+
+/*
+ * Data-ring keepalives prove the two directions independently.  A sender's
+ * cookie and sequence prove the receive direction; the echoed cookie and
+ * sequence prove that the peer received a frame from this exact session.
+ */
+#define TBFRAME_WIRE_KEEPALIVE_LEGACY_SIZE	8u
+#define TBFRAME_WIRE_KEEPALIVE_SIZE		32u
+
+struct tbframe_wire_keepalive {
+	u64 session_cookie;
+	u64 sequence;
+	u64 ack_cookie;
+	u64 ack_sequence;
+};
 
 static const u8 tbframe_wire_uuid[16] = {
 	0x9a, 0x52, 0xc3, 0xb4, 0x1f, 0x6e, 0x4d, 0x07,
@@ -56,6 +72,7 @@ enum tbframe_wire_op {
 /* HELLO capability word (spec §3): additive, unknown bits ignored. */
 #define TBFRAME_WIRE_CAP_E2E		BIT(0)
 #define TBFRAME_WIRE_CAP_KEEPALIVE	BIT(1)
+#define TBFRAME_WIRE_CAP_KEEPALIVE_ACK	BIT(2)
 
 struct tbframe_wire_hello {
 	u16	proto_version;
@@ -108,6 +125,30 @@ static inline u64 tbframe_wire_get_le64(const u8 *p)
 {
 	return (u64)tbframe_wire_get_le32(p) |
 	       ((u64)tbframe_wire_get_le32(p + 4) << 32);
+}
+
+static inline void
+tbframe_wire_build_keepalive(void *buf,
+			     const struct tbframe_wire_keepalive *keepalive)
+{
+	u8 *p = buf;
+
+	tbframe_wire_put_le64(p, keepalive->session_cookie);
+	tbframe_wire_put_le64(p + 8, keepalive->sequence);
+	tbframe_wire_put_le64(p + 16, keepalive->ack_cookie);
+	tbframe_wire_put_le64(p + 24, keepalive->ack_sequence);
+}
+
+static inline void
+tbframe_wire_parse_keepalive(const void *buf,
+			     struct tbframe_wire_keepalive *keepalive)
+{
+	const u8 *p = buf;
+
+	keepalive->session_cookie = tbframe_wire_get_le64(p);
+	keepalive->sequence = tbframe_wire_get_le64(p + 8);
+	keepalive->ack_cookie = tbframe_wire_get_le64(p + 16);
+	keepalive->ack_sequence = tbframe_wire_get_le64(p + 24);
 }
 
 static inline int tbframe_wire_build_hello(void *buf, size_t size,
