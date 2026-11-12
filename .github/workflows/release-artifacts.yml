@@ -2,7 +2,7 @@ name: release-artifacts
 
 on:
   push:
-    branches: [pub/tbfix-v6.17, main]
+    branches: [pub/tbfix-v6.17, pub/tbfix-v7.0, main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
